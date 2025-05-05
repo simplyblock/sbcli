@@ -80,7 +80,7 @@ def cleanup_remote_logs(ssh, node):
     cleanup_commands = [
         f"rm -rf {HOME_DIR}/container-logs.tar.gz",  # Remove compressed tar file
         f"rm -rf {HOME_DIR}/container-logs/*",  # Remove container logs content
-        f"rm -rf {HOME_DIR}/*.txt* {HOME_DIR}/*.log {HOME_DIR}/*.state",  # Remove uploaded logs
+        f"rm -rf {HOME_DIR}/*.txt* {HOME_DIR}/*.log {HOME_DIR}/*.state {HOME_DIR}/*iolog*",  # Remove uploaded logs
         "rm -rf /etc/simplyblock/[0-9]*",  # Remove dump logs
         "rm -rf /etc/simplyblock/*core*.zst",  # Remove dump logs
         "rm -rf /etc/simplyblock/LVS*",  # Remove dump logs

@@ -55,7 +55,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         #                       "lvol_disconnect_primary"]
         # self.outage_types = ["container_stop", "graceful_shutdown", 
         #                      "interface_full_network_interrupt", "interface_partial_network_interrupt"]
-        self.outage_types = ["graceful_shutdown", "container_stop"]
+        self.outage_types = ["graceful_shutdown"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -222,6 +222,24 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             sleep_n_sec(5)
 
             # Start FIO
+            # fio_thread = threading.Thread(
+            #     target=self.ssh_obj.run_fio_test,
+            #     args=(client_node, None, self.lvol_mount_details[lvol_name]["Mount"], self.lvol_mount_details[lvol_name]["Log"]),
+            #     kwargs={
+            #         "size": self.fio_size,
+            #         "name": f"{lvol_name}_fio",
+            #         "rw": "randrw",
+            #         "bs": f"{2 ** random.randint(2, 7)}K",
+            #         "nrfiles": 16,
+            #         "iodepth": 1,
+            #         "numjobs": 5,
+            #         "time_based": True,
+            #         "runtime": 2000,
+            #         "log_avg_msec": 1000,
+            #         "iolog_file": self.lvol_mount_details[lvol_name]["iolog_base_path"],
+            #         "debug": True,
+            #     },
+            # )
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
                 args=(client_node, None, self.lvol_mount_details[lvol_name]["Mount"], self.lvol_mount_details[lvol_name]["Log"]),
@@ -672,6 +690,24 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             sleep_n_sec(5)
 
             # Start FIO
+            # fio_thread = threading.Thread(
+            #     target=self.ssh_obj.run_fio_test,
+            #     args=(client, None, self.clone_mount_details[clone_name]["Mount"], self.clone_mount_details[clone_name]["Log"]),
+            #     kwargs={
+            #         "size": self.fio_size,
+            #         "name": f"{clone_name}_fio",
+            #         "rw": "randrw",
+            #         "bs": f"{2 ** random.randint(2, 7)}K",
+            #         "nrfiles": 16,
+            #         "iodepth": 1,
+            #         "numjobs": 5,
+            #         "time_based": True,
+            #         "runtime": 2000,
+            #         "log_avg_msec": 1000,
+            #         "iolog_file": self.clone_mount_details[clone_name]["iolog_base_path"],
+            #         "debug": True,
+            #     },
+            # )
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
                 args=(client, None, self.clone_mount_details[clone_name]["Mount"], self.clone_mount_details[clone_name]["Log"]),
@@ -874,6 +910,24 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.lvol_mount_details[lvol]["iolog_base_path"] = iolog_base_path
 
             # Start FIO
+            # fio_thread = threading.Thread(
+            #     target=self.ssh_obj.run_fio_test,
+            #     args=(lvol_details["Client"], None, mount_point, log_file),
+            #     kwargs={
+            #         "size": self.fio_size,
+            #         "name": f"{lvol}_fio",
+            #         "rw": "randrw",
+            #         "bs": f"{2 ** random.randint(2, 7)}K",
+            #         "nrfiles": 16,
+            #         "iodepth": 1,
+            #         "numjobs": 5,
+            #         "time_based": True,
+            #         "runtime": 2000,
+            #         "log_avg_msec": 1000,
+            #         "iolog_file": self.lvol_mount_details[lvol]["iolog_base_path"],
+            #         "debug": True,
+            #     },
+            # )
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
                 args=(lvol_details["Client"], None, mount_point, log_file),
@@ -911,6 +965,24 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             sleep_n_sec(5)
 
             # Start FIO
+            # fio_thread = threading.Thread(
+            #     target=self.ssh_obj.run_fio_test,
+            #     args=(clone_details["Client"], None, mount_point, log_file),
+            #     kwargs={
+            #         "size": self.fio_size,
+            #         "name": f"{clone}_fio",
+            #         "rw": "randrw",
+            #         "bs": f"{2 ** random.randint(2, 7)}K",
+            #         "nrfiles": 16,
+            #         "iodepth": 1,
+            #         "numjobs": 5,
+            #         "time_based": True,
+            #         "runtime": 2000,
+            #         "log_avg_msec": 1000,
+            #         "iolog_file": self.clone_mount_details[clone]["iolog_base_path"],
+            #         "debug": True,
+            #     },
+            # )
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
                 args=(clone_details["Client"], None, mount_point, log_file),
@@ -927,7 +999,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "log_avg_msec": 1000,
                     "iolog_file": self.clone_mount_details[clone]["iolog_base_path"],
                 },
-            )
+            )            
             fio_thread.start()
             self.fio_threads.append(fio_thread)
 
@@ -1019,10 +1091,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"],
                                                     log_file=clone_details["Log"])
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone}_fio*"])
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone}_fio_iolog*"])
             
             for lvol, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(lvol_details["Client"],
                                                     log_file=lvol_details["Log"])
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
 
             # Perform failover and manage resources during outage
             outage_type = self.perform_failover_during_outage()
@@ -1053,11 +1129,15 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     lvol_details["Client"],
                     lvol_details["Log"]
                 )
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/local-{lvol_name}_fio*"])
+                self.ssh_obj.delete_files(lvol_details["Client"], [f"{self.log_path}/{lvol_name}_fio_iolog*"])
             for clone_name, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(
                     clone_details["Client"],
                     clone_details["Log"]
                 )
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
+                self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
 
             self.logger.info(f"Failover iteration {iteration} complete.")
             iteration += 1

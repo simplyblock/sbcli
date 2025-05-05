@@ -251,7 +251,7 @@ def delete(snapshot_uuid, force_delete=False):
 
     clones = []
     for lvol in db_controller.get_lvols(snode.cluster_id):
-        if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid:
+        if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid and lvol.status != LVol.STATUS_IN_DELETION:
             clones.append(lvol)
 
     if len(clones) >= 1:

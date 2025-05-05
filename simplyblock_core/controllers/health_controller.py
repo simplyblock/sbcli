@@ -102,7 +102,7 @@ def _check_port_on_node(snode, port_id):
                 for rule in chain['rules']:
                     if str(port_id) in rule['options']:
                         action = rule['target']
-                        if action == "DROP":
+                        if action in ["DROP", "REJECT"]:
                             return False
 
         return True

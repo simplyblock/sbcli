@@ -42,16 +42,26 @@ def parse_iolog_file(file_path: str) -> List[Tuple[float, int, int, str]]:
     with open(file_path, "r") as f:
         for line in f:
             parts = line.strip().split()
-            if len(parts) != 4:
-                continue
-            try:
-                ts = float(parts[0])
-                offset = int(parts[1])
-                length = int(parts[2])
-                op = parts[3].upper()
-                entries.append((ts, offset, length, op))
-            except ValueError:
-                continue
+            if len(parts) == 4:
+                try:
+                    ts = float(parts[0])
+                    offset = int(parts[1])
+                    length = int(parts[2])
+                    op = parts[3].upper()
+                    entries.append((ts, offset, length, op))
+                except ValueError:
+                    continue
+            elif len(parts) == 5:
+                try:
+                    ts = float(parts[0])
+                    op = parts[2].upper()
+                    offset = int(parts[3])
+                    length = int(parts[4])
+                    entries.append((ts, offset, length, op))
+                except ValueError:
+                    continue
+            else:
+                logging.debug(f"Skipped malformed line in {file_path}: {line.strip()}")
     logging.debug(f"Parsed {len(entries)} entries from {file_path}")
     return entries
 
@@ -62,12 +72,12 @@ def merge_iolog_files(file_list: List[str]) -> List[Tuple[float, int, int, str]]
     logging.debug(f"Merged {len(all_entries)} total entries from {len(file_list)} files")
     return sorted(all_entries, key=lambda x: x[0])
 
-def find_matches(entries: List[Tuple[float, int, int, str]], target_offsets: List[int], threshold: int = 4096) -> Dict[int, Dict[str, Optional[Tuple[float, int, int, str]]]]:
+def find_matches(entries: List[Tuple[float, int, int, str]], target_offsets: List[int], threshold: int = 4096) -> Dict[int, Dict[str, List[Tuple[float, int, int, str]]]]:
     results = {}
     for target in target_offsets:
-        match = next((e for e in entries if e[1] == target), None)
-        if match:
-            results[target] = {"type": "exact", "entry": match}
+        exact_matches = [e for e in entries if e[1] == target]
+        if exact_matches:
+            results[target] = {"type": "exact", "entries": exact_matches}
         else:
             closest = min(
                 (e for e in entries if abs(e[1] - target) <= threshold),
@@ -75,27 +85,39 @@ def find_matches(entries: List[Tuple[float, int, int, str]], target_offsets: Lis
                 default=None
             )
             if closest:
-                results[target] = {"type": "closest", "entry": closest}
+                results[target] = {"type": "closest", "entries": [closest]}
             else:
-                results[target] = {"type": "not_found", "entry": None}
+                results[target] = {"type": "not_found", "entries": []}
     logging.debug(f"Match results: {results}")
     return results
 
-def save_results_to_logfile(entity: str, results: Dict[int, Dict[str, Optional[Tuple[float, int, int, str]]]]):
+def format_timestamp(ts: float) -> str:
+    return f"{ts / 1_000_000:.3f}s" 
+
+def save_results_to_logfile(entity: str, results: Dict[int, Dict[str, List[Tuple[float, int, int, str]]]]):
     log_file = os.path.join(LOG_DIR, f"fio_md5_offset_trace_{entity}.log")
     with open(log_file, "w") as f:
         for offset, result in results.items():
             match_type = result["type"]
-            entry = result["entry"]
+            entries = result["entries"]
             if match_type == "exact":
-                msg = f"[EXACT]   Offset={offset} at {entry[0]:.3f}s | Length={entry[2]} | Op={entry[3]}"
+                for entry in entries:
+                    ts_fmt = format_timestamp(entry[0])
+                    msg = f"[EXACT]   Offset={offset} at {ts_fmt} | Length={entry[2]} | Op={entry[3]}"
+                    f.write(msg + "\n")
+                    logging.info(f"[{entity}] {msg}")
             elif match_type == "closest":
+                entry = entries[0]
+                ts_fmt = format_timestamp(entry[0])
                 diff = abs(entry[1] - offset)
-                msg = f"[CLOSEST] Offset={offset} → Closest Offset={entry[1]} at {entry[0]:.3f}s | Δ={diff} bytes | Op={entry[3]}"
+                msg = f"[CLOSEST] Offset={offset} → Closest Offset={entry[1]} at {ts_fmt} | Δ={diff} bytes | Op={entry[3]}"
+                f.write(msg + "\n")
+                logging.info(f"[{entity}] {msg}")
             else:
                 msg = f"[MISS]    Offset={offset} → No match within threshold"
-            f.write(msg + "\n")
-            logging.info(f"[{entity}] {msg}")
+                f.write(msg + "\n")
+                logging.info(f"[{entity}] {msg}")
+        
 
 def collect_fio_entities(iolog_dir: str) -> Dict[str, Dict[str, List[str]]]:
     grouped = {}
@@ -157,3 +179,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

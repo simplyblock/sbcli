@@ -3039,7 +3039,7 @@ def recreate_lvstore(snode):
             logger.error("Error creating hublvol: %s", e.message)
             # return False
 
-        if sec_node.status == StorageNode.STATUS_ONLINE:
+        if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
                 sec_node.connect_to_hublvol(snode)
             except Exception as e:

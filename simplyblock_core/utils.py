@@ -532,10 +532,9 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     return: minimum_hp_memory in bytes
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 12 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(memory_consumption)
-
-
+    
 def calculate_minimum_sys_memory(max_prov, total):
     minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + (constants.EXTRA_SYS_MEMORY * total)
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
