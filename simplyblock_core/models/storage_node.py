@@ -142,6 +142,7 @@ class StorageNode(BaseNodeObject):
             #
             # raise
 
+
     def create_hublvol(self, cluster_nqn):
         """Create a hublvol for this node's lvstore
         """
@@ -165,7 +166,7 @@ class StorageNode(BaseNodeObject):
                     model_number=str(uuid4()),
                     uuid=self.hublvol.uuid,
                     nguid=utils.generate_hex_string(16),
-                    port=self.hublvol.nvmf_port
+                    port=utils.next_free_port(9096),
             )
         except RPCException:
             if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
