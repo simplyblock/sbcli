@@ -120,6 +120,6 @@ ultra21 = ServiceObject(
 
 distr = ServiceObject(
     "distr",
-    f"numactl --cpunodebind={SPDK_SOCKET} --membind={SPDK_SOCKET} {SPDK_PATH}/ultra/DISTR_v2/bdts {SPDK_PATH}/DISTR_v2/bdts.json 2047 0x3",
+    f"{SPDK_PATH}/ultra/DISTR_v2/bdts {SPDK_PATH}/DISTR_v2/bdts.json 2047 0x3",
     env_vars=f'LD_LIBRARY_PATH="$LD_LIBRARY_PATH:{SPDK_PATH}/build/lib:{SPDK_PATH}/dpdk/build/lib"',
     pre_start_cmd=f"export HUGEMEM=4096 ; /bin/sudo {os.path.join(SPDK_PATH, 'scripts/setup.sh')}")
