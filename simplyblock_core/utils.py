@@ -9,11 +9,13 @@ import string
 import subprocess
 import sys
 import uuid
+import time
 from typing import Union
 
 import docker
 from prettytable import PrettyTable
 from graypy import GELFTCPHandler
+from docker.errors import APIError, DockerException, ImageNotFound
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
@@ -1031,3 +1033,34 @@ def get_random_snapshot_vuid():
     while r in used_vuids:
         r = 1 + int(random.random() * 1000000)
     return r
+
+
+def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retries=3, delay=5):
+    """
+    Pulls a Docker image with retries in case of failure.
+
+    Args:
+        client (docker.DockerClient): The Docker client instance.
+        image_name (str): The name of the Docker image to pull.
+        retries (int): Number of retry attempts. Defaults to 3.
+        delay (int): Delay between retries in seconds. Defaults to 5.
+
+    Returns:
+        docker.models.images.Image: The pulled Docker image.
+
+    Raises:
+        DockerException: If all retry attempts fail.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"Attempt {attempt}: Pulling image '{image_name}'...")
+            image = client.images.pull(image_name)
+            print(f"Image '{image_name}' pulled successfully.")
+            return image
+        except (APIError, DockerException, ImageNotFound) as e:
+            print(f"Error pulling image (attempt {attempt}): {e}")
+            if attempt < retries:
+                time.sleep(delay)
+            else:
+                print("All retries failed.")
+                raise

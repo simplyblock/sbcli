@@ -339,17 +339,21 @@ class SshUtils:
             f"{log_avg_msec_opt} {iolog_opt} "
             f"{output_format}{output_file}"
         )
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = log_file or f"/tmp/{name}_{timestamp}.log"
+        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # log_file = log_file or f"/tmp/{name}_{timestamp}.log"
 
         if kwargs.get("debug"):
             command += " --debug=all"
-        else:
-            command += " --debug=verify"
+
+        if log_file:
+            command += f" > {log_file} 2>&1"
         
-        awk_ts = " | awk '{ print strftime(\"[%Y-%m-%d %H:%M:%S]\"), $0; fflush(); }' | "
-        command += awk_ts
-        command += f"tee {log_file}"
+        # else:
+        #     command += " --debug=verify"
+        
+        # awk_ts = " | awk '{ print strftime(\"[%Y-%m-%d %H:%M:%S]\"), $0; fflush(); }' | "
+        # command += awk_ts
+        # command += f"tee {log_file}"
 
         self.logger.info(f"Executing FIO command:\n{command}")
 

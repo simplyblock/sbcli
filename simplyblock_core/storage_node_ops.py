@@ -29,7 +29,7 @@ from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
-
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
 
@@ -2602,9 +2602,8 @@ def deploy(ifname, spdk_cpu_mask="", isolate_cores=False):
 def start_storage_node_api_container(node_ip):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
     # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
-
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
 
     logger.info("Recreating SNodeAPI container")
 
@@ -2637,7 +2636,7 @@ def start_storage_node_api_container(node_ip):
         ]
     )
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return True
 
 
