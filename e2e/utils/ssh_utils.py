@@ -1256,7 +1256,8 @@ class SshUtils:
                     continue
 
                 log_file_path = f"/tmp/{log_file_name}"
-                destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}"
+                timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
+                destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}_{timestamp}"
 
                 # Copy log file from inside container to host machine
                 copy_command = f"sudo docker cp {container_name}:{log_file_path} {destination_path}"
