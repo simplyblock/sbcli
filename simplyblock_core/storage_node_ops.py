@@ -3282,7 +3282,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvstore_status = "in_creation"
     snode.write_to_db()
 
-    ret, err = _create_bdev_stack(snode, lvstore_stack, cluster.storage_tiering)
+    ret, err = _create_bdev_stack(snode, lvstore_stack, storage_tiering=cluster.storage_tiering)
     if err:
         logger.error(f"Failed to create lvstore on node {snode.get_id()}")
         logger.error(err)
