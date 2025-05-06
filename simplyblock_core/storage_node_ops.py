@@ -3383,6 +3383,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None, storage_tie
             if storage_tiering:
                 distrib_name = params['name']
                 params['secondary_stg_name'] = 's3_{}'.format(distrib_name)
+                params['support_storage_tiering'] = True
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask
