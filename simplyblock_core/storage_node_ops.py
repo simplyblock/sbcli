@@ -3185,6 +3185,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.jm_vuid = jm_vuid
         snode.write_to_db()
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     write_protection = False
     if ndcs > 1:
         write_protection = True
@@ -3214,8 +3215,30 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 }
             ]
         )
+        if cluster.storage_tiering:
+            lvstore_stack.append(
+                {
+                    "type": "bdev_s3_create",
+                    "params": {
+                        'name': 's3_{}'.format(distrib_name),
+                        'local_testing': True,
+                        'local_endpoint': cluster.s3_endpoint,
+                    }
+                }
+            )
         distrib_list.append(distrib_name)
         distrib_vuids.append(distrib_vuid)
+
+    if cluster.storage_tiering:
+        lvstore_stack.append(
+            {
+                "type": "bdev_s3_add_bucket_name",
+                "params": {
+                    'name': 's3_{}'.format(distrib_name),
+                    'bucket_name': cluster.s3_bucket,
+                }
+            }
+        )
 
     if len(distrib_list) == 1:
         raid_device = distrib_list[0]
@@ -3259,7 +3282,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvstore_status = "in_creation"
     snode.write_to_db()
 
-    ret, err = _create_bdev_stack(snode, lvstore_stack)
+    ret, err = _create_bdev_stack(snode, lvstore_stack, cluster.storage_tiering)
     if err:
         logger.error(f"Failed to create lvstore on node {snode.get_id()}")
         logger.error(err)
@@ -3310,8 +3333,8 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     return True
 
 
-def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None, storage_tiering=False):
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password )
 
     created_bdevs = []
     if not lvstore_stack:
@@ -3334,12 +3357,26 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
         if name in node_bdev_names:
             continue
 
+        elif type == "bdev_s3_create":
+            if params['local_testing']:
+                params['local_endpoint'] = snode.s3_endpoint
+            ret = rpc_client.bdev_s3_create(**params)
+            if not ret:
+                return False, f"Failed to create S3 bdev: {name}"
+        
+        elif type == "bdev_s3_add_bucket_name":
+            ret = rpc_client.bdev_s3_add_bucket_name(**params)
+            if not ret:
+                return False, f"Failed to add bucket name: {name}"
         elif type == "bdev_distr":
             if primary_node:
                 params['jm_names'] = get_node_jm_names(primary_node, remote_node=snode)
             else:
                 params['jm_names'] = get_node_jm_names(snode)
 
+            if storage_tiering:
+                distrib_name = params['name']
+                params['secondary_stg_name'] = 's3_{}'.format(distrib_name)
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask

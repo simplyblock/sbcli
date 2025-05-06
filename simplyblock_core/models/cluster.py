@@ -61,6 +61,9 @@ class Cluster(BaseModel):
     strict_node_anti_affinity: bool = False
     tls: bool = False
     is_re_balancing: bool = False
+    storage_tiering: bool = True
+    s3_endpoint: str = "http://192.168.10.146:9000"
+    s3_bucket: str = "mybucket"
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
