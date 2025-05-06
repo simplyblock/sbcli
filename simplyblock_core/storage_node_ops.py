@@ -3289,13 +3289,12 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             type = op['type']
             if type == "bdev_s3_create":
                 params = op['params']
-                if params['local_testing']:
-                    params['local_endpoint'] = snode.s3_endpoint
                 ret = rpc_client.bdev_s3_create(**params)
                 if not ret:
                     return False, f"Failed to create S3 bdev: {params['name']}"
             
             elif type == "bdev_s3_add_bucket_name":
+                params = op['params']
                 ret = rpc_client.bdev_s3_add_bucket_name(**params)
                 if not ret:
                     return False, f"Failed to add bucket name: {params['name']}"
