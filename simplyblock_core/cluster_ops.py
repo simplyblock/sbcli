@@ -29,7 +29,7 @@ from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from utils import pull_docker_image_with_retry
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = logging.getLogger()
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
