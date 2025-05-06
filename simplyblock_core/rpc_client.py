@@ -427,7 +427,9 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=True):
+                            full_page_unmap=False, storage_tiering_id=0, secondary_io_timeout_us=1 << 30, ghost_capacity=100, fifo_main_capacity=1000, fifo_small_capacity=100,
+                            support_storage_tiering=False, secondary_stg_name="", disaster_recovery=False,
+                            ):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -443,7 +445,7 @@ class RPCClient:
             ret = self.get_bdevs(name)
             if ret:
                 return ret
-        except:
+        except Exception:
             pass
         params = {
             "name": name,
@@ -469,6 +471,16 @@ class RPCClient:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
+
+        if support_storage_tiering:
+            params['support_storage_tiering'] = support_storage_tiering
+            params['secondary_stg_name'] = secondary_stg_name
+            params['secondary_io_timeout_us'] = secondary_io_timeout_us
+            params['disaster_recovery'] = disaster_recovery
+            params['storage_tiering_id'] = storage_tiering_id
+            params['ghost_capacity'] = ghost_capacity
+            params['fifo_main_capacity'] = fifo_main_capacity
+            params['fifo_small_capacity'] = fifo_small_capacity
         return self._request("bdev_distrib_create", params)
 
     def bdev_lvol_delete_lvstore(self, name):
