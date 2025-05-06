@@ -3189,6 +3189,8 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     write_protection = False
     if ndcs > 1:
         write_protection = True
+
+    storage_tiering_ops = []
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
         while distrib_vuid in distrib_vuids:
@@ -3216,7 +3218,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             ]
         )
         if cluster.storage_tiering:
-            lvstore_stack.append(
+            storage_tiering_ops.append(
                 {
                     "type": "bdev_s3_create",
                     "params": {
@@ -3230,7 +3232,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         distrib_vuids.append(distrib_vuid)
 
     if cluster.storage_tiering:
-        lvstore_stack.append(
+        storage_tiering_ops.append(
             {
                 "type": "bdev_s3_add_bucket_name",
                 "params": {
@@ -3281,6 +3283,22 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvol_subsys_port = lvol_subsys_port
     snode.lvstore_status = "in_creation"
     snode.write_to_db()
+
+    if storage_tiering_ops:
+        for op in storage_tiering_ops:
+            type = op['type']
+            if type == "bdev_s3_create":
+                params = op['params']
+                if params['local_testing']:
+                    params['local_endpoint'] = snode.s3_endpoint
+                ret = rpc_client.bdev_s3_create(**params)
+                if not ret:
+                    return False, f"Failed to create S3 bdev: {params['name']}"
+            
+            elif type == "bdev_s3_add_bucket_name":
+                ret = rpc_client.bdev_s3_add_bucket_name(**params)
+                if not ret:
+                    return False, f"Failed to add bucket name: {params['name']}"
 
     ret, err = _create_bdev_stack(snode, lvstore_stack, storage_tiering=cluster.storage_tiering)
     if err:
@@ -3356,18 +3374,6 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None, storage_tie
 
         if name in node_bdev_names:
             continue
-
-        elif type == "bdev_s3_create":
-            if params['local_testing']:
-                params['local_endpoint'] = snode.s3_endpoint
-            ret = rpc_client.bdev_s3_create(**params)
-            if not ret:
-                return False, f"Failed to create S3 bdev: {name}"
-        
-        elif type == "bdev_s3_add_bucket_name":
-            ret = rpc_client.bdev_s3_add_bucket_name(**params)
-            if not ret:
-                return False, f"Failed to add bucket name: {name}"
         elif type == "bdev_distr":
             if primary_node:
                 params['jm_names'] = get_node_jm_names(primary_node, remote_node=snode)
