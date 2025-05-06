@@ -296,8 +296,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             self.ssh_obj.remove_dir(client, dir_path=f"/mnt/{lvol}")
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol)
-            self.ssh_obj.delete_files(self.lvol_mount_details["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
-            self.ssh_obj.delete_files(self.lvol_mount_details["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
+            self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
+            self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             del self.lvol_mount_details[lvol]
             for _, lvols in self.node_vs_lvol.items():
                 if lvol in lvols:
