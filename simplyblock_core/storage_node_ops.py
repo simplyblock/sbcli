@@ -3285,6 +3285,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.write_to_db()
 
     if storage_tiering_ops:
+        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password )
         for op in storage_tiering_ops:
             type = op['type']
             if type == "bdev_s3_create":
