@@ -244,7 +244,7 @@ while True:
                         if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
                             lvstore_check &= health_controller._check_node_lvstore(
                                 lvstore_stack, second_node_1, auto_fix=True, stack_src_node=snode)
-                        lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1)
+                            lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1)
 
                     lvol_port_check = False
                     # if node_api_check:

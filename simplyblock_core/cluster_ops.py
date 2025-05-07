@@ -29,6 +29,7 @@ from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = logging.getLogger()
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -268,9 +269,21 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     values = {
         'CLUSTER_ID': c.uuid,
         'CLUSTER_SECRET': c.secret}
-    file_path = os.path.join(scripts_folder, prometheus_file)
+
+    temp_dir = tempfile.mkdtemp()
+
+    file_path = os.path.join(temp_dir, prometheus_file)
     with open(file_path, 'w') as file:
         file.write(template.render(values))
+
+    prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
+    try:
+        subprocess.run(['sudo', 'mv', file_path, prometheus_file_path], check=True)
+        print(f"File moved to {prometheus_file_path} successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred: {e}")
+    shutil.rmtree(temp_dir)
+
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
@@ -1256,7 +1269,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         logger.info("Updating mgmt cluster")
         cluster_docker = utils.get_docker_client(cluster_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-        cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+        pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
         image_without_tag = image_without_tag.split("/")
         image_parts = "/".join(image_without_tag[-2:])
@@ -1283,7 +1296,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 if spdk_image:
                     img = spdk_image
                 logger.info(f"Pulling image {img}")
-                node_docker.images.pull(img)
+                pull_docker_image_with_retry(node_docker, img)
             except Exception as e:
                 logger.error(e)
 
