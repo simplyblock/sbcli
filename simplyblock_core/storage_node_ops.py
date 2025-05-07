@@ -2856,7 +2856,7 @@ def recreate_lvstore_on_sec(secondary_node):
                 lvol_list.append(lv)
 
         ### 1- create distribs and raid
-        ret, err = _create_bdev_stack(secondary_node, primary_node.lvstore_stack, primary_node=primary_node)
+        ret, err = _create_bdev_stack(secondary_node, primary_node.lvstore_stack, primary_node=primary_node, storage_tiering=cluster.storage_tiering)
         if err:
             logger.error(f"Failed to recreate lvstore on node {secondary_node.get_id()}")
             logger.error(err)
@@ -2920,9 +2920,10 @@ def recreate_lvstore(snode):
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
     ### 1- create distribs and raid
-    ret, err = _create_bdev_stack(snode, [])
+    ret, err = _create_bdev_stack(snode, [], storage_tiering=cluster.storage_tiering)
     if err:
         logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
         logger.error(err)
@@ -3321,7 +3322,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         # creating lvstore on secondary
         sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node)
         sec_node.write_to_db()
-        ret, err = _create_bdev_stack(sec_node, lvstore_stack, primary_node=snode)
+        ret, err = _create_bdev_stack(sec_node, lvstore_stack, primary_node=snode, storage_tiering=cluster.storage_tiering)
         if err:
             logger.error(f"Failed to create lvstore on node {sec_node.get_id()}")
             logger.error(err)
