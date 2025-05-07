@@ -320,7 +320,7 @@ def spdk_process_start():
             'SPDK_IMAGE': spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
             'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
-            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB'),
+            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB') + 2 ,
             'MEM2_GEGA': 2,
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
