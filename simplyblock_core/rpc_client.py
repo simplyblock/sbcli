@@ -479,7 +479,7 @@ class RPCClient:
 
         if support_storage_tiering:
             # generate a random int
-            storage_tiering_id = random.randint(1, 1000000)
+            storage_tiering_id = random.randint(0,  2**16 - 2)
             params['support_storage_tiering'] = support_storage_tiering
             params['secondary_stg_name'] = secondary_stg_name
             params['secondary_io_timeout_us'] = secondary_io_timeout_us
