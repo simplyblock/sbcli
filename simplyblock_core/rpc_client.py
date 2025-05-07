@@ -483,7 +483,12 @@ class RPCClient:
             params['fifo_small_capacity'] = fifo_small_capacity
         return self._request("bdev_distrib_create", params)
 
-    def bdev_s3_create(self, **params):
+    def bdev_s3_create(self, name, local_testing, local_endpoint):
+        params = {
+            "name": name,
+            "local_testing": local_testing,
+            "local_endpoint": local_endpoint,
+        }
         return self._request("bdev_s3_create", params)
 
     def bdev_s3_delete(self, **params):
