@@ -9,11 +9,7 @@ import boto3
 import re
 
 import jc
-from kubernetes.stream import stream
-from kubernetes import client, config
-
 from simplyblock_core import shell_utils
-from simplyblock_web import utils
 
 
 
