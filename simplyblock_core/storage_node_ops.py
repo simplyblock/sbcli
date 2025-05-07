@@ -2855,6 +2855,7 @@ def recreate_lvstore_on_sec(secondary_node):
             if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
                 lvol_list.append(lv)
 
+        cluster = db_controller.get_cluster_by_id(primary_node.cluster_id)
         ### 1- create distribs and raid
         ret, err = _create_bdev_stack(secondary_node, primary_node.lvstore_stack, primary_node=primary_node, storage_tiering=cluster.storage_tiering)
         if err:
@@ -3355,6 +3356,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None, storage_tiering=False):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password )
 
+    print("STORAGE TIERING: ", storage_tiering)
     created_bdevs = []
     if not lvstore_stack:
         # Restart case
