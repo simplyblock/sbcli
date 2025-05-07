@@ -91,6 +91,10 @@ class RPCClient:
     def get_version(self):
         return self._request("spdk_get_version")
 
+    def bdev_get_bdevs(self, name):
+        params = { 'name': name }
+        return self._request("bdev_get_bdevs", params)
+
     def subsystem_list(self, nqn_name=None):
         data = self._request("nvmf_get_subsystems")
         if data and nqn_name:
