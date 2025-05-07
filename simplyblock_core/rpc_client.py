@@ -2,7 +2,7 @@ import json
 import inspect
 
 import requests
-
+import inspect
 from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
@@ -483,15 +483,10 @@ class RPCClient:
             params['fifo_small_capacity'] = fifo_small_capacity
         return self._request("bdev_distrib_create", params)
 
-    def bdev_s3_create(self, name, uuid=None, bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=32):
-        params = { 'name': name, 'bdb_lcpu_mask': bdb_lcpu_mask, 's3_lcpu_mask': s3_lcpu_mask, 's3_thread_pool_size': s3_thread_pool_size }
-        if uuid:
-            params['uuid'] = uuid
-
+    def bdev_s3_create(self, **params):
         return self._request("bdev_s3_create", params)
 
-    def bdev_s3_delete(self, name):
-        params = { 'name': name }
+    def bdev_s3_delete(self, **params):
         return self._request("bdev_s3_delete", params)
 
     def bdev_s3_add_bucket(self, name, bucket_name):
