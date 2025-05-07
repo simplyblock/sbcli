@@ -222,6 +222,10 @@ def storage_node_add():
     if 'spdk_debug' in req_data:
         spdk_debug = req_data['spdk_debug']
 
+    full_page_unmap = None
+    if 'full_page_unmap' in req_data:
+        full_page_unmap = req_data['full_page_unmap']
+
     data_nics = None
     if 'data_nics' in req_data:
         data_nics = req_data['data_nics']
@@ -289,7 +293,7 @@ def storage_node_add():
         "enable_ha_jm": not disable_ha_jm,
         "is_secondary_node": is_secondary_node,
         "ssd_pcie": ssd_pcie,
-
+        "full_page_unmap": full_page_unmap,
     })
 
     return utils.get_response(True)

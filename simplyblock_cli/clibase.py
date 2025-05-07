@@ -115,6 +115,7 @@ class CLIWrapperBase:
             spdk_hp_mem=spdk_mem,
             ssd_pcie=ssd_pcie,
             spdk_cpu_count=spdk_cpu_count,
+            full_page_unmap=args.full_page_unmap,
         )
 
         return out
