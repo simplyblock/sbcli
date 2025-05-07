@@ -3286,22 +3286,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvstore_status = "in_creation"
     snode.write_to_db()
 
-    if storage_tiering_ops:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password )
-        for op in storage_tiering_ops:
-            type = op['type']
-            if type == "bdev_s3_create":
-                params = op['params']
-                ret = rpc_client.bdev_s3_create(**params)
-                if not ret:
-                    return False, f"Failed to create S3 bdev: {params['name']}"
-            
-            elif type == "bdev_s3_add_bucket_name":
-                params = op['params']
-                ret = rpc_client.bdev_s3_add_bucket_name(**params)
-                if not ret:
-                    return False, f"Failed to add bucket name: {params['name']}"
-
     ret, err = _create_bdev_stack(snode, lvstore_stack, storage_tiering=cluster.storage_tiering)
     if err:
         logger.error(f"Failed to create lvstore on node {snode.get_id()}")
@@ -3353,6 +3337,42 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     return True
 
 
+def s3_bdev_create(node_id, name, local_testing, local_endpoint):
+     db_controller = DBController()
+
+     snode = db_controller.get_storage_node_by_id(node_id)
+     if not snode:
+         logger.error(f"Can not find storage node: {node_id}")
+         return False
+
+     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+     return rpc_client.bdev_s3_create(name, local_testing, local_endpoint)
+
+def s3_bdev_delete(node_id, name):
+     db_controller = DBController()
+
+     snode = db_controller.get_storage_node_by_id(node_id)
+     if not snode:
+         logger.error(f"Can not find storage node: {node_id}")
+         return False
+
+     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+     return rpc_client.bdev_s3_delete(name)
+
+def s3_bdev_add_bucket_name(node_id, name, bucket_name):
+     db_controller = DBController()
+
+     snode = db_controller.get_storage_node_by_id(node_id)
+     if not snode:
+         logger.error(f"Can not find storage node: {node_id}")
+         return False
+
+     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+     return rpc_client.bdev_s3_add_bucket(name, bucket_name)
+
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None, storage_tiering=False):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password )
 
@@ -3387,6 +3407,8 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None, storage_tie
                 distrib_name = params['name']
                 params['secondary_stg_name'] = 's3_{}'.format(distrib_name)
                 params['support_storage_tiering'] = True
+                s3_bdev_create(snode.get_id(), params['secondary_stg_name'], True, "http://192.168.10.146:9000")
+                s3_bdev_add_bucket_name(snode.get_id(), params['secondary_stg_name'], "mys3bucket")
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask
