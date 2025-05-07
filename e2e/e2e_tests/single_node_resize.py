@@ -152,7 +152,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
         for node in self.storage_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
-            if "core" in files and "tmp_cores" not in files:
+            if "core.react" in files:
                 raise Exception("Core file present! Not starting resize!!")
             
         for i in range(1, 11):
@@ -165,7 +165,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 for node in self.storage_nodes:
                     files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
                     self.logger.info(f"Files in /etc/simplyblock: {files}")
-                    if "core" in files and "tmp_cores" not in files:
+                    if "core.react" in files:
                         raise Exception("Core file present after lvol resize! Not continuing resize!!")
                     
                 self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(clone_name),
@@ -174,7 +174,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 for node in self.storage_nodes:
                     files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
                     self.logger.info(f"Files in /etc/simplyblock: {files}")
-                    if "core" in files and "tmp_cores" not in files:
+                    if "core.react" in files:
                         raise Exception("Core file present after clone resize! Not continuing resize!!")
             
         lvol_size = lvol_size + 20
@@ -217,7 +217,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             for node in self.storage_nodes:
                 files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
                 self.logger.info(f"Files in /etc/simplyblock: {files}")
-                if "core" in files and "tmp_cores" not in files:
+                if "core.react" in files:
                     raise Exception("Core file present after lvol resize! Not continuing resize!!")
             self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(clone_name),
                                          new_size=f"{lvol_size}G")
@@ -225,7 +225,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             for node in self.storage_nodes:
                 files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
                 self.logger.info(f"Files in /etc/simplyblock: {files}")
-                if "core" in files and "tmp_cores" not in files:
+                if "core.react" in files:
                     raise Exception("Core file present after clone resize! Not continuing resize!!")
             
             lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=mount_path)
