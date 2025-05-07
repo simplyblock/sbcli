@@ -188,7 +188,7 @@ def spdk_process_start(body: SPDKParams):
             f"ssd_pcie={ssd_pcie_params}",
             f"PCI_ALLOWED={ssd_pcie_list}",
             f"TOTAL_HP={total_mem_mib}",
-            "AWS_ACCEESS_KEY_ID=foobar",
+            "AWS_ACCESS_KEY_ID=foobar",
             "AWS_SECRET_ACCESS_KEY=barfoobarfoo",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
