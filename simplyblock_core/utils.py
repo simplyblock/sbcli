@@ -654,7 +654,7 @@ def parse_size(size: Union[str, int], mode: str = 'si/iec', assume_unit: str = '
         return -1
 
 
-def convert_size(size: Union[int, str], unit: str) -> int:
+def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> int:
     """Convert the given number of bytes to target unit
 
     Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
@@ -664,7 +664,8 @@ def convert_size(size: Union[int, str], unit: str) -> int:
         size = int(size)
 
     base, exponent = _parse_unit(unit, 'si/iec')
-    return int(size / (base ** exponent))
+    raw = size / (base ** exponent)
+    return math.ceil(raw) if round_up else int(raw)
 
 
 def nearest_upper_power_of_2(n):
