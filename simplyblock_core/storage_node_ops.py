@@ -15,6 +15,7 @@ import docker
 
 from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
+from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
@@ -2575,7 +2576,7 @@ def deploy(ifname, spdk_cpu_mask="", isolate_cores=False):
         return False
 
     logger.info("NVMe SSD devices found on node:")
-    stream = os.popen("lspci -Dnn | grep -i nvme")
+    stream = os.popen(f"lspci -Dnn | grep -i '\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\]'")
     for l in stream.readlines():
         logger.info(l.strip())
 
