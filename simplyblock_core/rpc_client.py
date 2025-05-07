@@ -3,6 +3,7 @@ import inspect
 
 import requests
 import inspect
+import random
 from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
@@ -473,6 +474,8 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
 
         if support_storage_tiering:
+            # generate a random int
+            storage_tiering_id = random.randint(1, 1000000)
             params['support_storage_tiering'] = support_storage_tiering
             params['secondary_stg_name'] = secondary_stg_name
             params['secondary_io_timeout_us'] = secondary_io_timeout_us

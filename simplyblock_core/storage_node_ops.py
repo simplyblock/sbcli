@@ -3347,7 +3347,15 @@ def s3_bdev_create(node_id, name, local_testing, local_endpoint):
 
      rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
-     return rpc_client.bdev_s3_create(name, local_testing, local_endpoint)
+     resp = rpc_client.bdev_get_bdevs(name)
+     if resp is None:
+         print("s3 bdev does not exist. creating...")
+         rpc_client.bdev_s3_create(name, local_testing, local_endpoint)
+         rpc_client.bdev_s3_add_bucket(name, "mys3bucket")
+     else:
+         print("bdev already exists")
+         print(resp)
+
 
 def s3_bdev_delete(node_id, name):
      db_controller = DBController()
@@ -3404,11 +3412,11 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None, storage_tie
                 params['jm_names'] = get_node_jm_names(snode)
 
             if storage_tiering:
-                distrib_name = params['name']
-                params['secondary_stg_name'] = 's3_{}'.format(distrib_name)
+                snode_id = snode.get_id()
+                params['secondary_stg_name'] = 's3_{}'.format(snode_id.split("-")[0])
                 params['support_storage_tiering'] = True
                 s3_bdev_create(snode.get_id(), params['secondary_stg_name'], True, "http://192.168.10.146:9000")
-                s3_bdev_add_bucket_name(snode.get_id(), params['secondary_stg_name'], "mys3bucket")
+                # s3_bdev_add_bucket_name(snode.get_id(), params['secondary_stg_name'], "mys3bucket")
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask
