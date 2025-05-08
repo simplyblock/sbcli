@@ -1145,7 +1145,7 @@ def get_nvme_pci_devices():
         # Step 3: Map NVMe devices to PCI addresses
         pci_addresses = []
         lspci_output = subprocess.check_output(
-            "lspci -DnnP | grep '0108'",
+            "lspci -Dnn | grep '0108'",
             shell=True,
             text=True
         )
