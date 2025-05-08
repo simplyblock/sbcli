@@ -10,6 +10,7 @@ import subprocess
 import sys
 import uuid
 import time
+import psutil
 from typing import Set, Union
 
 import docker
@@ -1048,16 +1049,8 @@ def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retrie
                 raise
 
 
-def used_ports() -> Set[int]:
-    return {
-        int(local_address.rsplit(':', 1)[1])
-        for proto, recvq, sendq, local_address, foreign_address, state
-        in (
-            line.split()
-            for line
-            in subprocess.check_output(['netstat', '-tn'], text=True).splitlines()[2:]
-        )
-    }
+def used_ports() -> set[int]:
+    return {conn.laddr.port for conn in psutil.net_connections(kind='tcp') if conn.laddr}
 
 
 def next_free_port(port: int) -> int:
