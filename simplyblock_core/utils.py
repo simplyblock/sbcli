@@ -1088,7 +1088,7 @@ def next_free_hublvol_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = 9096
+    port = 9060
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.hublvol and node.hublvol.nvmf_port > 0:
