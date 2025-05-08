@@ -160,6 +160,7 @@ class StorageNode(BaseNodeObject):
                 'bdev_name': f'{self.lvstore}/hublvol',
                 'model_number': str(uuid4()),
                 'nguid': utils.generate_hex_string(16),
+                'port': utils.next_free_port(9096),
             })
 
             self.expose_bdev(
@@ -168,7 +169,7 @@ class StorageNode(BaseNodeObject):
                     model_number=self.hublvol.model_number,
                     uuid=self.hublvol.uuid,
                     nguid=self.hublvol.nguid,
-                    port=self.hublvol.nvmf_port
+                    port=self.hublvol.nvmf_port,
             )
         except RPCException:
             if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):

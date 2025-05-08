@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 import time
-from typing import Union
+from typing import Set, Union
 
 import docker
 from prettytable import PrettyTable
@@ -1046,3 +1046,25 @@ def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retrie
             else:
                 print("All retries failed.")
                 raise
+
+
+def used_ports() -> Set[int]:
+    return {
+        int(local_address.rsplit(':', 1)[1])
+        for proto, recvq, sendq, local_address, foreign_address, state
+        in (
+            line.split()
+            for line
+            in subprocess.check_output(['netstat', '-tn'], text=True).splitlines()[2:]
+        )
+    }
+
+
+def next_free_port(port: int) -> int:
+    """Gets the next open port starting at the given one
+    """
+    return next(
+        p for p
+        in range(port, port + 1000)
+        if p not in used_ports()
+    )
