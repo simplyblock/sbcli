@@ -162,7 +162,8 @@ class StorageNode(BaseNodeObject):
                 'bdev_name': f'{self.lvstore}/hublvol',
                 'model_number': str(uuid4()),
                 'nguid': utils.generate_hex_string(16),
-                'port': utils.next_free_port(9096),
+                'nvmf_port': utils.next_free_port(self.cluster_id),
+                'nvmf_port': utils.next_free_hublvol_port(self.cluster_id),
             })
 
             self.expose_bdev(

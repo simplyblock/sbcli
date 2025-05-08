@@ -1084,18 +1084,21 @@ def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retrie
                 raise
 
 
-def used_ports() -> set[int]:
-    return {conn.laddr.port for conn in psutil.net_connections(kind='tcp') if conn.laddr}
+def next_free_hublvol_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
 
+    port = 9096
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.hublvol and node.hublvol.nvmf_port > 0:
+            used_ports.append(node.hublvol.nvmf_port)
 
-def next_free_port(port: int) -> int:
-    """Gets the next open port starting at the given one
-    """
-    return next(
-        p for p
-        in range(port, port + 1000)
-        if p not in used_ports()
-    )
+    next_port = port
+    while True:
+        if next_port not in used_ports:
+            return next_port
+        next_port += 1
 
 
 def validate_sockets(sockets_to_use, cores_by_numa):
