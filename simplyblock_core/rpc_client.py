@@ -408,7 +408,7 @@ class RPCClient:
             "uuid": uuid,
             # "use_scheduling": True,
             "use_optimized": True,
-            "pba_nbalign": 4096,
+            "pba_nbalign": 4096
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
@@ -419,7 +419,7 @@ class RPCClient:
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
         return self._request("bdev_alceml_create", params)
-
+       
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,

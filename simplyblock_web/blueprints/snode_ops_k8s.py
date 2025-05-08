@@ -128,12 +128,22 @@ def delete_cluster_id():
     return out
 
 
-def get_cores_config(cpu_count):
-    spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
-    cores_config = {
-        "cpu_mask": spdk_cpu_mask
-    }
-    return cores_config
+def get_nodes_config():
+    file_path = constants.NODES_CONFIG_FILE
+    try:
+        # Open and read the JSON file
+        with open(file_path, "r") as file:
+            nodes_config = json.load(file)
+
+        core_utils.validate_node_config(nodes_config)
+        return nodes_config
+
+    except FileNotFoundError:
+        logger.error(f"The file '{file_path}' does not exist.")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON: {e}")
+        return {}
 
 
 @bp.route('/info', methods=['GET'])
@@ -161,7 +171,7 @@ def get_info():
         "network_interface": core_utils.get_nics_data(),
 
         "cloud_instance": CLOUD_INFO,
-        "cores_config": get_cores_config(CPU_INFO['count']),
+        "nodes_config": get_nodes_config(),
     }
     return utils.get_response(out)
 
@@ -431,3 +441,37 @@ def firewall_set_port():
 def get_firewall():
     ret = node_utils_k8s.firewall_get_k8s()
     return utils.get_response(ret)
+
+
+@bp.route('/apply_config', methods=['POST'])
+def apply_config():
+
+    data = request.get_json()
+    isolate_cores = data.get('isolate_cores', False)
+    node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
+
+    if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
+        nodes = node_info["nodes_config"]["nodes"]
+    else:
+        logger.error("Please run sbcli sn configure before adding the storage node")
+        return utils.get_response(False, "Required: Node configure not run")
+
+    all_isolated_cores = core_utils.validate_config(node_info.get("nodes_config"))
+    if not all_isolated_cores:
+        return utils.get_response(False, "Config validation is incorrect")
+
+    # Set Huge page memory
+    huge_page_memory_dict = {}
+    for node_config in nodes:
+        numa = node_config["socket"]
+        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+    for numa, huge_page_memory in huge_page_memory_dict.items():
+        num_pages = huge_page_memory // (2048 * 1024)
+        core_utils.set_hugepages_if_needed(numa, num_pages)
+
+    # Isolate cores
+    if isolate_cores:
+        core_utils.generate_realtime_variables_file(all_isolated_cores)
+        core_utils.run_tuned()
+    return utils.get_response(False)
+

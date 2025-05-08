@@ -41,6 +41,10 @@ def spdk_process_start():
         spdk_cpu_mask = data['spdk_cpu_mask']
     node_cpu_count = os.cpu_count()
 
+    socket = '0' 
+    if 'socket' in data: 
+       socket = data['socket']
+    
     global namespace
     if 'namespace' in data:
         namespace = data['namespace']

@@ -134,9 +134,9 @@ def spdk_process_start():
     if 'spdk_debug' in data and data['spdk_debug']:
         set_debug = data['spdk_debug']
 
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in data:
-        spdk_cpu_mask = data['spdk_cpu_mask']
+    l_cores = None
+    if 'l_cores' in data:
+        l_cores = data['l_cores']
 
     spdk_mem_mib = core_utils.convert_size(core_utils.parse_size('4GiB'), 'MiB')
     if 'spdk_mem' in data:
@@ -184,7 +184,7 @@ def spdk_process_start():
 
     container = node_docker.containers.run(
         spdk_image,
-        f"/root/scripts/run_distr_with_ssd.sh {spdk_cpu_mask} {spdk_mem_mib} {spdk_debug}",
+        f"/root/scripts/run_distr_with_ssd.sh {l_cores} {spdk_mem_mib} {spdk_debug}",
         name=f"spdk_{rpc_port}",
         detach=True,
         privileged=True,
@@ -326,18 +326,15 @@ def get_node_lsblk():
     return data
 
 
-def get_cores_config():
-    file_path = constants.TEMP_CORES_FILE
+def get_nodes_config():
+    file_path = constants.NODES_CONFIG_FILE
     try:
         # Open and read the JSON file
         with open(file_path, "r") as file:
-            cores_config = json.load(file)
+            nodes_config = json.load(file)
 
-        # Output the parsed data
-        logger.info("Parsed Core Configuration:")
-        for key, value in cores_config.items():
-            logger.info(f"{key}: {value}")
-        return cores_config
+        core_utils.validate_node_config(nodes_config)
+        return nodes_config
 
     except FileNotFoundError:
         logger.error(f"The file '{file_path}' does not exist.")
@@ -374,7 +371,7 @@ def get_info():
         "cloud_instance": CLOUD_INFO,
 
         "lsblk": get_node_lsblk(),
-        "cores_config": get_cores_config(),
+        "nodes_config": get_nodes_config(),
     }
     return utils.get_response(out)
 

@@ -400,8 +400,8 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
                    contact_point, grafana_endpoint, distr_bs, distr_chunk_bs,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,
                    data_nics,spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,
-                   spdk_cpu_mask,max_lvol,max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,
-                   ha_jm_count, number_of_distribs,namespace,secondary_nodes,partition_size,
+                   max_snap,number_of_devices,enable_test_device,enable_ha_jm,
+                   ha_jm_count,namespace,partition_size,
                    lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
                    max_rw_mbytes, max_r_mbytes, max_w_mbytes, with_snapshot, max_size, crypto_key1, crypto_key2,
                    lvol_priority_class, id_device_by_nqn, fstype):
@@ -423,9 +423,9 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
     for node in storage_nodes_list:
         node_ip = node.strip()
         dev_ip=f"{node_ip}:5000"
-        add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
-                                  small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,id_device_by_nqn,partition_size,ha_jm_count)
+        add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_snap,spdk_image,spdk_debug,
+                                  small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,number_of_devices,
+                                  enable_test_device,namespace,enable_ha_jm,id_device_by_nqn,partition_size,ha_jm_count)
         
         
         if not add_node_status:
@@ -433,21 +433,8 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             return False
 
         time.sleep(5)
-    
-    if secondary_nodes:
-        secondary_nodes_list = secondary_nodes.split(",")
-        for node in secondary_nodes_list:
-            node_ip = node.strip()
-            dev_ip=f"{node_ip}:5000"
-            add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
-                                    small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                    enable_test_device,namespace,number_of_distribs,enable_ha_jm,True,id_device_by_nqn,partition_size,ha_jm_count)
-                    
-            if not add_node_status:
-                logger.error("Could not add storage node successfully")
-                return False
 
-        time.sleep(5)
+
     
     activated = cluster_activate(cluster_uuid)
     if not activated:
