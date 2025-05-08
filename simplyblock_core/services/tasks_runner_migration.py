@@ -143,11 +143,11 @@ while True:
                         node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
                         if not node_task:
                             logger.info("no task found on same node, resuming compression")
-                            node = db.get_storage_node_by_id(task.node_id)
-                            rpc_client = RPCClient(
-                                node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
-                            ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-                            if not ret:
-                                logger.error("Failed to resume JC compression")
+                            # node = db.get_storage_node_by_id(task.node_id)
+                            # rpc_client = RPCClient(
+                            #     node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+                            # ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+                            # if not ret:
+                            #     logger.error("Failed to resume JC compression")
 
     time.sleep(3)
