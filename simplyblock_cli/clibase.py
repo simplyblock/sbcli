@@ -97,7 +97,6 @@ class CLIWrapperBase:
         enable_ha_jm = args.enable_ha_jm
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
-        storage_ops.configure_huge_pages(node_ip)
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
