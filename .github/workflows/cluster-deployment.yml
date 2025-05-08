@@ -1,0 +1,52 @@
+name: Deploy and test cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: 'Cluster identifier'
+        default: 'c111'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+    - name: Checkout sbcli
+      uses: actions/checkout@v4
+      with:
+        path: sbcli
+
+    - name: Checkout ansible-tools
+      uses: actions/checkout@v4
+      with:
+        repository: simplyblock-io/simplyBlockDeploy
+        path: deploy
+        branch: vmware
+
+    - name: Set docker image tag
+      id: get_info
+      run: |
+        if [[ "${{github.ref}}" == refs/pull/* ]]; then
+          tag=${GITHUB_REF/\/merge/}
+          echo "TAG=$(echo pr-${tag:10})" >> $GITHUB_ENV
+        else
+          echo "TAG=$(echo ${GITHUB_REF#refs/*/} | sed 's/\//-/g')" >> $GITHUB_ENV
+        fi
+
+    - name: Deploy cluster
+      run: |
+        cd deploy
+        eval $(python3 inventory.py inventory/${{ github.event.inputs.cluster }})
+        export NDCS=1
+        export NPCS=1
+        export BS=4096
+        export CHUNK_BS=4096
+        export NR_HUGEPAGES=2048
+        export SBCLI_INSTALL_SOURCE=${{ github.repository_url }}@${{ github.sha }}
+        export SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:$TAG
+        ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-size 400G --number-of-devices 1 --sbcli-cmd sbcli-dev --spdk-debug
