@@ -45,7 +45,7 @@ def set_device_health_check(cluster_id, device, health_check_status):
 # get DB controller
 db = db_controller.DBController()
 
-nodes_ports_blocked = {}
+nodes_ports_blocked: dict[str, list] = {}
 
 logger.info("Starting health check service")
 while True:
@@ -103,7 +103,7 @@ while True:
                         for al in b['aliases']:
                             node_bdev_names[al] = b
                 else:
-                    node_bdev_names = []
+                    node_bdev_names = {}
 
                 subsystem_list = rpc_client.subsystem_list() or []
                 subsystems = {

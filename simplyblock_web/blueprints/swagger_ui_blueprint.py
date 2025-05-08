@@ -11,8 +11,7 @@ API_URL=f"{SCRIPT_PATH}/../static/swagger.yaml"
 
 cnf = {}
 with open(API_URL) as f:
-    cnf = f.read()
-    cnf = yaml.load(cnf, Loader=yaml.SafeLoader)
+    cnf = yaml.load(f.read(), Loader=yaml.SafeLoader)
 
 # # Convert non-serializable types to strings
 cnf = json.loads(json.dumps(cnf, default=str))

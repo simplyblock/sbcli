@@ -12,7 +12,7 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
-last_event = {}
+last_event: dict[str, dict] = {}
 
 logger.info("Starting capacity monitoring service...")
 while True:

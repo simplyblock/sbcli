@@ -277,6 +277,7 @@ while True:
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
             node_port_check = True
+
             down_ports = []
             if spdk_process and node_rpc_check and snode.lvstore_status == "ready":
                 ports = [snode.nvmf_port]
@@ -292,7 +293,7 @@ while True:
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
                     if not ret and port == snode.nvmf_port:
-                        down_ports.append(port)
+                        down_ports |= True
 
                 for data_nic in snode.data_nics:
                     if data_nic.ip4_address:
@@ -300,7 +301,7 @@ while True:
                         logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
                         if not data_ping_check:
                             node_port_check = False
-                            down_ports.append(data_nic.ip4_address)
+                            down_ports |= True
 
 
             cluster = db.get_cluster_by_id(cluster.get_id())

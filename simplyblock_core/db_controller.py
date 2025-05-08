@@ -25,7 +25,7 @@ logger = logging.getLogger()
 
 
 class Singleton(type):
-    _instances = {}
+    _instances = {}  # type: ignore
     def __call__(cls, *args, **kwargs):
         if cls in cls._instances:
             return cls._instances[cls]
