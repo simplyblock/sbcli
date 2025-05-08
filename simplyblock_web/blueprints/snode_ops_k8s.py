@@ -16,8 +16,8 @@ from kubernetes.client import ApiException
 from jinja2 import Environment, FileSystemLoader
 import yaml
 
-from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
+from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, pod_name
 
 logger = logging.getLogger(__name__)
@@ -105,26 +105,26 @@ def get_amazon_cloud_info():
 def scan_devices():
     run_health_check = request.args.get('run_health_check', default=False, type=bool)
     out = {
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
     }
     return utils.get_response(out)
 
 
 def get_cluster_id():
-    out, _, _ = node_utils.run_command(f"cat {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"cat {cluster_id_file}")
     return out
 
 
 def set_cluster_id(cluster_id):
-    out, _, _ = node_utils.run_command(f"echo {cluster_id} > {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"echo {cluster_id} > {cluster_id_file}")
     return out
 
 
 def delete_cluster_id():
-    out, _, _ = node_utils.run_command(f"rm -f {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"rm -f {cluster_id_file}")
     return out
 
 
@@ -152,13 +152,13 @@ def get_info():
         "hugepages": node_utils.get_huge_memory(),
         "memory_details": node_utils.get_memory_details(),
 
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
 
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
-        "network_interface": node_utils.get_nics_data(),
+        "network_interface": core_utils.get_nics_data(),
 
         "cloud_instance": CLOUD_INFO,
         "cores_config": get_cores_config(CPU_INFO['count']),
@@ -254,7 +254,7 @@ def delete_gpt_partitions_for_dev():
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
 SYSTEM_ID = ""
 CLOUD_INFO = get_amazon_cloud_info()
 if not CLOUD_INFO:
@@ -266,7 +266,7 @@ if not CLOUD_INFO:
 if CLOUD_INFO:
     SYSTEM_ID = CLOUD_INFO["id"]
 else:
-    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+    SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 
 
 @bp.route('/spdk_process_start', methods=['POST'])
@@ -395,7 +395,7 @@ def spdk_process_is_up():
 
 @bp.route('/get_file_content/<string:file_name>', methods=['GET'])
 def get_file_content(file_name):
-    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{file_name}")
     if out:
         return utils.get_response(out)
     elif err:

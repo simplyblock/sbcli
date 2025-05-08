@@ -13,9 +13,8 @@ from docker.types import LogConfig
 from flask import Blueprint
 from flask import request
 
-from simplyblock_web import utils, node_utils
-
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
+from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +89,9 @@ def get_docker_client(timeout=60):
     except:
         ip = os.getenv("DOCKER_IP")
         if not ip:
-            for ifname in node_utils.get_nics_data():
+            for ifname in core_utils.get_nics_data():
                 if ifname in ["eth0", "ens0"]:
-                    ip = node_utils.get_nics_data()[ifname]['ip']
+                    ip = core_utils.get_nics_data()[ifname]['ip']
                     break
         cl = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=timeout)
         try:
@@ -105,10 +104,10 @@ def get_docker_client(timeout=60):
 def scan_devices():
     run_health_check = request.args.get('run_health_check', default=False, type=bool)
     out = {
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
     }
     return utils.get_response(out)
 
@@ -294,12 +293,12 @@ def spdk_proxy_restart():
 
 
 def get_cluster_id():
-    out, _, _ = node_utils.run_command(f"cat {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"cat {cluster_id_file}")
     return out
 
 @bp.route('/get_file_content/<string:file_name>', methods=['GET'])
 def get_file_content(file_name):
-    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{file_name}")
     if out:
         return utils.get_response(out)
     elif err:
@@ -314,12 +313,12 @@ def set_cluster_id(cluster_id):
 
 
 def delete_cluster_id():
-    out, _, _ = node_utils.run_command(f"rm -f {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"rm -f {cluster_id_file}")
     return out
 
 
 def get_node_lsblk():
-    out, err, rc = node_utils.run_command("lsblk -J")
+    out, err, rc = shell_utils.run_command("lsblk -J")
     if rc != 0:
         logger.error(err)
         return []
@@ -364,13 +363,13 @@ def get_info():
         "hugepages": node_utils.get_huge_memory(),
         "memory_details": node_utils.get_memory_details(),
 
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
 
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
-        "network_interface": node_utils.get_nics_data(),
+        "network_interface": core_utils.get_nics_data(),
 
         "cloud_instance": CLOUD_INFO,
 
@@ -510,8 +509,8 @@ def delete_gpt_partitions_for_dev():
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = node_utils.run_command("hostname -s")
-SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
+SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 CLOUD_INFO = {}
 if not os.environ.get("WITHOUT_CLOUD_INFO"):
     CLOUD_INFO = get_amazon_cloud_info()
