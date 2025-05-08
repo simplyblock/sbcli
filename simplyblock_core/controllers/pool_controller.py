@@ -153,11 +153,11 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
 
     # Apply QoS settings via RPC
     for hostname in db_controller.get_hostnames_by_pool_id(uuid):
-        sn = db_controller.get_storage_node_by_hostname(hostname)
-        client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
-        if not client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
-            logger.error("RPC failed bdev_lvol_set_qos_limit")
-            return False, "RPC failed"
+        for sn in db_controller.get_storage_nodes_by_hostname(hostname):
+            client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+            if not client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
+                logger.error("RPC failed bdev_lvol_set_qos_limit")
+                return False, "RPC failed"
 
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_updated(pool)
