@@ -41,6 +41,10 @@ def spdk_process_start():
         spdk_cpu_mask = data['spdk_cpu_mask']
     node_cpu_count = os.cpu_count()
 
+    socket = '0' 
+    if 'socket' in data: 
+       socket = data['socket']
+    
     global namespace
     if 'namespace' in data:
         namespace = data['namespace']
@@ -60,7 +64,6 @@ def spdk_process_start():
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
-        # node_docker.images.pull(spdk_image)
 
     # with open(spdk_deploy_yaml, 'r') as f:
     #     dep = yaml.safe_load(f)

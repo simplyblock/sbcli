@@ -19,3 +19,5 @@ argcomplete
 jc
 sentry-sdk
 prometheus_client
+ec2_metadata
+

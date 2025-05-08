@@ -209,7 +209,7 @@ def check_for_dumps():
     for node in storage_nodes:
         files = ssh_obj.list_files(node, "/etc/simplyblock/")
         logger.info(f"Files in /etc/simplyblock: {files}")
-        if "core" in files and "tmp_cores" not in files:
+        if "core.react" in files:
             core_exist = True
             break
 

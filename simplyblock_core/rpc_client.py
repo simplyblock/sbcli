@@ -143,7 +143,7 @@ class RPCClient:
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
             "zcopy": True,
-            "in_capsule_data_size": 24500,
+            "in_capsule_data_size": 8192,
             "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
@@ -394,7 +394,7 @@ class RPCClient:
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
-                           write_protection=False):
+                           write_protection=False, full_page_unmap=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -408,8 +408,7 @@ class RPCClient:
             "uuid": uuid,
             # "use_scheduling": True,
             "use_optimized": True,
-            "pba_nbalign": 4096,
-            "use_map_whole_page_on_1st_write": False
+            "pba_nbalign": 4096
         }
         if alceml_cpu_mask:
             params["bdb_lcpu_mask"] = int(alceml_cpu_mask, 16)
@@ -417,11 +416,14 @@ class RPCClient:
             params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask, 16)
         if write_protection:
             params["write_protection"] = True
+        if full_page_unmap:
+            params["use_map_whole_page_on_1st_write"] = True
         return self._request("bdev_alceml_create", params)
-
+       
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
-                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False):
+                            distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
+                            full_page_unmap=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -461,6 +463,8 @@ class RPCClient:
             params["bdb_lcpu_mask"] = int(distrib_cpu_mask, 16)
         if write_protection:
             params["write_protection"] = True
+        if full_page_unmap:
+            params["use_map_whole_page_on_1st_write"] = True
         return self._request("bdev_distrib_create", params)
 
     def bdev_lvol_delete_lvstore(self, name):
@@ -564,9 +568,8 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
-            # "fast_io_fail_timeout_sec": 1,
             "num_io_queues": 128,
-            # "ctrlr_loss_timeout_sec": 1,
+            #"ctrlr_loss_timeout_sec": 3,
             "multipath":"disable",
             # "reconnect_delay_sec":1
         }
@@ -629,7 +632,7 @@ class RPCClient:
             "bdev_retry_count": 0,
             "transport_retry_count": 3,
             "ctrlr_loss_timeout_sec": 1,
-            "fast_io_fail_timeout_sec": 0,
+            "fast_io_fail_timeout_sec" : 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
             "transport_ack_timeout": 10,

@@ -349,6 +349,14 @@ class TestClusterBase:
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
+        cmd = f"{self.base_cmd} lvol list >& {base_path}/lvol_list.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} snapshot list >& {base_path}/snapshot_list.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         node=1
         for result in storage_nodes['results']:
@@ -411,7 +419,7 @@ class TestClusterBase:
             self.logger.info("FIO did not exit completely after kill and wait. "
                              "Some hanging mount points could be present. "
                              "Needs manual cleanup.")
-
+        
         try:
             lvols = self.sbcli_utils.list_lvols()
             self.unmount_all(base_path=self.mount_path)

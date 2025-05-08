@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 bp = Blueprint("metrics", __name__)
 
 registry = CollectorRegistry()
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 io_stats_keys = [
     "date",
@@ -52,11 +52,11 @@ io_stats_keys = [
     "write_latency_ticks",
 ]
 
-ng = {}
-cg = {}
-dg = {}
-lg = {}
-pg = {}
+ng: dict[str, Gauge] = {}
+cg: dict[str, Gauge] = {}
+dg: dict[str, Gauge] = {}
+lg: dict[str, Gauge] = {}
+pg: dict[str, Gauge] = {}
 
 def get_device_metrics():
     global dg
@@ -102,10 +102,10 @@ def get_pool_metrics():
 @bp.route('/cluster/metrics', methods=['GET'])
 def get_data():
 
-    clusters = db_controller.get_clusters()
+    clusters = db.get_clusters()
     for cl in clusters:
 
-        records = db_controller.get_cluster_stats(cl, 1)
+        records = db.get_cluster_stats(cl, 1)
         if records:
             data = records[0].get_clean_dict()
             ng = get_cluster_metrics()
@@ -116,7 +116,7 @@ def get_data():
                 elif v == "status_code":
                     ng[g].labels(cluster=cl.get_id()).set(cl.get_status_code())
 
-        snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
+        snodes = db.get_storage_nodes_by_cluster_id(cl.get_id())
         for node in snodes:
             logger.info("Node: %s", node.get_id())
             if node.status != StorageNode.STATUS_ONLINE:
@@ -127,7 +127,7 @@ def get_data():
                 logger.error("No devices found in node: %s", node.get_id())
                 continue
 
-            records = db_controller.get_node_stats(node, 1)
+            records = db.get_node_stats(node, 1)
             if records:
                 data = records[0].get_clean_dict()
                 ng = get_snode_metrics()
@@ -147,7 +147,7 @@ def get_data():
                     logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
 
-                records= db_controller.get_device_stats(device, 1)
+                records= db.get_device_stats(device, 1)
                 if records:
                     data = records[0].get_clean_dict()
                     ng = get_device_metrics()
@@ -163,9 +163,9 @@ def get_data():
                                 device.health_check)
 
 
-        for pool in db_controller.get_pools():
+        for pool in db.get_pools():
 
-            records = db_controller.get_pool_stats(pool, 1)
+            records = db.get_pool_stats(pool, 1)
             if records:
                 data = records[0].get_clean_dict()
                 ng = get_pool_metrics()
@@ -177,8 +177,8 @@ def get_data():
                         ng[g].labels(cluster=cl.get_id(), name=pool.pool_name, pool=pool.get_id()).set(
                             pool.get_status_code())
 
-        for lvol in db_controller.get_lvols(cl.get_id()):
-            records = db_controller.get_lvol_stats(lvol, limit=1)
+        for lvol in db.get_lvols(cl.get_id()):
+            records = db.get_lvol_stats(lvol, limit=1)
             if records:
                 data = records[0].get_clean_dict()
                 ng = get_lvol_metrics()

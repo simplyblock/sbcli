@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 
-function set_config() {
-  sudo sed -i "s#\($1 *= *\).*#\1$2#" $3
+function create_override() {
+override_dir=/etc/systemd/system/docker.service.d
+mkdir -p ${override_dir}
+/bin/cat <<EOM > ${override_dir}/override.conf
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/dockerd --containerd=/run/containerd/containerd.sock -H tcp://${1}:2375 -H unix:///var/run/docker.sock -H fd://
+EOM
 }
 
 DEV_IP=$1
@@ -27,12 +33,10 @@ then
 \" > /etc/hosts "
 fi
 
-if [[ -z $(grep "tcp://${DEV_IP}:2375" /usr/lib/systemd/system/docker.service) ]]
-then
-  set_config ExecStart "/usr/bin/dockerd --containerd=/run/containerd/containerd.sock -H tcp://${DEV_IP}:2375 -H unix:///var/run/docker.sock -H fd://" /usr/lib/systemd/system/docker.service
-  sudo systemctl daemon-reload
-  sudo systemctl restart docker
-fi
+# Always create file to ensure content is correct
+create_override ${DEV_IP}
+sudo systemctl daemon-reload
+sudo systemctl restart docker
 
 activate-global-python-argcomplete --user
 if [ ! -s "$HOME/.bashrc" ] ||  [ -z "$(grep "source $HOME/.bash_completion" $HOME/.bashrc)" ]

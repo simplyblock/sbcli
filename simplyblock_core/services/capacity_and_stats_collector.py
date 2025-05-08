@@ -11,7 +11,7 @@ from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, Clus
 logger = utils.get_logger(__name__)
 
 
-last_object_record = {}
+last_object_record: dict[str, DeviceStatObject] = {}
 
 
 def add_device_stats(cl, device, capacity_dict, stats_dict):
@@ -59,7 +59,7 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
             last_record = last_object_record[device.get_id()]
         else:
             last_record = DeviceStatObject(data={"uuid": device.get_id(), "cluster_id": cl.get_id()}
-                                           ).get_last(db_controller.kv_store)
+                                           ).get_last(db.kv_store)
         if last_record:
             time_diff = (now - last_record.date)
             if time_diff > 0:
@@ -81,7 +81,7 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
         logger.error("Error getting stats")
 
     stat_obj = DeviceStatObject(data=data)
-    stat_obj.write_to_db(db_controller.kv_store)
+    stat_obj.write_to_db(db.kv_store)
     last_object_record[device.get_id()] = stat_obj
 
     return stat_obj
@@ -98,7 +98,7 @@ def add_node_stats(node, records):
         data.update(records_sum.get_clean_dict())
 
     size_prov = 0
-    for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
+    for lvol in db.get_lvols_by_node_id(node.get_id()):
         size_prov += lvol.size
 
     size_util = 0
@@ -116,7 +116,7 @@ def add_node_stats(node, records):
         "size_prov_util": size_prov_util
     })
     stat_obj = NodeStatObject(data=data)
-    stat_obj.write_to_db(db_controller.kv_store)
+    stat_obj.write_to_db(db.kv_store)
 
     return stat_obj
 
@@ -145,21 +145,21 @@ def add_cluster_stats(cl, records):
     })
 
     stat_obj = ClusterStatObject(data=data)
-    stat_obj.write_to_db(db_controller.kv_store)
+    stat_obj.write_to_db(db.kv_store)
 
     return stat_obj
 
 
 
 # get DB controller
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 logger.info("Starting capacity and stats collector...")
 while True:
 
-    clusters = db_controller.get_clusters()
+    clusters = db.get_clusters()
     for cl in clusters:
-        snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
+        snodes = db.get_storage_nodes_by_cluster_id(cl.get_id())
         if not snodes:
             logger.error(f"Cluster has no storage nodes: {cl.get_id()}")
 

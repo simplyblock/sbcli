@@ -1,4 +1,5 @@
 # coding=utf-8
+import glob
 import json
 import logging
 import math
@@ -9,16 +10,21 @@ import string
 import subprocess
 import sys
 import uuid
-from typing import Union
+import time
+import psutil
+from typing import Set, Union
 
 import docker
 from prettytable import PrettyTable
 from graypy import GELFTCPHandler
+from docker.errors import APIError, DockerException, ImageNotFound
+import psutil
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_web import node_utils
 
 CONFIG_KEYS = [
     "app_thread_core",
@@ -29,7 +35,6 @@ CONFIG_KEYS = [
     "distrib_cpu_cores",
     "jc_singleton_core",
 ]
-
 
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
@@ -64,31 +69,41 @@ def get_ips():
     return out
 
 
-def get_nics_data():
-    try:
-        out, _, _ = shell_utils.run_command("ip -j address show")
-        data = json.loads(out)
-        def _get_ip4_address(list_of_addr):
-            if list_of_addr:
-                for data in list_of_addr:
-                    if data['family'] == 'inet':
-                        return data['local']
-            return ""
+def get_system_cpus():
+    out, _, _ = shell_utils.run_command("lscpu -p=CPU,NODE")
+    return out
 
-        devices = {i["ifname"]: i for i in data}
-        iface_list = {}
-        for nic in devices:
-            device = devices[nic]
-            iface = {
-                'name': device['ifname'],
-                'ip': _get_ip4_address(device['addr_info']),
-                'status': device['operstate'],
-                'net_type': device['link_type']}
-            iface_list[nic] = iface
-        return iface_list
-    except Exception as e:
-        logger.error(e)
-        return False
+
+def get_nvme_info(dev_name):
+    out, _, _ = shell_utils.run_command(f"udevadm info --query=all --name=/dev/{dev_name}")
+    return out
+
+
+def get_nics_data():
+    out, err, rc = shell_utils.run_command("ip -j address show")
+    if rc != 0:
+        logger.error(err)
+        return []
+    data = json.loads(out)
+
+    def _get_ip4_address(list_of_addr):
+        if list_of_addr:
+            for data in list_of_addr:
+                if data['family'] == 'inet':
+                    return data['local']
+        return ""
+
+    devices = {i["ifname"]: i for i in data}
+    iface_list = {}
+    for nic in devices:
+        device = devices[nic]
+        iface = {
+            'name': device['ifname'],
+            'ip': _get_ip4_address(device['addr_info']),
+            'status': device['operstate'],
+            'net_type': device['link_type']}
+        iface_list[nic] = iface
+    return iface_list
 
 
 def get_iface_ip(ifname):
@@ -175,7 +190,7 @@ def dict_agg(data, mean=False, keys=None):
         count = len(data)
         if count > 1:
             for key in out:
-                out[key] = int(out[key]/count)
+                out[key] = int(out[key] / count)
     return out
 
 
@@ -199,7 +214,7 @@ def get_weights(node_stats, cluster_stats):
     def _get_key_w(node_id, key):
         w = 0
         if cluster_stats[key] > 0:
-            w = (cluster_stats[key]/node_stats[node_id][key])*10
+            w = (cluster_stats[key] / node_stats[node_id][key]) * 10
             # if key in ["lvol", "r_io", "w_io", "r_b", "w_b"]:  # get reverse value
             #     w = (cluster_stats[key]/node_stats[node_id][key]) * 100
         return w
@@ -262,13 +277,13 @@ def parse_history_param(history_string):
         ind = s[-1]
         v = int(s[:-1])
         if ind == 'd':
-            history_in_seconds += v * (60*60*24)
+            history_in_seconds += v * (60 * 60 * 24)
         if ind == 'h':
-            history_in_seconds += v * (60*60)
+            history_in_seconds += v * (60 * 60)
         if ind == 'm':
             history_in_seconds += v * 60
 
-    records_number = int(history_in_seconds/5)
+    records_number = int(history_in_seconds / 5)
     return records_number
 
 
@@ -324,7 +339,7 @@ def get_random_vuid():
             type = bdev['type']
             if type == "bdev_distr":
                 vuid = bdev['params']['vuid']
-            elif type == "bdev_raid"  and "jm_vuid" in bdev:
+            elif type == "bdev_raid" and "jm_vuid" in bdev:
                 vuid = bdev['jm_vuid']
             else:
                 continue
@@ -359,99 +374,85 @@ def hexa_to_cpu_list(cpu_mask):
 
     return cpu_list
 
-def calculate_core_allocation(cpu_cores):
-    if len(cpu_cores) >= 23:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [10]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [11, 22]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [9, 7, 8, 12, 14, 15, 19, 20]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2, 3]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [13, 21]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 16, 17, 18]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [23]]
-    elif len(cpu_cores) >= 21:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [14]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [15, 21]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 7, 8, 9, 10, 11, 13]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [12, 20]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 16, 17, 18]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [19]]
-    elif len(cpu_cores) >= 19:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [13]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [14]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 8, 7, 9, 12, 15]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [11, 19]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 5, 6, 16, 17, 18]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [10]]
-    elif len(cpu_cores) >= 17:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [12]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [13]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [6, 7, 8, 11, 14]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [10]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 5, 15, 16, 17]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [9]]
-    elif len(cpu_cores) >= 15:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [8]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [15]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [6, 7, 10, 13]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1, 2]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [9]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 5, 11, 12]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [14]]
-    elif len(cpu_cores) >= 13:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [9]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [10]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6, 7]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [8]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 11, 12]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [13]]
-    elif len(cpu_cores) >= 11:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [8]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [9]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4, 10]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [7]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [11]]
-    elif len(cpu_cores) >= 9:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [7]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [8]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 4]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [4, 9]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 5, 6]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [7]]
-    elif len(cpu_cores) >= 7:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [6]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [5]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [3, 5]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 4]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [7]]
-    elif len(cpu_cores) >= 5:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [5]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [5]]
-    elif len(cpu_cores) >= 4:
-        app_thread_core = [cpu_cores[pos - 1] for pos in [4]]
-        jm_cpu_core = [cpu_cores[pos - 1] for pos in [4]]
-        poller_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
-        alceml_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        alceml_worker_cpu_cores = [cpu_cores[pos - 1] for pos in [1]]
-        distrib_cpu_cores = [cpu_cores[pos - 1] for pos in [2, 3]]
-        jc_singleton_core = [cpu_cores[pos - 1] for pos in [4]]
-    else:
-        app_thread_core = jm_cpu_core = poller_cpu_cores = alceml_cpu_cores = alceml_worker_cpu_cores = distrib_cpu_cores = jc_singleton_core = []
 
-    return app_thread_core, jm_cpu_core, poller_cpu_cores, alceml_cpu_cores, alceml_worker_cpu_cores, distrib_cpu_cores, jc_singleton_core
+def pair_hyperthreads(vcpus):
+    half = len(vcpus) // 2
+    return {vcpus[i]: vcpus[i + half] for i in range(half)}
+
+
+def calculate_core_allocations(vcpu_list, alceml_count=2):
+    total = len(vcpu_list)
+    is_hyperthreaded = is_hyperthreading_enabled_via_siblings()
+    pairs = pair_hyperthreads(vcpu_list) if is_hyperthreaded else {}
+    remaining = set(vcpu_list)
+
+    def reserve(vcpu):
+        if vcpu in remaining:
+            remaining.remove(vcpu)
+            if is_hyperthreaded and vcpu in pairs:
+                sibling = pairs[vcpu]
+                if sibling in remaining:
+                    remaining.remove(sibling)
+                    return [vcpu, sibling]
+            return [vcpu]
+        return []
+
+    def reserve_n(count):
+        vcpus = []
+        if count > 0:
+            for v in sorted(remaining):
+                vcpus += reserve(v)
+                if len(vcpus) >= count:
+                    break
+        return vcpus[:count]
+
+    assigned = {}
+    assigned["app_thread_core"] = reserve_n(1)
+    if (len(vcpu_list) < 12):
+        vcpu = reserve_n(1)
+        assigned["jm_cpu_core"] = vcpu
+        assigned["jc_singleton_core"] = vcpu
+        assigned["alceml_worker_cpu_cores"] = vcpu
+        vcpu = reserve_n(1)
+        assigned["alceml_cpu_cores"] = vcpu
+    elif (len(vcpu_list) < 22):
+        vcpu = reserve_n(1)
+        assigned["jm_cpu_core"] = vcpu
+        assigned["jc_singleton_core"] = vcpu
+        vcpus = reserve_n(1)
+        assigned["alceml_worker_cpu_cores"] = vcpus
+        vcpus = reserve_n(2)
+        assigned["alceml_cpu_cores"] = vcpus
+    else:
+        vcpus = reserve_n(1)
+        assigned["jm_cpu_core"] = vcpus
+        vcpu = reserve_n(1)
+        assigned["jc_singleton_core"] = vcpu
+        vcpus = reserve_n(int(alceml_count / 3) + ((alceml_count % 3) > 0))
+        assigned["alceml_worker_cpu_cores"] = vcpus
+        vcpus = reserve_n(alceml_count)
+        assigned["alceml_cpu_cores"] = vcpus
+
+    dp = int(len(remaining) / 2)
+    vcpus = reserve_n(dp)
+    assigned["distrib_cpu_cores"] = vcpus
+    vcpus = reserve_n(dp)
+    assigned["poller_cpu_cores"] = vcpus
+    if len(remaining) > 0:
+        if len(assigned["poller_cpu_cores"]) == 0:
+            assigned["distrib_cpu_cores"] = assigned["poller_cpu_cores"] = reserve_n(1)
+        else:
+            assigned["poller_cpu_cores"] = assigned["poller_cpu_cores"] + reserve_n(1)
+    # Return the individual threads as separate values
+    return (
+        assigned.get("app_thread_core", []),
+        assigned.get("jm_cpu_core", []),
+        assigned.get("poller_cpu_cores", []),
+        assigned.get("alceml_cpu_cores", []),
+        assigned.get("alceml_worker_cpu_cores", []),
+        assigned.get("distrib_cpu_cores", []),
+        assigned.get("jc_singleton_core", [])
+    )
 
 
 def isolate_cores(spdk_cpu_mask):
@@ -467,11 +468,13 @@ def isolate_cores(spdk_cpu_mask):
         isolated_full.discard(0)
     return isolated_full
 
+
 def generate_mask(cores):
     mask = 0
     for core in cores:
         mask |= (1 << core)
     return f'0x{mask:X}'
+
 
 def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_count):
     '''
@@ -496,12 +499,11 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
 
     '''
     poller_number = poller_count if poller_count else cpu_count
-    #small_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
 
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
-    #large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
-    return 2*small_pool_count, 2*large_pool_count
+
+    return int(2.0 * small_pool_count), int(1.5 * large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -513,12 +515,14 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     return: minimum_hp_memory in bytes
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 12 * lvol_count) * (1024 * 1024) + (
+            250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(memory_consumption)
 
 
 def calculate_minimum_sys_memory(max_prov, total):
-    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + (constants.EXTRA_SYS_MEMORY * total)
+    minimum_sys_memory = (1800 * 1024 * 1024) * convert_size(max_prov, 'TiB') + 500 * 1024 * 1024 + (constants.EXTRA_SYS_MEMORY * total)
+
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
 
@@ -547,7 +551,7 @@ def get_total_size_per_instance_type(instance_type):
 
 def validate_add_lvol_or_snap_on_node(memory_free, huge_free, max_lvol_or_snap,
                                       lvol_or_snap_size, node_capacity, node_lvol_or_snap_count):
-    min_sys_memory = 2 / 4096 * lvol_or_snap_size +  1 / 4096 * node_capacity + constants.MIN_SYS_MEMORY_FOR_LVOL
+    min_sys_memory = 2 / 4096 * lvol_or_snap_size + 1 / 4096 * node_capacity + constants.MIN_SYS_MEMORY_FOR_LVOL
     if huge_free < constants.MIN_HUGE_PAGE_MEMORY_FOR_LVOL:
         return f"No enough huge pages memory on the node, Free memory: {humanbytes(huge_free)}, " \
                f"Min Huge memory required: {humanbytes(constants.MIN_HUGE_PAGE_MEMORY_FOR_LVOL)}"
@@ -653,7 +657,7 @@ def parse_size(size: Union[str, int], mode: str = 'si/iec', assume_unit: str = '
         return -1
 
 
-def convert_size(size: Union[int, str], unit: str) -> int:
+def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> int:
     """Convert the given number of bytes to target unit
 
     Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
@@ -663,7 +667,8 @@ def convert_size(size: Union[int, str], unit: str) -> int:
         size = int(size)
 
     base, exponent = _parse_unit(unit, 'si/iec')
-    return int(size / (base ** exponent))
+    raw = size / (base ** exponent)
+    return math.ceil(raw) if round_up else int(raw)
 
 
 def nearest_upper_power_of_2(n):
@@ -689,7 +694,7 @@ def strfdelta(tdelta):
     return out.strip()
 
 
-def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes = None):
+def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes=None):
     if res:
         if not allowed_error_codes:
             allowed_error_codes = [0]
@@ -755,6 +760,7 @@ def get_next_port(cluster_id):
             return next_port
         next_port += 1
 
+
 def get_next_rpc_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
@@ -773,11 +779,12 @@ def get_next_rpc_port(cluster_id):
 
     return 0
 
+
 def get_next_dev_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = 9080
+    port = constants.NODE_NVMF_PORT_START
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.nvmf_port > 0:
@@ -787,6 +794,7 @@ def get_next_dev_port(cluster_id):
         if next_port not in used_ports:
             return next_port
         next_port += 1
+
 
 def generate_realtime_variables_file(isolated_cores, realtime_variables_file_path="/etc/tuned/realtime-variables.conf"):
     """
@@ -823,6 +831,7 @@ cmdline_add=isolcpus={core_list} nohz_full={core_list} rcu_nocbs={core_list}
     except subprocess.CalledProcessError as e:
         logger.error(f"Error writing to file: {e}")
 
+
 def run_tuned():
     try:
         subprocess.run(
@@ -856,7 +865,7 @@ def is_hyperthreading_enabled_via_siblings():
     """
     siblings = parse_thread_siblings()
     for sibling_list in siblings.values():
-       if len(sibling_list) > 1:
+        if len(sibling_list) > 1:
             return True
     return False
 
@@ -883,7 +892,6 @@ def load_core_distribution_from_file(file_path, number_of_cores):
                             raise ValueError(f"Invalid distribution, the index of the core {value}: "
                                              f"must be in range of number of cores {number_of_cores}")
 
-
             # Validate all keys are present
             if not all(key in config and config[key] is not None for key in CONFIG_KEYS):
                 logger.warning("Incomplete configuration provided. Using default values.")
@@ -895,14 +903,10 @@ def load_core_distribution_from_file(file_path, number_of_cores):
         return None  # Indicate that defaults should be used
 
 
-def store_cores_config(spdk_cpu_mask):
-    cores_config = {
-        "cpu_mask": spdk_cpu_mask
-    }
-    file_path = constants.TEMP_CORES_FILE
+def store_config_file(data_config, file_path, create_read_only_file=False):
     # Ensure the directory exists
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    cores_config_json = json.dumps(cores_config, indent=4)
+    cores_config_json = json.dumps(data_config, indent=4)
 
     # Write the dictionary to the JSON file
     try:
@@ -914,8 +918,25 @@ def store_cores_config(spdk_cpu_mask):
             check=True  # Raise an error if command fails
         )
         logger.info(f"JSON file successfully written to {file_path}")
+        # Write to read-only file
+        if create_read_only_file:
+            subprocess.run(
+                ["sudo", "tee", f"{file_path}_read_only"],
+                input=cores_config_json.encode("utf-8"),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=True
+            )
+            subprocess.run(["sudo", "chmod", "444", f"{file_path}_read_only"], check=True)
+
     except subprocess.CalledProcessError as e:
         logger.error(f"Error writing to file: {e}")
+
+def load_config(file_path):
+    # Load and parse a JSON config file
+    with open(file_path, 'r') as f:
+        config = json.load(f)
+    return config
 
 def init_sentry_sdk(name=None):
     # import sentry_sdk
@@ -935,6 +956,23 @@ def init_sentry_sdk(name=None):
     # # set_level("critical")
 
     return True
+
+
+def get_numa_cores():
+    cores_by_numa = {}
+    try:
+        output = get_system_cpus()
+        for line in output.splitlines():
+            if line.startswith("#"):
+                continue
+            cpu_id, node_id = line.strip().split(',')
+            node_id = int(node_id)
+            cpu_id = int(cpu_id)
+            cores_by_numa.setdefault(node_id, []).append(cpu_id)
+    except:
+        total_cores = os.cpu_count()
+        cores_by_numa[0] = list(range(total_cores))
+    return cores_by_numa
 
 
 def generate_hex_string(length):
@@ -998,6 +1036,684 @@ def addNvmeDevices(rpc_client, snode, devs):
                     'node_id': snode.get_id(),
                     'cluster_id': snode.cluster_id,
                     'status': NVMeDevice.STATUS_ONLINE
-            }))
+                }))
     return devices
 
+
+def get_random_snapshot_vuid():
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    used_vuids = []
+    for snap in db_controller.get_snapshots():
+        used_vuids.append(snap.vuid)
+
+    r = 1 + int(random.random() * 1000000)
+    while r in used_vuids:
+        r = 1 + int(random.random() * 1000000)
+    return r
+
+
+def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retries=3, delay=5):
+    """
+    Pulls a Docker image with retries in case of failure.
+
+    Args:
+        client (docker.DockerClient): The Docker client instance.
+        image_name (str): The name of the Docker image to pull.
+        retries (int): Number of retry attempts. Defaults to 3.
+        delay (int): Delay between retries in seconds. Defaults to 5.
+
+    Returns:
+        docker.models.images.Image: The pulled Docker image.
+
+    Raises:
+        DockerException: If all retry attempts fail.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"Attempt {attempt}: Pulling image '{image_name}'...")
+            image = client.images.pull(image_name)
+            print(f"Image '{image_name}' pulled successfully.")
+            return image
+        except (APIError, DockerException, ImageNotFound) as e:
+            print(f"Error pulling image (attempt {attempt}): {e}")
+            if attempt < retries:
+                time.sleep(delay)
+            else:
+                print("All retries failed.")
+                raise
+
+
+def next_free_hublvol_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = 9096
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.hublvol and node.hublvol.nvmf_port > 0:
+            used_ports.append(node.hublvol.nvmf_port)
+
+    next_port = port
+    while True:
+        if next_port not in used_ports:
+            return next_port
+        next_port += 1
+
+
+def validate_sockets(sockets_to_use, cores_by_numa):
+    for socket in sockets_to_use:
+        if socket not in cores_by_numa:
+            print(f"Error: Socket {socket} not in system sockets {cores_by_numa}")
+
+
+def detect_nics():
+    nics = {}
+    net_path = "/sys/class/net"
+    for nic in os.listdir(net_path):
+        if nic.startswith("lo"):
+            continue
+        numa_node_path = os.path.join(net_path, nic, "device/numa_node")
+        try:
+            with open(numa_node_path, "r") as f:
+                numa_node = int(f.read().strip())
+        except:
+            numa_node = -1
+        nics[nic] = numa_node
+    return nics
+
+
+def get_nvme_pci_devices():
+    try:
+        # Step 1: Get all NVMe devices that mounted or have partitions
+        lsblk_output = subprocess.check_output(
+            ["lsblk", "-dn", "-o", "NAME,MOUNTPOINT"],
+            text=True
+        )
+        blocked_devices = []
+        for line in lsblk_output.strip().splitlines():
+            name = line.strip().split()
+            partitions = subprocess.check_output(
+                ["lsblk", "-n", f"/dev/{name[0]}"],
+                text=True
+            ).strip().splitlines()
+
+            if len(name) > 1 or len(partitions) > 1:
+                blocked_devices.append(name[0])
+
+
+        # Step 3: Map NVMe devices to PCI addresses
+        pci_addresses = []
+        lspci_output = subprocess.check_output(
+            "lspci -DnnP | grep '0108'",
+            shell=True,
+            text=True
+        )
+        pci_addresses = [line.split()[0] for line in lspci_output.strip().splitlines()]
+        return pci_addresses, blocked_devices
+
+    except subprocess.CalledProcessError:
+        logger.warning("No NVMe devices with class 0108 found.")
+        return [], []
+
+
+def get_bound_driver(pci_address):
+    driver_path = f"/sys/bus/pci/devices/{pci_address}/driver"
+    if os.path.islink(driver_path):
+        return os.path.basename(os.readlink(driver_path))
+    return None
+
+
+def unbind_pci_driver(pci_address):
+    current_driver = get_bound_driver(pci_address)
+    if current_driver:
+        unbind_path = f"/sys/bus/pci/devices/{pci_address}/driver/unbind"
+        try:
+            cmd = f"echo {pci_address} | sudo tee {unbind_path}"
+            subprocess.run(cmd, shell=True, check=True)
+            logger.debug(f"Unbound {pci_address} from {current_driver}.")
+        except Exception as e:
+            logger.error(f"Failed to unbind {pci_address} from {current_driver}: {e}")
+
+
+def bind_to_nvme_driver(pci_address):
+    NVME_DRIVER = "nvme"
+    current_driver = get_bound_driver(pci_address)
+    if current_driver == NVME_DRIVER:
+        logger.info(f"{pci_address} is already bound to {NVME_DRIVER}.")
+        return
+
+    # Unbind from current driver if any
+    unbind_pci_driver(pci_address)
+
+    # Bind to nvme
+    new_id_path = f"/sys/bus/pci/drivers/{NVME_DRIVER}/bind"
+    try:
+        cmd = f"echo {pci_address} | sudo tee {new_id_path}"
+        subprocess.run(cmd, shell=True, check=True)
+        logger.debug(f"Bound {pci_address} to {NVME_DRIVER}.")
+    except Exception as e:
+        logger.error(f"Failed to bind {pci_address} to {NVME_DRIVER}: {e}")
+
+
+def detect_nvmes(pci_allowed, pci_blocked):
+    pci_addresses, blocked_devices = get_nvme_pci_devices()
+    ssd_pci_set = set(pci_addresses)
+
+    # Normalize SSD PCI addresses and user PCI list
+    if pci_allowed:
+        user_pci_set = set(
+            addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
+            for addr in pci_allowed
+        )
+
+        # Check for unmatched addresses
+        unmatched = user_pci_set - ssd_pci_set
+        if unmatched:
+            logger.error(f"Invalid PCI addresses: {', '.join(unmatched)}")
+            return []
+
+        pci_addresses = list(user_pci_set)
+    elif pci_blocked:
+        user_pci_set = set(
+            addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
+            for addr in pci_blocked
+        )
+        rest = ssd_pci_set - user_pci_set
+        pci_addresses = list(rest)
+
+    for pci in pci_addresses:
+        bind_to_nvme_driver(pci)
+
+    nvme_base_path = '/sys/class/nvme/'
+    nvme_devices = [dev for dev in os.listdir(nvme_base_path) if dev.startswith('nvme')]
+    nvmes = {}
+    for dev in nvme_devices:
+        dev_name = os.path.basename(dev)
+        if dev_name in blocked_devices:
+            continue
+        device_symlink = os.path.join(nvme_base_path, dev)
+        try:
+            pci_address = "unknown"
+
+            # Resolve the real path to get the actual device path
+            real_path = os.path.realpath(device_symlink)
+
+            # Read the PCI address from the 'address' file
+            address_file = os.path.join(real_path, 'address')
+            with open(address_file, 'r') as f:
+                pci_address = f.read().strip()
+
+            # Read the NUMA node information
+            numa_node_file = os.path.join(real_path, 'numa_node')
+            with open(numa_node_file, 'r') as f:
+                numa_node = f.read().strip()
+
+            if pci_address not in pci_addresses:
+                continue
+            nvmes[dev_name] = {"pci_address": pci_address, "numa_node": numa_node}
+        except Exception:
+            continue
+    return nvmes
+
+
+def calculate_unisolated_cores(cores):
+    # calculate the number if unused system cores (UnIsolated cores)
+    total = len(cores)
+    if total <= 10:
+        return 1
+    elif total <= 20:
+        return 2
+    elif total <= 28:
+        return 3
+    else:
+        return int(total * 0.15)
+
+
+def get_core_indexes(core_to_index, list_of_cores):
+    return [core_to_index[core] for core in list_of_cores if core in core_to_index]
+
+
+def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
+    node_distribution = {}
+    # Iterate over each NUMA node
+    for numa_node in sockets_to_use:
+        if numa_node not in cores_by_numa:
+            continue
+        all_cores = sorted(cores_by_numa[numa_node])
+        total_cores = len(all_cores)
+        num_unisolated = calculate_unisolated_cores(all_cores)
+
+        unisolated = []
+        half = total_cores // 2
+        for i in range(num_unisolated):
+            if i % 2 == 0:
+                index = i // 2
+            else:
+                index = (i - 1) // 2
+            if i % 2 == 0:
+                unisolated.append(all_cores[index])
+            else:
+                unisolated.append(all_cores[half + index])
+
+        available_cores = [c for c in all_cores if c not in unisolated]
+        q1 = len(available_cores) // 4
+
+        node_distribution[numa_node] = []
+
+        if nodes_per_socket == 1:
+            # If there's only one node, assign all available cores to it
+            node_cores = available_cores
+            l_cores = ",".join([f"{i}@{core}" for i, core in enumerate(node_cores)])
+            core_to_index = {core: idx for idx, core in enumerate(node_cores)}
+            node_distribution[numa_node].append({
+                "cpu_mask": hex(sum([1 << c for c in node_cores])),
+                "isolated": node_cores,
+                "l-cores": l_cores,
+                "distribution": calculate_core_allocations(node_cores),
+                "core_to_index": core_to_index
+            })
+        else:
+            # Distribute cores equally between the nodes
+            node_0_cores = available_cores[0:q1] + available_cores[2 * q1:3 * q1]
+            node_1_cores = available_cores[q1:2 * q1] + available_cores[3 * q1:]
+
+            # Ensure the number of isolated cores is the same for both nodes
+            min_isolated_cores = min(len(node_0_cores), len(node_1_cores))
+
+            # Generate l-cores for node 0
+            l_cores_0 = ",".join([f"{i}@{core}" for i, core in enumerate(node_0_cores[:min_isolated_cores])])
+            core_to_index = {core: idx for idx, core in enumerate(node_0_cores)}
+            isolated_cores = node_0_cores[:min_isolated_cores]
+            node_distribution[numa_node].append({
+                "cpu_mask": hex(sum([1 << c for c in node_0_cores[:min_isolated_cores]])),
+                "isolated": isolated_cores,
+                "l-cores": l_cores_0,
+                "distribution": calculate_core_allocations(isolated_cores),
+                "core_to_index": core_to_index
+            })
+
+            # Generate l-cores for node 1
+            l_cores_1 = ",".join([f"{i}@{core}" for i, core in enumerate(node_1_cores[:min_isolated_cores])])
+            core_to_index = {core: idx for idx, core in enumerate(node_1_cores)}
+            isolated_cores = node_1_cores[:min_isolated_cores]
+            node_distribution[numa_node].append({
+                "cpu_mask": hex(sum([1 << c for c in node_1_cores[:min_isolated_cores]])),
+                "isolated": isolated_cores,
+                "l-cores": l_cores_1,
+                "distribution": calculate_core_allocations(isolated_cores),
+                "core_to_index": core_to_index
+            })
+
+    return node_distribution
+
+
+def calculate_sys_memory(max_size_bytes):
+    # total_memory_bytes = psutil.virtual_memory().total
+    minimum_sys_memory = (max_size_bytes * 1.5) / 4096 + 2 * (1024 ** 3)
+    logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
+    return int(minimum_sys_memory)
+
+
+def regenerate_config(new_config, old_config):
+    if len(old_config.get("nodes")) != len(new_config.get("nodes")):
+        logger.error("The number of node in old config not equal to the number of node in updated config")
+        return False
+    for i in range(len(old_config.get("nodes"))):
+        validate_node_config(new_config.get("nodes")[i])
+        if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
+            logger.error("The socket is changed, please rerun sbcli configure without upgrade firstly")
+            return False
+        if old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"]:
+            try:
+                isolated_cores = hexa_to_cpu_list(new_config["nodes"][i]["cpu_mask"])
+            except ValueError:
+                logger.error(f"The updated cpu mask is incorrect {new_config['nodes'][i]['cpu_mask']}")
+                return False
+            old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
+            old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])
+            old_config["nodes"][i]["isolated"] = isolated_cores
+            distribution = calculate_core_allocations(isolated_cores)
+            core_to_index = {core: idx for idx, core in enumerate(isolated_cores)}
+            old_config["nodes"][i]["distribution"] ={
+                "app_thread_core": get_core_indexes(core_to_index, distribution[0]),
+                "jm_cpu_core": get_core_indexes(core_to_index, distribution[1]),
+                "poller_cpu_cores": get_core_indexes(core_to_index, distribution[2]),
+                "alceml_cpu_cores": get_core_indexes(core_to_index, distribution[3]),
+                "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
+                "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
+                "jc_singleton_core": get_core_indexes(core_to_index, distribution[6])}
+
+        isolated_cores = old_config["nodes"][i]["isolated"]
+        number_of_distribs = 2
+        number_of_distribs_cores = len(old_config["nodes"][i]["distribution"]["distrib_cpu_cores"])
+        number_of_poller_cores = len(old_config["nodes"][i]["distribution"]["poller_cpu_cores"])
+        if number_of_distribs_cores > 2:
+            number_of_distribs = number_of_distribs_cores
+        old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
+        old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
+        number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
+        old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
+        small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
+                                                                  len(isolated_cores),
+                                                                  number_of_poller_cores or len(
+                                                                      isolated_cores),)
+        minimum_hp_memory = calculate_minimum_hp_memory(small_pool_count, large_pool_count, old_config["nodes"][i]["max_lvol"],
+                                                        old_config["nodes"][i]["max_size"], len(isolated_cores))
+        old_config["nodes"][i]["small_pool_count"] = small_pool_count
+        old_config["nodes"][i]["large_pool_count"] = large_pool_count
+        old_config["nodes"][i]["huge_page_memory"] = minimum_hp_memory
+        minimum_sys_memory = calculate_sys_memory(old_config["nodes"][i]["max_size"])
+        old_config["nodes"][i]["sys_memory"] =  minimum_sys_memory
+
+    memory_details = node_utils.get_memory_details()
+    free_memory = memory_details.get("free")
+    huge_total = memory_details.get("huge_total")
+    total_free_memory = free_memory + huge_total
+    total_required_memory = 0
+    for node in old_config["nodes"]:
+        if len(node["ssd_pcis"]) == 0:
+            logger.error(f"There is no enough SSD devices on numa {node['socket']}")
+            return False
+        total_required_memory += node["huge_page_memory"] + node["sys_memory"]
+    if total_free_memory < total_required_memory:
+            logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
+            return False
+    return old_config
+
+
+def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
+    system_info = {}
+    nodes_config = {"nodes": []}
+
+    cores_by_numa = get_numa_cores()
+    validate_sockets(sockets_to_use, cores_by_numa)
+    logger.debug(f"Cores by numa {cores_by_numa}")
+    nics = detect_nics()
+    nvmes = detect_nvmes(pci_allowed, pci_blocked)
+
+    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket)
+
+    for nid in sockets_to_use:
+        if nid in cores_by_numa:
+            system_info[nid] = {
+                "cores": cores_by_numa[nid],
+                "nics": [],
+                "nvmes": []
+            }
+
+    for nic, numa in nics.items():
+        if numa in sockets_to_use:
+            system_info[numa]["nics"].append(nic)
+        else:
+            system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nics"].append(nic)
+
+    for nvme, val in nvmes.items():
+        pci = val["pci_address"]
+        numa = val["numa_node"]
+        unbind_pci_driver(pci)
+        if numa in sockets_to_use:
+            system_info[numa]["nvmes"].append(pci)
+        else:
+            system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nvmes"].append(pci)
+
+    nvme_by_numa = {nid: [] for nid in sockets_to_use}
+    nvme_numa_neg1 = []
+    for nvme_name, val in nvmes.items():
+        numa = val["numa_node"]
+        if numa in sockets_to_use:
+            nvme_by_numa[numa].append(nvme_name)
+        elif int(numa) == -1:
+            nvme_numa_neg1.append(nvme_name)
+
+    total_nodes = nodes_per_socket * len(sockets_to_use)
+    all_nvmes_per_node = [[] for _ in range(total_nodes)]
+    all_nvmes = []
+    for devs in nvme_by_numa.values():
+        all_nvmes.extend(devs)
+    all_nvmes.extend(nvme_numa_neg1)
+
+    for i, nvme_name in enumerate(all_nvmes):
+        all_nvmes_per_node[i % total_nodes].append(nvme_name)
+
+    all_nvmes_neg1_per_node = [[] for _ in range(total_nodes)]
+    for i, nvme_name in enumerate(nvme_numa_neg1):
+        all_nvmes_neg1_per_node[i % total_nodes].append(nvme_name)
+
+    all_nodes = []
+    node_index = 0
+    for nid in sockets_to_use:
+        nvme_list = nvme_by_numa.get(nid)
+        logger.debug(f"NVME devices list {nvme_list}")
+        nvme_per_core_group = [[] for _ in range(nodes_per_socket)]
+        for i, nvme in enumerate(nvme_list):
+            nvme_per_core_group[i % nodes_per_socket].append(nvme)
+
+        for idx, core_group in enumerate(node_cores.get(nid, [])):
+            node_info = {
+                "socket": nid,
+                "cpu_mask": core_group["cpu_mask"],
+                "isolated": core_group["isolated"],
+                "l-cores": ",".join([f"{i}@{core}" for i, core in enumerate(core_group["isolated"])]),
+                "number_of_alcemls": 0,
+                "distribution": {
+                    "app_thread_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][0]),
+                    "jm_cpu_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][1]),
+                    "poller_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][2]),
+                    "alceml_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][3]),
+                    "alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][4]),
+                    "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
+                    "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6])
+                },
+                "ssd_pcis": [],
+                "nic_ports": system_info[nid]["nics"]
+            }
+            number_of_distribs = 2
+            number_of_distribs_cores = len(node_info["distribution"]["distrib_cpu_cores"])
+
+            number_of_poller_cores = len(node_info["distribution"]["poller_cpu_cores"])
+            if number_of_distribs_cores > 2:
+                number_of_distribs = number_of_distribs_cores
+            node_info["number_of_distribs"] = number_of_distribs
+
+            nvme_neg1_list = all_nvmes_neg1_per_node[node_index]
+            for nvme_name in nvme_neg1_list:
+                node_info["ssd_pcis"].append({
+                    "device": nvme_name,
+                    "pci_address": nvmes[nvme_name]["pci_address"]
+                })
+            for nvme_name in nvme_per_core_group[idx]:
+                node_info["ssd_pcis"].append({
+                    "device": nvme_name,
+                    "pci_address": nvmes[nvme_name]["pci_address"]
+                })
+            number_of_alcemls = len(node_info["ssd_pcis"])
+            node_info["number_of_alcemls"] = number_of_alcemls
+            small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
+                                                                      len(core_group["isolated"]),
+                                                                      number_of_poller_cores or len(
+                                                                          core_group["isolated"]))
+            minimum_hp_memory = calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol,
+                                                            max_prov, len(core_group["isolated"]))
+            node_info["small_pool_count"] = small_pool_count
+            node_info["large_pool_count"] = large_pool_count
+            node_info["max_lvol"] = max_lvol
+            node_info["max_size"] = max_prov
+            node_info["huge_page_memory"] = minimum_hp_memory
+            minimum_sys_memory = calculate_sys_memory(max_prov)
+            node_info["sys_memory"] =  minimum_sys_memory
+            all_nodes.append(node_info)
+            node_index += 1
+    memory_details = node_utils.get_memory_details()
+    free_memory = memory_details.get("free")
+    huge_total = memory_details.get("huge_total")
+    total_free_memory = free_memory + huge_total
+    total_required_memory = 0
+    for node in all_nodes:
+        if len(node["ssd_pcis"]) == 0:
+            logger.error(f"There is no enough SSD devices on numa {node['socket']}")
+            return False, False
+        total_required_memory += node["huge_page_memory"] + node["sys_memory"]
+    if total_free_memory < total_required_memory:
+            logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
+            return False, False
+    nodes_config["nodes"] = all_nodes
+    return nodes_config, system_info
+
+
+def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
+    """Set hugepages for a specific NUMA node if current number is less than needed."""
+    hugepage_path = f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
+
+    try:
+        with open(hugepage_path, "r") as f:
+            current_hugepages = int(f.read().strip())
+
+        if current_hugepages >= hugepages_needed:
+            logger.debug(f"Node {node}: already has {current_hugepages} hugepages, no change needed.")
+        else:
+            logger.debug(f"Node {node}: has {current_hugepages} hugepages, setting to {hugepages_needed}...")
+            cmd = f"echo {hugepages_needed} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
+            subprocess.run(cmd, shell=True, check=True)
+            logger.debug(f"Node {node}: hugepages updated to {hugepages_needed}.")
+
+    except FileNotFoundError:
+        logger.error(f"Node {node}: Hugepage path not found. Is hugepage support enabled?")
+    except PermissionError:
+        logger.error(f"Node {node}: Permission denied. Run the script as root.")
+    except Exception as e:
+        logger.error(f"Node {node}: Error occurred: {e}")
+
+
+def validate_node_config(node):
+    required_top_fields = [
+        "socket", "cpu_mask", "isolated", "l-cores", "number_of_alcemls",
+        "distribution", "ssd_pcis", "nic_ports", "number_of_distribs",
+        "small_pool_count", "large_pool_count", "max_lvol", "max_size",
+        "huge_page_memory", "sys_memory"
+    ]
+
+    required_distribution_fields = [
+        "app_thread_core", "jm_cpu_core", "poller_cpu_cores",
+        "alceml_cpu_cores", "alceml_worker_cpu_cores",
+        "distrib_cpu_cores", "jc_singleton_core"
+    ]
+
+    required_ssd_pci_fields = ["device", "pci_address"]
+
+    # Check top-level fields
+    for field in required_top_fields:
+        if field not in node:
+            logger.error(f"Missing required top-level field '{field}' in node: {node.get('socket')}")
+            return False
+
+    # Check distribution subfields
+    distribution = node["distribution"]
+    for field in required_distribution_fields:
+        if field not in distribution:
+            logger.error(f"Missing required distribution field '{field}' in node: {node.get('socket')}")
+            return False
+
+    # Check ssd_pcis fields
+    for ssd in node["ssd_pcis"]:
+        for field in required_ssd_pci_fields:
+            if field not in ssd:
+                logger.error(f"Missing required SSD field '{field}' in node: {node.get('socket')}")
+                return False
+
+    if not node["isolated"]:
+        logger.error(f"'isolated' list is empty in node: {node.get('socket')}")
+        return False
+
+    if not node["l-cores"]:
+        logger.error(f"'l-cores' string is empty in node: {node.get('socket')}")
+        return False
+    return True
+
+
+def get_system_cores():
+    """Reads the available system cores from /sys/devices/system/cpu."""
+    cpu_dir = "/sys/devices/system/cpu/"
+    cores = []
+    for entry in os.listdir(cpu_dir):
+        if entry.startswith("cpu") and entry[3:].isdigit():
+            cores.append(int(entry[3:]))
+    return set(cores)
+
+
+def validate_config(config, upgrade=False):
+    if "nodes" not in config:
+        logger.error("Missing 'nodes' in config")
+        return False
+    all_isolated_cores = set()
+    for node in config["nodes"]:
+        required_keys = [
+            "socket", "cpu_mask", "isolated", "l-cores", "distribution",
+            "ssd_pcis", "nic_ports", "number_of_distribs",
+            "small_pool_count", "large_pool_count", "max_lvol",
+            "max_size", "huge_page_memory", "sys_memory"
+        ]
+        for key in required_keys:
+            if key not in node:
+                logger.error(f"Missing key '{key}' in node config")
+                return False
+        if upgrade:
+            continue
+        # Validate that cpu_mask includes isolated cores
+        cpu_mask_value = int(node["cpu_mask"], 16)
+        for core in node["isolated"]:
+            if not (cpu_mask_value & (1 << core)):
+                logger.error(f"Core {core} from 'isolated' is not included in 'cpu_mask' {node['cpu_mask']}")
+                return False
+
+        # Validate l-cores syntax
+        l_cores_pairs = node["l-cores"].split(",")
+        core_to_index = {}
+        index_to_core = {}
+        for pair in l_cores_pairs:
+            if "@" not in pair:
+                logger.error(f"Invalid l-cores format in node {node['socket']}: '{pair}'")
+                return False
+            index_str, core_str = pair.split("@")
+            if not index_str.isdigit() or not core_str.isdigit():
+                logger.error(f"Invalid l-cores entry in node {node['socket']}: '{pair}'")
+                return False
+            core = int(core_str)
+            index = int(index_str)
+            if core in core_to_index:
+                logger.error(f"Duplicate core {core} in l-cores for node {node['socket']}")
+                return False
+            core_to_index[core] = index
+            index_to_core[index] = core
+
+        # Check that all cores in 'isolated' are also in l-cores
+        for core in node["isolated"]:
+            if core not in core_to_index:
+                logger.error(f"Core {core} in 'isolated' not present in 'l-cores' for node {node['socket']}")
+                return False
+
+        # Validate distribution cores
+        distribution = node["distribution"]
+        for key, cores in distribution.items():
+            if not isinstance(cores, list):
+                logger.error(f"Distribution key '{key}' must be a list")
+                return False
+            for core in cores:
+                if core not in index_to_core:
+                    logger.error(f"Core {core} in distribution '{key}' not found in l-cores for node {node['socket']}")
+                    return False
+        system_cores = get_system_cores()
+        # Check isolated cores are subset of system cores
+        for core in node["isolated"]:
+            if core not in system_cores:
+                raise ValueError(f"Core {core} in node {node['socket']} is not a valid system core")
+
+        # Check no core is used in more than one node
+        node_cores_set = set(node["isolated"])
+        if all_isolated_cores.intersection(node_cores_set):
+            logger.error(f"Duplicate isolated cores found between nodes: {all_isolated_cores.intersection(node_cores_set)}")
+            return False
+        all_isolated_cores.update(node_cores_set)
+    if upgrade:
+        return True
+    return all_isolated_cores

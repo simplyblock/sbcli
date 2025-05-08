@@ -12,6 +12,7 @@ import jc
 from kubernetes.stream import stream
 from kubernetes import client, config
 
+from simplyblock_core import shell_utils
 from simplyblock_web import utils
 
 
@@ -19,28 +20,18 @@ from simplyblock_web import utils
 logger = logging.getLogger(__name__)
 
 
-def run_command(cmd):
-    try:
-        process = subprocess.Popen(
-            cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stdout, stderr = process.communicate()
-        return stdout.strip().decode("utf-8"), stderr.strip(), process.returncode
-    except Exception as e:
-        return "", str(e), 1
-
-
-def _get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    out, err, _ = run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
+def get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
+    out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
     spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     if not spdk_pcie_list:
-        out, err, _ = run_command("ls /sys/bus/pci/drivers/vfio-pci")
+        out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/vfio-pci")
         spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     logger.debug(spdk_pcie_list)
     return spdk_pcie_list
 
 
-def _get_nvme_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    out, err, _ = run_command("ls /sys/bus/pci/drivers/nvme")
+def get_nvme_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
+    out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/nvme")
     spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
     logger.debug(spdk_pcie_list)
     return spdk_pcie_list
@@ -58,8 +49,8 @@ def get_nvme_pcie():
     return devs
 
 
-def _get_nvme_devices():
-    out, err, rc = run_command("nvme list -v -o json")
+def get_nvme_devices():
+    out, err, rc = shell_utils.run_command("nvme list -v -o json")
     if rc != 0:
         logger.error("Error getting nvme list")
         logger.error(err)
@@ -93,39 +84,12 @@ def _get_nvme_devices():
     return devices
 
 
-def get_nics_data():
-    out, err, rc = run_command("ip -j address show")
-    if rc != 0:
-        logger.error(err)
-        return []
-    data = json.loads(out)
-
-    def _get_ip4_address(list_of_addr):
-        if list_of_addr:
-            for data in list_of_addr:
-                if data['family'] == 'inet':
-                    return data['local']
-        return ""
-
-    devices = {i["ifname"]: i for i in data}
-    iface_list = {}
-    for nic in devices:
-        device = devices[nic]
-        iface = {
-            'name': device['ifname'],
-            'ip': _get_ip4_address(device['addr_info']),
-            'status': device['operstate'],
-            'net_type': device['link_type']}
-        iface_list[nic] = iface
-    return iface_list
-
-
-def _get_spdk_devices():
+def get_spdk_devices():
     return []
 
 
 def _get_mem_info():
-    out, err, rc = run_command("cat /proc/meminfo")
+    out, err, rc = shell_utils.run_command("cat /proc/meminfo")
 
     if rc != 0:
         raise ValueError('Failed to get memory info')
@@ -167,7 +131,7 @@ def get_memory_details():
 
 
 def get_host_arch():
-    out, err, rc = run_command("uname -m")
+    out, err, rc = shell_utils.run_command("uname -m")
     return out
 
 def get_region():
@@ -283,23 +247,20 @@ def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
             if chain['chain'] in ["INPUT", "OUTPUT"]:
                 for rule in chain['rules']:
                     if str(port_id) in rule['options']:
-                        cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']}")
+                        cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']} -w")
 
     except Exception as e:
         logger.error(e)
 
     if block:
         cmd_list.extend([
-            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
-            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
-            "iptables -L -n -v",
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP -w",
+            f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT -w",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP -w",
+            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT -w",
         ])
-    else:
-        cmd_list.extend([
-            # f"iptables -A INPUT -p {port_type} --dport {port_id} -j ACCEPT",
-            # f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
-            "iptables -L -n -v",
-        ])
+
+    cmd_list.append("iptables -L -n -v -w")
 
     out = ""
     spk_name = "spdk"
@@ -319,7 +280,7 @@ def firewall_get(rpc_port=None):
     spk_name = "spdk"
     if rpc_port:
         spk_name = f"spdk_{rpc_port}"
-    cmd = f"docker exec {spk_name} iptables -L -n"
+    cmd = f"docker exec {spk_name} iptables -L -n -w"
     stream = os.popen(cmd)
     ret = stream.read()
     return ret

@@ -11,15 +11,15 @@ from simplyblock_core.models.cluster import Cluster
 logger = utils.get_logger(__name__)
 
 # get DB controller
-db_controller = db_controller.DBController()
-last_event = {}
+db = db_controller.DBController()
+last_event: dict[str, dict] = {}
 
 logger.info("Starting capacity monitoring service...")
 while True:
-    clusters = db_controller.get_clusters()
+    clusters = db.get_clusters()
     for cl in clusters:
         logger.info(f"Checking cluster: {cl.get_id()}")
-        records = db_controller.get_cluster_capacity(cl, 1)
+        records = db.get_cluster_capacity(cl, 1)
         if not records:
             logger.error("Cluster capacity record not found!")
             continue

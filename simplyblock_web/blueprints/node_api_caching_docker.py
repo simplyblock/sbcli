@@ -12,6 +12,7 @@ from flask import request
 
 from simplyblock_web import utils, node_utils
 from simplyblock_core import scripts, constants, utils as core_utils
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,9 @@ bp = Blueprint("node_api_caching_docker", __name__, url_prefix="/cnode")
 def get_docker_client():
     ip = os.getenv("DOCKER_IP")
     if not ip:
-        for ifname in node_utils.get_nics_data():
+        for ifname in core_utils.get_nics_data():
             if ifname in ["eth0", "ens0"]:
-                ip = node_utils.get_nics_data()[ifname]['ip']
+                ip = core_utils.get_nics_data()[ifname]['ip']
                 break
     return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
 
@@ -62,7 +63,7 @@ def spdk_process_start():
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
     if 'spdk_image' in data and data['spdk_image']:
         spdk_image = data['spdk_image']
-        node_docker.images.pull(spdk_image)
+        pull_docker_image_with_retry(node_docker, spdk_image)
 
     container = node_docker.containers.run(
         spdk_image,

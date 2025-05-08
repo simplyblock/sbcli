@@ -151,12 +151,17 @@ def _def_create_device_stack(device_obj, snode, force=False):
         logger.info(f"adding {alceml_name}")
         if snode.alceml_cpu_cores:
             alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-            ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=2,
-                                                alceml_cpu_mask=alceml_cpu_mask,  pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection)
+            ret = rpc_client.bdev_alceml_create(
+                alceml_name, nvme_bdev, alceml_id, pba_init_mode=2, alceml_cpu_mask=alceml_cpu_mask,
+                pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection,
+                full_page_unmap=snode.full_page_unmap
+            )
             snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
         else:
-            ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=2,
-                                                pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection)
+            ret = rpc_client.bdev_alceml_create(
+                alceml_name, nvme_bdev, alceml_id, pba_init_mode=2, pba_page_size=cluster.page_size_in_blocks,
+                write_protection=write_protection, full_page_unmap=snode.full_page_unmap
+            )
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
@@ -907,10 +912,11 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
             cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-            ret = rpc_client.bdev_alceml_create(jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-                                                pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
-                                                alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-                                                pba_page_size=cluster.page_size_in_blocks)
+            ret = rpc_client.bdev_alceml_create(
+                jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(), pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
+                alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks,
+                full_page_unmap=snode.full_page_unmap
+            )
 
             if not ret:
                 logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")

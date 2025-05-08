@@ -25,7 +25,7 @@ logger = logging.getLogger()
 
 
 class Singleton(type):
-    _instances = {}
+    _instances = {}  # type: ignore
     def __call__(cls, *args, **kwargs):
         if cls in cls._instances:
             return cls._instances[cls]
@@ -71,6 +71,20 @@ class DBController(metaclass=Singleton):
             if node.system_uuid == system_id:
                 return node
         return None
+
+    def get_storage_nodes_by_system_id(self, system_id) -> List[StorageNode]:
+        return [
+            node for node
+            in StorageNode().read_from_db(self.kv_store)
+            if node.system_uuid == system_id
+        ]
+
+    def get_storage_nodes_by_hostname(self, hostname) -> List[StorageNode]:
+        return [
+            node for node
+            in self.get_storage_nodes()
+            if node.hostname == hostname
+        ]
 
     def get_storage_node_by_id(self, id) -> Optional[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store, id)

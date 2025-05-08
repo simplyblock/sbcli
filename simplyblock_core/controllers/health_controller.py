@@ -1,6 +1,9 @@
 # coding=utf-8
 import time
 
+from typing import Any
+from logging import DEBUG, ERROR
+
 import jc
 
 from simplyblock_core import utils, distr_controller, storage_node_ops
@@ -12,6 +15,37 @@ from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
+
+
+def check_bdev(name, *, rpc_client=None, bdev_names=None):
+    present = (
+            ((bdev_names is not None) and (name in bdev_names)) or
+            (rpc_client is not None and (rpc_client.get_bdevs(name) is not None))
+    )
+    logger.log(DEBUG if present else ERROR, f"Checking bdev: {name} ... " + ('ok' if present else 'failed'))
+    return present
+
+
+def check_subsystem(nqn, *, rpc_client=None, nqns=None):
+    if rpc_client:
+        subsystem = subsystems[0] if (subsystems := rpc_client.subsystem_list(nqn)) is not None else None
+    elif nqns:
+        subsystem = nqns.get(nqn)
+    else:
+        raise ValueError('Either rpc_client or nqns must be passed')
+
+    if not subsystem:
+        logger.error(f"Checking subsystem {nqn} ... not found")
+        return False
+
+    logger.debug(f"Checking subsystem {nqn} ... ok")
+
+    listeners = bool(subsystem['listen_addresses'])
+    namespaces = bool(subsystem['namespaces'])
+
+    logger.log(DEBUG if listeners else ERROR, "Checking listener ... " + ('ok' if listeners else 'not found'))
+    logger.log(DEBUG if namespaces else ERROR, "Checking namespaces ... " + ('ok' if namespaces else 'not found'))
+    return listeners and namespaces
 
 
 def check_cluster(cluster_id):
@@ -102,7 +136,7 @@ def _check_port_on_node(snode, port_id):
                 for rule in chain['rules']:
                     if str(port_id) in rule['options']:
                         action = rule['target']
-                        if action == "DROP":
+                        if action in ["DROP", "REJECT"]:
                             return False
 
         return True
@@ -119,7 +153,7 @@ def _check_node_ping(ip):
         return False
 
 def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None):
-    logger.info(f"Checking Hublvol: {node.hublvol.name} on node {node.get_id()}")
+    logger.info(f"Checking Hublvol: {node.hublvol.bdev_name} on node {node.get_id()}")
     db_controller = DBController()
 
     passed = True
@@ -128,11 +162,13 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
 
         if not node_bdev_names:
+            node_bdev_names = {}
             ret = rpc_client.get_bdevs()
             if ret:
-                node_bdev_names = [b['name'] for b in ret]
-            else:
-                node_bdev_names = []
+                for b in ret:
+                    node_bdev_names[b['name']] = b
+                    for al in b['aliases']:
+                        node_bdev_names[al] = b
 
         if not node_lvols_nqns:
             node_lvols_nqns = {}
@@ -140,28 +176,9 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             for sub in ret:
                 node_lvols_nqns[sub['nqn']] = sub
 
-        if node.hublvol.uuid in node_bdev_names:
-            logger.info(f"Checking bdev: {node.hublvol.uuid} ... ok")
-        else:
-            logger.error(f"Checking bdev: {node.hublvol.uuid} ... failed")
-            passed = False
+        passed &= check_bdev(node.hublvol.bdev_name, bdev_names=node_bdev_names)
+        passed &= check_subsystem(node.hublvol.nqn, nqns=node_lvols_nqns)
 
-        if node.hublvol.nqn in node_lvols_nqns:
-            logger.info(f"Checking subsystem ... ok")
-            if node_lvols_nqns[node.hublvol.nqn]["listen_addresses"]:
-                logger.info(f"Checking listener ... ok")
-            else:
-                logger.info(f"Checking listener ... not found")
-                passed = False
-
-            if node_lvols_nqns[node.hublvol.nqn]["namespaces"]:
-                logger.info(f"Checking namespaces ... ok")
-            else:
-                logger.info(f"Checking namespaces ... not found")
-                passed = False
-        else:
-            logger.info(f"Checking subsystem ... not found")
-            passed = False
         cl = db_controller.get_cluster_by_id(node.cluster_id)
 
         ret = rpc_client.bdev_lvol_get_lvstores(node.lvstore)
@@ -170,7 +187,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
             lvs_info = ret[0]
             logger.info(f"lVol store Info:")
             lvs_info_dict = []
-            expected = {}
+            expected: dict[str, Any] = {}
             expected["lvs leadership"] = True
             expected["lvs_primary"] = True
             expected["lvs_read_only"] = False
@@ -197,7 +214,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
 
 def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None):
-    logger.info(f"Checking secondary Hublvol: {node.hublvol.name} on node {node.get_id()}")
+    logger.info(f"Checking secondary Hublvol: {node.hublvol.bdev_name} on node {node.get_id()}")
     db_controller = DBController()
 
     passed = True
@@ -224,18 +241,14 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
         primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
 
-        ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.name)
+        ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
         if ret:
-            logger.info(f"Checking controller: {primary_node.hublvol.name} ... ok")
+            logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... ok")
         else:
-            logger.info(f"Checking controller: {primary_node.hublvol.name} ... failed")
+            logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... failed")
             passed = False
 
-        if primary_node.hublvol.get_remote_bdev_name() in node_bdev:
-            logger.info(f"Checking bdev: {primary_node.hublvol.get_remote_bdev_name()} ... ok")
-        else:
-            logger.error(f"Checking bdev: {primary_node.hublvol.get_remote_bdev_name()} ... failed")
-            passed = False
+        passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
         cl = db_controller.get_cluster_by_id(node.cluster_id)
         ret = rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore)
         if ret:
@@ -243,7 +256,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             lvs_info = ret[0]
             logger.info(f"lVol store Info:")
             lvs_info_dict = []
-            expected = {}
+            expected: dict [str, Any] = {}
             expected["name"] = primary_node.lvstore
             expected["lvs leadership"] = False
             expected["lvs_secondary"] = True
@@ -450,12 +463,7 @@ def check_node(node_id, with_devices=True):
             snode.rpc_username, snode.rpc_password,
             timeout=5, retry=1)
         for remote_device in snode.remote_devices:
-            ret = rpc_client.get_bdevs(remote_device.remote_bdev)
-            if ret:
-                logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
-            else:
-                logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-            node_remote_devices_check &= bool(ret)
+            node_remote_devices_check &= check_bdev(remote_device.remote_bdev, rpc_client=rpc_client)
 
         if snode.jm_device:
             print("*" * 100)
@@ -472,12 +480,7 @@ def check_node(node_id, with_devices=True):
             print("*" * 100)
             logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
             for remote_device in snode.remote_jm_devices:
-                ret = rpc_client.get_bdevs(remote_device.remote_bdev)
-                if ret:
-                    logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
-                else:
-                    logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
-                node_remote_devices_check &= bool(ret)
+                node_remote_devices_check &= check_bdev(remote_device.remote_bdev, rpc_client=rpc_client)
 
         print("*" * 100)
         if snode.lvstore_stack:
@@ -540,23 +543,14 @@ def check_device(device_id):
         for bdev in bdevs_stack:
             if not bdev:
                 continue
-            ret = rpc_client.get_bdevs(bdev)
-            if ret:
-                logger.debug(f"Checking bdev: {bdev} ... ok")
-            else:
-                logger.error(f"Checking bdev: {bdev} ... not found")
+
+            if not check_bdev(bdev, rpc_client=rpc_client):
                 problems += 1
                 passed = False
-                # return False
+
         logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack)-problems)}/{len(bdevs_stack)})")
 
-        ret = rpc_client.subsystem_list(device.nvmf_nqn)
-        logger.debug(f"Checking subsystem: {device.nvmf_nqn}")
-        if ret:
-            logger.info(f"Checking subsystem ... ok")
-        else:
-            logger.info(f"Checking subsystem: ... not found")
-            passed = False
+        passed &= check_subsystem(device.nvmf_nqn, rpc_client=rpc_client)
 
         if device.status == NVMeDevice.STATUS_ONLINE:
             logger.info("Checking other node's connection to this device...")
@@ -588,13 +582,7 @@ def check_remote_device(device_id):
                 continue
             logger.info(f"Connecting to node: {node.get_id()}")
             rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
-            name = f"remote_{device.alceml_bdev}n1"
-            ret = rpc_client.get_bdevs(name)
-            if ret:
-                logger.info(f"Checking bdev: {device.alceml_bdev} ... ok")
-            else:
-                logger.info(f"Checking bdev: {device.alceml_bdev} ... not found")
-                result = False
+            result &= check_bdev(f'remote_{device.alceml_bdev}n1', rpc_client=rpc_client)
 
     return result
 
@@ -619,8 +607,9 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     if not node_bdev_names:
         node_bdev_names = {}
         ret = rpc_client.get_bdevs()
-        for bdev in ret:
-            node_bdev_names[bdev['name']] = bdev
+        if ret:
+            for bdev in ret:
+                node_bdev_names[bdev['name']] = bdev
 
     if not node_lvols_nqns:
         node_lvols_nqns = {}
@@ -635,28 +624,9 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
             if bdev_info['type'] in ["bdev_lvol", "bdev_lvol_clone"]:
                 bdev_name = lvol.lvol_uuid
 
-            if bdev_name in node_bdev_names:
-                logger.info(f"Checking bdev: {bdev_name} ... ok")
-            else:
-                logger.error(f"Checking bdev: {bdev_name} ... failed")
-                passed = False
+            passed &= check_bdev(bdev_name, bdev_names=node_bdev_names)
 
-        if lvol.nqn in node_lvols_nqns:
-            logger.info(f"Checking subsystem ... ok")
-            if node_lvols_nqns[lvol.nqn]["listen_addresses"]:
-                logger.info(f"Checking listener ... ok")
-            else:
-                logger.info(f"Checking listener ... not found")
-                passed = False
-
-            if node_lvols_nqns[lvol.nqn]["namespaces"]:
-                logger.info(f"Checking namespaces ... ok")
-            else:
-                logger.info(f"Checking namespaces ... not found")
-                passed = False
-        else:
-            logger.info(f"Checking subsystem ... not found")
-            passed = False
+        passed &= check_subsystem(lvol.nqn, nqns=node_lvols_nqns)
 
     except Exception as e:
         logger.exception(e)
@@ -734,12 +704,7 @@ def check_jm_device(device_id):
             snode.mgmt_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
-        ret = rpc_client.get_bdevs(jm_device.jm_bdev)
-        if ret:
-            logger.debug(f"Checking bdev: {jm_device.jm_bdev} ... ok")
-        else:
-            logger.debug(f"Checking bdev: {jm_device.jm_bdev} ... not found")
-            passed = False
+        passed &= check_bdev(jm_device.jm_bdev, rpc_client=rpc_client)
 
     except Exception as e:
         logger.error(f"Failed to connect to node's SPDK: {e}")

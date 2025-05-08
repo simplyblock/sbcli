@@ -29,6 +29,7 @@ from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = logging.getLogger()
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -268,9 +269,21 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     values = {
         'CLUSTER_ID': c.uuid,
         'CLUSTER_SECRET': c.secret}
-    file_path = os.path.join(scripts_folder, prometheus_file)
+
+    temp_dir = tempfile.mkdtemp()
+
+    file_path = os.path.join(temp_dir, prometheus_file)
     with open(file_path, 'w') as file:
         file.write(template.render(values))
+
+    prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
+    try:
+        subprocess.run(['sudo', 'mv', file_path, prometheus_file_path], check=True)
+        print(f"File moved to {prometheus_file_path} successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"An error occurred: {e}")
+    shutil.rmtree(temp_dir)
+
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
@@ -387,8 +400,8 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
                    contact_point, grafana_endpoint, distr_bs, distr_chunk_bs,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,
                    data_nics,spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,
-                   spdk_cpu_mask,max_lvol,max_snap,max_prov,number_of_devices,enable_test_device,enable_ha_jm,
-                   ha_jm_count, number_of_distribs,namespace,secondary_nodes,partition_size,
+                   max_snap,number_of_devices,enable_test_device,enable_ha_jm,
+                   ha_jm_count,namespace,partition_size,
                    lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
                    max_rw_mbytes, max_r_mbytes, max_w_mbytes, with_snapshot, max_size, crypto_key1, crypto_key2,
                    lvol_priority_class, id_device_by_nqn, fstype):
@@ -410,9 +423,9 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
     for node in storage_nodes_list:
         node_ip = node.strip()
         dev_ip=f"{node_ip}:5000"
-        add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
-                                  small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                  enable_test_device,namespace,number_of_distribs,enable_ha_jm,False,id_device_by_nqn,partition_size,ha_jm_count)
+        add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_snap,spdk_image,spdk_debug,
+                                  small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,number_of_devices,
+                                  enable_test_device,namespace,enable_ha_jm,id_device_by_nqn,partition_size,ha_jm_count)
         
         
         if not add_node_status:
@@ -420,21 +433,8 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             return False
 
         time.sleep(5)
-    
-    if secondary_nodes:
-        secondary_nodes_list = secondary_nodes.split(",")
-        for node in secondary_nodes_list:
-            node_ip = node.strip()
-            dev_ip=f"{node_ip}:5000"
-            add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_lvol,max_snap,max_prov,spdk_image,spdk_debug,
-                                    small_bufsize,large_bufsize,spdk_cpu_mask,num_partitions_per_dev,jm_percent,number_of_devices,
-                                    enable_test_device,namespace,number_of_distribs,enable_ha_jm,True,id_device_by_nqn,partition_size,ha_jm_count)
-                    
-            if not add_node_status:
-                logger.error("Could not add storage node successfully")
-                return False
 
-        time.sleep(5)
+
     
     activated = cluster_activate(cluster_uuid)
     if not activated:
@@ -1256,14 +1256,15 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         logger.info("Updating mgmt cluster")
         cluster_docker = utils.get_docker_client(cluster_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-        cluster_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+        pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_without_tag = image_without_tag.split("/")[-1]
+        image_without_tag = image_without_tag.split("/")
+        image_parts = "/".join(image_without_tag[-2:])
         service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
         if mgmt_image:
             service_image = mgmt_image
         for service in cluster_docker.services.list():
-            if image_without_tag in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
                 service.update(image=service_image, force_update=True)
         logger.info("Done updating mgmt cluster")
@@ -1282,7 +1283,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 if spdk_image:
                     img = spdk_image
                 logger.info(f"Pulling image {img}")
-                node_docker.images.pull(img)
+                pull_docker_image_with_retry(node_docker, img)
             except Exception as e:
                 logger.error(e)
 

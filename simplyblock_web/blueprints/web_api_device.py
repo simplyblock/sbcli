@@ -13,12 +13,12 @@ from simplyblock_core import db_controller
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("device", __name__)
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 @bp.route('/device/list/<string:uuid>', methods=['GET'])
 def list_devices_by_node(uuid):
-    snode = db_controller.get_storage_node_by_id(uuid)
+    snode = db.get_storage_node_by_id(uuid)
     if not snode:
         return utils.get_response_error(f"snode not found: {uuid}", 404)
 
@@ -33,13 +33,13 @@ def list_devices_by_node(uuid):
 def list_storage_devices(uuid):
     devices = []
     if uuid:
-        dev = db_controller.get_storage_device_by_id(uuid)
+        dev = db.get_storage_device_by_id(uuid)
         if not dev:
             return utils.get_response_error(f"device not found: {uuid}", 404)
         devices = [dev]
     else:
         cluster_id = utils.get_cluster_id(request)
-        nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
         for node in nodes:
             devices.append(node.nvme_devices)
     data = []
@@ -50,7 +50,7 @@ def list_storage_devices(uuid):
 @bp.route('/device/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/device/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def device_capacity(uuid, history):
-    device = db_controller.get_storage_device_by_id(uuid)
+    device = db.get_storage_device_by_id(uuid)
     if not device:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
@@ -61,7 +61,7 @@ def device_capacity(uuid, history):
 @bp.route('/device/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/device/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def device_iostats(uuid, history):
-    device = db_controller.get_storage_device_by_id(uuid)
+    device = db.get_storage_device_by_id(uuid)
     if not device:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
@@ -75,7 +75,7 @@ def device_iostats(uuid, history):
 
 @bp.route('/device/reset/<string:uuid>', methods=['GET'])
 def device_reset(uuid):
-    devices = db_controller.get_storage_device_by_id(uuid)
+    devices = db.get_storage_device_by_id(uuid)
     if not devices:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
@@ -85,7 +85,7 @@ def device_reset(uuid):
 
 @bp.route('/device/remove/<string:uuid>', methods=['GET'])
 def device_remove(uuid):
-    devices = db_controller.get_storage_device_by_id(uuid)
+    devices = db.get_storage_device_by_id(uuid)
     if not devices:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
@@ -95,7 +95,7 @@ def device_remove(uuid):
 
 @bp.route('/device/<string:uuid>', methods=['POST'])
 def device_add(uuid):
-    devices = db_controller.get_storage_device_by_id(uuid)
+    devices = db.get_storage_device_by_id(uuid)
     if not devices:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 

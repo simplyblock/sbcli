@@ -14,7 +14,7 @@ from simplyblock_core import db_controller, utils as core_utils
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("pool", __name__)
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 @bp.route('/pool', defaults={'uuid': None}, methods=['GET'])
@@ -22,17 +22,17 @@ db_controller = db_controller.DBController()
 def list_pools(uuid):
     cluster_id = utils.get_cluster_id(request)
     if uuid:
-        pool = db_controller.get_pool_by_id(uuid)
+        pool = db.get_pool_by_id(uuid)
         if pool and pool.cluster_id == cluster_id:
             pools = [pool]
         else:
             return utils.get_response_error(f"Pool not found: {uuid}", 404)
     else:
-        pools = db_controller.get_pools(cluster_id)
+        pools = db.get_pools(cluster_id)
     data = []
     for pool in pools:
         d = pool.get_clean_dict()
-        lvs = db_controller.get_lvols_by_pool_id(pool.get_id()) or []
+        lvs = db.get_lvols_by_pool_id(pool.get_id()) or []
         d['lvols'] = len(lvs)
         data.append(d)
     return utils.get_response(data)
@@ -61,7 +61,7 @@ def add_pool():
 
     name = pool_data['name']
     cluster_id = utils.get_cluster_id(request)
-    for p in db_controller.get_pools():
+    for p in db.get_pools():
         if p.pool_name == name and p.cluster_id == cluster_id:
             return utils.get_response_error(f"Pool found with the same name: {name}", 400)
 
@@ -91,7 +91,7 @@ def add_pool():
 
 @bp.route('/pool/<string:uuid>', methods=['DELETE'])
 def delete_pool(uuid):
-    pool = db_controller.get_pool_by_id(uuid)
+    pool = db.get_pool_by_id(uuid)
     if not pool:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
@@ -103,19 +103,19 @@ def delete_pool(uuid):
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    lvols = db_controller.get_lvols_by_pool_id(uuid)
+    lvols = db.get_lvols_by_pool_id(uuid)
     if lvols and len(lvols) > 0:
         msg = f"Pool {uuid} is not empty, lvols found {len(lvols)}"
         logger.error(msg)
         return utils.get_response_error(msg, 400)
 
-    pool.remove(db_controller.kv_store)
+    pool.remove(db.kv_store)
     return utils.get_response("Done")
 
 
 @bp.route('/pool/<string:uuid>', methods=['PUT'])
 def update_pool(uuid):
-    pool = db_controller.get_pool_by_id(uuid)
+    pool = db.get_pool_by_id(uuid)
     if not pool:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
@@ -161,7 +161,7 @@ def update_pool(uuid):
 
 @bp.route('/pool/capacity/<string:uuid>', methods=['GET'])
 def pool_capacity(uuid):
-    pool = db_controller.get_pool_by_id(uuid)
+    pool = db.get_pool_by_id(uuid)
     if not pool:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
@@ -172,7 +172,7 @@ def pool_capacity(uuid):
 
     out = []
     total_size = 0
-    for lvol in db_controller.get_lvols_by_pool_id(uuid):
+    for lvol in db.get_lvols_by_pool_id(uuid):
         total_size += lvol.size
         out.append({
             "device name": lvol.lvol_name,
@@ -193,7 +193,7 @@ def pool_capacity(uuid):
 @bp.route('/pool/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/pool/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def pool_iostats(uuid, history):
-    pool = db_controller.get_pool_by_id(uuid)
+    pool = db.get_pool_by_id(uuid)
     if not pool:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
@@ -210,7 +210,7 @@ def pool_iostats(uuid, history):
     else:
         records_number = 20
 
-    out = db_controller.get_pool_stats(pool, records_number)
+    out = db.get_pool_stats(pool, records_number)
     records_count = 20
     new_records = core_utils.process_records(out, records_count)
 
@@ -224,14 +224,14 @@ def pool_iostats(uuid, history):
 
 @bp.route('/pool/iostats-all-lvols/<string:pool_uuid>', methods=['GET'])
 def lvol_iostats(pool_uuid):
-    pool = db_controller.get_pool_by_id(pool_uuid)
+    pool = db.get_pool_by_id(pool_uuid)
     if not pool:
         return utils.get_response_error(f"Pool not found: {pool_uuid}", 404)
 
     ret = []
-    for lvol in db_controller.get_lvols_by_pool_id(pool_uuid):
+    for lvol in db.get_lvols_by_pool_id(pool_uuid):
 
-        records_list = db_controller.get_lvol_stats(lvol, limit=1)
+        records_list = db.get_lvol_stats(lvol, limit=1)
 
         if records_list:
             data = records_list[0].get_clean_dict()

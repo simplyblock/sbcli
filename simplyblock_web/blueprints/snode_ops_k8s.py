@@ -16,8 +16,8 @@ from kubernetes.client import ApiException
 from jinja2 import Environment, FileSystemLoader
 import yaml
 
-from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
+from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, pod_name
 
 logger = logging.getLogger(__name__)
@@ -105,35 +105,45 @@ def get_amazon_cloud_info():
 def scan_devices():
     run_health_check = request.args.get('run_health_check', default=False, type=bool)
     out = {
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
     }
     return utils.get_response(out)
 
 
 def get_cluster_id():
-    out, _, _ = node_utils.run_command(f"cat {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"cat {cluster_id_file}")
     return out
 
 
 def set_cluster_id(cluster_id):
-    out, _, _ = node_utils.run_command(f"echo {cluster_id} > {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"echo {cluster_id} > {cluster_id_file}")
     return out
 
 
 def delete_cluster_id():
-    out, _, _ = node_utils.run_command(f"rm -f {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"rm -f {cluster_id_file}")
     return out
 
 
-def get_cores_config(cpu_count):
-    spdk_cpu_mask = hex(int(math.pow(2, cpu_count)) - 2)
-    cores_config = {
-        "cpu_mask": spdk_cpu_mask
-    }
-    return cores_config
+def get_nodes_config():
+    file_path = constants.NODES_CONFIG_FILE
+    try:
+        # Open and read the JSON file
+        with open(file_path, "r") as file:
+            nodes_config = json.load(file)
+
+        core_utils.validate_node_config(nodes_config)
+        return nodes_config
+
+    except FileNotFoundError:
+        logger.error(f"The file '{file_path}' does not exist.")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON: {e}")
+        return {}
 
 
 @bp.route('/info', methods=['GET'])
@@ -152,16 +162,16 @@ def get_info():
         "hugepages": node_utils.get_huge_memory(),
         "memory_details": node_utils.get_memory_details(),
 
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
 
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
-        "network_interface": node_utils.get_nics_data(),
+        "network_interface": core_utils.get_nics_data(),
 
         "cloud_instance": CLOUD_INFO,
-        "cores_config": get_cores_config(CPU_INFO['count']),
+        "nodes_config": get_nodes_config(),
     }
     return utils.get_response(out)
 
@@ -254,7 +264,7 @@ def delete_gpt_partitions_for_dev():
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = node_utils.run_command("hostname -s")
+HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
 SYSTEM_ID = ""
 CLOUD_INFO = get_amazon_cloud_info()
 if not CLOUD_INFO:
@@ -266,7 +276,7 @@ if not CLOUD_INFO:
 if CLOUD_INFO:
     SYSTEM_ID = CLOUD_INFO["id"]
 else:
-    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+    SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 
 
 @bp.route('/spdk_process_start', methods=['POST'])
@@ -320,7 +330,7 @@ def spdk_process_start():
             'SPDK_IMAGE': spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
             'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
-            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB'),
+            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB', round_up=True),
             'MEM2_GEGA': 2,
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
@@ -395,7 +405,7 @@ def spdk_process_is_up():
 
 @bp.route('/get_file_content/<string:file_name>', methods=['GET'])
 def get_file_content(file_name):
-    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{file_name}")
     if out:
         return utils.get_response(out)
     elif err:
@@ -431,3 +441,37 @@ def firewall_set_port():
 def get_firewall():
     ret = node_utils_k8s.firewall_get_k8s()
     return utils.get_response(ret)
+
+
+@bp.route('/apply_config', methods=['POST'])
+def apply_config():
+
+    data = request.get_json()
+    isolate_cores = data.get('isolate_cores', False)
+    node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
+
+    if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
+        nodes = node_info["nodes_config"]["nodes"]
+    else:
+        logger.error("Please run sbcli sn configure before adding the storage node")
+        return utils.get_response(False, "Required: Node configure not run")
+
+    all_isolated_cores = core_utils.validate_config(node_info.get("nodes_config"))
+    if not all_isolated_cores:
+        return utils.get_response(False, "Config validation is incorrect")
+
+    # Set Huge page memory
+    huge_page_memory_dict = {}
+    for node_config in nodes:
+        numa = node_config["socket"]
+        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+    for numa, huge_page_memory in huge_page_memory_dict.items():
+        num_pages = huge_page_memory // (2048 * 1024)
+        core_utils.set_hugepages_if_needed(numa, num_pages)
+
+    # Isolate cores
+    if isolate_cores:
+        core_utils.generate_realtime_variables_file(all_isolated_cores)
+        core_utils.run_tuned()
+    return utils.get_response(False)
+

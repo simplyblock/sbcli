@@ -3,8 +3,6 @@ name: Python Package Build
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
     paths:
       - 'simplyblock_core/env_var'
 
@@ -54,5 +52,5 @@ jobs:
 
     - name: Publish package codeArtifact
       run: |
-        aws codeartifact login --tool twine --repository sbcli --domain simplyblock --domain-owner 565979732541 --region eu-west-1
+        aws codeartifact login --tool twine --repository sbcli --domain simplyblock --domain-owner ${{ secrets.AWS_ACCOUNT_ID }} --region eu-west-1
         twine upload dist/* -r codeartifact
