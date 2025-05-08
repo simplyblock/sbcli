@@ -180,8 +180,8 @@ def parse_distr_cluster_map(map_string):
             data = {
                 "Kind": "Node",
                 "UUID": node_id,
-                "Reported Status": status,
-                "Actual Status": "",
+                "Found Status": status,
+                "Desired Status": "",
                 "Results": "",
             }
             nd = db_controller.get_storage_node_by_id(node_id)
@@ -189,7 +189,7 @@ def parse_distr_cluster_map(map_string):
                 node_status = nd.status
                 if node_status == StorageNode.STATUS_SCHEDULABLE:
                     node_status = StorageNode.STATUS_UNREACHABLE
-                data["Actual Status"] = node_status
+                data["Desired Status"] = node_status
                 if node_status == status:
                     data["Results"] = "ok"
                 else:
@@ -205,13 +205,13 @@ def parse_distr_cluster_map(map_string):
             data = {
                 "Kind": "Device",
                 "UUID": device_id,
-                "Reported Status": status,
-                "Actual Status": "",
+                "Found Status": status,
+                "Desired Status": "",
                 "Results": "",
             }
             sd = db_controller.get_storage_device_by_id(device_id)
             if sd:
-                data["Actual Status"] = sd.status
+                data["Desired Status"] = sd.status
                 if sd.status == status:
                     data["Results"] = "ok"
                 else:

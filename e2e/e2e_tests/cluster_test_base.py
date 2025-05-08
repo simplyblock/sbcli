@@ -419,7 +419,7 @@ class TestClusterBase:
             self.logger.info("FIO did not exit completely after kill and wait. "
                              "Some hanging mount points could be present. "
                              "Needs manual cleanup.")
-
+        
         try:
             lvols = self.sbcli_utils.list_lvols()
             self.unmount_all(base_path=self.mount_path)

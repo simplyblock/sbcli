@@ -105,11 +105,12 @@ while True:
                 else:
                     node_bdev_names = {}
 
-                sub_list = rpc_client.subsystem_list()
-                if sub_list:
-                    subsystem_list = {item['nqn']: item for item in sub_list }
-                else:
-                    subsystem_list = {}
+                subsystem_list = rpc_client.subsystem_list() or []
+                subsystems = {
+                        subsystem['nqn']: subsystem
+                        for subsystem
+                        in subsystem_list
+                }
 
                 for device in snode.nvme_devices:
                     passed = True
@@ -133,21 +134,13 @@ while True:
                         if not bdev:
                             continue
 
-                        if bdev in node_bdev_names:
-                            logger.debug(f"Checking bdev: {bdev} ... ok")
-                        else:
-                            logger.error(f"Checking bdev: {bdev} ... not found")
+                        if not health_controller.check_bdev(bdev, bdev_names=node_bdev_names):
                             problems += 1
                             passed = False
 
                     logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
 
-                    logger.debug(f"Checking subsystem: {device.nvmf_nqn}")
-                    if device.nvmf_nqn in subsystem_list:
-                        logger.info(f"Checking subsystem ... ok")
-                    else:
-                        logger.info(f"Checking subsystem: ... not found")
-                        passed = False
+                    passed &= health_controller.check_subsystem(device.nvmf_nqn, nqns=subsystem_list)
 
                     set_device_health_check(cluster_id, device, passed)
                     if device.status == NVMeDevice.STATUS_ONLINE:
@@ -159,12 +152,10 @@ while True:
                     org_dev = db.get_storage_device_by_id(remote_device.get_id())
                     org_node =  db.get_storage_node_by_id(remote_device.node_id)
                     if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
-                        if remote_device.remote_bdev in node_bdev_names:
-                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                        if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
                             connected_devices.append(remote_device.get_id())
                             ret = True
                         else:
-                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
                             if not org_dev.alceml_bdev:
                                 logger.error(f"device alceml bdev not found!, {org_dev.get_id()}")
                                 continue
@@ -201,11 +192,8 @@ while True:
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
                     for remote_device in snode.remote_jm_devices:
-                        if remote_device.remote_bdev in node_bdev_names:
-                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... ok")
+                        if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
                             connected_jms.append(remote_device.get_id())
-                        else:
-                            logger.info(f"Checking bdev: {remote_device.remote_bdev} ... not found")
 
                     for jm_id in snode.jm_ids:
                         if jm_id not in connected_jms:
@@ -244,7 +232,7 @@ while True:
                         if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
                             lvstore_check &= health_controller._check_node_lvstore(
                                 lvstore_stack, second_node_1, auto_fix=True, stack_src_node=snode)
-                        lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1)
+                            lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1)
 
                     lvol_port_check = False
                     # if node_api_check:

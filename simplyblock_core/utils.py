@@ -9,11 +9,14 @@ import string
 import subprocess
 import sys
 import uuid
-from typing import Union
+import time
+import psutil
+from typing import Set, Union
 
 import docker
 from prettytable import PrettyTable
 from graypy import GELFTCPHandler
+from docker.errors import APIError, DockerException, ImageNotFound
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
@@ -501,7 +504,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     #large_pool_count = (3 + alceml_count + lvol_count + 2 * snap_count + 1) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
-    return 2*small_pool_count, 2*large_pool_count
+    return 2.0*small_pool_count, 1.5*large_pool_count
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -513,12 +516,11 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     return: minimum_hp_memory in bytes
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 12 * lvol_count) * (1024 * 1024) + (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(memory_consumption)
-
-
+    
 def calculate_minimum_sys_memory(max_prov, total):
-    minimum_sys_memory = (250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + (constants.EXTRA_SYS_MEMORY * total)
+    minimum_sys_memory = (1800 * 1024 * 1024) * convert_size(max_prov, 'TiB') + 500 * 1024 * 1024 + (constants.EXTRA_SYS_MEMORY * total)
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
 
@@ -653,7 +655,7 @@ def parse_size(size: Union[str, int], mode: str = 'si/iec', assume_unit: str = '
         return -1
 
 
-def convert_size(size: Union[int, str], unit: str) -> int:
+def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> int:
     """Convert the given number of bytes to target unit
 
     Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
@@ -663,7 +665,8 @@ def convert_size(size: Union[int, str], unit: str) -> int:
         size = int(size)
 
     base, exponent = _parse_unit(unit, 'si/iec')
-    return int(size / (base ** exponent))
+    raw = size / (base ** exponent)
+    return math.ceil(raw) if round_up else int(raw)
 
 
 def nearest_upper_power_of_2(n):
@@ -777,7 +780,7 @@ def get_next_dev_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = 9080
+    port = constants.NODE_NVMF_PORT_START
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.nvmf_port > 0:
@@ -1001,3 +1004,60 @@ def addNvmeDevices(rpc_client, snode, devs):
             }))
     return devices
 
+
+def get_random_snapshot_vuid():
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    used_vuids = []
+    for snap in db_controller.get_snapshots():
+        used_vuids.append(snap.vuid)
+
+    r = 1 + int(random.random() * 1000000)
+    while r in used_vuids:
+        r = 1 + int(random.random() * 1000000)
+    return r
+
+
+def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retries=3, delay=5):
+    """
+    Pulls a Docker image with retries in case of failure.
+
+    Args:
+        client (docker.DockerClient): The Docker client instance.
+        image_name (str): The name of the Docker image to pull.
+        retries (int): Number of retry attempts. Defaults to 3.
+        delay (int): Delay between retries in seconds. Defaults to 5.
+
+    Returns:
+        docker.models.images.Image: The pulled Docker image.
+
+    Raises:
+        DockerException: If all retry attempts fail.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"Attempt {attempt}: Pulling image '{image_name}'...")
+            image = client.images.pull(image_name)
+            print(f"Image '{image_name}' pulled successfully.")
+            return image
+        except (APIError, DockerException, ImageNotFound) as e:
+            print(f"Error pulling image (attempt {attempt}): {e}")
+            if attempt < retries:
+                time.sleep(delay)
+            else:
+                print("All retries failed.")
+                raise
+
+
+def used_ports() -> set[int]:
+    return {conn.laddr.port for conn in psutil.net_connections(kind='tcp') if conn.laddr}
+
+
+def next_free_port(port: int) -> int:
+    """Gets the next open port starting at the given one
+    """
+    return next(
+        p for p
+        in range(port, port + 1000)
+        if p not in used_ports()
+    )

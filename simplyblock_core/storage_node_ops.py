@@ -15,6 +15,7 @@ import docker
 
 from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
+from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
@@ -29,7 +30,7 @@ from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
-
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
 
@@ -106,7 +107,8 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode,
                                         alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-                                        pba_page_size=cluster.page_size_in_blocks)
+                                        pba_page_size=cluster.page_size_in_blocks,
+                                        full_page_unmap=snode.full_page_unmap)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
@@ -195,7 +197,8 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ret = rpc_client.bdev_alceml_create(
         alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode, alceml_cpu_mask=alceml_cpu_mask,
-        alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks)
+        alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=snode.full_page_unmap)
 
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
@@ -287,7 +290,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         write_protection = True
     ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
                                         alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-                                        pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection)
+                                        pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection,
+                                        full_page_unmap=snode.full_page_unmap)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return None
@@ -571,7 +575,8 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         ret = rpc_client.bdev_alceml_create(
             jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(), pba_init_mode=pba_init_mode,
-            alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks)
+            alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
+            pba_page_size=cluster.page_size_in_blocks, full_page_unmap=snode.full_page_unmap)
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
@@ -774,7 +779,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0):
+             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0,
+             full_page_unmap=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1095,6 +1101,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.num_partitions_per_dev = num_partitions_per_dev
     snode.jm_percent = jm_percent
     snode.id_device_by_nqn = id_device_by_nqn
+    snode.full_page_unmap = full_page_unmap
 
     if partition_size:
         snode.partition_size = utils.parse_size(partition_size)
@@ -1472,6 +1479,10 @@ def restart_storage_node(
         logger.error(f"Node is in restart: {node_id}")
         if force is False:
             return False
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+        logger.error("Cluster is in activation status, can not restart node")
+        return False
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
@@ -2134,7 +2145,7 @@ def shutdown_storage_node(node_id, force=False):
     logger.info("Stopping SPDK")
     if health_controller._check_node_api(snode.mgmt_ip):
         snode_api = SNodeClient(snode.api_endpoint, timeout=30, retry=1)
-        results, err = snode_api.spdk_process_kill(snode.rpc_port)
+        snode_api.spdk_process_kill(snode.rpc_port)
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
@@ -2232,9 +2243,9 @@ def suspend_storage_node(node_id, force=False):
     for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
         for iface in snode.data_nics:
             if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                    lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
-    time.sleep(1)
+                ret = rpc_client.listeners_del(
+                    lvol.nqn, iface.get_transport_type(), iface.ip4_address, lvol.subsys_port)
+    # time.sleep(1)
 
     rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -2331,8 +2342,9 @@ def resume_storage_node(node_id):
     for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
         for iface in snode.data_nics:
             if iface.ip4_address:
-                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, True)
+                ret = rpc_client.listeners_create(
+                    lvol.nqn, iface.get_transport_type(), iface.ip4_address, lvol.subsys_port, ana_state="optimized")
+
         lvol.status = LVol.STATUS_ONLINE
         lvol.io_error = False
         lvol.health_check = True
@@ -2564,7 +2576,7 @@ def deploy(ifname, spdk_cpu_mask="", isolate_cores=False):
         return False
 
     logger.info("NVMe SSD devices found on node:")
-    stream = os.popen("lspci -Dnn | grep -i nvme")
+    stream = os.popen(f"lspci -Dnn | grep -i '\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\]'")
     for l in stream.readlines():
         logger.info(l.strip())
 
@@ -2586,9 +2598,8 @@ def deploy(ifname, spdk_cpu_mask="", isolate_cores=False):
 def start_storage_node_api_container(node_ip):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
     # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
-
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
 
     logger.info("Recreating SNodeAPI container")
 
@@ -2621,7 +2632,7 @@ def start_storage_node_api_container(node_ip):
         ]
     )
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return True
 
 
@@ -2845,10 +2856,10 @@ def recreate_lvstore_on_sec(secondary_node):
             logger.info("creating subsystem %s", lvol.nqn)
             secondary_rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000)
 
-        if primary_node.status == StorageNode.STATUS_ONLINE:
+        if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
 
             ### 3- block primary port
-            primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "block")
+            primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "block", primary_node.rpc_port)
             tcp_ports_events.port_deny(primary_node, primary_node.lvol_subsys_port)
 
             ### 4- set leadership to false
@@ -2862,17 +2873,18 @@ def recreate_lvstore_on_sec(secondary_node):
 
         ### 6- wait for examine
         ret = secondary_rpc_client.bdev_wait_for_examine()
-        try:
-            time.sleep(1)
-            secondary_node.connect_to_hublvol(primary_node)
 
-        except Exception as e:
-            logger.error("Error connecting to hublvol: %s", e)
-            # return False
+        if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+            try:
+                secondary_node.connect_to_hublvol(primary_node)
 
-        ### 8- allow port on primary
-        primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow")
-        tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
+            except Exception as e:
+                logger.error("Error connecting to hublvol: %s", e)
+                # return False
+
+            ### 8- allow port on primary
+            primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow", primary_node.rpc_port)
+            tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
 
         ### 7- add lvols to subsystems
         executor = ThreadPoolExecutor(max_workers=100)
@@ -2913,7 +2925,6 @@ def recreate_lvstore(snode):
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     sec_node_api = SNodeClient(sec_node.api_endpoint, timeout=5, retry=5)
 
-    lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
@@ -2975,30 +2986,29 @@ def recreate_lvstore(snode):
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
+    ### 9- add lvols to subsystems
+    executor = ThreadPoolExecutor(max_workers=100)
+    for lvol in lvol_list:
+        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+
     if sec_node:
         ### 7- create and connect hublvol
-        cluster_nqn = db_controller.get_cluster_by_id(snode.cluster_id).nqn
         try:
-            snode.create_hublvol(cluster_nqn)
+            snode.recreate_hublvol()
         except RPCException as e:
             logger.error("Error creating hublvol: %s", e.message)
             # return False
 
-        if sec_node.status == StorageNode.STATUS_ONLINE:
+        if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
-                time.sleep(1)
                 sec_node.connect_to_hublvol(snode)
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
+            time.sleep(1)
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
-
-    ### 9- add lvols to subsystems
-    executor = ThreadPoolExecutor(max_workers=100)
-    for lvol in lvol_list:
-        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
     if prim_node_suspend:
         logger.info("Node restart interrupted because secondary node is unreachable")
@@ -3015,7 +3025,6 @@ def recreate_lvstore(snode):
     if snode.lvstore_stack_secondary_1:
         node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
         if node:
-            time.sleep(2)
             ret = recreate_lvstore_on_sec(snode)
             if not ret:
                 logger.error(f"Failed to recreate secondary on node: {snode.get_id()}")
@@ -3314,6 +3323,8 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask
                 snode.distrib_cpu_index = (snode.distrib_cpu_index + 1) % len(snode.distrib_cpu_cores)
+
+            params['full_page_unmap'] = snode.full_page_unmap
             ret = rpc_client.bdev_distrib_create(**params)
             if ret:
                 ret = distr_controller.send_cluster_map_to_distr(snode, name)

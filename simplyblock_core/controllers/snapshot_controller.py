@@ -84,7 +84,8 @@ def add(lvol_id, snapshot_name):
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    snap_bdev_name = f"SNAP_{utils.get_random_vuid()}"
+    snap_vuid = utils.get_random_snapshot_vuid()
+    snap_bdev_name = f"SNAP_{snap_vuid}"
     size = lvol.size
     blobid = 0
     snap_uuid = ""
@@ -189,6 +190,7 @@ def add(lvol_id, snapshot_name):
     snap.snap_bdev = f"{lvol.lvs_name}/{snap_bdev_name}"
     snap.created_at = int(time.time())
     snap.lvol = lvol
+    snap.vuid = snap_vuid
 
     snap.write_to_db(db_controller.kv_store)
 
@@ -241,7 +243,7 @@ def delete(snapshot_uuid, force_delete=False):
 
     clones = []
     for lvol in db_controller.get_lvols(snode.cluster_id):
-        if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid:
+        if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid and lvol.status != LVol.STATUS_IN_DELETION:
             clones.append(lvol)
 
     if len(clones) >= 1:

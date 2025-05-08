@@ -87,7 +87,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     #  host validation
     # snode = db_controller.get_storage_node_by_id(host_id_or_name)
     # if not snode:
-    #     snode = db_controller.get_storage_node_by_hostname(host_id_or_name)
+    #     snode = db_controller.get_storage_nodes_by_hostname(host_id_or_name)
     #     if not snode:
     #         return False, f"Can not find storage node: {host_id_or_name}"
 
@@ -273,8 +273,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if host_id_or_name:
         host_node = db_controller.get_storage_node_by_id(host_id_or_name)
         if not host_node:
-            host_node = db_controller.get_storage_node_by_hostname(host_id_or_name)
-            if not host_node:
+            nodes = db_controller.get_storage_nodes_by_hostname(host_id_or_name)
+            if len(nodes) > 0:
+                host_node = nodes[0]
+            else:
                 return False, f"Can not find storage node: {host_id_or_name}"
 
     pool = None
@@ -948,12 +950,7 @@ def delete_lvol(id_or_name, force_delete=False):
     if lvol.cloned_from_snap:
         snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
         if snap and snap.deleted is True:
-            lvols_count = 0
-            for lvol in db_controller.get_lvols():  # pass
-                if lvol.status != LVol.STATUS_IN_DELETION and lvol.cloned_from_snap == snap.get_id():
-                    lvols_count += 1
-            if lvols_count == 0:
-                snapshot_controller.delete(snap.get_id())
+            snapshot_controller.delete(snap.get_id())
 
     logger.info("Done")
     return True
@@ -969,7 +966,7 @@ def connect_lvol_to_pool(uuid):
         logger.error(f"Pool is disabled")
         return False
 
-    snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip,
@@ -1012,7 +1009,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     if name:
         lvol.lvol_name = name
 
-    snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
     # creating RPCClient instance
     rpc_client = RPCClient(
         snode.mgmt_ip,
@@ -1332,7 +1329,7 @@ def set_read_only(id):
 
     logger.info(f"Setting LVol: {lvol.get_id()} read only")
 
-    snode = db_controller.get_storage_node_by_hostname(lvol.hostname)
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
     # creating RPCClient instance
     rpc_client = RPCClient(

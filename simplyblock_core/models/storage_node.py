@@ -97,6 +97,7 @@ class StorageNode(BaseNodeObject):
     nvmf_port: int = 4420
     physical_label: int = 0
     hublvol: HubLVol = None
+    full_page_unmap: bool = False
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -156,16 +157,19 @@ class StorageNode(BaseNodeObject):
             self.hublvol = HubLVol({
                 'uuid': hublvol_uuid,
                 'nqn': f'{cluster_nqn}:lvol:{hublvol_uuid}',
-                'name': f'{self.lvstore}/hublvol',
+                'bdev_name': f'{self.lvstore}/hublvol',
+                'model_number': str(uuid4()),
+                'nguid': utils.generate_hex_string(16),
+                'port': utils.next_free_port(9096),
             })
 
             self.expose_bdev(
                     nqn=self.hublvol.nqn,
-                    bdev_name=self.hublvol.name,
-                    model_number=str(uuid4()),
+                    bdev_name=self.hublvol.bdev_name,
+                    model_number=self.hublvol.model_number,
                     uuid=self.hublvol.uuid,
-                    nguid=utils.generate_hex_string(16),
-                    port=self.hublvol.nvmf_port
+                    nguid=self.hublvol.nguid,
+                    port=self.hublvol.nvmf_port,
             )
         except RPCException:
             if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
@@ -178,6 +182,31 @@ class StorageNode(BaseNodeObject):
             raise
 
         self.write_to_db()
+        return self.hublvol
+
+    def recreate_hublvol(self):
+        """reCreate a hublvol for this node's lvstore
+        """
+
+        if self.hublvol and self.hublvol.uuid:
+            logger.info(f'Recreating hublvol on {self.get_id()}')
+            rpc_client = self.rpc_client()
+
+            try:
+                ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
+
+                self.expose_bdev(
+                        nqn=self.hublvol.nqn,
+                        bdev_name=self.hublvol.bdev_name,
+                        model_number=self.hublvol.model_number,
+                        uuid=self.hublvol.uuid,
+                        nguid=self.hublvol.nguid,
+                        port=self.hublvol.nvmf_port
+                )
+                return True
+            except RPCException:
+                pass
+
         return self.hublvol
 
     def connect_to_hublvol(self, primary_node):
@@ -193,7 +222,7 @@ class StorageNode(BaseNodeObject):
         remote_bdev = None
         for ip in (iface.ip4_address for iface in primary_node.data_nics):
             remote_bdev = rpc_client.bdev_nvme_attach_controller_tcp(
-                    primary_node.hublvol.name, primary_node.hublvol.nqn,
+                    primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
                     ip, primary_node.hublvol.nvmf_port)[0]
             if remote_bdev is not None:
                 break

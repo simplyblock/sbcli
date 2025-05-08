@@ -297,7 +297,7 @@ class SshUtils:
         return output.strip().split()
     
     def run_fio_test(self, node, device=None, directory=None, log_file=None, **kwargs):
-        """Run FIO Tests with given params
+        """Run FIO Tests with given params and proper logging for MD5 error timestamp tracing.
 
         Args:
             node (str): Node to perform ssh operation on
@@ -311,8 +311,6 @@ class SshUtils:
         if directory:
             location = f"--directory={directory}"
 
-        # filename_format = f"{directory}/file_" + r"${jobnum}_${filenum}"
-        
         runtime = kwargs.get("runtime", 3600)
         rw = kwargs.get("rw", "randrw")
         name = kwargs.get("name", "test")
@@ -321,33 +319,43 @@ class SshUtils:
         bs = kwargs.get("bs", "4k")
         rwmixread = kwargs.get("rwmixread", 70)
         size = kwargs.get("size", "10MiB")
-        time_based = kwargs.get("time_based", True)
-        time_based = "--time_based" if time_based else ""
+        time_based = "--time_based" if kwargs.get("time_based", True) else ""
         numjobs = kwargs.get("numjobs", 1)
         nrfiles = kwargs.get("nrfiles", 1)
-        
-        output_format = kwargs.get("output_format", '')
-        output_format = f' --output-format={output_format} ' if output_format else ''
 
-        output_file = kwargs.get("output_file", '')
-        output_file = f" --output={output_file} " if output_file else ''
+        output_format = f' --output-format={kwargs["output_format"]} ' if kwargs.get("output_format") else ''
+        output_file = f" --output={kwargs['output_file']} " if kwargs.get("output_file") else ''
 
-        # command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
-        #           f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-        #           f"--verify=md5 --numjobs={numjobs} --nrfiles={nrfiles} --verify_dump=1 --verify_fatal=1 "
-        #           f"--verify_state_save=1 --verify_backlog=10 --group_reporting{output_format}{output_file}")
+        log_avg_msec = kwargs.get("log_avg_msec", 1000)
+        log_avg_msec_opt = f"--log_avg_msec={log_avg_msec}" if log_avg_msec else ""
 
-        command = (f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
-                   f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-                   f"--verify=md5 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
-                   f"{output_format}{output_file}")
-        
-        if kwargs.get("debug", None):
-            command = f"{command} --debug=all"
+        iolog_base = kwargs.get("iolog_file", f"/tmp/{name}_iolog.txt")
+        iolog_opt = f"--write_iolog={iolog_base}" if iolog_base else ""
+
+        command = (
+            f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
+            f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
+            f"--verify=md5 --verify_fatal=1 --verify_dump=1 --numjobs={numjobs} --nrfiles={nrfiles} "
+            f"{log_avg_msec_opt} {iolog_opt} "
+            f"{output_format}{output_file}"
+        )
+        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # log_file = log_file or f"/tmp/{name}_{timestamp}.log"
+
+        if kwargs.get("debug"):
+            command += " --debug=all"
+
         if log_file:
-            command = f"{command} > {log_file} 2>&1"
+            command += f" > {log_file} 2>&1"
+        
+        # else:
+        #     command += " --debug=verify"
+        
+        # awk_ts = " | awk '{ print strftime(\"[%Y-%m-%d %H:%M:%S]\"), $0; fflush(); }' | "
+        # command += awk_ts
+        # command += f"tee {log_file}"
 
-        self.logger.info(f"{command}")
+        self.logger.info(f"Executing FIO command:\n{command}")
 
         start_time = time.time()
         output, error = self.exec_command(node=node, command=command, timeout=runtime * 2)
@@ -356,6 +364,17 @@ class SshUtils:
         total_time = end_time - start_time
         self.fio_runtime[name] = start_time
         self.logger.info(f"Total time taken to run the command: {total_time:.2f} seconds")
+
+        # Return all generated iolog files (one per job)
+        iolog_files = [f"{iolog_base}.{i}" for i in range(numjobs)]
+        return {
+            "output": output,
+            "error": error,
+            "start_time": start_time,
+            "end_time": end_time,
+            "iolog_files": iolog_files,
+        }
+
     
     def find_process_name(self, node, process_name, return_pid=False):
         if return_pid:
@@ -1237,7 +1256,8 @@ class SshUtils:
                     continue
 
                 log_file_path = f"/tmp/{log_file_name}"
-                destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}"
+                timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
+                destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}_{timestamp}"
 
                 # Copy log file from inside container to host machine
                 copy_command = f"sudo docker cp {container_name}:{log_file_path} {destination_path}"

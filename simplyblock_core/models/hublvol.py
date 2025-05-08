@@ -8,8 +8,10 @@ class HubLVol(BaseModel):
     """
     uuid: str = ""
     nqn: str = ""
-    name: str = ""
-    nvmf_port: int = 9099
+    bdev_name: str = ""
+    nvmf_port: int = 9096
+    model_number: str = ""
+    nguid: str = ""
 
     def get_remote_bdev_name(self):
-        return f"{self.name}n1"
+        return f"{self.bdev_name}n1"

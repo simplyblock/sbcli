@@ -106,7 +106,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
     data = []
     tasks = db.get_job_tasks(cluster_id, reverse=True, limit=limit)
     tasks.reverse()
-    if tasks and is_json is True:
+    if is_json is True:
         for t in tasks:
             data.append(t.get_clean_dict())
         return json.dumps(data, indent=2)
@@ -156,7 +156,7 @@ def get_active_node_restart_task(cluster_id, node_id):
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
-            if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
     return False
 
