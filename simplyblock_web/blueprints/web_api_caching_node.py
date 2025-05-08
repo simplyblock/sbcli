@@ -67,7 +67,7 @@ def list_caching_nodes(uuid):
     if uuid:
         node = db.get_caching_node_by_id(uuid)
         if not node:
-            node = db.get_storage_node_by_hostname(uuid)
+            node = db.get_caching_node_by_hostname(uuid)
 
         if node:
             nodes = [node]

@@ -335,15 +335,25 @@ class SshUtils:
         command = (
             f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
+            f"--verify=md5 --verify_fatal=1 --verify_dump=1 --numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_avg_msec_opt} {iolog_opt} "
             f"{output_format}{output_file}"
         )
+        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # log_file = log_file or f"/tmp/{name}_{timestamp}.log"
 
         if kwargs.get("debug"):
             command += " --debug=all"
+
         if log_file:
             command += f" > {log_file} 2>&1"
+        
+        # else:
+        #     command += " --debug=verify"
+        
+        # awk_ts = " | awk '{ print strftime(\"[%Y-%m-%d %H:%M:%S]\"), $0; fflush(); }' | "
+        # command += awk_ts
+        # command += f"tee {log_file}"
 
         self.logger.info(f"Executing FIO command:\n{command}")
 
@@ -1246,7 +1256,8 @@ class SshUtils:
                     continue
 
                 log_file_path = f"/tmp/{log_file_name}"
-                destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}"
+                timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
+                destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}_{timestamp}"
 
                 # Copy log file from inside container to host machine
                 copy_command = f"sudo docker cp {container_name}:{log_file_path} {destination_path}"

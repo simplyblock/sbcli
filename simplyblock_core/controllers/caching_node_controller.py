@@ -18,6 +18,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = lg.getLogger()
 
@@ -611,7 +612,7 @@ def deploy(ifname):
         ]
     )
     logger.info(f"Pulling SPDK image {constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE}")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
+    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
     return f"{dev_ip}:5000"
 
 

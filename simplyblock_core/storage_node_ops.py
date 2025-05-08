@@ -15,6 +15,7 @@ import docker
 
 from simplyblock_core import constants, scripts, distr_controller
 from simplyblock_core import utils
+from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
@@ -29,7 +30,7 @@ from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
-
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
 
@@ -106,7 +107,8 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode,
                                         alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-                                        pba_page_size=cluster.page_size_in_blocks)
+                                        pba_page_size=cluster.page_size_in_blocks,
+                                        full_page_unmap=snode.full_page_unmap)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
@@ -195,7 +197,8 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ret = rpc_client.bdev_alceml_create(
         alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode, alceml_cpu_mask=alceml_cpu_mask,
-        alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks)
+        alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=snode.full_page_unmap)
 
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
@@ -287,7 +290,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         write_protection = True
     ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
                                         alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-                                        pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection)
+                                        pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection,
+                                        full_page_unmap=snode.full_page_unmap)
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return None
@@ -571,7 +575,8 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         ret = rpc_client.bdev_alceml_create(
             jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(), pba_init_mode=pba_init_mode,
-            alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks)
+            alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
+            pba_page_size=cluster.page_size_in_blocks, full_page_unmap=snode.full_page_unmap)
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
@@ -774,7 +779,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0, spdk_cpu_mask=None,
              num_partitions_per_dev=0, jm_percent=0, number_of_devices=0, enable_test_device=False,
              namespace=None, number_of_distribs=2, enable_ha_jm=False, is_secondary_node=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0):
+             partition_size="", ha_jm_count=3, spdk_hp_mem=None, ssd_pcie=None, spdk_cpu_count=0,
+             full_page_unmap=False):
 
     db_controller = DBController()
     kv_store = db_controller.kv_store
@@ -1095,6 +1101,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     snode.num_partitions_per_dev = num_partitions_per_dev
     snode.jm_percent = jm_percent
     snode.id_device_by_nqn = id_device_by_nqn
+    snode.full_page_unmap = full_page_unmap
 
     if partition_size:
         snode.partition_size = utils.parse_size(partition_size)
@@ -2569,7 +2576,7 @@ def deploy(ifname, spdk_cpu_mask="", isolate_cores=False):
         return False
 
     logger.info("NVMe SSD devices found on node:")
-    stream = os.popen("lspci -Dnn | grep -i nvme")
+    stream = os.popen(f"lspci -Dnn | grep -i '\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\]'")
     for l in stream.readlines():
         logger.info(l.strip())
 
@@ -2591,9 +2598,8 @@ def deploy(ifname, spdk_cpu_mask="", isolate_cores=False):
 def start_storage_node_api_container(node_ip):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
     # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
-
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
 
     logger.info("Recreating SNodeAPI container")
 
@@ -2626,7 +2632,7 @@ def start_storage_node_api_container(node_ip):
         ]
     )
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     return True
 
 
@@ -2993,7 +2999,7 @@ def recreate_lvstore(snode):
             logger.error("Error creating hublvol: %s", e.message)
             # return False
 
-        if sec_node.status == StorageNode.STATUS_ONLINE:
+        if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
                 sec_node.connect_to_hublvol(snode)
             except Exception as e:
@@ -3317,6 +3323,8 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
                 params['distrib_cpu_mask'] = distrib_cpu_mask
                 snode.distrib_cpu_index = (snode.distrib_cpu_index + 1) % len(snode.distrib_cpu_cores)
+
+            params['full_page_unmap'] = snode.full_page_unmap
             ret = rpc_client.bdev_distrib_create(**params)
             if ret:
                 ret = distr_controller.send_cluster_map_to_distr(snode, name)

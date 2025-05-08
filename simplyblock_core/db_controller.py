@@ -65,11 +65,19 @@ class DBController(metaclass=Singleton):
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_storage_node_by_system_id(self, system_id) -> StorageNode:
-        nodes = StorageNode().read_from_db(self.kv_store)
-        for node in nodes:
-            if node.system_uuid == system_id:
-                return node
+    def get_storage_nodes_by_system_id(self, system_id) -> List[StorageNode]:
+        return [
+            node for node
+            in StorageNode().read_from_db(self.kv_store)
+            if node.system_uuid == system_id
+        ]
+
+    def get_storage_nodes_by_hostname(self, hostname) -> List[StorageNode]:
+        return [
+            node for node
+            in self.get_storage_nodes()
+            if node.hostname == hostname
+        ]
 
     def get_storage_node_by_id(self, id) -> StorageNode:
         ret = StorageNode().read_from_db(self.kv_store, id)
@@ -95,12 +103,6 @@ class DBController(metaclass=Singleton):
 
     def get_caching_node_by_hostname(self, hostname)  -> CachingNode:
         nodes = self.get_caching_nodes()
-        for node in nodes:
-            if node.hostname == hostname:
-                return node
-
-    def get_storage_node_by_hostname(self, hostname) -> StorageNode:
-        nodes = self.get_storage_nodes()
         for node in nodes:
             if node.hostname == hostname:
                 return node
