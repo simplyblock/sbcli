@@ -9,7 +9,7 @@ class HubLVol(BaseModel):
     uuid: str = ""
     nqn: str = ""
     bdev_name: str = ""
-    nvmf_port: int = 9060
+    nvmf_port: int = 0
     model_number: str = ""
     nguid: str = ""
 
