@@ -443,21 +443,21 @@ def get_firewall():
     return utils.get_response(ret)
 
 
+@bp.route('/set_hugepages', methods=['POST'])
+def set_hugepages():
+    return utils.get_response(True)
+
+
 @bp.route('/apply_config', methods=['POST'])
 def apply_config():
-
-    data = request.get_json()
-    isolate_cores = data.get('isolate_cores', False)
     node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
-
-    if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
-        nodes = node_info["nodes_config"]["nodes"]
+    if node_info.get("nodes"):
+        nodes = node_info["nodes"]
     else:
         logger.error("Please run sbcli sn configure before adding the storage node")
-        return utils.get_response(False, "Required: Node configure not run")
+        return utils.get_response(False, "Please run sbcli sn configure before adding the storage noden")
 
-    all_isolated_cores = core_utils.validate_config(node_info.get("nodes_config"))
-    if not all_isolated_cores:
+    if not core_utils.validate_config(node_info):
         return utils.get_response(False, "Config validation is incorrect")
 
     # Set Huge page memory
@@ -469,9 +469,4 @@ def apply_config():
         num_pages = huge_page_memory // (2048 * 1024)
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
-    # Isolate cores
-    if isolate_cores:
-        core_utils.generate_realtime_variables_file(all_isolated_cores)
-        core_utils.run_tuned()
-    return utils.get_response(False)
-
+    return utils.get_response(True)

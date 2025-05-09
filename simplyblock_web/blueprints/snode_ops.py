@@ -572,3 +572,27 @@ def get_firewall():
     rpc_port = request.args.get('rpc_port', default="", type=str)
     ret = node_utils.firewall_get(rpc_port)
     return utils.get_response(ret)
+
+
+@bp.route('/set_hugepages', methods=['POST'])
+def set_hugepages():
+    node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
+    if node_info.get("nodes"):
+        nodes = node_info["nodes"]
+    else:
+        logger.error("Please run sbcli sn configure before adding the storage node")
+        return utils.get_response(False, "Please run sbcli sn configure before adding the storage noden")
+
+    if not core_utils.validate_config(node_info):
+        return utils.get_response(False, "Config validation is incorrect")
+
+    # Set Huge page memory
+    huge_page_memory_dict = {}
+    for node_config in nodes:
+        numa = node_config["socket"]
+        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+    for numa, huge_page_memory in huge_page_memory_dict.items():
+        num_pages = huge_page_memory // (2048 * 1024)
+        core_utils.set_hugepages_if_needed(numa, num_pages)
+
+    return utils.get_response(True)

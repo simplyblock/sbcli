@@ -791,7 +791,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     else:
         logger.error("Please run sbcli sn configure before adding the storage node")
         return False
-
+    snode_api.set_hugepages()
     for node_config in nodes:
         logger.debug(node_config)
         db_controller = DBController()

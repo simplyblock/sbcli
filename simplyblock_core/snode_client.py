@@ -168,3 +168,6 @@ class SNodeClient:
     def spdk_proxy_restart(self,rpc_port=None):
         params = {"rpc_port": rpc_port}
         return self._request("GET", "spdk_proxy_restart", params)
+
+    def set_hugepages(self):
+        return self._request("POST", "set_hugepages")
