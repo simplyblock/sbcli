@@ -1413,7 +1413,7 @@ def regenerate_config(new_config, old_config):
     total_required_memory = 0
     for node in old_config["nodes"]:
         if len(node["ssd_pcis"]) == 0:
-            logger.error(f"There is no enough SSD devices on numa {node['socket']}")
+            logger.error(f"There are not enough SSD devices on numa node {node['socket']}")
             return False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
     if total_free_memory < total_required_memory:
@@ -1551,7 +1551,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     total_required_memory = 0
     for node in all_nodes:
         if len(node["ssd_pcis"]) == 0:
-            logger.error(f"There is no enough SSD devices on numa {node['socket']}")
+            logger.error(f"There are not enough SSD devices on numa node {node['socket']}")
             return False, False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
     if total_free_memory < total_required_memory:
