@@ -140,7 +140,7 @@ while True:
 
                     logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
 
-                    passed &= health_controller.check_subsystem(device.nvmf_nqn, nqns=subsystem_list)
+                    passed &= health_controller.check_subsystem(device.nvmf_nqn, nqns=subsystems)
 
                     set_device_health_check(cluster_id, device, passed)
                     if device.status == NVMeDevice.STATUS_ONLINE:
