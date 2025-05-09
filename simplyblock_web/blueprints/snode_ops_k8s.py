@@ -283,28 +283,25 @@ else:
 def spdk_process_start():
     data = request.get_json()
 
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in data:
-        spdk_cpu_mask = data['spdk_cpu_mask']
-    node_cpu_count = os.cpu_count()
+    ssd_pcie_list = "none"
+    ssd_pcie_params = ""
+    if 'ssd_pcie' in data and data['ssd_pcie']:
+        ssd_pcie = data['ssd_pcie']
+        ssd_pcie_params = " -A " + " -A ".join(ssd_pcie)
+        ssd_pcie_list = " ".join(ssd_pcie)
 
     namespace = node_utils_k8s.get_namespace()
     if 'namespace' in data:
         namespace = data['namespace']
         set_namespace(namespace)
 
-    if spdk_cpu_mask:
-        requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
-        if requested_cpu_count > node_cpu_count:
-            return utils.get_response(
-                False,
-                f"The requested cpu count: {requested_cpu_count} "
-                f"is larger than the node's cpu count: {node_cpu_count}")
-    else:
-        spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
+    total_mem_mib = ""
+    if 'total_mem' in data:
+        total_mem = core_utils.parse_size(data['total_mem'])
+        total_mem_mib = core_utils.convert_size(total_mem, 'MB')
 
     spdk_mem = data.get('spdk_mem', core_utils.parse_size('64GiB'))
-
+    sys_memory = data.get('system_mem', core_utils.parse_size('4GiB'))
     spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
     # if node_utils.get_host_arch() == "aarch64":
     #     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE_ARM64
@@ -328,10 +325,10 @@ def spdk_process_start():
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         values = {
             'SPDK_IMAGE': spdk_image,
-            'SPDK_CPU_MASK': spdk_cpu_mask,
+            "L_CORES": data['l_cores'],
             'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
             'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB', round_up=True),
-            'MEM2_GEGA': 2,
+            'MEM2_GEGA': core_utils.convert_size(sys_memory, 'GiB', round_up=True),
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
             'RPC_USERNAME': data['rpc_username'],
@@ -340,7 +337,10 @@ def spdk_process_start():
             'NAMESPACE': namespace,
             'FDB_CONNECTION': fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-            'GRAYLOG_SERVER_IP': data['cluster_ip']
+            'GRAYLOG_SERVER_IP': data['cluster_ip'],
+            'SSD_PCIE': ssd_pcie_params,
+            'PCI_ALLOWED': ssd_pcie_list,
+            'TOTAL_HP': total_mem_mib
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)

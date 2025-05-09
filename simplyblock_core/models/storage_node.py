@@ -92,6 +92,7 @@ class StorageNode(BaseNodeObject):
     spdk_debug: bool = False
     spdk_image: str = ""
     spdk_mem: int = 0
+    minimum_sys_memory: int = 0
     partition_size: int = 0
     subsystem: str = ""
     system_uuid: str = ""

@@ -79,8 +79,16 @@ spec:
             if [ ! -e /dev/fd ]; then
               ln -s /proc/self/fd /dev/fd
             fi
-            /root/scripts/run_distr.sh "{{ SPDK_CPU_MASK }}" "{{ SPDK_MEM }}"
+            /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
         env:
+          - name: SSD_PCIE
+            value: "{{ SSD_PCIE }}"
+          - name: PCI_ALLOWED
+            value: "{{ PCI_ALLOWED }}"
+          - name: TOTAL_HP
+            value: "{{ TOTAL_HP }}"
+          - name: RPC_PORT
+            value: "{{ RPC_PORT }}"
           - name: SPDKCSI_SECRET
             valueFrom:
               secretKeyRef:
