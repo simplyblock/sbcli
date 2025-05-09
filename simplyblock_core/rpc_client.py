@@ -1055,3 +1055,17 @@ class RPCClient:
             "suspend": suspend,
         }
         return self._request("jc_suspend_compression", params)
+
+    def nvmf_subsystem_add_listener(self, nqn, trtype, traddr, trsvcid, ana_state=None):
+        params = {
+            "nqn": nqn,
+            "listen_address": {
+                "trtype": trtype,
+                "adrfam": "IPv4",
+                "traddr": traddr,
+                "trsvcid": str(trsvcid)
+            }
+        }
+        if ana_state:
+            params["ana_state"] = ana_state
+        return self._request2("nvmf_subsystem_add_listener", params)
