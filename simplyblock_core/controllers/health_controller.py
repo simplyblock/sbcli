@@ -346,7 +346,7 @@ def _check_node_lvstore(
                         for result in results:
                             if result['Results'] == 'failed':
                                 if result['Kind'] == "Device":
-                                    if result['Reported Status']:
+                                    if result['Found Status']:
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
                                         if dev.status == NVMeDevice.STATUS_ONLINE:
                                             name = f"remote_{dev.alceml_bdev}"
