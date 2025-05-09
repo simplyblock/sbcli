@@ -1230,7 +1230,9 @@ def detect_nvmes(pci_allowed, pci_blocked):
     nvmes = {}
     for dev in nvme_devices:
         dev_name = os.path.basename(dev)
-        if dev_name in blocked_devices:
+        pattern = re.compile(rf"^{re.escape(dev_name)}n\d+$")
+        if any(pattern.match(block_device) for block_device in blocked_devices):
+            logger.debug(f"device {dev_name} is busy.. skipping")
             continue
         device_symlink = os.path.join(nvme_base_path, dev)
         try:
