@@ -112,31 +112,31 @@ class StorageNode(BaseNodeObject):
         rpc_client = self.rpc_client()
 
         try:
-            if not rpc_client.subsystem_create(
-                    nqn=nqn,
-                    serial_number='sbcli-cn',
-                    model_number=model_number,
-            ):
-                logger.error("fFailed to create subsystem for {nqn}")
-                # raise RPCException(f'Failed to create subsystem for {nqn}')
+            subsys =  rpc_client.subsystem_list(nqn)
+            if not subsys:
+                if not rpc_client.subsystem_create(
+                        nqn=nqn,
+                        serial_number='sbcli-cn',
+                        model_number=model_number,
+                ):
+                    logger.error("fFailed to create subsystem for {nqn}")
+                    raise RPCException(f'Failed to create subsystem for {nqn}')
 
             for ip in (iface.ip4_address for iface in self.data_nics):
-                if not rpc_client.listeners_create(
+                rpc_client.listeners_create(
                         nqn=nqn,
                         trtype='TCP',
                         traddr=ip,
                         trsvcid=port,
-                ):
-                    logger.error(f'Failed to create listener for {nqn}')
-                    # raise RPCException(f'Failed to create listener for {nqn}')
+                )
 
-            if not rpc_client.nvmf_subsystem_add_ns(
+            rpc_client.nvmf_subsystem_add_ns(
                     nqn=nqn,
                     dev_name=bdev_name,
                     uuid=uuid,
                     nguid=nguid,
-            ):
-                logger.error(f'Failed to add namespace to subsytem {nqn}')
+            )
+                # logger.error(f'Failed to add namespace to subsytem {nqn}')
                 # raise RPCException(f'Failed to add namespace to subsytem {nqn}')
         except RPCException as e:
             logger.exception(e)
@@ -195,7 +195,10 @@ class StorageNode(BaseNodeObject):
             rpc_client = self.rpc_client()
 
             try:
-                ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
+                if not rpc_client.get_bdevs(self.hublvol.bdev_name):
+                    ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
+                else:
+                    logger.info(f'Hublvol already exists {self.hublvol.bdev_name}')
 
                 self.expose_bdev(
                         nqn=self.hublvol.nqn,
@@ -221,18 +224,19 @@ class StorageNode(BaseNodeObject):
 
         rpc_client = self.rpc_client()
 
-        remote_bdev = None
-        for ip in (iface.ip4_address for iface in primary_node.data_nics):
-            remote_bdev = rpc_client.bdev_nvme_attach_controller_tcp(
-                    primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                    ip, primary_node.hublvol.nvmf_port)[0]
-            if remote_bdev is not None:
-                break
-            else:
-                logger.warning(f'Failed to connect to hublvol on {ip}')
+        remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
 
-        if remote_bdev is None:
-            raise RPCException('Failed to connect to hublvol')
+        if not rpc_client.get_bdevs(remote_bdev):
+
+            for ip in (iface.ip4_address for iface in primary_node.data_nics):
+                ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                        primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
+                        ip, primary_node.hublvol.nvmf_port)
+                if ret:
+                    remote_bdev = ret[0]
+                    break
+                else:
+                    logger.warning(f'Failed to connect to hublvol on {ip}')
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
@@ -240,7 +244,9 @@ class StorageNode(BaseNodeObject):
                 subsystem_port=primary_node.lvol_subsys_port,
                 secondary=True,
         ):
-            raise RPCException('Failed to set secondary lvstore options')
+            pass
+            # raise RPCException('Failed to set secondary lvstore options')
 
         if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
-            raise RPCException('Failed to connect secondary lvstore to primary')
+            pass
+            # raise RPCException('Failed to connect secondary lvstore to primary')
