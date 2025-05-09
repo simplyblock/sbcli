@@ -237,7 +237,7 @@ class StorageNode(BaseNodeObject):
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
                 groupid=primary_node.jm_vuid,
-                subsystem_port=self.lvol_subsys_port,
+                subsystem_port=primary_node.lvol_subsys_port,
                 secondary=True,
         ):
             raise RPCException('Failed to set secondary lvstore options')
