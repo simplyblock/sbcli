@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
 import json
-import logging
-import math
 import os
 import time
 

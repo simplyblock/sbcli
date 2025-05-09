@@ -17,7 +17,7 @@ def send_node_status_event(node, node_status, target_node=None):
     node_id = node.get_id()
     if node_status == StorageNode.STATUS_SCHEDULABLE:
         node_status = StorageNode.STATUS_UNREACHABLE
-    logging.info(f"Sending event updates, node: {node_id}, status: {node_status}")
+    logger.info(f"Sending event updates, node: {node_id}, status: {node_status}")
     node_status_event = {
         "timestamp": datetime.datetime.now().isoformat("T", "seconds") + 'Z',
         "event_type": "node_status",
@@ -68,7 +68,7 @@ def send_dev_status_event(device, status, target_node=None):
             "event_type": "device_status",
             "storage_ID": storage_ID,
             "status": dev_status}]}
-        logging.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
+        logger.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
         ret = rpc_client.distr_status_events_update(events)
         if not ret:
