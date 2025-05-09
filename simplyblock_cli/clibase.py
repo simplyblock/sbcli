@@ -146,11 +146,13 @@ class CLIWrapperBase:
 
         small_bufsize = args.small_bufsize
         large_bufsize = args.large_bufsize
+        ssd_pcie = args.ssd_pcie
 
         return storage_ops.restart_storage_node(
             node_id, max_lvol, max_snap, max_prov,
             spdk_image, spdk_debug,
-            small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force)
+            small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
+            new_ssd_pcie=ssd_pcie)
 
     def storage_node__shutdown(self, sub_command, args):
         return storage_ops.shutdown_storage_node(args.node_id, args.force)

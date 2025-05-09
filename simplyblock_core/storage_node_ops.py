@@ -1396,7 +1396,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_ip=None, reattach_volume=False, clear_data=False):
+        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[]):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -1560,6 +1560,8 @@ def restart_storage_node(
 
     results = None
     try:
+        if new_ssd_pcie and type(new_ssd_pcie) is list:
+            snode.ssd_pcie.extend(new_ssd_pcie)
         fdb_connection = cluster.db_connection
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,

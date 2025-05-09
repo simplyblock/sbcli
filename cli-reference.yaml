@@ -322,6 +322,13 @@ commands:
             dest: force
             type: bool
             action: store_true
+          - name: "--ssd-pcie"
+            help: "New Nvme PCIe address to add to the storage node. Can be more than one."
+            dest: ssd_pcie
+            required: false
+            type: str
+            nargs: +
+            default: ""
       - name: shutdown
         help: "Initiates a storage node shutdown"
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.

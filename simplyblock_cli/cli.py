@@ -168,6 +168,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize', required=False)
         argument = subcommand.add_argument('--force', help='Force restart', dest='force', required=False, action='store_true')
+        argument = subcommand.add_argument('--ssd-pcie', help='New Nvme PCIe address to add to the storage node. Can be more than one.', type=str, default='', dest='ssd_pcie', required=False, nargs='+')
 
     def init_storage_node__shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'shutdown', 'Initiates a storage node shutdown')
