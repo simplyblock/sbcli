@@ -521,7 +521,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
 
 
 def calculate_minimum_sys_memory(max_prov):
-    minimum_sys_memory = (2000 * 1024 * 1024) * convert_size(max_prov, 'TiB') + 500 * 1024 * 1024
+    minimum_sys_memory = (2000 * 1024) * convert_size(max_prov, 'GB') + 500 * 1024 * 1024
 
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
