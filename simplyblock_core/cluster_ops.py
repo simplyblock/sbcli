@@ -1,7 +1,6 @@
 # coding=utf-8
 import datetime
 import json
-import logging
 import os
 import re
 import tempfile
@@ -31,7 +30,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import pull_docker_image_with_retry
 
-logger = logging.getLogger()
+logger = utils.get_logger(__name__)
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 db_controller = DBController()
