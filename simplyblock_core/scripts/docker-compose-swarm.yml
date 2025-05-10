@@ -161,7 +161,6 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   HAProxy:
-    <<: *service-base
     image: haproxytech/haproxy-debian:latest
     deploy:
       mode: global
