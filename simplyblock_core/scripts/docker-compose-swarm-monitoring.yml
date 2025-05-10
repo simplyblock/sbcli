@@ -31,7 +31,7 @@ services:
 
   graylog:
     hostname: "server"
-    image: "graylog/graylog:6.1"
+    image: "graylog/graylog:6.2.2"
     entrypoint: "/usr/bin/tini -- wait-for-it opensearch:9200 --  /docker-entrypoint.sh"
     environment:
       GRAYLOG_NODE_ID_FILE: "/usr/share/graylog/data/config/node-id"
@@ -48,6 +48,7 @@ services:
       GRAYLOG_ELASTICSEARCH_MAX_TIME_PER_INDEX: "1d"
       GRAYLOG_RING_SIZE: "4096"
       GRAYLOG_INPUTBUFFER_RING_SIZE: "8192"
+      GRAYLOG_VERSIONCHECKS: "false"
     ports:
     - "5044:5044/tcp"   # Beats
     - "5140:5140/udp"   # Syslog
