@@ -169,7 +169,7 @@ services:
     ports:
       - 80:80
       - 12202:12202
-      - 9200:9200
+#      - 9200:9200
     networks:
       - localnet
       - monitoring-net
