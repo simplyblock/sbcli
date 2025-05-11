@@ -8,25 +8,23 @@ on:
 
 
 jobs:
-
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@master
+    - name: Checkout project
+      uses: actions/checkout@master
 
     - name: Set docker image tag
-      id: get_info
+      id: image_info
       run: |
-        if [[ "${{github.ref}}" == refs/pull/* ]]; then
+        if [[ "${{ github.ref }}" == refs/pull/* ]]; then
           tag=${GITHUB_REF/\/merge/}
-          echo "TAG=$(echo pr-${tag:10})" >> $GITHUB_ENV
+          echo "tag=$(echo pr-${tag:10})" >> $GITHUB_OUTPUT
         else
-          echo "TAG=$(echo ${GITHUB_REF#refs/*/} | sed 's/\//-/g')" >> $GITHUB_ENV
+          echo "tag=$(echo ${GITHUB_REF#refs/*/} | sed 's/\//-/g')" >> $GITHUB_OUTPUT
         fi
-        echo "BRANCH=$([ -z '${{ github.event.pull_request.head.sha }}' ] && echo ${GITHUB_REF#refs/*/} || echo $GITHUB_HEAD_REF)" >> $GITHUB_ENV
-        echo "SHA=$([ -z '${{ github.event.pull_request.head.sha }}' ] && echo $GITHUB_SHA || echo '${{ github.event.pull_request.head.sha }}')" >> $GITHUB_ENV
+        echo "short_sha=$(echo ${{ github.sha }} | head -c 8)" >> $GITHUB_OUTPUT
 
     - name: Login to Docker Hub
       uses: docker/login-action@v1
@@ -47,16 +45,22 @@ jobs:
       with:
         registry-type: public
 
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
 
-    - name: Build & Push
-      run: |
-        SHORT_SHA=$(echo ${{ env.SHA }} | head -c 8)
-        docker buildx ls
-        docker buildx create --name mybuilder --bootstrap --use
-        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG -t public.ecr.aws/simply-block/simplyblock:$TAG  -f docker/Dockerfile . --push
-        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG-$SHORT_SHA -t public.ecr.aws/simply-block/simplyblock:$TAG-$SHORT_SHA -f docker/Dockerfile . --push
-
-        echo "::notice title=Docker.com::simplyblock/simplyblock:$TAG"
-        echo "::notice title=AWS-ECR::public.ecr.aws/simply-block/simplyblock:$TAG"
+    - name: Build and publish image
+      uses: docker/build-push-action@v6
+      with:
+        file: docker/Dockerfile
+        push: true
+        platforms: linux/amd64,linux/arm64
+        tags: |
+          simplyblock/simplyblock:${{ steps.image_info.outputs.tag }}
+          simplyblock/simplyblock:${{ steps.image_info.outputs.tag }}-${{ steps.image_info.outputs.short_sha }}
+          public.ecr.aws/simply-block/simplyblock:${{ steps.image_info.outputs.tag }}
+          public.ecr.aws/simply-block/simplyblock:${{ steps.image_info.outputs.tag }}-${{ steps.image_info.outputs.short_sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
