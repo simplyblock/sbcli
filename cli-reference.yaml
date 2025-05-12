@@ -1207,6 +1207,12 @@ commands:
             completer: _completer_get_cluster_list
       - name: list
         help: "Shows the cluster list"
+        arguments:
+          - name: "--json"
+            help: "Print json output"
+            dest: json
+            type: bool
+            action: store_true
       - name: status
         help: "Shows a cluster's status"
         arguments:
