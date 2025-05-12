@@ -4,8 +4,13 @@ SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
 def get_from_env_var_file(name, default=None):
+    """
+    priority of env var file is higher than env var
+    """
     if not name:
         return False
+    if os.env.get(name):
+        return os.env.get(name)
     with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
         for line in fh.readlines():
             if line.startswith(name):
