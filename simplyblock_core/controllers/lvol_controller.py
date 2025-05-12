@@ -620,7 +620,6 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
 
 def add_lvol_on_node(lvol, snode, is_primary=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    db_controller = DBController()
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
@@ -632,7 +631,10 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         min_cntlid =  1000
     logger.info("creating subsystem %s", lvol.nqn)
     ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
-    logger.debug(ret)
+
+    ana_state = "non_optimized"
+    if lvol.node_id == snode.get_id():
+        ana_state = "optimized"
 
     # add listeners
     logger.info("adding listeners")
@@ -640,17 +642,13 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port)
+            ret, err = rpc_client.nvmf_subsystem_add_listener(
+                lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana_state)
             if not ret:
-                return False, f"Failed to create listener for {lvol.get_id()}"
-            is_optimized = False
-            if lvol.node_id == snode.get_id():
-                is_optimized = True
-            logger.info(f"Setting ANA state: {is_optimized}")
-            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized)
-            if not ret:
-                return False, f"Failed to set ANA state for {lvol.get_id()}"
+                if err and "code" in err and err["code"] == -32602:
+                    logger.warning("listener already exists")
+                else:
+                    return False, f"Failed to create listener for {lvol.get_id()}"
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
