@@ -125,7 +125,7 @@ class TestSingleNodeFailure(TestClusterBase):
         
         sleep_n_sec(30)
         timestamp = int(datetime.now().timestamp())
-        self.ssh_obj.stop_spdk_process(node=node_ip)
+        self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node[0]["rpc_port"])
 
         try:
             self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
@@ -408,7 +408,7 @@ class TestHASingleNodeFailure(TestClusterBase):
 
             sleep_n_sec(30)
             timestamp = int(datetime.now().timestamp())
-            self.ssh_obj.stop_spdk_process(node=node_ip)
+            self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node["rpc_port"])
 
             try:
                 self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")

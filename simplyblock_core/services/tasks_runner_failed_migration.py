@@ -4,16 +4,13 @@ import time
 import sys
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller, device_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 
 
-# Import the GELF logger
-from graypy import GELFTCPHandler
 
-from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
@@ -121,14 +118,7 @@ def task_runner(task):
         return False
 
 
-# configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()

@@ -82,13 +82,15 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
         for node in outage_nodes:
             outage_type = random.choice(self.outage_types)
-            node_ip = self.sbcli_utils.get_storage_node_details(node)[0]["mgmt_ip"]
+            node_details = self.sbcli_utils.get_storage_node_details(node)
+            node_ip = node_details[0]["mgmt_ip"]
+            node_rpc_port = node_details[0]["rpc_port"]
 
             self.logger.info(f"Performing {outage_type} on primary node {node}.")
             self.log_outage_event(node, outage_type, "Outage started")
 
             if outage_type == "container_stop":
-                self.ssh_obj.stop_spdk_process(node_ip)
+                self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port)
             elif outage_type == "graceful_shutdown":
                 self._graceful_shutdown_node(node)
             elif outage_type == "interface_partial_network_interrupt":

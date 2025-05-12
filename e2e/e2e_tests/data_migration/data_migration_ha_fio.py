@@ -473,7 +473,7 @@ class FioWorkloadTest(TestClusterBase):
         
         node_details = self.sbcli_utils.get_storage_node_details(node_id)
         node_ip = node_details[0]["mgmt_ip"]
-        self.ssh_obj.stop_spdk_process(node_ip)
+        self.ssh_obj.stop_spdk_process(node_ip, node_details[0]["rpc_port"])
 
         self.logger.info(f"Docker container on node {node_id} stopped successfully.")
 

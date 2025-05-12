@@ -206,10 +206,9 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
         for fio_thread in fio_threads:
             fio_thread.join()
 
-        lvol_spdk_stop = list(lvol_vs_node.keys())[0]
-        node_lvol_ip = self.node_id_ip[lvol_vs_node[lvol_spdk_stop]]
         self.logger.info("Stopping SPDK process on node without LVOLs")
-        self.ssh_obj.stop_spdk_process(node=node_lvol_ip)
+        self.ssh_obj.stop_spdk_process(node=self.node_id_ip[node_without_lvols],
+                                       rpc_port=node_details[0]["rpc_port"])
 
         node_wait_thread = threading.Thread(
             target=self.sbcli_utils.wait_for_storage_node_status,

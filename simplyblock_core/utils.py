@@ -520,8 +520,8 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     return int(memory_consumption)
 
 
-def calculate_minimum_sys_memory(max_prov, total):
-    minimum_sys_memory = (1800 * 1024 * 1024) * convert_size(max_prov, 'TiB') + 500 * 1024 * 1024 + (constants.EXTRA_SYS_MEMORY * total)
+def calculate_minimum_sys_memory(max_prov):
+    minimum_sys_memory = (2000 * 1024) * convert_size(max_prov, 'GB') + 500 * 1024 * 1024
 
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
@@ -1230,7 +1230,9 @@ def detect_nvmes(pci_allowed, pci_blocked):
     nvmes = {}
     for dev in nvme_devices:
         dev_name = os.path.basename(dev)
-        if dev_name in blocked_devices:
+        pattern = re.compile(rf"^{re.escape(dev_name)}n\d+$")
+        if any(pattern.match(block_device) for block_device in blocked_devices):
+            logger.debug(f"device {dev_name} is busy.. skipping")
             continue
         device_symlink = os.path.join(nvme_base_path, dev)
         try:
@@ -1348,13 +1350,6 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
     return node_distribution
 
 
-def calculate_sys_memory(max_size_bytes):
-    # total_memory_bytes = psutil.virtual_memory().total
-    minimum_sys_memory = (max_size_bytes * 1.5) / 4096 + 2 * (1024 ** 3)
-    logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
-    return int(minimum_sys_memory)
-
-
 def regenerate_config(new_config, old_config):
     if len(old_config.get("nodes")) != len(new_config.get("nodes")):
         logger.error("The number of node in old config not equal to the number of node in updated config")
@@ -1403,7 +1398,7 @@ def regenerate_config(new_config, old_config):
         old_config["nodes"][i]["small_pool_count"] = small_pool_count
         old_config["nodes"][i]["large_pool_count"] = large_pool_count
         old_config["nodes"][i]["huge_page_memory"] = minimum_hp_memory
-        minimum_sys_memory = calculate_sys_memory(old_config["nodes"][i]["max_size"])
+        minimum_sys_memory = calculate_minimum_sys_memory(old_config["nodes"][i]["max_size"])
         old_config["nodes"][i]["sys_memory"] =  minimum_sys_memory
 
     memory_details = node_utils.get_memory_details()
@@ -1540,7 +1535,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["max_lvol"] = max_lvol
             node_info["max_size"] = max_prov
             node_info["huge_page_memory"] = minimum_hp_memory
-            minimum_sys_memory = calculate_sys_memory(max_prov)
+            minimum_sys_memory = calculate_minimum_sys_memory(max_prov)
             node_info["sys_memory"] =  minimum_sys_memory
             all_nodes.append(node_info)
             node_index += 1

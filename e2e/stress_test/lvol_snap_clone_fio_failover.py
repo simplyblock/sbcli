@@ -181,7 +181,8 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         elif failover_type == "container_stop":
             node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
             node_ip = node_details[0]["mgmt_ip"]
-            self.ssh_obj.stop_spdk_process(node_ip)
+            node_rpc_port = node_details[0]["rpc_port"]
+            self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port)
             self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
         elif failover_type == "network_interrupt":
             cmd = (

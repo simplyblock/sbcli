@@ -948,7 +948,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                 namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
-                ssd_pcie=ssd_pcie, total_mem=total_mem)
+                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory)
             time.sleep(5)
 
         except Exception as e:
@@ -1006,6 +1006,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         snode.number_of_alceml_devices = number_of_alceml_devices
         snode.enable_ha_jm = enable_ha_jm
         snode.ha_jm_count = ha_jm_count
+        snode.minimum_sys_memory = minimum_sys_memory
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -1534,8 +1535,8 @@ def restart_storage_node(
         return False
 
     # Calculate minimum sys memory
-    minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov, memory_details['total'])
-
+    #minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov, memory_details['total'])
+    minimum_sys_memory = snode.minimum_sys_memory
     satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
                                                       minimum_sys_memory,
                                                       int(memory_details['free']),
@@ -1567,7 +1568,7 @@ def restart_storage_node(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=snode.ssd_pcie, total_mem=total_mem)
+            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory)
 
     except Exception as e:
         logger.error(e)

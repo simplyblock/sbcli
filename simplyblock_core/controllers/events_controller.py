@@ -1,23 +1,14 @@
 import time
 import uuid
 import json
-import logging
 
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.db_controller import DBController
-from simplyblock_core import constants
+from simplyblock_core import utils
 
-from graypy import GELFTCPHandler
 
-# configure logging
-logging.captureWarnings(True)
-gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-logger.addHandler(gelf_handler)
+logger = utils.get_logger(__name__)
 
-py_warnings_logger = logging.getLogger("py.warnings")
-py_warnings_logger.addHandler(gelf_handler)
 
 EVENT_STATUS_CHANGE = "STATUS_CHANGE"
 EVENT_OBJ_CREATED = "OBJ_CREATED"

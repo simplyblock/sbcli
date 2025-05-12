@@ -309,8 +309,9 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         timestamp = int(datetime.now().timestamp())
         node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
         node_ip = node_details[0]["mgmt_ip"]
+        node_rpc_port = node_details[0]["rpc_port"]
         
-        self.ssh_obj.stop_spdk_process(node_ip)
+        self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port)
         sleep_n_sec(30)
         
         self.validate_checksums()
@@ -598,8 +599,9 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         
         node_details = self.sbcli_utils.get_storage_node_details(self.lvol_node)
         node_ip = node_details[0]["mgmt_ip"]
+        node_rpc_port = node_details[0]["rpc_port"]
         
-        self.ssh_obj.stop_spdk_process(node_ip)
+        self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port)
         sleep_n_sec(30)
         self.validate_checksums()
         restart_start_time = datetime.now()
