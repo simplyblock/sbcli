@@ -2,7 +2,7 @@
 
 function create_override() {
 override_dir=/etc/systemd/system/docker.service.d
-mkdir -p ${override_dir}
+sudo mkdir -p ${override_dir}
 /bin/cat <<EOM > ${override_dir}/override.conf
 [Service]
 ExecStart=
