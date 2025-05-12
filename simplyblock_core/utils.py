@@ -375,7 +375,8 @@ def hexa_to_cpu_list(cpu_mask):
     return cpu_list
 
 
-def pair_hyperthreads(vcpus):
+def pair_hyperthreads():
+    vcpus = list(range(os.cpu_count()))
     half = len(vcpus) // 2
     return {vcpus[i]: vcpus[i + half] for i in range(half)}
 
@@ -383,13 +384,13 @@ def pair_hyperthreads(vcpus):
 def calculate_core_allocations(vcpu_list, alceml_count=2):
     total = len(vcpu_list)
     is_hyperthreaded = is_hyperthreading_enabled_via_siblings()
-    pairs = pair_hyperthreads(vcpu_list) if is_hyperthreaded else {}
+    pairs = pair_hyperthreads() if is_hyperthreaded else {}
     remaining = set(vcpu_list)
 
-    def reserve(vcpu):
+    def reserve(vcpu, get_sibling=False):
         if vcpu in remaining:
             remaining.remove(vcpu)
-            if is_hyperthreaded and vcpu in pairs:
+            if is_hyperthreaded and vcpu in pairs and get_sibling:
                 sibling = pairs[vcpu]
                 if sibling in remaining:
                     remaining.remove(sibling)
@@ -401,7 +402,10 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         vcpus = []
         if count > 0:
             for v in sorted(remaining):
-                vcpus += reserve(v)
+                if (count - len(vcpus)) >= 2:
+                    vcpus += reserve(v, True)
+                else:
+                    vcpus += reserve(v)
                 if len(vcpus) >= count:
                     break
         return vcpus[:count]
@@ -432,7 +436,6 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(alceml_count)
         assigned["alceml_cpu_cores"] = vcpus
-
     dp = int(len(remaining) / 2)
     vcpus = reserve_n(dp)
     assigned["distrib_cpu_cores"] = vcpus
@@ -442,7 +445,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         if len(assigned["poller_cpu_cores"]) == 0:
             assigned["distrib_cpu_cores"] = assigned["poller_cpu_cores"] = reserve_n(1)
         else:
-            assigned["poller_cpu_cores"] = assigned["poller_cpu_cores"] + reserve_n(1)
+            assigned["distrib_cpu_cores"] = assigned["distrib_cpu_cores"] + reserve_n(1)
     # Return the individual threads as separate values
     return (
         assigned.get("app_thread_core", []),
@@ -453,7 +456,6 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned.get("distrib_cpu_cores", []),
         assigned.get("jc_singleton_core", [])
     )
-
 
 def isolate_cores(spdk_cpu_mask):
     spdk_cores = hexa_to_cpu_list(spdk_cpu_mask)
