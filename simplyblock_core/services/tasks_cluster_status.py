@@ -30,18 +30,10 @@ def execute_command(command):
     result = subprocess.run(command, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return result
 
-def run_cluster_commands():
+def run_cluster_commands(cluster_id: str):
     """Fetch cluster ID and execute commands, logging results."""
     try:
-        cluster_id_cmd = "sbcli-dev cluster list | grep simplyblock | awk '{print $2}'"
-        logger.info("Fetching cluster ID.")
-        result = execute_command(cluster_id_cmd)
-        cluster_id = result.stdout.strip()
-        logger.info(f"Cluster ID: {cluster_id}")
-        if not cluster_id:
-            logger.error("Cluster ID not found.")
-            return
-
+        logger.info(f"Running commands for cluster ID: {cluster_id}")
         for command in cluster_commands:
             full_command = f"{command} {cluster_id}"
             logger.info(f"Executing command: {full_command}")
@@ -52,10 +44,10 @@ def run_cluster_commands():
     except Exception as e:
         logger.critical(f"Exception occurred: {e}")
 
-def get_storage_node_ids():
+def get_storage_node_ids(cluster_id: str):
     """Fetch the JSON output and extract storage node IDs."""
     try:
-        command = "sbcli-dev storage-node list --json"
+        command = "sbcli-dev storage-node list --json --cluster-id " + cluster_id
         result = execute_command(command)
         if result.stderr:
             logger.error(f"Error fetching storage node list: {result.stderr}")
@@ -82,18 +74,46 @@ def check_storage_node(node_id):
     except Exception as e:
         logger.critical(f"Exception occurred while checking storage node {node_id}: {e}")
 
+def list_clusters():
+    """List all clusters and return their UUIDs."""
+    try:
+        command = "sbcli-dev cluster list --json"
+        result = execute_command(command)
+        if result.stderr:
+            logger.error(f"Error fetching cluster list: {result.stderr}")
+            return []
+        
+        output = result.stdout.strip()
+        sanitized_output = output.replace("'", '"')  # Replace single quotes with double quotes
+        try:
+            clusters = json.loads(sanitized_output)
+        except json.JSONDecodeError as err:
+            logger.error(f"Failed to parse sanitized JSON: {err}")
+            logger.debug(f"Sanitized output: {sanitized_output}")
+            return []
+        
+        cluster_uuids = [cluster.get("UUID") for cluster in clusters if "UUID" in cluster]
+        logger.info(f"Fetched {len(cluster_uuids)} cluster UUIDs: {cluster_uuids}")
+        return cluster_uuids
+
+    except Exception as e:
+        logger.critical(f"Exception occurred while listing clusters: {e}", exc_info=True)
+        return []
+
 if __name__ == "__main__":
     logger = setup_logger()
     logger.info("Starting SBCLI worker.")
 
-    # this for every 5 minutes
     while True:
         logger.info("Running cluster commands")
-        run_cluster_commands()
+        clusters = list_clusters()
+        print(clusters)
+        for cluster in clusters:
+            run_cluster_commands(cluster)
 
-        logger.info("Running storage node checks")
-        storage_node_ids = get_storage_node_ids()
-        for node_id in storage_node_ids:
-            check_storage_node(node_id)
-        logger.info("Sleeping for 5 minutes...")
-        time.sleep(300)
+            logger.info("Running storage node checks")
+            storage_node_ids = get_storage_node_ids(cluster)
+            for node_id in storage_node_ids:
+                check_storage_node(node_id)
+            logger.info("Sleeping for 5 minutes...")
+            time.sleep(300)

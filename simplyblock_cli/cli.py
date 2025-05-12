@@ -471,6 +471,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Shows the cluster list')
+        argument = subcommand.add_argument('--json', help='Print json output', dest='json', required=False, action='store_true')
 
     def init_cluster__status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'status', 'Shows a cluster\'s status')
