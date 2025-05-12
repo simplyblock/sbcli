@@ -14,7 +14,7 @@ def get_from_env_var_file(name, default=None):
 
 
 KVD_DB_VERSION = 730
-KVD_DB_FILE_PATH = '/Users/manohar/simplyblock/sbcli/cluster'
+KVD_DB_FILE_PATH = '/etc/foundationdb/fdb.cluster'
 KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
 RPC_HTTP_PROXY_PORT = 8080
