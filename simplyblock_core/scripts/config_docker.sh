@@ -3,7 +3,7 @@
 function create_override() {
 override_dir=/etc/systemd/system/docker.service.d
 sudo mkdir -p ${override_dir}
-/bin/cat <<EOM > ${override_dir}/override.conf
+sudo tee ${override_dir}/override.conf > /dev/null <<EOM
 [Service]
 ExecStart=
 ExecStart=-/usr/bin/dockerd --containerd=/run/containerd/containerd.sock -H tcp://${1}:2375 -H unix:///var/run/docker.sock -H fd://
