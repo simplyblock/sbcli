@@ -483,7 +483,7 @@ class SshUtils:
         output, error = self.exec_command(node=node, command=cmd)
         return output
     
-    def stop_spdk_process(self, node):
+    def stop_spdk_process(self, node, rpc_port):
         """Stops spdk process and waits until spdk_* containers are either exited or no longer listed.
         
         If containers are not killed within 20 seconds, the kill command is retried.
@@ -495,7 +495,7 @@ class SshUtils:
         max_attempts = 50
         attempt = 0
 
-        kill_cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill"
+        kill_cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
         output, error = self.exec_command(node=node, command=kill_cmd)
         # record the time when the kill command was last sent
         last_kill_time = time.time()
