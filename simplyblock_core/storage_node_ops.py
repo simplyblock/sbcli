@@ -2951,11 +2951,6 @@ def recreate_lvstore(snode):
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
-    ### 9- add lvols to subsystems
-    executor = ThreadPoolExecutor(max_workers=100)
-    for lvol in lvol_list:
-        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
-
     if sec_node:
         ### 7- create and connect hublvol
         try:
@@ -2963,6 +2958,13 @@ def recreate_lvstore(snode):
         except RPCException as e:
             logger.error("Error creating hublvol: %s", e.message)
             # return False
+
+    ### 9- add lvols to subsystems
+    executor = ThreadPoolExecutor(max_workers=100)
+    for lvol in lvol_list:
+        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+
+    if sec_node:
 
         if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
