@@ -747,3 +747,11 @@ class SbcliUtils:
         """
         data = self.get_request(api_url=f"/cluster/capacity/{self.cluster_id}")
         return data["results"]
+    
+    def activate_cluster(self, cluster_id):
+        """Activate the given cluster
+
+        Args:
+            cluster_id (str): Activates the given cluster
+        """
+        self.put_request(api_url=f"/lvol/resize/{cluster_id}")

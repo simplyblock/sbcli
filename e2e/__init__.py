@@ -23,6 +23,10 @@ from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
 
 
+from e2e_tests.add_node_fio_run import TestAddNodesDuringFioRun
+from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
+
+
 from stress_test.lvol_stress_fio_run import TestStressLvolCloneClusterFioRun
 from stress_test.lvol_ha_stress_fio import (
     TestLvolHAClusterGracefulShutdown,
@@ -49,6 +53,7 @@ ALL_TESTS = [
     TestLvolFioNpcs2,
     TestSingleNodeOutage,
     TestSingleNodeFailure,
+    TestAddNodesDuringFioRun,
     FioWorkloadTest,
     TestMultiFioSnapshotDowntime,
     TestManyLvolSameNode,
@@ -74,7 +79,9 @@ def get_all_tests(custom=True, ha_test=False):
         # TestSingleNodeReboot,
         # TestHASingleNodeReboot,
         TestHASingleNodeOutage,
-        # TestSingleNodeResizeLvolCone
+        # TestAddNodesDuringFioRun,
+        # TestRestartNodeOnAnotherHost,
+        # TestSingleNodeResizeLvolCone,
         # FioWorkloadTest,
         # TestMultiFioSnapshotDowntime,
         # TestManyLvolSameNode,
