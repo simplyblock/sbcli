@@ -10,7 +10,7 @@ uuid_regex = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 def api_call(entrypoint, cluster, secret, method, path, *, fail=True, data=None, log_func=lambda msg: None):
     response = requests.request(
         method,
-        f'http://{entrypoint}{path}',
+        f'{entrypoint}{path}',
         headers={'Authorization': f'{cluster} {secret}'},
         json=data,
     )
