@@ -62,5 +62,5 @@ jobs:
           simplyblock/simplyblock:${{ steps.image_info.outputs.tag }}-${{ steps.image_info.outputs.short_sha }}
           public.ecr.aws/simply-block/simplyblock:${{ steps.image_info.outputs.tag }}
           public.ecr.aws/simply-block/simplyblock:${{ steps.image_info.outputs.tag }}-${{ steps.image_info.outputs.short_sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-from: type=registry,ref=simplyblock/simplyblock:${{ steps.image_info.outputs.tag }}
+        cache-to: type=registry,ref=simplyblock/simplyblock:${{ steps.image_info.outputs.tag }},mode=max
