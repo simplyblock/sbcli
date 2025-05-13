@@ -124,57 +124,62 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
         old_ip = node_details["mgmt_ip"]
         proxmox_id, vm_id = proxmox.get_proxmox(old_ip)
         self.logger.info(f"Stopping VM {vm_id} on proxmox {proxmox_id}")
-        proxmox.stop_vm(proxmox_id, vm_id)
+        try:
+            proxmox.stop_vm(proxmox_id, vm_id)
 
-        # Step 3: Wait for schedulable state
-        self.sbcli_utils.wait_for_storage_node_status(restart_target["node_uuid"],
-                                                      status="schedulable",
-                                                      timeout=600)
+            # Step 3: Wait for schedulable state
+            self.sbcli_utils.wait_for_storage_node_status(restart_target["node_uuid"],
+                                                        status="schedulable",
+                                                        timeout=600)
 
-        # Step 4: Deploy node config on new IP
-        node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
-        max_lvol = node_sample["max_lvol"]
-        max_prov = int(node_sample["max_prov"] / (1024**3))
-        self.ssh_obj.deploy_storage_node(self.new_node_ip, max_lvol, max_prov)
+            # Step 4: Deploy node config on new IP
+            node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
+            max_lvol = node_sample["max_lvol"]
+            max_prov = int(node_sample["max_prov"] / (1024**3))
+            self.ssh_obj.deploy_storage_node(self.new_node_ip, max_lvol, max_prov)
 
-        # Step 5: Restart node with new IP
-        restart_cmd = f"{self.base_cmd} storage-node restart {restart_target['node_uuid']} --node-ip {self.new_node_ip}:5000"
-        self.ssh_obj.exec_command(self.mgmt_nodes[0], restart_cmd)
+            # Step 5: Restart node with new IP
+            restart_cmd = f"{self.base_cmd} storage-node restart {restart_target['node_uuid']} --node-ip {self.new_node_ip}:5000"
+            self.ssh_obj.exec_command(self.mgmt_nodes[0], restart_cmd)
 
-        self.sbcli_utils.wait_for_storage_node_status(restart_target["node_uuid"],
-                                                      status="online",
-                                                      timeout=600)
+            self.sbcli_utils.wait_for_storage_node_status(restart_target["node_uuid"],
+                                                        status="online",
+                                                        timeout=600)
 
-        # Step 6: Disconnect old NVMe devices
-        devices = self.ssh_obj.get_nvme_subsystems(self.mgmt_nodes[0])
-        for dev in devices:
-            if old_ip in dev:
-                self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev)
+            # Step 6: Disconnect old NVMe devices
+            devices = self.ssh_obj.get_nvme_subsystems(self.mgmt_nodes[0])
+            for dev in devices:
+                if old_ip in dev:
+                    self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev)
 
-        # Step 7: Reconnect using new IP only
-        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_id"])
-        for cmd in connect_ls:
-            if self.new_node_ip in cmd:
-                for _ in range(10):
-                    _, err = self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
-                    if not err:
-                        break
-                    sleep_n_sec(5)
+            # Step 7: Reconnect using new IP only
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_id"])
+            for cmd in connect_ls:
+                if self.new_node_ip in cmd:
+                    for _ in range(10):
+                        _, err = self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+                        if not err:
+                            break
+                        sleep_n_sec(5)
 
-        # Step 8: Now mark node as primary
-        make_primary_cmd = f"{self.base_cmd} --dev storage-node make-primary {restart_target['node_uuid']}"
-        self.ssh_obj.exec_command(self.mgmt_nodes[0], make_primary_cmd)
+            # Step 8: Now mark node as primary
+            make_primary_cmd = f"{self.base_cmd} --dev storage-node make-primary {restart_target['node_uuid']}"
+            self.ssh_obj.exec_command(self.mgmt_nodes[0], make_primary_cmd)
 
-        # Step 9: Wait for fio and node online
-        self.common_utils.manage_fio_threads(self.mgmt_nodes[0], fio_threads, timeout=700)
+            # Step 9: Wait for fio and node online
+            self.common_utils.manage_fio_threads(self.mgmt_nodes[0], fio_threads, timeout=700)
 
-        for lvol_name, lvol_detail in lvol_details.items():
-            self.logger.info(f"Checking fio log for lvol and clone for {lvol_name}")
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Log"])
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Clone"]["Log"])
+            for lvol_name, lvol_detail in lvol_details.items():
+                self.logger.info(f"Checking fio log for lvol and clone for {lvol_name}")
+                self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Log"])
+                self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Clone"]["Log"])
 
-        for node in self.sbcli_utils.get_storage_nodes()["results"]:
-            assert node["status"] == "online", f"{node['id']} is not online"
-            assert node["health_check"], f"{node['id']} health check failed"
+            for node in self.sbcli_utils.get_storage_nodes()["results"]:
+                assert node["status"] == "online", f"{node['id']} is not online"
+                assert node["health_check"], f"{node['id']} health check failed"
+        except Exception as e:
+            raise e
+        finally:
+            proxmox.start_vm(proxmox_id, vm_id, 600)
 
         self.logger.info("TEST CASE PASSED !!!")
