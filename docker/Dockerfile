@@ -39,4 +39,5 @@ RUN pip3 install -r requirements.txt
 RUN pip3 install -r simplyblock_web/requirements.txt
 
 COPY . /app
-RUN python setup.py install
+RUN python3 -m ensurepip
+RUN pip3 install --no-cache-dir .
