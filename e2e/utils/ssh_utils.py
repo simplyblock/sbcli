@@ -1696,7 +1696,17 @@ class SshUtils:
 
         self.logger.info(f"Started root partition and container memory logging on {node_ip}")
 
+    
+    def suspend_cluster(self, node_ip, cluster_id):
+        """Sets cluster in suspended state
 
+        Args:
+            node_ip (str): Mgmt Node IP to run command on
+            cluster_id (str): Cluster id to put in suspended state
+        """
+        cmd = f"{self.base_cmd} --dev cluster set {cluster_id} status suspended"
+        output, _ = self.exec_command(node_ip, cmd)
+        return output.strip().split()
 
     # def stop_netstat_dmesg_logging(self, node_ip):
     #     """Stop continuous netstat and dmesg logging without using watch."""

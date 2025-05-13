@@ -123,7 +123,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
         # Step 2: Suspend cluster
         self.logger.info("Suspending the Cluster")
-        self.sbcli_utils.suspend_cluster()
+        self.ssh_obj.suspend_cluster(self.mgmt_nodes[0], self.cluster_id)
 
         # Step 3: Add new nodes
         self.logger.info("Adding new nodes")
