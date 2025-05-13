@@ -145,6 +145,18 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
             self.sbcli_utils.wait_for_storage_node_status(restart_target["node_uuid"],
                                                         status="online",
                                                         timeout=600)
+            
+            self.storage_nodes.append(self.new_node_ip)
+            containers = self.ssh_obj.get_running_containers(node_ip=self.new_node_ip)
+            self.container_nodes[self.new_node_ip] = containers
+            
+            for node in self.storage_nodes:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node,
+                    containers=self.container_nodes[node],
+                    log_dir=self.docker_logs_path,
+                    test_name=self.test_name
+                )
 
             # Step 6: Disconnect old NVMe devices
             devices = self.ssh_obj.get_nvme_subsystems(self.mgmt_nodes[0])

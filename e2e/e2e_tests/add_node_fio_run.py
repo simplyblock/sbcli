@@ -147,6 +147,18 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             new_nodes_id.append(self.sbcli_utils.get_node_without_lvols())
             sleep_n_sec(60)
 
+            self.storage_nodes.append(ip)
+            containers = self.ssh_obj.get_running_containers(node_ip=ip)
+            self.container_nodes[ip] = containers
+        
+        for node in self.storage_nodes:
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node,
+                containers=self.container_nodes[node],
+                log_dir=self.docker_logs_path,
+                test_name=self.test_name
+            )
+
         # Step 4: Resume cluster
         self.logger.info("Resuming the Cluster")
         self.sbcli_utils.activate_cluster(cluster_id=self.cluster_id)
