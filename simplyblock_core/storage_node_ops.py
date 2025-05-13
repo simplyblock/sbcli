@@ -3033,13 +3033,18 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 def get_sorted_ha_jms(current_node):
     db_controller = DBController()
     jm_count = {}
+    mgmt_ips = []
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE):  # pass
             continue
         if node.mgmt_ip == current_node.mgmt_ip:
             continue
+        if node.mgmt_ip in mgmt_ips:
+            continue
+
         if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
             jm_count[node.jm_device.get_id()] = 1
+            mgmt_ips.append(node.mgmt_ip)
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE):  # pass
