@@ -31,9 +31,6 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
 
 WORKDIR /app
 
-COPY requirements.txt requirements.txt
-COPY simplyblock_web/requirements.txt simplyblock_web/requirements.txt
-
 COPY . /app
 RUN python3 -m ensurepip
 RUN pip3 install .
