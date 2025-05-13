@@ -34,10 +34,6 @@ WORKDIR /app
 COPY requirements.txt requirements.txt
 COPY simplyblock_web/requirements.txt simplyblock_web/requirements.txt
 
-RUN pip3 install --upgrade pip setuptools
-RUN pip3 install -r requirements.txt
-RUN pip3 install -r simplyblock_web/requirements.txt
-
 COPY . /app
 RUN python3 -m ensurepip
-RUN pip3 install --no-cache-dir .
+RUN pip3 install .
