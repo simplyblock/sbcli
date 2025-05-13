@@ -907,7 +907,12 @@ def load_core_distribution_from_file(file_path, number_of_cores):
 
 def store_config_file(data_config, file_path, create_read_only_file=False):
     # Ensure the directory exists
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    subprocess.run(
+        ["sudo", "mkdir", "-p", os.path.dirname(file_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=True)
+
     cores_config_json = json.dumps(data_config, indent=4)
 
     # Write the dictionary to the JSON file

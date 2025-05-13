@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=18.0.19
+SIMPLY_BLOCK_VERSION=18.0.20
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:main
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:main-latest
