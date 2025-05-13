@@ -26,12 +26,7 @@ bp = Blueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
-config.load_incluster_config()
-k8s_apps_v1 = client.AppsV1Api()
-k8s_core_v1 = client.CoreV1Api()
-
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-
 
 def set_namespace(namespace):
     if not os.path.exists(namespace_id_file):
@@ -344,6 +339,7 @@ def spdk_process_start():
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
+        k8s_apps_v1 = core_utils.get_k8s_apps_client()
         resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
         msg = f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}"
         logger.info(msg)
@@ -355,7 +351,8 @@ def spdk_process_start():
 
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
-
+    k8s_apps_v1 = core_utils.get_k8s_apps_client()
+    k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
@@ -381,6 +378,7 @@ def spdk_process_kill():
 
 
 def _is_pod_up():
+    k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -429,6 +427,7 @@ def firewall_set_port():
     action = data['action']
     container = "spdk-container"
 
+    k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
     resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
     for pod in resp.items:
         if pod.metadata.name.startswith(pod_name):
