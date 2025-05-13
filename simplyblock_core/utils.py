@@ -13,7 +13,7 @@ import uuid
 import time
 import psutil
 from typing import Set, Union
-
+from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
 from graypy import GELFTCPHandler
@@ -1714,3 +1714,12 @@ def validate_config(config, upgrade=False):
     if upgrade:
         return True
     return all_isolated_cores
+
+
+def get_k8s_apps_client():
+    config.load_incluster_config()
+    return client.AppsV1Api()
+
+def get_k8s_core_client():
+    config.load_incluster_config()
+    return client.CoreV1Api()

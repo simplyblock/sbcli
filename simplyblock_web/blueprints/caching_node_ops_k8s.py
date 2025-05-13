@@ -28,11 +28,6 @@ default_namespace = 'default'
 namespace_id_file = '/etc/simplyblock/namespace'
 pod_name = 'cnode-spdk-deployment'
 
-
-config.load_incluster_config()
-k8s_apps_v1 = client.AppsV1Api()
-k8s_core_v1 = client.CoreV1Api()
-
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
@@ -133,6 +128,7 @@ def spdk_process_start():
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
+        k8s_apps_v1 = core_utils.get_k8s_apps_client()
         resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
         msg = f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}"
         logger.info(msg)
@@ -144,7 +140,8 @@ def spdk_process_start():
 
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
-
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    k8s_apps_v1 = core_utils.get_k8s_apps_client()
     try:
         namespace = get_namespace()
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
@@ -170,6 +167,7 @@ def spdk_process_kill():
 
 
 def _is_pod_up():
+    k8s_core_v1 = core_utils.get_k8s_core_client()
     resp = k8s_core_v1.list_namespaced_pod(get_namespace())
     for pod in resp.items:
         if pod.metadata.name.startswith(pod_name):
