@@ -54,6 +54,7 @@ ALL_TESTS = [
     TestSingleNodeOutage,
     TestSingleNodeFailure,
     TestAddNodesDuringFioRun,
+    TestRestartNodeOnAnotherHost,
     FioWorkloadTest,
     TestMultiFioSnapshotDowntime,
     TestManyLvolSameNode,

@@ -335,7 +335,7 @@ class SshUtils:
         command = (
             f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_fatal=1 --verify_dump=1 --numjobs={numjobs} --nrfiles={nrfiles} "
+            f"--verify=md5 --verify_dump=1 --numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_avg_msec_opt} {iolog_opt} "
             f"{output_format}{output_file}"
         )

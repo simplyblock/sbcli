@@ -41,8 +41,9 @@ def get_api_token(proxmox_id):
     env_var = f"PROXMOX_TOKEN_{proxmox_id}"
     token = os.getenv(env_var)
     if not token:
-        logging.error(f"Missing environment variable: {env_var}")
-        sys.exit(1)
+        err = f"Missing environment variable: {env_var}"
+        logging.error(err)
+        raise Exception(err)
     
     return f"PVEAPIToken={token}"
 

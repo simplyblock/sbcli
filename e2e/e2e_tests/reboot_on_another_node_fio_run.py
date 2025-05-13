@@ -28,7 +28,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
 
         for i, _ in enumerate(self.storage_nodes):
             node_uuid = self.sbcli_utils.get_node_without_lvols()
-            lvol_name = f"lvl_{generate_random_sequence()}_{i}"
+            lvol_name = f"lvl_{generate_random_sequence(4)}_{i}"
             self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="5G", host_id=node_uuid)
 
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)

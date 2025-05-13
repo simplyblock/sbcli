@@ -23,7 +23,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         self.sbcli_utils.add_storage_pool(self.pool_name)
         sleep_n_sec(10)
         for i, _ in enumerate(self.storage_nodes):
-            lvol_name = f"lvl_{generate_random_sequence()}{i}"
+            lvol_name = f"lvl_{generate_random_sequence(4)}{i}"
             mount_path = f"{self.mount_base}/{lvol_name}"
             log_path = f"{self.log_base}/{lvol_name}.log"
 
@@ -165,7 +165,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
         # Step 5: Create lvols on new nodes and validate
         for node in new_nodes_id:
-            lvol_name = f"lvl_{generate_random_sequence()}_nn"
+            lvol_name = f"lvl_{generate_random_sequence(4)}_nn"
             mount_path = f"{self.mount_base}/{lvol_name}"
             log_path = f"{self.log_base}/{lvol_name}.log"
 
