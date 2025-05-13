@@ -5,7 +5,7 @@ SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 
 def get_from_env_var_file(name, default=None):
     """
-    priority of env var file is higher than env var
+    OS environment variable is checked first, if not found, check the env_var file.
     """
     if not name:
         return False
