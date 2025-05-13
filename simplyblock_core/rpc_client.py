@@ -148,7 +148,7 @@ class RPCClient:
             "io_unit_size": 8192,
             "max_aq_depth": 128,
             "num_shared_buffers": 24576,
-            "buf_cache_size": 2048,
+            "buf_cache_size": 1024,
             "dif_insert_or_strip": False,
             "c2h_success": True,
             "sock_priority": 0
