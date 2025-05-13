@@ -8,7 +8,6 @@ py-cpuinfo
 pytest
 mock
 setuptools
-flask
 kubernetes
 PyYAML
 urllib3
@@ -20,4 +19,6 @@ jc
 sentry-sdk
 prometheus_client
 ec2_metadata
-
+flask
+flask-swagger-ui
+sentry-sdk[flask]
