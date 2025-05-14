@@ -6,7 +6,7 @@ WORKDIR /app
 COPY requirements.txt .
 COPY simplyblock_web/requirements.txt .
 
-RUN pip3 install -r requirements.txt \
+RUN --mount=type=cache,target=/root/.cache/pip pip3 install -r requirements.txt \
     && pip3 install -r simplyblock_web/requirements.txt
 
 COPY . /app
