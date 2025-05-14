@@ -165,7 +165,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                     self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev)
 
             # Step 7: Reconnect using new IP only
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_id"])
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_name"])
             for cmd in connect_ls:
                 if self.new_node_ip in cmd:
                     for _ in range(10):
