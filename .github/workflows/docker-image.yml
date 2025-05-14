@@ -9,7 +9,6 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
     uses: ./.github/workflows/build-docker-image.yml
     with:
       dockerfile: docker/Dockerfile
