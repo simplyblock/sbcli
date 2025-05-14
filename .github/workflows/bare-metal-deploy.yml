@@ -51,6 +51,8 @@ on:
 jobs:
   deploy:
     runs-on: ${{ inputs.runs_on }}
+    concurrency:
+      group: ${{ inputs.cluster }}
 
     outputs:
       cluster_id: ${{ steps.deployment.outputs.cluster_id }}
