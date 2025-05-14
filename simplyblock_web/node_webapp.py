@@ -1,18 +1,14 @@
 #!/usr/bin/env python
 # encoding: utf-8
+from simplyblock_core import utils as core_utils
+logger = core_utils.get_logger(__name__)
+
 import argparse
-import logging
 
 from flask import Flask
 
 from simplyblock_web import utils
 from simplyblock_core import constants
-
-logger_handler = logging.StreamHandler()
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-logger = logging.getLogger()
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
 
 
 app = Flask(__name__)

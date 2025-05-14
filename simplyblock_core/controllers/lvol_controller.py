@@ -856,13 +856,6 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.info("Done")
         return True
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
-
     # disconnect from caching nodes:
     cnodes = db_controller.get_caching_nodes()
     for cnode in cnodes:

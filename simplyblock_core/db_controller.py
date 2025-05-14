@@ -1,5 +1,4 @@
 # coding=utf-8
-import logging
 import os.path
 
 import fdb
@@ -21,7 +20,6 @@ from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, Clus
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode
 
-logger = logging.getLogger()
 
 
 class Singleton(type):
@@ -44,13 +42,12 @@ class DBController(metaclass=Singleton):
     def __init__(self):
         try:
             if not os.path.isfile(constants.KVD_DB_FILE_PATH):
-                # logger.error(f"DB File Not Found: {constants.KVD_DB_FILE_PATH}")
                 return
             fdb.api_version(constants.KVD_DB_VERSION)
             self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)
             self.kv_store.options.set_transaction_timeout(constants.KVD_DB_TIMEOUT_MS)
         except Exception as e:
-            logger.error(e)
+            print(e)
 
     def get_storage_nodes(self) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)

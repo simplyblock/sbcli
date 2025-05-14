@@ -1,8 +1,16 @@
 version: '3.8'
 
+x-service-base: &service-base
+  logging:
+    driver: gelf
+    options:
+      gelf-address: "tcp://${CLUSTER_IP}:12202"
+
+
 services:
 
   spdk-stats-collector:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/spdk_stats_collector.py"
     volumes:
@@ -14,6 +22,7 @@ services:
       - monitoring-net
 
   fdb-server:
+    <<: *service-base
     image: foundationdb/foundationdb:7.3.42
     networks:
       - hostnet
@@ -36,6 +45,7 @@ services:
           memory: 4g
 
   fdb-backup-agent:
+    <<: *service-base
     image: foundationdb/foundationdb:7.3.42
     entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
     networks:
@@ -49,6 +59,7 @@ services:
         constraints: [ node.role == manager ]
 
   WebAppAPI:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_web/app.py"
     networks:
@@ -66,6 +77,7 @@ services:
       FLASK_ENV: "production"
 
   StorageNodeMonitor:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/storage_node_monitor.py"
     deploy:
@@ -79,6 +91,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   MgmtNodeMonitor:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/mgmt_node_monitor.py"
     deploy:
@@ -92,6 +105,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   CachingNodeMonitor:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/caching_node_monitor.py"
     deploy:
@@ -105,6 +119,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   LVolStatsCollector:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/lvol_stat_collector.py"
     deploy:
@@ -118,6 +133,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   CachedLVolStatsCollector:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/cached_lvol_stat_collector.py"
     deploy:
@@ -131,6 +147,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   MainDistrEventCollector:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/main_distr_event_collector.py"
     networks:
@@ -162,6 +179,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   CapacityAndStatsCollector:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/capacity_and_stats_collector.py"
     deploy:
@@ -175,6 +193,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   CapacityMonitor:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/cap_monitor.py"
     deploy:
@@ -188,6 +207,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   HealthCheck:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/health_check_service.py"
     deploy:
@@ -201,6 +221,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   DeviceMonitor:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/device_monitor.py"
     deploy:
@@ -214,6 +235,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   LVolMonitor:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/lvol_monitor.py"
     deploy:
@@ -227,6 +249,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   CleanupFDB:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
@@ -241,6 +264,7 @@ services:
       - hostnet
 
   TasksRunnerRestart:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/tasks_runner_restart.py"
     deploy:
@@ -254,6 +278,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   TasksRunnerMigration:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/tasks_runner_migration.py"
     deploy:
@@ -267,6 +292,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   TasksRunnerFailedMigration:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/tasks_runner_failed_migration.py"
     deploy:
@@ -293,6 +319,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   TasksRunnerNewDeviceMigration:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/tasks_runner_new_dev_migration.py"
     deploy:
@@ -305,20 +332,8 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-#  NewDeviceDiscovery:
-#    image: $SIMPLYBLOCK_DOCKER_IMAGE
-#    command: "python simplyblock_core/services/new_device_discovery.py"
-#    deploy:
-#      placement:
-#        constraints: [node.role == manager]
-#    volumes:
-#      - "/etc/foundationdb:/etc/foundationdb"
-#    networks:
-#      - hostnet
-#    environment:
-#      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
   TasksNodeAddRunner:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/tasks_runner_node_add.py"
     deploy:
@@ -331,9 +346,6 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-
-volumes:
-  os_data:
 
 networks:
   monitoring-net:
