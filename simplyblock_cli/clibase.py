@@ -23,7 +23,7 @@ class CLIWrapperBase:
         argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
-        self.parser = argparse.ArgumentParser(description='SimplyBlock management CLI')
+        self.parser = argparse.ArgumentParser(description='Simplyblock management CLI')
         self.parser.add_argument("-d", '--debug', help='Print debug messages', required=False, action='store_true')
         self.parser.add_argument('--dev', help='Enable developer options', required=False, action='store_true')
         self.subparser = self.parser.add_subparsers(dest='command')
