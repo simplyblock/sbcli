@@ -664,7 +664,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
                         return False, f"Failed to create listener for {lvol.get_id()}"
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, lvol.vuid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
 
@@ -706,7 +706,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, lvol.vuid)
     # if not ret:
     #     return False, "Failed to add bdev to subsystem"
 
@@ -798,10 +798,15 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
+    subsystem = rpc_client.subsystem_list(lvol.nqn)
     # 1- remove subsystem
-    if rpc_client.subsystem_list(lvol.nqn):
-        logger.info(f"Removing subsystem")
-        rpc_client.subsystem_delete(lvol.nqn)
+    if subsystem:
+        if len(subsystem[0]["namespaces"]) > 1:
+            logger.info(f"Removing namespace")
+            rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.vuid)
+        else:
+            logger.info(f"Removing subsystem")
+            rpc_client.subsystem_delete(lvol.nqn)
 
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
