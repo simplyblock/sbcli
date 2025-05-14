@@ -169,12 +169,16 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                     self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev["device"])
 
             # Step 7: Reconnect using new IP only
+
+            node_details = self.sbcli_utils.get_storage_node_details(restart_target["node_uuid"])[0]
+            new_ip = node_details["data_nics"]["ip4_address"]
+            
             
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_name"])
             self.logger.info(f"Output: {connect_ls}")
             for cmd in connect_ls:
                 self.logger.info(f"Output: {cmd}")
-                if self.new_node_ip in cmd:
+                if new_ip in cmd:
                     for _ in range(10):
                         _, err = self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
                         if not err:
@@ -185,7 +189,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
             self.logger.info(f"Output: {connect_ls}")
             for cmd in connect_ls:
                 self.logger.info(f"Output: {cmd}")
-                if self.new_node_ip in cmd:
+                if new_ip in cmd:
                     for _ in range(10):
                         _, err = self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
                         if not err:

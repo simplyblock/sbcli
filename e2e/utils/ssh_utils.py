@@ -576,7 +576,8 @@ class SshUtils:
         out, _ = self.exec_command(node=node, command=cmd)
         try:
             subsys_info = json.loads(out)
-            self.logger.info(f"Output: {out}")
+            self.logger.info(f"Output: {subsys_info}")
+            subsys_info = subsys_info[0]
             devices = []
             for s in subsys_info.get("Subsystems", []):
                 for path in s.get("Paths", []):
