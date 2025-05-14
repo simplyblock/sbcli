@@ -901,9 +901,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         if not satisfied:
             logger.warning(
                 f"Not enough memory for the provided max_lvo: {max_lvol}, max_prov: {max_prov}..")
-        ssd_pcie = []
-        for ssd in node_config.get("ssd_pcis"):
-            ssd_pcie.append(ssd["pci_address"])
+        ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
             for ssd in ssd_pcie:
