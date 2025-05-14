@@ -667,6 +667,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
+    lvol.ns_id = int(ret)
 
     spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
     logger.debug("ultra21_util_get_malloc_stats:")
@@ -802,14 +803,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     # 1- remove subsystem
     if subsystem:
         if len(subsystem[0]["namespaces"]) > 1:
-            logger.info(f"Removing namespace")
-            ns_id = 0
-            for ns in subsystem[0]["namespaces"]:
-                if ns["uuid"] == lvol_id:
-                    ns_id = ns["nsid"]
-                    break
-            if ns_id:
-                rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns_id)
+            rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
         else:
             logger.info(f"Removing subsystem")
             rpc_client.subsystem_delete(lvol.nqn)
@@ -1100,6 +1094,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Status": lvol.status,
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
+            "NS ID": lvol.ns_id,
         })
 
     if is_json:
