@@ -14,19 +14,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@master
-
     - name: Set docker image tag
-      id: get_info
-      run: |
-        if [[ "${{github.ref}}" == refs/pull/* ]]; then
-          tag=${GITHUB_REF/\/merge/}
-          echo "TAG=$(echo pr-${tag:10})" >> $GITHUB_ENV
-        else
-          echo "TAG=$(echo ${GITHUB_REF#refs/*/} | sed 's/\//-/g')" >> $GITHUB_ENV
-        fi
-        echo "BRANCH=$([ -z '${{ github.event.pull_request.head.sha }}' ] && echo ${GITHUB_REF#refs/*/} || echo $GITHUB_HEAD_REF)" >> $GITHUB_ENV
-        echo "SHA=$([ -z '${{ github.event.pull_request.head.sha }}' ] && echo $GITHUB_SHA || echo '${{ github.event.pull_request.head.sha }}')" >> $GITHUB_ENV
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: |
+          simplyblock/simplyblock
+          public.ecr.aws/simply-block/simplyblock
+        tags: |
+          type=raw,value=latest,enable={{ is_default_branch }}
+          type=ref,event=branch
+          type=ref,event=pull_request
+          type=ref,event=workflow_dispatch
+          type=ref,event=workflow_dispatch
+          type=sha,prefix={{ branch }}-
 
     - name: Login to Docker Hub
       uses: docker/login-action@v1
@@ -51,12 +52,9 @@ jobs:
       uses: docker/setup-qemu-action@v3
 
     - name: Build & Push
-      run: |
-        SHORT_SHA=$(echo ${{ env.SHA }} | head -c 8)
-        docker buildx ls
-        docker buildx create --name mybuilder --bootstrap --use
-        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG -t public.ecr.aws/simply-block/simplyblock:$TAG  -f docker/Dockerfile . --push
-        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG-$SHORT_SHA -t public.ecr.aws/simply-block/simplyblock:$TAG-$SHORT_SHA -f docker/Dockerfile . --push
-
-        echo "::notice title=Docker.com::simplyblock/simplyblock:$TAG"
-        echo "::notice title=AWS-ECR::public.ecr.aws/simply-block/simplyblock:$TAG"
+      uses: docker/build-push-action@v6
+      with:
+        file: docker/Dockerfile
+        platforms: linux/amd64,linux/arm64
+        tags: ${{ steps.meta.outputs.tags }}
+        push: true
