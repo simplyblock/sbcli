@@ -51,8 +51,10 @@ def download_from_minio(minio_uri):
 
         # Ensure local directories exist
         os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
-
-        print(f"[INFO] Downloading {s3_file_key} → {local_file_path}")
+        if "_iolog" in s3_file_key:
+            print(f"[INFO] Skipping download for iolog and state file: {s3_file_key}")
+        else:
+            print(f"[INFO] Downloading {s3_file_key} → {local_file_path}")
 
         # Download the file
         try:

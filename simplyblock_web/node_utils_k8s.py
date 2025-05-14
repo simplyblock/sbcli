@@ -6,6 +6,7 @@ import os
 import jc
 from kubernetes.stream import stream
 from kubernetes import client, config
+from simplyblock_core.utils import get_k8s_core_client
 
 
 node_name = os.environ.get("HOSTNAME")
@@ -13,9 +14,6 @@ deployment_name = f"snode-spdk-deployment-{node_name}"
 pod_name = deployment_name[:50]
 namespace_id_file = '/etc/simplyblock/namespace'
 default_namespace = 'default'
-
-config.load_incluster_config()
-k8s_core_v1 = client.CoreV1Api()
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +59,7 @@ def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=Non
 
 
 def firewall_get_k8s():
+    k8s_core_v1 = get_k8s_core_client()
     ret = ""
     resp = k8s_core_v1.list_namespaced_pod(get_namespace())
     for pod in resp.items:

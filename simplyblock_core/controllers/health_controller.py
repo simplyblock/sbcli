@@ -214,8 +214,9 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
 
 def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None):
-    logger.info(f"Checking secondary Hublvol: {node.hublvol.bdev_name} on node {node.get_id()}")
     db_controller = DBController()
+    primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
+    logger.info(f"Checking secondary Hublvol: {primary_node.hublvol.bdev_name} on node {node.get_id()}")
 
     passed = True
     try:
@@ -239,7 +240,6 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             for sub in ret:
                 node_lvols_nqns[sub['nqn']] = sub
 
-        primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
 
         ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
         if ret:

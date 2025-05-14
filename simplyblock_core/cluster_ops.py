@@ -787,7 +787,7 @@ def cluster_set_active(cl_id):
     return True
 
 
-def list():
+def list(json_output:bool = False):
     db_controller = DBController()
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()
@@ -807,7 +807,10 @@ def list():
             "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
             "Status": status.upper(),
         })
-    return utils.print_table(data)
+    if json_output:
+        return data
+    else:
+        return utils.print_table(data)
 
 
 

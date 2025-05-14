@@ -1,0 +1,33 @@
+name: API Test
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:  # Has to be an input
+        description: Platform to execute on
+        type: string
+        default: ubuntu-latest
+      cluster_ip:
+        required: true
+        type: string
+      cluster_id:
+        required: true
+        type: string
+      cluster_secret:
+        required: true
+        type: string
+
+jobs:
+  api_test:
+    runs-on: ${{ inputs.runs_on }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Run tests
+      run: |
+        pytest simplyblock_web \
+          --entrypoint=${{ inputs.cluster_ip }} \
+          --cluster=${{ inputs.cluster_id }} \
+          --secret=${{ inputs.cluster_secret }}
