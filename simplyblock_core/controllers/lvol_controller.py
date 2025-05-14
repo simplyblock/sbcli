@@ -279,6 +279,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             else:
                 return False, f"Can not find storage node: {host_id_or_name}"
 
+    if namespace:
+        master_lvol = db_controller.get_lvol_by_id(namespace)
+        if not master_lvol:
+            return False, f"LVol not found: {namespace}"
+
+        host_node = db_controller.get_storage_node_by_id(master_lvol.node_id)
+
     pool = None
     for p in db_controller.get_pools():
         if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
@@ -383,7 +390,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol = LVol()
     lvol.lvol_name = name
     lvol.pvc_name = pvc_name or ""
-    lvol.namespace = namespace or ""
     lvol.size = int(size)
     lvol.max_size = int(max_size)
     lvol.status = LVol.STATUS_IN_CREATION
@@ -401,8 +407,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
-    lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
     lvol.lvol_priority_class = lvol_priority_class
+
+    if namespace:
+        master_lvol = db_controller.get_lvol_by_id(namespace)
+        lvol.nqn = master_lvol.nqn
+        lvol.namespace = namespace or ""
+    else:
+        lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
 
     nodes = []
     if host_node:
@@ -625,30 +637,31 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     if not ret:
         return False, msg
 
-    if is_primary:
-        min_cntlid = 1
-    else:
-        min_cntlid =  1000
-    logger.info("creating subsystem %s", lvol.nqn)
-    ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
+    if not lvol.namespace:
+        if is_primary:
+            min_cntlid = 1
+        else:
+            min_cntlid =  1000
+        logger.info("creating subsystem %s", lvol.nqn)
+        ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
 
-    ana_state = "non_optimized"
-    if lvol.node_id == snode.get_id():
-        ana_state = "optimized"
+        ana_state = "non_optimized"
+        if lvol.node_id == snode.get_id():
+            ana_state = "optimized"
 
-    # add listeners
-    logger.info("adding listeners")
-    for iface in snode.data_nics:
-        if iface.ip4_address:
-            tr_type = iface.get_transport_type()
-            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret, err = rpc_client.nvmf_subsystem_add_listener(
-                lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana_state)
-            if not ret:
-                if err and "code" in err and err["code"] == -32602:
-                    logger.warning("listener already exists")
-                else:
-                    return False, f"Failed to create listener for {lvol.get_id()}"
+        # add listeners
+        logger.info("adding listeners")
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                ret, err = rpc_client.nvmf_subsystem_add_listener(
+                    lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana_state)
+                if not ret:
+                    if err and "code" in err and err["code"] == -32602:
+                        logger.warning("listener already exists")
+                    else:
+                        return False, f"Failed to create listener for {lvol.get_id()}"
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
