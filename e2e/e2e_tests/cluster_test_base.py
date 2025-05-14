@@ -644,7 +644,7 @@ class TestClusterBase:
         snapshots = self.ssh_obj.get_snapshots(node=self.mgmt_nodes[0])
         for snapshot in snapshots:
             self.logger.info(f"Deleting snapshot: {snapshot}")
-            delete_snapshot_command = f"sbcli-lvol snapshot delete {snapshot} --force"
+            delete_snapshot_command = f"{self.base_cmd} snapshot delete {snapshot} --force"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
 
     def filter_migration_tasks(self, tasks, node_id, timestamp):
@@ -661,7 +661,7 @@ class TestClusterBase:
         """
         filtered_tasks = [
             task for task in tasks
-            if task['function_name'] == 'device_migration' and task['date'] > timestamp
+            if 'device_migration' in task['function_name'] and task['date'] > timestamp
             and (node_id is None or task['node_id'] == node_id)
         ]
         return filtered_tasks
@@ -700,7 +700,7 @@ class TestClusterBase:
             if not filtered_tasks and not no_task_ok:
                 raise RuntimeError(
                     f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} "
-                    f"after the specified timestamp."
+                    f"after the specified timestamp {timestamp} and function containing device migration!"
                 )
 
             self.logger.info(f"Checking migration tasks: {filtered_tasks}")

@@ -575,9 +575,8 @@ class SshUtils:
         cmd = "nvme list-subsys -o json"
         out, _ = self.exec_command(node=node, command=cmd)
         try:
-            out = out[0]
-            print(out)
             subsys_info = json.loads(out)
+            self.logger.info(f"Output: {out}")
             devices = []
             for s in subsys_info.get("Subsystems", []):
                 for path in s.get("Paths", []):

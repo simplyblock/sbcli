@@ -171,8 +171,9 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
             # Step 7: Reconnect using new IP only
             
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_name"])
+            self.logger.info(f"Output: {connect_ls}")
             for cmd in connect_ls:
-                print(cmd)
+                self.logger.info(f"Output: {cmd}")
                 if self.new_node_ip in cmd:
                     for _ in range(10):
                         _, err = self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
@@ -181,7 +182,9 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                         sleep_n_sec(5)
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["clone_name"])
+            self.logger.info(f"Output: {connect_ls}")
             for cmd in connect_ls:
+                self.logger.info(f"Output: {cmd}")
                 if self.new_node_ip in cmd:
                     for _ in range(10):
                         _, err = self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
@@ -200,7 +203,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                 self.logger.info(f"Checking fio log for lvol and clone for {lvol_name}")
                 self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Log"])
                 self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Clone"]["Log"])
-            
+            self.logger.info(f"Testing migration jobs after timestamp")
             self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
             
             for node in self.sbcli_utils.get_storage_nodes()["results"]:
