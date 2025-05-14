@@ -159,10 +159,10 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                 )
 
             # Step 6: Disconnect old NVMe devices
-            devices = self.ssh_obj.get_nvme_subsystems(self.mgmt_nodes[0])
+            devices = self.ssh_obj.get_nvme_device_subsystems(self.mgmt_nodes[0])
             for dev in devices:
-                if old_ip in dev:
-                    self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev)
+                if dev["traddr"] == old_ip:
+                    self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev["device"])
 
             # Step 7: Reconnect using new IP only
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_name"])

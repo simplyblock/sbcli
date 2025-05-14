@@ -562,6 +562,39 @@ class SshUtils:
         cmd = "sudo nvme list-subsys | grep -i %s | awk '{print $3}' | cut -d '=' -f 2" % nqn_filter
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
+    
+    def get_nvme_device_subsystems(self, node):
+        """Get json for nvme device wise
+
+        Args:
+            node (str): Node with device
+
+        Returns:
+            List: List of dictionary with device details
+        """
+        cmd = "nvme list-subsys -o json"
+        out, _ = self.exec_command(node=node, command=cmd)
+        try:
+            subsys_info = json.loads(out)
+            devices = []
+            for s in subsys_info.get("Subsystems", []):
+                for path in s.get("Paths", []):
+                    if "Name" in s and "Address" in path:
+                        address_str = path.get("Address", "")
+                        traddr = ""
+                        for part in address_str.split(","):
+                            if part.startswith("traddr="):
+                                traddr = part.split("=")[1]
+                                break
+                        devices.append({
+                            "device": f"/dev/{path.get('Name')}",
+                            "traddr": traddr,
+                            "subnqn": s.get("NQN", "")
+                        })
+            return devices
+        except Exception as e:
+            self.logger.error(f"Failed to parse NVMe subsys output: {e}")
+            return []
 
     def get_snapshots(self, node):
         """Get all snapshots on the node."""
