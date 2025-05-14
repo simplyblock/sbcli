@@ -33,7 +33,8 @@ RUN python3 -m ensurepip
 WORKDIR /app
 
 COPY requirements.txt /app
-RUN pip3 install -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install -r requirements.txt
 
 COPY . /app
 RUN pip3 install .
