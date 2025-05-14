@@ -30,7 +30,6 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
     fi
 
 WORKDIR /app
-
 COPY . /app
 RUN python3 -m ensurepip
 RUN pip3 install .
