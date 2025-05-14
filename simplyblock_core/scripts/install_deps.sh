@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+sudo yum install -y yum-utils
 sudo yum install -y https://repo.almalinux.org/almalinux/9/devel/aarch64/os/Packages/tuned-profiles-realtime-2.24.0-1.el9.noarch.rpm
 sudo yum install -y yum-utils xorg-x11-xauth nvme-cli fio tuned
 sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
