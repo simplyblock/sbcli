@@ -759,19 +759,6 @@ class SshUtils:
     #             filesystem.append(columns[0])
     #     return filesystem
 
-    def deploy_storage_node(self, node):
-        cmd = "sudo yum install -y pip jq"
-        self.exec_command(node=node, command=cmd)
-
-        cmd = f"pip install {self.base_cmd}"
-        self.exec_command(node=node, command=cmd)
-
-        cmd = "pip list"
-        self.exec_command(node=node, command=cmd)
-
-        cmd = f"{self.base_cmd} -d sn deploy"
-        self.exec_command(node=node, command=cmd, timeout=1200)
-
     def deploy_storage_node(self, node, max_lvol, max_prov_gb, ifname="eth0"):
         """
         Runs 'sn configure' and 'sn deploy' on the node with provided configuration.
@@ -782,6 +769,11 @@ class SshUtils:
             max_prov_gb (int): Maximum provision size in GB.
             ifname (str): Mgmt Interface (Default: eth0)
         """
+        cmd = f"pip install {self.base_cmd}"
+        self.exec_command(node=node, command=cmd)
+
+        time.sleep(10)
+
         configure_cmd = f"{self.base_cmd} -d sn configure --max-lvol {max_lvol} --max-size {max_prov_gb}G"
         deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname} || {{ echo 'Deploy command failed'; exit 1; }}"
         
