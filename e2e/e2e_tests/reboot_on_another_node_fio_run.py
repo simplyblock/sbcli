@@ -92,8 +92,8 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount
 
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
@@ -116,7 +116,9 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                 restart_target = {
                     "node_uuid": node_uuid,
                     "lvol_id": lvol_id,
-                    "lvol_name": lvol_name
+                    "lvol_name": lvol_name,
+                    "clone_name": clone_name,
+                    "clone_id": clone_id
                 }
 
         # Step 2: Shutdown original node via Proxmox
@@ -137,6 +139,8 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
             max_lvol = node_sample["max_lvol"]
             max_prov = int(node_sample["max_prov"] / (1024**3))
             self.ssh_obj.deploy_storage_node(self.new_node_ip, max_lvol, max_prov)
+
+            timestamp = int(datetime.now().timestamp())
 
             # Step 5: Restart node with new IP
             restart_cmd = f"{self.base_cmd} storage-node restart {restart_target['node_uuid']} --node-ip {self.new_node_ip}:5000"
@@ -165,7 +169,18 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                     self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev["device"])
 
             # Step 7: Reconnect using new IP only
+            
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_name"])
+            for cmd in connect_ls:
+                print(cmd)
+                if self.new_node_ip in cmd:
+                    for _ in range(10):
+                        _, err = self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+                        if not err:
+                            break
+                        sleep_n_sec(5)
+
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["clone_name"])
             for cmd in connect_ls:
                 if self.new_node_ip in cmd:
                     for _ in range(10):
@@ -185,7 +200,9 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                 self.logger.info(f"Checking fio log for lvol and clone for {lvol_name}")
                 self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Log"])
                 self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Clone"]["Log"])
-
+            
+            self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
+            
             for node in self.sbcli_utils.get_storage_nodes()["results"]:
                 assert node["status"] == "online", f"{node['id']} is not online"
                 assert node["health_check"], f"{node['id']} health check failed"
