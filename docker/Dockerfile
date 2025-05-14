@@ -29,7 +29,11 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         rm -f foundationdb-clients_7* ; \
     fi
 
-WORKDIR /app
-COPY . /app
 RUN python3 -m ensurepip
+WORKDIR /app
+
+COPY requirements.txt /app
+RUN pip3 install -r requirements.txt
+
+COPY . /app
 RUN pip3 install .
