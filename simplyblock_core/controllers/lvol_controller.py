@@ -649,13 +649,13 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         if lvol.node_id == snode.get_id():
             ana_state = "optimized"
 
-            # add listeners
-            logger.info("adding listeners")
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    tr_type = iface.get_transport_type()
-                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                    ret, err = rpc_client.nvmf_subsystem_add_listener(
+        # add listeners
+        logger.info("adding listeners")
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                ret, err = rpc_client.nvmf_subsystem_add_listener(
                     lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana_state)
                 if not ret:
                     if err and "code" in err and err["code"] == -32602:
