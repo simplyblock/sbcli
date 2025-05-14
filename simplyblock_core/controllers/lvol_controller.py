@@ -664,7 +664,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
                         return False, f"Failed to create listener for {lvol.get_id()}"
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, lvol.vuid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
 
@@ -706,7 +706,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, lvol.vuid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     # if not ret:
     #     return False, "Failed to add bdev to subsystem"
 
@@ -803,7 +803,13 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     if subsystem:
         if len(subsystem[0]["namespaces"]) > 1:
             logger.info(f"Removing namespace")
-            rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.vuid)
+            ns_id = 0
+            for ns in subsystem[0]["namespaces"]:
+                if ns["uuid"] == lvol_id:
+                    ns_id = ns["nsid"]
+                    break
+            if ns_id:
+                rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns_id)
         else:
             logger.info(f"Removing subsystem")
             rpc_client.subsystem_delete(lvol.nqn)
