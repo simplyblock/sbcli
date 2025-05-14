@@ -68,12 +68,11 @@ jobs:
       with:
         repository: simplyblock-io/simplyBlockDeploy
         path: deploy
-        ref: vmware
 
     - name: Deploy cluster
       id: deployment
       run: |
-        cd deploy
+        cd deploy/bare-metal
         eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
         ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-size 400G --number-of-devices 1 --sbcli-cmd sbcli-dev --spdk-debug
       env:
