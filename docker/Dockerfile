@@ -4,10 +4,8 @@ FROM simplyblock/simplyblock:base_image
 WORKDIR /app
 
 COPY requirements.txt .
-COPY simplyblock_web/requirements.txt .
 
-RUN pip3 install -r requirements.txt \
-    && pip3 install -r simplyblock_web/requirements.txt
+RUN pip3 install -r requirements.txt
 
 COPY . /app
 
