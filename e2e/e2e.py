@@ -28,6 +28,7 @@ def main():
     parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
     parser.add_argument('--run_ha', type=bool, help="Run HA tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
+    parser.add_argument('--new-nodes', type=str, help="New nodes to add (space-separated)", default="")
     
 
     args = parser.parse_args()
@@ -38,11 +39,28 @@ def main():
         tests = get_all_tests(custom=True, ha_test=args.run_ha)
 
     test_class_run = []
+    new_nodes = args.new_nodes.strip().split() if args.new_nodes else []
+    skipped_cases = 0
     if args.testname is None or len(args.testname.strip()) == 0:
-        test_class_run = tests
+        for cls in tests:
+            if cls.__name__ == "TestAddNodesDuringFioRun":
+                if len(new_nodes) == 0 or len(new_nodes) % 2 != 0:
+                    logger.warning("Skipping TestAddNodesDuringFioRun: requires --new-nodes with IPs in multiples of 2.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ == "TestRestartNodeOnAnotherHost":
+                if len(new_nodes) == 0:
+                    logger.warning("Skipping TestRestartNodeOnAnotherHost: requires --new-nodes with atleast 1 IP.")
+                    skipped_cases += 1
+                    continue
+            test_class_run.append(cls)
     else:
         for cls in ALL_TESTS:
             if args.testname.lower() in cls.__name__.lower():
+                if cls.__name__ == "TestAddNodesDuringFioRun" and (len(new_nodes) == 0 or len(new_nodes) % 2 != 0):
+                    raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
+                if cls.__name__ == "TestRestartNodeOnAnotherHost" and len(new_nodes) == 0:
+                    raise ValueError("TestRestartNodeOnAnotherHost requires --new-nodes with atleast 1 new IP.")
                 test_class_run.append(cls)
 
     if not test_class_run:
@@ -59,7 +77,8 @@ def main():
                         npcs=args.npcs,
                         bs=args.bs,
                         chunk_bs=args.chunk_bs,
-                        k8s_run=args.run_k8s)
+                        k8s_run=args.run_k8s,
+                        new_nodes=new_nodes)
         try:
             test_obj.setup()
             if i == 0:
@@ -90,7 +109,8 @@ def main():
                 break
 
     failed_cases = list(errors.keys())
-    skipped_cases = len(test_class_run) - (len(passed_cases) + len(failed_cases))
+    skipped_cases += len(test_class_run) - (len(passed_cases) + len(failed_cases))
+
     logger.info(f"Number of Total Cases: {len(test_class_run)}")
     logger.info(f"Number of Passed Cases: {len(passed_cases)}")
     logger.info(f"Number of Failed Cases: {len(failed_cases)}")

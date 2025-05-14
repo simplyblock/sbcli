@@ -8,7 +8,6 @@ import time
 import yaml
 from flask import Blueprint
 from flask import request
-from kubernetes import client, config
 from kubernetes.client import ApiException
 
 from simplyblock_core import constants, utils as core_utils
@@ -24,9 +23,6 @@ namespace = 'default'
 deployment_name = 'spdk-deployment'
 pod_name = 'spdk-deployment'
 
-config.load_incluster_config()
-k8s_apps_v1 = client.AppsV1Api()
-k8s_core_v1 = client.CoreV1Api()
 
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 spdk_deploy_yaml = os.path.join(TOP_DIR, 'static/deploy_spdk.yaml')
@@ -82,6 +78,10 @@ def spdk_process_start():
         'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
     }
     dep = yaml.safe_load(template.render(values))
+
+    k8s_apps_v1 = core_utils.get_k8s_apps_client()
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+
     resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
     logger.info(f"Deployment created: '{resp.metadata.name}'")
 
@@ -118,6 +118,8 @@ def spdk_process_start():
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
 
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    k8s_apps_v1 = core_utils.get_k8s_apps_client()
     try:
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
 
@@ -144,6 +146,7 @@ def spdk_process_kill():
 
 @bp.route('/spdk_process_is_up', methods=['GET'])
 def spdk_process_is_up():
+    k8s_core_v1 = core_utils.get_k8s_core_client()
     resp = k8s_core_v1.list_namespaced_pod(namespace)
     for pod in resp.items:
         if pod.metadata.name.startswith(pod_name):

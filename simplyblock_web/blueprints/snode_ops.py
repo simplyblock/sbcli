@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
 import json
-import logging
-import math
 import os
 import time
 
@@ -16,7 +14,7 @@ from flask import request
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils
 
-logger = logging.getLogger(__name__)
+logger = core_utils.get_logger(__name__)
 
 bp = Blueprint("snode", __name__, url_prefix="/snode")
 

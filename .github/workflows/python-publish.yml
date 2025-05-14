@@ -44,7 +44,7 @@ jobs:
       run: echo "::notice title=PIP Package::$(ls dist)"
 
     - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v1
+      uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_HAMDI }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_HAMDI }}

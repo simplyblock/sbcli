@@ -1,7 +1,6 @@
 # coding=utf-8
 import datetime
 import json
-import logging
 import os
 import re
 import tempfile
@@ -31,7 +30,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import pull_docker_image_with_retry
 
-logger = logging.getLogger()
+logger = utils.get_logger(__name__)
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 db_controller = DBController()
@@ -788,7 +787,7 @@ def cluster_set_active(cl_id):
     return True
 
 
-def list():
+def list(json_output:bool = False):
     db_controller = DBController()
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()
@@ -808,7 +807,10 @@ def list():
             "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
             "Status": status.upper(),
         })
-    return utils.print_table(data)
+    if json_output:
+        return data
+    else:
+        return utils.print_table(data)
 
 
 

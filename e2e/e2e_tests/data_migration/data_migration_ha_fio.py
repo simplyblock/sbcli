@@ -253,20 +253,18 @@ class FioWorkloadTest(TestClusterBase):
         #     spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
         # )
 
-        self.ssh_obj.deploy_storage_node(node=new_node_ip)
+        self.ssh_obj.deploy_storage_node(node=new_node_ip,
+                                         max_lvol=affected_node_details[0]["max_lvol"],
+                                         max_prov_gb=convert_bytes_to_gb_tb(affected_node_details[0]["max_prov"]),
+
+)
 
         self.ssh_obj.add_storage_node(
             node=self.mgmt_nodes[0],
             cluster_id=self.cluster_id,
             node_ip=new_node_ip,
             ifname="eth0",
-            max_lvol=affected_node_details[0]["max_lvol"],
-            max_snap=affected_node_details[0]["max_snap"],
-            max_prov=convert_bytes_to_gb_tb(affected_node_details[0]["max_prov"]),
-            number_of_distribs=affected_node_details[0]["number_of_distribs"],
-            number_of_devices=affected_node_details[0]["number_of_devices"],
             partitions=affected_node_details[0]["num_partitions_per_dev"],
-            jm_percent=affected_node_details[0]["jm_percent"],
             disable_ha_jm=not affected_node_details[0]["enable_ha_jm"],
             enable_test_device=affected_node_details[0]["enable_test_device"],
             # iobuf_small_pool_count=affected_node_details[0]["iobuf_small_pool_count"],
@@ -473,7 +471,7 @@ class FioWorkloadTest(TestClusterBase):
         
         node_details = self.sbcli_utils.get_storage_node_details(node_id)
         node_ip = node_details[0]["mgmt_ip"]
-        self.ssh_obj.stop_spdk_process(node_ip)
+        self.ssh_obj.stop_spdk_process(node_ip, node_details[0]["rpc_port"])
 
         self.logger.info(f"Docker container on node {node_id} stopped successfully.")
 

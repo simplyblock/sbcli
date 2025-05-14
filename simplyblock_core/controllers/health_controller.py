@@ -26,7 +26,7 @@ def check_bdev(name, *, rpc_client=None, bdev_names=None):
     return present
 
 
-def check_subsystem(nqn, *, rpc_client=None, nqns=None):
+def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None):
     if rpc_client:
         subsystem = subsystems[0] if (subsystems := rpc_client.subsystem_list(nqn)) is not None else None
     elif nqns:
@@ -40,11 +40,20 @@ def check_subsystem(nqn, *, rpc_client=None, nqns=None):
 
     logger.debug(f"Checking subsystem {nqn} ... ok")
 
-    listeners = bool(subsystem['listen_addresses'])
-    namespaces = bool(subsystem['namespaces'])
+    listeners = len(subsystem['listen_addresses'])
 
-    logger.log(DEBUG if listeners else ERROR, "Checking listener ... " + ('ok' if listeners else 'not found'))
-    logger.log(DEBUG if namespaces else ERROR, "Checking namespaces ... " + ('ok' if namespaces else 'not found'))
+    if ns_uuid:
+        for ns in subsystem['namespaces']:
+            if ns['uuid'] == ns_uuid:
+                namespaces = 1
+                break
+        else:
+            namespaces = 0
+    else:
+        namespaces = len(subsystem['namespaces'])
+
+    logger.log(DEBUG if listeners else ERROR, f"Checking listener: {listeners} ... " + ('ok' if listeners else 'not found'))
+    logger.log(DEBUG if namespaces else ERROR, f"Checking namespaces: {namespaces} ... " + ('ok' if namespaces else 'not found'))
     return listeners and namespaces
 
 
@@ -214,8 +223,9 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
 
 def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None):
-    logger.info(f"Checking secondary Hublvol: {node.hublvol.bdev_name} on node {node.get_id()}")
     db_controller = DBController()
+    primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
+    logger.info(f"Checking secondary Hublvol: {primary_node.hublvol.bdev_name} on node {node.get_id()}")
 
     passed = True
     try:
@@ -239,7 +249,6 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             for sub in ret:
                 node_lvols_nqns[sub['nqn']] = sub
 
-        primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
 
         ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
         if ret:
@@ -626,7 +635,7 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
 
             passed &= check_bdev(bdev_name, bdev_names=node_bdev_names)
 
-        passed &= check_subsystem(lvol.nqn, nqns=node_lvols_nqns)
+        passed &= check_subsystem(lvol.nqn, nqns=node_lvols_nqns, ns_uuid=lvol.uuid)
 
     except Exception as e:
         logger.exception(e)

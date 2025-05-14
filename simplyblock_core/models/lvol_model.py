@@ -48,6 +48,7 @@ class LVol(BaseModel):
     node_id: str = ""
     nodes: List[str] = []
     nqn: str = ""
+    ns_id: int = 1
     subsys_port: int = 9090
     nvme_dev: NVMeDevice = None
     pool_uuid: str = ""

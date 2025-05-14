@@ -1,13 +1,14 @@
 name: Integration Tests
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  pull_request
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  integration-test:
+  mock-deploy:
     runs-on: ubuntu-latest
     services:
       docker:
@@ -33,3 +34,34 @@ jobs:
         run: |
           docker compose -f docker-compose-dev.yml logs
           docker compose -f docker-compose-dev.yml down --volumes --remove-orphans
+
+  await-image:
+    name: Await docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for image to be built succeed
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'build'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
+  deploy:
+    needs: [await-image, mock-deploy]
+    if: ${{ vars.ci_cluster != '' }}
+    uses: ./.github/workflows/bare-metal-deploy.yml
+    with:
+      runs_on: self-hosted
+      cluster: ${{ vars.ci_cluster }}
+      docker_image: public.ecr.aws/simply-block/simplyblock:${{ github.head_ref || github.ref_name }}
+      sbcli_source: ${{ github.repositoryUrl }}@${{ github.sha }}
+
+  test:
+    needs: deploy
+    uses: ./.github/workflows/api-test.yml
+    with:
+      runs_on: self-hosted
+      cluster_id: ${{ needs.deploy.outputs.cluster_id }}
+      cluster_ip: ${{ needs.deploy.outputs.cluster_ip }}
+      cluster_secret: ${{ needs.deploy.outputs.cluster_secret }}

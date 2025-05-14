@@ -1765,10 +1765,7 @@ def restart_storage_node(
     snode.lvstore_status = ""
     snode.write_to_db(db_controller.kv_store)
 
-    # logger.info("Setting node status to Online")
-    # set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
 
-    # time.sleep(1)
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
         if db_dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
@@ -1777,26 +1774,44 @@ def restart_storage_node(
             db_dev.health_check = True
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
-
-    # make other nodes connect to the new devices
-    logger.info("Make other nodes connect to the node devices")
-    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-    for node in snodes:
-        if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-            continue
-        node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
-        node.write_to_db(kv_store)
-
-    logger.info(f"Sending device status event")
-    snode = db_controller.get_storage_node_by_id(snode.get_id())
-    for db_dev in snode.nvme_devices:
-        distr_controller.send_dev_status_event(db_dev, db_dev.status)
-
-    if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+    #
+    # # make other nodes connect to the new devices
+    # logger.info("Make other nodes connect to the node devices")
+    # snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    # for node in snodes:
+    #     if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+    #         continue
+    #     node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+    #     node.write_to_db(kv_store)
+    #
+    # logger.info(f"Sending device status event")
+    # snode = db_controller.get_storage_node_by_id(snode.get_id())
+    # for db_dev in snode.nvme_devices:
+    #     distr_controller.send_dev_status_event(db_dev, db_dev.status)
+    #
+    # if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+    #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+
+        # make other nodes connect to the new devices
+        logger.info("Make other nodes connect to the node devices")
+        snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        for node in snodes:
+            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                continue
+            node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+            node.write_to_db(kv_store)
+
+        logger.info(f"Sending device status event")
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        for db_dev in snode.nvme_devices:
+            distr_controller.send_dev_status_event(db_dev, db_dev.status)
+
+        if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
         logger.info("Cluster is not ready yet")
         logger.info("Setting node status to Online")
         set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
@@ -1817,6 +1832,23 @@ def restart_storage_node(
         else:
             snode.lvstore_status = "ready"
             snode.write_to_db()
+
+            # make other nodes connect to the new devices
+            logger.info("Make other nodes connect to the node devices")
+            snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+            for node in snodes:
+                if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                    continue
+                node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+                node.write_to_db(kv_store)
+
+            logger.info(f"Sending device status event")
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            for db_dev in snode.nvme_devices:
+                distr_controller.send_dev_status_event(db_dev, db_dev.status)
+
+            if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+                device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
             logger.info("Setting node status to Online")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2951,11 +2983,6 @@ def recreate_lvstore(snode):
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
-    ### 9- add lvols to subsystems
-    executor = ThreadPoolExecutor(max_workers=100)
-    for lvol in lvol_list:
-        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
-
     if sec_node:
         ### 7- create and connect hublvol
         try:
@@ -2964,6 +2991,13 @@ def recreate_lvstore(snode):
             logger.error("Error creating hublvol: %s", e.message)
             # return False
 
+    ### 9- add lvols to subsystems
+    executor = ThreadPoolExecutor(max_workers=100)
+    for lvol in lvol_list:
+        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+
+    if sec_node:
+
         if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
                 sec_node.connect_to_hublvol(snode)
@@ -2971,7 +3005,6 @@ def recreate_lvstore(snode):
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
-            time.sleep(1)
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
@@ -3032,13 +3065,18 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 def get_sorted_ha_jms(current_node):
     db_controller = DBController()
     jm_count = {}
+    mgmt_ips = []
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE):  # pass
             continue
         if node.mgmt_ip == current_node.mgmt_ip:
             continue
+        if node.mgmt_ip in mgmt_ips:
+            continue
+
         if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
             jm_count[node.jm_device.get_id()] = 1
+            mgmt_ips.append(node.mgmt_ip)
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE):  # pass

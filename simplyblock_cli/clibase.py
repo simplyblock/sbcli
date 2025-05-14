@@ -291,7 +291,7 @@ class CLIWrapperBase:
         return cluster_ops.cluster_activate(cluster_id, args.force, args.force_lvstore_create)
 
     def cluster__list(self, sub_command, args):
-        return cluster_ops.list()
+        return cluster_ops.list(args.json)
 
     def cluster__status(self, sub_command, args):
         cluster_id = args.cluster_id

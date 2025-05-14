@@ -148,7 +148,7 @@ class RPCClient:
             "io_unit_size": 8192,
             "max_aq_depth": 128,
             "num_shared_buffers": 24576,
-            "buf_cache_size": 512,
+            "buf_cache_size": 1024,
             "dif_insert_or_strip": False,
             "c2h_success": True,
             "sock_priority": 0
@@ -220,7 +220,7 @@ class RPCClient:
         }
         return self._request2("ultra21_alloc_ns_init", params)
 
-    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None):
+    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None):
         params = {
             "nqn": nqn,
             "namespace": {
@@ -233,6 +233,9 @@ class RPCClient:
 
         if nguid:
             params['namespace']['nguid'] = nguid
+
+        if nsid:
+            params['namespace']['nsid'] = nsid
 
         return self._request("nvmf_subsystem_add_ns", params)
 

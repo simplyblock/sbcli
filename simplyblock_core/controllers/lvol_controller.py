@@ -279,6 +279,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             else:
                 return False, f"Can not find storage node: {host_id_or_name}"
 
+    if namespace:
+        master_lvol = db_controller.get_lvol_by_id(namespace)
+        if not master_lvol:
+            return False, f"LVol not found: {namespace}"
+
+        host_node = db_controller.get_storage_node_by_id(master_lvol.node_id)
+
     pool = None
     for p in db_controller.get_pools():
         if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
@@ -383,7 +390,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol = LVol()
     lvol.lvol_name = name
     lvol.pvc_name = pvc_name or ""
-    lvol.namespace = namespace or ""
     lvol.size = int(size)
     lvol.max_size = int(max_size)
     lvol.status = LVol.STATUS_IN_CREATION
@@ -401,8 +407,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
-    lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
     lvol.lvol_priority_class = lvol_priority_class
+
+    if namespace:
+        master_lvol = db_controller.get_lvol_by_id(namespace)
+        lvol.nqn = master_lvol.nqn
+        lvol.namespace = namespace or ""
+    else:
+        lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
 
     nodes = []
     if host_node:
@@ -620,42 +632,42 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
 
 def add_lvol_on_node(lvol, snode, is_primary=True):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    db_controller = DBController()
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
         return False, msg
 
-    if is_primary:
-        min_cntlid = 1
-    else:
-        min_cntlid =  1000
-    logger.info("creating subsystem %s", lvol.nqn)
-    ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
-    logger.debug(ret)
+    if not lvol.namespace:
+        if is_primary:
+            min_cntlid = 1
+        else:
+            min_cntlid =  1000
+        logger.info("creating subsystem %s", lvol.nqn)
+        ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
 
-    # add listeners
-    logger.info("adding listeners")
-    for iface in snode.data_nics:
-        if iface.ip4_address:
-            tr_type = iface.get_transport_type()
-            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port)
-            if not ret:
-                return False, f"Failed to create listener for {lvol.get_id()}"
-            is_optimized = False
-            if lvol.node_id == snode.get_id():
-                is_optimized = True
-            logger.info(f"Setting ANA state: {is_optimized}")
-            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized)
-            if not ret:
-                return False, f"Failed to set ANA state for {lvol.get_id()}"
+        ana_state = "non_optimized"
+        if lvol.node_id == snode.get_id():
+            ana_state = "optimized"
+
+        # add listeners
+        logger.info("adding listeners")
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                ret, err = rpc_client.nvmf_subsystem_add_listener(
+                    lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana_state)
+                if not ret:
+                    if err and "code" in err and err["code"] == -32602:
+                        logger.warning("listener already exists")
+                    else:
+                        return False, f"Failed to create listener for {lvol.get_id()}"
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         return False, "Failed to add bdev to subsystem"
+    lvol.ns_id = int(ret)
 
     spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
     logger.debug("ultra21_util_get_malloc_stats:")
@@ -787,10 +799,14 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
+    subsystem = rpc_client.subsystem_list(lvol.nqn)
     # 1- remove subsystem
-    if rpc_client.subsystem_list(lvol.nqn):
-        logger.info(f"Removing subsystem")
-        rpc_client.subsystem_delete(lvol.nqn)
+    if subsystem:
+        if len(subsystem[0]["namespaces"]) > 1:
+            rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
+        else:
+            logger.info(f"Removing subsystem")
+            rpc_client.subsystem_delete(lvol.nqn)
 
     # 2- remove bdevs
     logger.info(f"Removing bdev stack")
@@ -844,13 +860,6 @@ def delete_lvol(id_or_name, force_delete=False):
 
         logger.info("Done")
         return True
-
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
 
     # disconnect from caching nodes:
     cnodes = db_controller.get_caching_nodes()
@@ -1085,6 +1094,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Status": lvol.status,
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
+            "NS ID": lvol.ns_id,
         })
 
     if is_json:

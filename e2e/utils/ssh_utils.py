@@ -335,7 +335,7 @@ class SshUtils:
         command = (
             f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_fatal=1 --verify_dump=1 --numjobs={numjobs} --nrfiles={nrfiles} "
+            f"--verify=md5 --verify_dump=1 --numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_avg_msec_opt} {iolog_opt} "
             f"{output_format}{output_file}"
         )
@@ -483,7 +483,7 @@ class SshUtils:
         output, error = self.exec_command(node=node, command=cmd)
         return output
     
-    def stop_spdk_process(self, node):
+    def stop_spdk_process(self, node, rpc_port):
         """Stops spdk process and waits until spdk_* containers are either exited or no longer listed.
         
         If containers are not killed within 20 seconds, the kill command is retried.
@@ -495,7 +495,7 @@ class SshUtils:
         max_attempts = 50
         attempt = 0
 
-        kill_cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill"
+        kill_cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
         output, error = self.exec_command(node=node, command=kill_cmd)
         # record the time when the kill command was last sent
         last_kill_time = time.time()
@@ -562,6 +562,41 @@ class SshUtils:
         cmd = "sudo nvme list-subsys | grep -i %s | awk '{print $3}' | cut -d '=' -f 2" % nqn_filter
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
+    
+    def get_nvme_device_subsystems(self, node):
+        """Get json for nvme device wise
+
+        Args:
+            node (str): Node with device
+
+        Returns:
+            List: List of dictionary with device details
+        """
+        cmd = "nvme list-subsys -o json"
+        out, _ = self.exec_command(node=node, command=cmd)
+        try:
+            subsys_info = json.loads(out)
+            self.logger.info(f"Output: {subsys_info}")
+            subsys_info = subsys_info[0]
+            devices = []
+            for s in subsys_info.get("Subsystems", []):
+                for path in s.get("Paths", []):
+                    if "Name" in s and "Address" in path:
+                        address_str = path.get("Address", "")
+                        traddr = ""
+                        for part in address_str.split(","):
+                            if part.startswith("traddr="):
+                                traddr = part.split("=")[1]
+                                break
+                        devices.append({
+                            "device": f"/dev/{path.get('Name')}",
+                            "traddr": traddr,
+                            "subnqn": s.get("NQN", "")
+                        })
+            return devices
+        except Exception as e:
+            self.logger.error(f"Failed to parse NVMe subsys output: {e}")
+            return []
 
     def get_snapshots(self, node):
         """Get all snapshots on the node."""
@@ -724,37 +759,61 @@ class SshUtils:
     #             filesystem.append(columns[0])
     #     return filesystem
 
-    def deploy_storage_node(self, node):
-        cmd = "sudo yum install -y pip jq"
-        self.exec_command(node=node, command=cmd)
+    def deploy_storage_node(self, node, max_lvol, max_prov_gb, ifname="eth0"):
+        """
+        Runs 'sn configure' and 'sn deploy' on the node with provided configuration.
 
+        Args:
+            node (str): IP of the node.
+            max_lvol (int): Maximum number of lvols.
+            max_prov_gb (int): Maximum provision size in GB.
+            ifname (str): Mgmt Interface (Default: eth0)
+        """
         cmd = f"pip install {self.base_cmd}"
         self.exec_command(node=node, command=cmd)
 
-        cmd = "pip list"
-        self.exec_command(node=node, command=cmd)
+        time.sleep(10)
 
-        cmd = f"{self.base_cmd} -d sn deploy"
-        self.exec_command(node=node, command=cmd, timeout=1200)
+        configure_cmd = f"{self.base_cmd} -d sn configure --max-lvol {max_lvol} --max-size {max_prov_gb}G"
+        deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname} || {{ echo 'Deploy command failed'; exit 1; }}"
+        
+        self.logger.info(f"Deploying storage node: {node}")
+        self.exec_command(node=node, command=configure_cmd)
+        self.exec_command(node=node, command=deploy_cmd)
 
-    def add_storage_node(self, node, cluster_id, node_ip, ifname, max_lvol, max_prov, max_snap,
-                         number_of_distribs, number_of_devices, partitions, jm_percent,
-                         disable_ha_jm, enable_test_device, spdk_debug, spdk_image, spdk_cpu_mask):
+
+    def add_storage_node(self, node, cluster_id, node_ip, ifname="eth0", partitions=0,
+                         data_nic="eth1", disable_ha_jm=False, enable_test_device=False, 
+                         spdk_debug=False, spdk_image=None):
+        """Add new storage node
+
+        Args:
+            node (str): Mgmt Node ip to run this command on
+            cluster_id (str): Cluster id
+            node_ip (str): IP of storage node
+            ifname (str, optional): Mgmt Interface. Defaults to "eth0".
+            partitions (int, optional): Journal Partition. Defaults to 0.
+            data_nic (str, optional): Ifname for data. Defaults to "eth1".
+            disable_ha_jm (bool, optional): Disable HA feature. Defaults to False.
+            enable_test_device (bool, optional): Enable test device. Defaults to False.
+            spdk_debug (bool, optional): Enable debug logging. Defaults to False.
+            spdk_image (_type_, optional): SPDK image to use while add node. Defaults to None.
+        """
 
         
-        cmd = (f"{self.base_cmd} -d storage-node add-node --max-lvol {max_lvol} --max-snap {max_snap} --max-prov {max_prov} "
-               f"--number-of-devices {number_of_devices} --number-of-distribs {number_of_distribs} "
-               f"--partitions {partitions} --jm-percent {jm_percent} "
-               f" --cpu-mask {spdk_cpu_mask} --spdk-image {spdk_image}")
+        cmd = (f"{self.base_cmd} --dev -d storage-node add-node "
+               f"--journal-partition {partitions} ")
         
         if disable_ha_jm:
             cmd = f"{cmd} --disable-ha-jm"
         if enable_test_device:
             cmd = f"{cmd} --enable-test-device"
+        if spdk_image:
+            cmd = f"{cmd} --spdk-image {spdk_image}"
         if spdk_debug:
             cmd = f"{cmd} --spdk-debug"
     
-        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
+        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname} --data-nics {data_nic}"
         self.exec_command(node=node, command=add_node_cmd)
 
     def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
@@ -1664,7 +1723,17 @@ class SshUtils:
 
         self.logger.info(f"Started root partition and container memory logging on {node_ip}")
 
+    
+    def suspend_cluster(self, node_ip, cluster_id):
+        """Sets cluster in suspended state
 
+        Args:
+            node_ip (str): Mgmt Node IP to run command on
+            cluster_id (str): Cluster id to put in suspended state
+        """
+        cmd = f"{self.base_cmd} --dev cluster set {cluster_id} status suspended"
+        output, _ = self.exec_command(node_ip, cmd)
+        return output.strip().split()
 
     # def stop_netstat_dmesg_logging(self, node_ip):
     #     """Stop continuous netstat and dmesg logging without using watch."""
