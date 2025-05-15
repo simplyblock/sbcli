@@ -789,7 +789,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
         nodes = node_info["nodes_config"]["nodes"]
     else:
-        logger.error("Please run sbcli sn configure before adding the storage node")
+        logger.error("Please run sbcli sn configure before adding the storage node, "
+                     "If you run it and the config has been manually changed please "
+                     "run 'sbcli sn configure-upgrade'")
         return False
     snode_api.set_hugepages()
     for node_config in nodes:

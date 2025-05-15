@@ -338,9 +338,9 @@ def get_nodes_config():
             logger.error("The nodes config has been changed, "
                          "Please run sbcli sn configure-upgrade before adding the storage node")
             return {}
-
-        if not core_utils.validate_node_config(nodes_config):
-            return {}
+        for i in range(len(nodes_config.get("nodes"))):
+            if not core_utils.validate_node_config(nodes_config.get("nodes")[i]):
+                return {}
         return nodes_config
 
     except FileNotFoundError:
@@ -587,8 +587,9 @@ def set_hugepages():
     if node_info.get("nodes"):
         nodes = node_info["nodes"]
     else:
-        logger.error("Please run 'sbcli sn configure' before adding the storage node, "
-                     "If you run it please run 'sbcli sn configure-upgrade', if you changed the config")
+        logger.error("Please run sbcli sn configure before adding the storage node, "
+                     "If you run it and the config has been manually changed please "
+                     "run 'sbcli sn configure-upgrade'")
         return utils.get_response(False, "Please run sbcli sn configure before adding the storage node")
 
     if not core_utils.validate_config(node_info):

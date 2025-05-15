@@ -137,9 +137,9 @@ def get_nodes_config():
             logger.error("The nodes config has been changed, "
                          "Please run sbcli sn configure-upgrade before adding the storage node")
             return {}
-
-        if not core_utils.validate_node_config(nodes_config):
-            return {}
+        for i in range(len(nodes_config.get("nodes"))):
+            if not core_utils.validate_node_config(nodes_config.get("nodes")[i]):
+                return {}
         return nodes_config
 
     except FileNotFoundError:
