@@ -2960,7 +2960,7 @@ def recreate_lvstore(snode):
             ### 4- set leadership to false
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            # time.sleep(1)
+            time.sleep(1)
 
     ### 5- examine
     ret = rpc_client.bdev_examine(snode.raid)
