@@ -331,7 +331,16 @@ def get_nodes_config():
         with open(file_path, "r") as file:
             nodes_config = json.load(file)
 
-        core_utils.validate_node_config(nodes_config)
+        # Open and read the read_only JSON file
+        with open(f"{file_path}_read_only", "r") as file:
+            read_only_nodes_config = json.load(file)
+        if nodes_config != read_only_nodes_config:
+            logger.error("The nodes config has been changed, "
+                         "Please run sbcli sn configure-upgrade before adding the storage node")
+            return {}
+
+        if not core_utils.validate_node_config(nodes_config):
+            return {}
         return nodes_config
 
     except FileNotFoundError:
@@ -578,8 +587,9 @@ def set_hugepages():
     if node_info.get("nodes"):
         nodes = node_info["nodes"]
     else:
-        logger.error("Please run sbcli sn configure before adding the storage node")
-        return utils.get_response(False, "Please run sbcli sn configure before adding the storage noden")
+        logger.error("Please run 'sbcli sn configure' before adding the storage node, "
+                     "If you run it please run 'sbcli sn configure-upgrade', if you changed the config")
+        return utils.get_response(False, "Please run sbcli sn configure before adding the storage node")
 
     if not core_utils.validate_config(node_info):
         return utils.get_response(False, "Config validation is incorrect")

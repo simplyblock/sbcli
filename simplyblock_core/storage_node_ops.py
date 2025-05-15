@@ -958,7 +958,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             return False
 
         data_nics = []
-        names = data_nics_list or [iface_name]
+        names = node_config.get("nic_ports") or data_nics_list or [iface_name]
         for nic in names:
             device = node_info['network_interface'][nic]
             data_nics.append(
@@ -3500,22 +3500,3 @@ def set_value(node_id, attr, value):
             pass
 
     return True
-
-
-def configure_huge_pages(node_ip):
-    snode_api = SNodeClient(node_ip)
-    node_info, _ = snode_api.info()
-    if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
-        nodes = node_info["nodes_config"]["nodes"]
-    else:
-        logger.error("Please run sbcli sn configure before adding the storage node")
-        return False
-
-    # Set Huge page memory
-    huge_page_memory_dict = {}
-    for node_config in nodes:
-        numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-    for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // (2048 * 1024)
-        utils.set_hugepages_if_needed(numa, num_pages)

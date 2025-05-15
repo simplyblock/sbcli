@@ -1363,6 +1363,7 @@ def regenerate_config(new_config, old_config):
     if len(old_config.get("nodes")) != len(new_config.get("nodes")):
         logger.error("The number of node in old config not equal to the number of node in updated config")
         return False
+    all_nics = detect_nics()
     for i in range(len(old_config.get("nodes"))):
         validate_node_config(new_config.get("nodes")[i])
         if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
@@ -1396,6 +1397,11 @@ def regenerate_config(new_config, old_config):
             number_of_distribs = number_of_distribs_cores
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
+        old_config["nodes"][i]["nic_ports"] = new_config["nodes"][i]["nic_ports"]
+        for nic in old_config["nodes"][i]["nic_ports"]:
+            if nic not in all_nics:
+                logger.error(f"The nic {nic} is not a member of system nics {all_nics}")
+                return False
         number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
         old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
         small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
