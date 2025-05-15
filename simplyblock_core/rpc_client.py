@@ -479,12 +479,12 @@ class RPCClient:
 
         if support_storage_tiering:
             # generate a random int
-            storage_tiering_id = random.randint(0,  2**16 - 2)
+            # storage_tiering_id = random.randint(0,  2**16 - 2)
             params['support_storage_tiering'] = support_storage_tiering
             params['secondary_stg_name'] = secondary_stg_name
             params['secondary_io_timeout_us'] = secondary_io_timeout_us
             params['disaster_recovery'] = disaster_recovery
-            params['storage_tiering_id'] = storage_tiering_id
+            params['storage_tiering_id'] = params['vuid']
             params['ghost_capacity'] = ghost_capacity
             params['fifo_main_capacity'] = fifo_main_capacity
             params['fifo_small_capacity'] = fifo_small_capacity
