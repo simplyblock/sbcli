@@ -124,6 +124,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
         # Step 2: Shutdown original node via Proxmox
         node_details = self.sbcli_utils.get_storage_node_details(restart_target["node_uuid"])[0]
         old_ip = node_details["mgmt_ip"]
+        old_ip_data = node_details["data_nics"][0]["ip4_address"]
         proxmox_id, vm_id = proxmox.get_proxmox(old_ip)
         self.logger.info(f"Stopping VM {vm_id} on proxmox {proxmox_id}")
         try:
@@ -165,13 +166,13 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
             # Step 6: Disconnect old NVMe devices
             devices = self.ssh_obj.get_nvme_device_subsystems(self.mgmt_nodes[0])
             for dev in devices:
-                if dev["traddr"] == old_ip:
+                if dev["traddr"] == old_ip_data:
                     self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev["device"])
 
             # Step 7: Reconnect using new IP only
 
             node_details = self.sbcli_utils.get_storage_node_details(restart_target["node_uuid"])[0]
-            new_ip = node_details["data_nics"]["ip4_address"]
+            new_ip = node_details["data_nics"][0]["ip4_address"]
             
             
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_name"])

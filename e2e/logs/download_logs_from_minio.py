@@ -52,16 +52,16 @@ def download_from_minio(minio_uri):
         # Ensure local directories exist
         os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
         if "_iolog" in s3_file_key:
-            print(f"[INFO] Skipping download for iolog and state file: {s3_file_key}")
+            print(f"[INFO] Skipping download for iolog file: {s3_file_key}")
         else:
             print(f"[INFO] Downloading {s3_file_key} → {local_file_path}")
 
-        # Download the file
-        try:
-            s3_client.download_file(MINIO_BUCKET, s3_file_key, local_file_path)
-            print(f"[SUCCESS] Downloaded: {local_file_path}")
-        except Exception as e:
-            print(f"[ERROR] Failed to download {s3_file_key}: {e}")
+            # Download the file
+            try:
+                s3_client.download_file(MINIO_BUCKET, s3_file_key, local_file_path)
+                print(f"[SUCCESS] Downloaded: {local_file_path}")
+            except Exception as e:
+                print(f"[ERROR] Failed to download {s3_file_key}: {e}")
 
 # Parse arguments
 parser = argparse.ArgumentParser(description="Download logs from MinIO recursively.")
