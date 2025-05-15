@@ -587,7 +587,11 @@ def get_firewall(query: _RPCPortQuery):
     return utils.get_response(ret)
 
 
-@bp.route('/set_hugepages', methods=['POST'])
+@api.post('/set_hugepages', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'bool'
+    })}}},
+})
 def set_hugepages():
     node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
     if node_info.get("nodes"):
