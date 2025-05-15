@@ -589,7 +589,7 @@ def get_firewall(query: _RPCPortQuery):
 
 @api.post('/set_hugepages', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'bool'
+        'type': 'boolean'
     })}}},
 })
 def set_hugepages():
