@@ -143,3 +143,5 @@ NODE_HUBLVOL_PORT_START=9030
 
 NODES_CONFIG_FILE = "/etc/simplyblock/sn_config_file"
 SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
+
+LVO_MAX_NAMESPACES_PER_SUBSYS=32

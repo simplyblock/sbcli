@@ -103,13 +103,14 @@ class RPCClient:
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
 
-    def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1):
+    def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1, max_namespaces=32):
         params = {
             "nqn": nqn,
             "serial_number": serial_number,
             "allow_any_host": True,
             "min_cntlid": min_cntlid,
             "ana_reporting": True,
+            "max_namespaces": max_namespaces,
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
 

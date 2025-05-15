@@ -286,6 +286,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
         host_node = db_controller.get_storage_node_by_id(master_lvol.node_id)
 
+        lvols_count = 0
+        for lv in db_controller.get_lvols(host_node.cluster_id):
+            if lv.namespace == namespace:
+                lvols_count += 1
+
+        if lvols_count >= constants.LVO_MAX_NAMESPACES_PER_SUBSYS:
+            msg = f"Max namespaces reached: {lvols_count}"
+            logger.error(msg)
+            return False, msg
+
     pool = None
     for p in db_controller.get_pools():
         if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
@@ -643,7 +653,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         else:
             min_cntlid =  1000
         logger.info("creating subsystem %s", lvol.nqn)
-        ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
+        ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
+                                          max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
         ana_state = "non_optimized"
         if lvol.node_id == snode.get_id():
@@ -703,7 +714,8 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     min_cntlid = 1 + 1000 * ha_inode_self
     logger.info("creating subsystem %s", lvol.nqn)
-    rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid)
+    rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
+                                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
