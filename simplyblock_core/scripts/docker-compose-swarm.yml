@@ -80,7 +80,7 @@ services:
 
   CleanupFDB:
     <<: *cluster-service
-    command: "python -m simplyblock_core.services.cleanup_foundationdb"
+    command: "python -m simplyblock_core.workers.cleanup_foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
       LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
