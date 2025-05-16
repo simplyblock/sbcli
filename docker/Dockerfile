@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM python:3.9-slim
 
-RUN apt-get update
+RUN apt-get update ; apt-get upgrade -y
 
 RUN apt-get install -y wget nano
 
@@ -20,6 +20,9 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
 WORKDIR /app
 
 COPY . /app
+
+RUN pip3 install --upgrade pip
+RUN pip3 install setuptools --upgrade
 
 RUN pip install -r requirements.txt
 
