@@ -7,19 +7,21 @@ x-service-base: &service-base
       gelf-address: "tcp://${CLUSTER_IP}:12202"
 
 
-services:
-
-  spdk-stats-collector:
+x-cluster-service: &cluster-service
     <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/spdk_stats_collector.py"
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
+    image: "simplyblock/simplyblock:new-image"
     deploy:
       placement:
-        constraints: [ node.role == manager ]
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
     networks:
-      - monitoring-net
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+
+services:
 
   fdb-server:
     <<: *service-base
@@ -76,89 +78,86 @@ services:
       FLASK_DEBUG: "False"
       FLASK_ENV: "production"
 
-  StorageNodeMonitor:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/storage_node_monitor.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
+  CleanupFDB:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.cleanup_foundationdb"
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
+
+  SpdkStatsCollector:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.spdk_stats_collector"
+    networks:
+      - monitoring-net
+
+  StorageNodeMonitor:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.storage_node_monitor"
 
   MgmtNodeMonitor:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/mgmt_node_monitor.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.mgmt_node_monitor"
 
   CachingNodeMonitor:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/caching_node_monitor.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.caching_node_monitor"
 
   LVolStatsCollector:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/lvol_stat_collector.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.lvol_stat_collector"
 
   CachedLVolStatsCollector:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/cached_lvol_stat_collector.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.cached_lvol_stat_collector"
 
   MainDistrEventCollector:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/main_distr_event_collector.py"
-    networks:
-      - hostnet
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.main_distr_event_collector"
+
+  CapacityAndStatsCollector:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.capacity_and_stats_collector"
+
+  CapacityMonitor:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.cap_monitor"
+
+  HealthCheck:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.health_check_service"
+
+  DeviceMonitor:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.device_monitor"
+
+  LVolMonitor:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.lvol_monitor"
+
+  TasksRunnerRestart:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.tasks_runner_restart"
+
+  TasksNodeAddRunner:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.tasks_runner_node_add"
+
+  TasksRunnerMigration:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.tasks_runner_migration"
+
+  TasksRunnerFailedMigration:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.tasks_runner_failed_migration"
+
+  TasksRunnerNewDeviceMigration:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.tasks_runner_new_dev_migration"
+
+  TasksRunnerClusterStatus:
+    <<: *cluster-service
+    command: "python -m simplyblock_core.services.tasks_cluster_status"
 
   HAProxy:
     image: haproxytech/haproxy-debian:latest
@@ -175,174 +174,6 @@ services:
       - monitoring-net
     volumes:
       - "$DIR/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg"
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  CapacityAndStatsCollector:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/capacity_and_stats_collector.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  CapacityMonitor:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/cap_monitor.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  HealthCheck:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/health_check_service.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  DeviceMonitor:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/device_monitor.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  LVolMonitor:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/lvol_monitor.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  CleanupFDB:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-      LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
-    command: "python simplyblock_core/workers/cleanup_foundationdb.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-
-  TasksRunnerRestart:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/tasks_runner_restart.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  TasksRunnerMigration:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/tasks_runner_migration.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  TasksRunnerFailedMigration:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/tasks_runner_failed_migration.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  TasksRunnerClusterStatus:
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/tasks_cluster_status.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  TasksRunnerNewDeviceMigration:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/tasks_runner_new_dev_migration.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  TasksNodeAddRunner:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/tasks_runner_node_add.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
