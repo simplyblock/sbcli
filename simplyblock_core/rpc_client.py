@@ -285,10 +285,22 @@ class RPCClient:
             "lvs_name": name,
             "cluster_sz": cluster_sz,
             "clear_method": clear_method,
+            "not_evict_lvstore_md_pages": True,
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
+    def bdev_lvol_create_lvstore_persistent(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio, not_evict_lvstore_md_pages=True):
+         params = {
+             "bdev_name": bdev_name,
+             "lvs_name": name,
+             "cluster_sz": cluster_sz,
+             "clear_method": clear_method,
+             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+             "not_evict_lvstore_md_pages": True
+         }
+         return self._request("bdev_lvol_create_lvstore_persistent", params)
+    
     def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0):
         params = {
             "lvol_name": name,
@@ -296,6 +308,7 @@ class RPCClient:
             "lvs_name": lvs_name,
             "thin_provision": True,
             "clear_method": "unmap",
+            "sync_fetch": True,
             "lvol_priority_class": lvol_priority_class,
         }
         return self._request("bdev_lvol_create", params)
@@ -331,13 +344,17 @@ class RPCClient:
     def lvol_create_snapshot(self, lvol_id, snapshot_name):
         params = {
             "lvol_name": lvol_id,
-            "snapshot_name": snapshot_name}
+            "snapshot_name": snapshot_name,
+            "sync_fetch": True,
+            }
         return self._request("bdev_lvol_snapshot", params)
 
     def lvol_clone(self, snapshot_name, clone_name):
         params = {
             "snapshot_name": snapshot_name,
-            "clone_name": clone_name}
+            "clone_name": clone_name,
+            "sync_fetch": True,
+            }
         return self._request("bdev_lvol_clone", params)
 
     def lvol_compress_create(self, base_bdev_name, pm_path):
