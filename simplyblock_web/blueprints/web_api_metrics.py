@@ -72,8 +72,22 @@ def get_snode_metrics():
     global ng
     if not ng:
         labels = ['cluster', "snode"]
-        for k in io_stats_keys + ["status_code", "health_check", "cpu_busy_percentage", "cpu_core_utilization"]:
+        for k in io_stats_keys + ["status_code", "health_check"]:
             ng["snode_" + k] = Gauge("snode_" + k, "snode_" + k, labelnames=labels, registry=registry)
+
+        # Additional SPDK-specific metrics
+        ng["snode_cpu_busy_percentage"] = Gauge(
+            "snode_cpu_busy_percentage",
+            "Per-thread CPU Busy %",
+            labelnames=['cluster', 'snode', 'thread_name'],
+            registry=registry
+        )
+        ng["snode_cpu_core_utilization"] = Gauge(
+            "snode_cpu_core_utilization",
+            "Per-core CPU Utilization %",
+            labelnames=['cluster', 'snode', 'core_id', 'thread_names'],
+            registry=registry
+        )
     return ng
 
 def get_cluster_metrics():
