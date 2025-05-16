@@ -144,9 +144,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                                           disable_ha_jm=node_sample["enable_ha_jm"],
                                           enable_test_device=node_sample["enable_test_device"],
                                           spdk_debug=node_sample["spdk_debug"])
-            new_nodes_id.append(self.sbcli_utils.get_node_without_lvols())
             sleep_n_sec(60)
-
+            new_nodes_id.append(self.sbcli_utils.get_node_without_lvols())
             self.storage_nodes.append(ip)
             containers = self.ssh_obj.get_running_containers(node_ip=ip)
             self.container_nodes[ip] = containers

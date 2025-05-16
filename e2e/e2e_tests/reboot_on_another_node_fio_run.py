@@ -198,8 +198,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                         sleep_n_sec(5)
 
             # Step 8: Now mark node as primary
-            make_primary_cmd = f"{self.base_cmd} --dev storage-node make-primary {restart_target['node_uuid']}"
-            self.ssh_obj.exec_command(self.mgmt_nodes[0], make_primary_cmd)
+            self.ssh_obj.make_node_primary(self.mgmt_nodes[0], restart_target["node_uuid"])
 
             # Step 9: Wait for fio and node online
             self.common_utils.manage_fio_threads(self.mgmt_nodes[0], fio_threads, timeout=700)
@@ -208,7 +207,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                 self.logger.info(f"Checking fio log for lvol and clone for {lvol_name}")
                 self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Log"])
                 self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Clone"]["Log"])
-            self.logger.info(f"Testing migration jobs after timestamp")
+            self.logger.info(f"Testing migration jobs after timestamp: {timestamp}")
             self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
             
             for node in self.sbcli_utils.get_storage_nodes()["results"]:

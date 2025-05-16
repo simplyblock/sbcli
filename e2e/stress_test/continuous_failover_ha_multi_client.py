@@ -1065,8 +1065,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         while True:
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
-            # if iteration > 1:
-            #     self.restart_fio(iteration=iteration)
+            if iteration > 1:
+                self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
                 # self.delete_random_lvols(8)
