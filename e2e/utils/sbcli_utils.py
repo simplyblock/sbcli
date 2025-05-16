@@ -754,4 +754,4 @@ class SbcliUtils:
         Args:
             cluster_id (str): Activates the given cluster
         """
-        self.put_request(api_url=f"/lvol/resize/{cluster_id}")
+        self.put_request(api_url=f"/cluster/activate/{cluster_id}")
