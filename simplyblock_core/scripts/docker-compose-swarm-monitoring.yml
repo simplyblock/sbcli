@@ -81,14 +81,14 @@ services:
 #    networks:
 #      - monitoring-net
 
-  pushgateway:
-    image: prom/pushgateway
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
+  # pushgateway:
+  #   image: prom/pushgateway
+  #   deploy:
+  #     mode: global
+  #     placement:
+  #       constraints: [node.role == manager]
+  #   networks:
+  #     - monitoring-net
 
   prometheus:
     image: prom/prometheus:v2.44.0

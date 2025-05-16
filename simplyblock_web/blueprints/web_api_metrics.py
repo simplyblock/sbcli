@@ -94,7 +94,7 @@ def get_cluster_metrics():
     global cg
     if not cg:
         labels = ['cluster']
-        for k in io_stats_keys + ["status_code"]:
+        for k in io_stats_keys + ["status_code", "prov_cap_crit", "cap_crit"]:
             cg["cluster_" + k] = Gauge("cluster_" + k, "cluster_" + k, labelnames=labels, registry=registry)
     return cg
 
@@ -124,6 +124,8 @@ def get_data():
         records = db.get_cluster_stats(cl, 1)
         if records:
             data = records[0].get_clean_dict()
+            object_data =  cl.get_clean_dict()
+
             ng = get_cluster_metrics()
             for g in ng:
                 v = g.replace("cluster_", "")
@@ -131,6 +133,10 @@ def get_data():
                     ng[g].labels(cluster=cl.get_id()).set(data[v])
                 elif v == "status_code":
                     ng[g].labels(cluster=cl.get_id()).set(cl.get_status_code())
+                elif v == "prov_cap_crit":
+                    ng[g].labels(cluster=cl.get_id()).set(object_data[v])
+                elif v == "cap_crit":
+                    ng[g].labels(cluster=cl.get_id()).set(object_data[v])
 
         snodes = db.get_storage_nodes_by_cluster_id(cl.get_id())
         for node in snodes:
