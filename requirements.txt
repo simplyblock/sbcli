@@ -20,3 +20,4 @@ prometheus-client
 ec2-metadata
 flask-swagger-ui
 sentry-sdk[flask]
+setuptools>=70.0.0

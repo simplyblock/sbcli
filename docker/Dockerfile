@@ -17,8 +17,10 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
     	wget -q https://github.com/apple/foundationdb/releases/download/7.3.56/libfdb_c.x86_64.so -O /usr/lib64/libfdb_c.so ; \
     fi
 
-RUN pip install sbcli-dev
+WORKDIR /app
 
-RUN pip uninstall numpy -y
+COPY . /app
 
+RUN pip install -r requirements.txt
 
+RUN python setup.py install
