@@ -8,6 +8,8 @@ from flask import Blueprint
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core import db_controller
+from simplyblock_core.rpc_client import RPCClient
+
 
 from prometheus_client import generate_latest
 from flask import Response
@@ -70,7 +72,7 @@ def get_snode_metrics():
     global ng
     if not ng:
         labels = ['cluster', "snode"]
-        for k in io_stats_keys + ["status_code", "health_check"]:
+        for k in io_stats_keys + ["status_code", "health_check", "cpu_busy_percentage", "cpu_core_utilization"]:
             ng["snode_" + k] = Gauge("snode_" + k, "snode_" + k, labelnames=labels, registry=registry)
     return ng
 
@@ -126,6 +128,16 @@ def get_data():
             if not node.nvme_devices:
                 logger.error("No devices found in node: %s", node.get_id())
                 continue
+            
+            rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port,
+                node.rpc_username, node.rpc_password,
+                timeout=3*60, retry=10)
+
+            reactor_data = rpc_client.framework_get_reactors()
+            thread_data = rpc_client.thread_get_stats()
+
+            thread_busy_map = {t["id"]: t["busy"] for t in thread_data.get("threads", [])}    
 
             records = db.get_node_stats(node, 1)
             if records:
@@ -139,6 +151,33 @@ def get_data():
                         ng[g].labels(cluster=cl.get_id(), snode=node.get_id()).set(node.get_status_code())
                     elif v == "health_check":
                         ng[g].labels(cluster=cl.get_id(), snode=node.get_id()).set(node.health_check)
+
+                    for reactor in reactor_data.get("reactors", []):
+                        lcore = reactor.get("lcore")
+                        core_idle = reactor.get("idle", 0)
+                        core_busy = reactor.get("busy", 0)
+                        irq = reactor.get("irq", 0)
+                        sys = reactor.get("sys", 0)
+
+                        thread_names = ", ".join(thread["name"] for thread in reactor.get("lw_threads", []))
+                        if v == "cpu_busy_percentage":
+                            for thread in reactor.get("lw_threads", []):
+                                thread_name = thread.get("name")
+                                thread_id = thread.get("id")
+                                thread_busy = thread_busy_map.get(thread_id, 0)
+
+                                total_core_cycles = core_busy + core_idle
+                                cpu_usage_percent = (thread_busy / total_core_cycles) * 100 if total_core_cycles > 0 else 0
+
+                                ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), thread_name=thread_name).set(cpu_usage_percent)
+
+                        elif v == "cpu_core_utilization":
+
+                            total_cycle = core_busy + irq + sys
+                            total_with_idle = total_cycle + core_idle
+                            core_utilization = (total_cycle / total_with_idle) * 100 if total_with_idle > 0 else 0
+                            ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), core_id=str(lcore), thread_names=thread_names).set(core_utilization)
+
 
             for device in node.nvme_devices:
 
