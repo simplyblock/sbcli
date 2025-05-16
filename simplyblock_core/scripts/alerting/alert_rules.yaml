@@ -438,7 +438,7 @@ groups:
               model:
                 disableTextWrap: false
                 editorMode: builder
-                expr: cluster_prov_cap_critical
+                expr: cluster_prov_cap_crit
                 fullMetaSearch: false
                 includeNullMetadata: true
                 instant: true
@@ -526,7 +526,7 @@ groups:
               model:
                 disableTextWrap: false
                 editorMode: builder
-                expr: cluster_cap_critical
+                expr: cluster_cap_crit
                 fullMetaSearch: false
                 includeNullMetadata: true
                 instant: true

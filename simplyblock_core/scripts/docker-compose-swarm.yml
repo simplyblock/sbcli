@@ -9,18 +9,6 @@ x-service-base: &service-base
 
 services:
 
-  spdk-stats-collector:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/spdk_stats_collector.py"
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    deploy:
-      placement:
-        constraints: [ node.role == manager ]
-    networks:
-      - monitoring-net
-
   fdb-server:
     <<: *service-base
     image: foundationdb/foundationdb:7.3.42

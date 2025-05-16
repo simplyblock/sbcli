@@ -2549,13 +2549,13 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "cpu_busy_percentage{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "snode_cpu_busy_percentage{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
                 }
             ],
-            "title": "cpu_busy_percentage",
+            "title": "snode_cpu_busy_percentage",
             "type": "timeseries"
         },
         {
@@ -2641,13 +2641,13 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "cpu_core_utilization{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "snode_cpu_core_utilization{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
                 }
             ],
-            "title": "cpu_core_utilization",
+            "title": "snode_cpu_core_utilization",
             "type": "timeseries"
         }
     ],
