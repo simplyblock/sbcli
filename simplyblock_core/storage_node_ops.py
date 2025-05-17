@@ -2819,22 +2819,23 @@ def set_node_status(node_id, status, reconnect_on_online=True):
         snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
 
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node:
-            if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                try:
-                    sec_node.connect_to_hublvol(snode)
-                except Exception as e:
-                    logger.error("Error establishing hublvol: %s", e)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            if sec_node and snode.lvstore_status == "ready":
+                if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                    try:
+                        sec_node.connect_to_hublvol(snode)
+                    except Exception as e:
+                        logger.error("Error establishing hublvol: %s", e)
 
-
-        primary_node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-        if primary_node:
-            if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                try:
-                    snode.connect_to_hublvol(primary_node)
-                except Exception as e:
-                    logger.error("Error establishing hublvol: %s", e)
+            primary_node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
+            if primary_node and primary_node.lvstore_status == "ready":
+                if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                    try:
+                        snode.connect_to_hublvol(primary_node)
+                    except Exception as e:
+                        logger.error("Error establishing hublvol: %s", e)
 
 
     return True
