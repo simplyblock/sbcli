@@ -2883,8 +2883,8 @@ def recreate_lvstore_on_sec(secondary_node):
             tcp_ports_events.port_deny(primary_node, primary_node.lvol_subsys_port)
 
             ### 4- set leadership to false
-            primary_rpc_client.bdev_lvol_set_leader(primary_node.lvstore, leader=False)
-            primary_rpc_client.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+            # primary_rpc_client.bdev_lvol_set_leader(primary_node.lvstore, leader=False)
+            # primary_rpc_client.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
             # time.sleep(1)
 
         ### 5- examine
