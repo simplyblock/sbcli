@@ -13,7 +13,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 
 import docker
 
-from simplyblock_core import constants, scripts, distr_controller
+from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
@@ -1178,80 +1178,73 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
         snode.write_to_db(kv_store)
 
-        # make other nodes connect to the new devices
-        logger.info("Make other nodes connect to the new devices")
-        snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-        for node_index, node in enumerate(snodes):
-            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-                continue
-            logger.info(f"Connecting to node: {node.get_id()}")
-            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-            for dev in snode.nvme_devices:
-                if dev.status != NVMeDevice.STATUS_ONLINE:
-                    logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
-                    continue
-                name = f"remote_{dev.alceml_bdev}"
-                ret = rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
-                if not ret:
-                    logger.warning(f"Failed to connect to device: {name}")
-                    continue
-
-                dev.remote_bdev = f"{name}n1"
-                idx = -1
-                for i, d in enumerate(node.remote_devices):
-                    if d.get_id() == dev.get_id():
-                        idx = i
-                        break
-                if idx >= 0:
-                    node.remote_devices[idx] = dev
-                else:
-                    node.remote_devices.append(dev)
-
-            if node.enable_ha_jm:
-                node.remote_jm_devices = _connect_to_remote_jm_devs(node)
-            node.write_to_db(kv_store)
-            logger.info(f"connected to devices count: {len(node.remote_devices)}")
-            # time.sleep(3)
-
-        logger.info("Setting node status to Active")
-        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        #     logger.warning(
+        #         f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
+        #
+        #     logger.info("Setting node status to Active")
+        #     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        #
+        #     logger.info("Make other nodes connect to the node devices")
+        #     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        #     for node in snodes:
+        #         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+        #             continue
+        #         node.remote_devices = _connect_to_remote_devs(node)
+        #         node.write_to_db(kv_store)
+        #
+        #     continue
 
         snode = db_controller.get_storage_node_by_id(snode.get_id())
+        old_status = snode.status
+        snode.status =  StorageNode.STATUS_ONLINE
+        snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
+        snode.write_to_db(db_controller.kv_store)
 
-        if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
+        # distr_controller.send_node_status_event(snode, status)
+
+        logger.info("Make other nodes connect to the node devices")
+        snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        for node in snodes:
+            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                continue
+            node.remote_devices = _connect_to_remote_devs(node)
+            node.write_to_db(kv_store)
+
+        if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY, Cluster.STATUS_IN_EXPANSION]:
             logger.warning(
                 f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
-            logger.info("Done")
             continue
 
-        logger.info("Sending cluster map")
+        logger.info("Sending cluster map add node")
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
         snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
         for node_index, node in enumerate(snodes):
             if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
                 continue
             ret = distr_controller.send_cluster_map_add_node(snode, node)
 
-        # Create distribs
-        max_size = cluster.cluster_max_size
-        ret = create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                             cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
+        # for dev in snode.nvme_devices:
+        #     if dev.status == NVMeDevice.STATUS_ONLINE:
+        #         device_controller.device_set_unavailable(dev.get_id())
 
-        else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
-            logger.error("Failed to create lvstore")
-            return False
+        # logger.info("Setting node status to suspended")
+        # set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+        # logger.info("Done")
+
+        logger.info("Setting node status to Active")
+        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
 
         for dev in snode.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 tasks_controller.add_new_device_mig_task(dev.get_id())
 
         storage_events.snode_add(snode)
-        logger.info("Done")
+
+        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
+    logger.info("Done")
     return "Success"
 
 
@@ -3148,14 +3141,15 @@ def get_secondary_nodes(current_node):
         if node.get_id() == current_node.get_id():
             nod_found = True
             continue
-        if node.get_id() != current_node.get_id() and not node.lvstore_stack_secondary_1 \
-                and node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip \
-                and node.secondary_node_id != current_node.get_id():
-            nodes.append(node.get_id())
-            if nod_found:
-                return [node.get_id()]
-        if node.get_id() != current_node.get_id() and node.is_secondary_node:
-            return [node.get_id()]
+        # elif node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED] and node.mgmt_ip != current_node.mgmt_ip :
+        elif node.status == StorageNode.STATUS_ONLINE :
+            if node.is_secondary_node:
+                nodes.append(node.get_id())
+
+            elif not node.lvstore_stack_secondary_1:
+                nodes.append(node.get_id())
+                if nod_found:
+                    return [node.get_id()]
 
     return nodes
 
