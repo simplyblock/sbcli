@@ -460,7 +460,7 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     sg_cmd_list = [
         f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}",
     ]
-    if partition_percent:
+    if body.partition_percent:
         perc_per_partition = body.partition_percent
     else:
         perc_per_partition = int((100 - body.jm_percent) / body.num_partitions)
@@ -504,11 +504,11 @@ def delete_gpt_partitions_for_dev(body: _DeviceParams):
         logger.debug(ret)
         time.sleep(1)
 
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+    device_name = os.popen(f"ls /sys/devices/pci0000:00/{body.device_pci}/nvme/nvme*/ | grep nvme").read().strip()
     if device_name:
         cmd_list = [
             f"parted -fs /dev/{device_name} mklabel gpt",
-            f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+            f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
         ]
 
         for cmd in cmd_list:
