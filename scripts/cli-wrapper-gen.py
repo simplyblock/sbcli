@@ -80,7 +80,7 @@ def default_value(item):
         return value
     elif item_type == "bool":
         return value if isinstance(value, bool) else value.lower() == "true"
-    elif item_type == "size" or (isinstance(item_type, dict) and 'size' in type):
+    elif item_type == "size" or (isinstance(item_type, dict) and 'size' in item_type):
         return f"'{value}'"
     elif isinstance(item_type, dict) and 'range' in item_type:
         return f"{value}"
