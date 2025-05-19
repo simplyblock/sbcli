@@ -157,7 +157,7 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
 
         template = environment.get_template("cli-wrapper.jinja2")
         output = template.render({"commands": reference["commands"]})
-        with open("%s/simplyblock_cli/cli.py" % base_path, "t+w") as target:
+        with open("%s/cli.py" % base_path, "t+w") as target:
             target.write(output)
 
         print("Successfully generated cli.py")
