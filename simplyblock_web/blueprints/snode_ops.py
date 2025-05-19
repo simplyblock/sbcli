@@ -556,7 +556,7 @@ def bind_device_to_spdk(body: _DeviceParams):
 
 
 class _FirewallParams(BaseModel):
-    port_id: str
+    port_id: int
     port_type: str
     action: str
     rpc_port: int = Field(ge=1, le=65536)
