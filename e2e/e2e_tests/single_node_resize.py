@@ -186,8 +186,8 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
         for i in range(1,6):
             log_path = f"{self.log_path}_{i}"
             cl_log_path = f"{self.log_path}_cl_{i}"
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes,log_file=log_path)
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes,log_file=cl_log_path)
+            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],log_file=log_path)
+            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],log_file=cl_log_path)
         
         lvol_check_sum = {}
         
