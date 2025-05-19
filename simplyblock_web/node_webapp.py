@@ -52,6 +52,6 @@ if __name__ == '__main__':
 
     if mode == "storage_node_k8s":
         from simplyblock_web.blueprints import snode_ops_k8s
-        app.register_blueprint(snode_ops_k8s.bp)
+        app.register_api(snode_ops_k8s.api)
 
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)

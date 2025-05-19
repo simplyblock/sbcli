@@ -3,7 +3,7 @@
 import json
 import os
 import time
-from typing import Annotated, List, Optional, Union
+from typing import List, Optional, Union
 
 import cpuinfo
 import docker
@@ -127,14 +127,14 @@ def scan_devices():
 
 
 class SPDKParams(BaseModel):
-    server_ip: str = Field(default=None, pattern=utils.IP_PATTERN)
+    server_ip: str = Field(pattern=utils.IP_PATTERN)
     rpc_port: int = Field(constants.RPC_HTTP_PROXY_PORT, ge=1, le=65536)
     rpc_username: str
     rpc_password: str
     ssd_pcie: Optional[List[str]] = Field(None)
     spdk_debug: Optional[bool] = Field(False)
     l_cores: Optional[str] = Field(None)
-    spdk_mem: Optional[int] = Field(core_utils.parse_size('4GiB'))
+    spdk_mem: int = Field(core_utils.parse_size('4GiB'))
     total_mem: Optional[Union[int, str]] = Field('')
     multi_threading_enabled: Optional[bool] = Field(False)
     timeout: Optional[int] = Field(5 * 60)
@@ -441,10 +441,10 @@ def leave_swarm():
 
 
 class _GPTPartitionsParams(BaseModel):
-    nbd_device: Optional[str] = Field('/dev/nbd0')
-    jm_percent: Optional[int] = Field(3, ge=0, le=100)
-    num_partitions: Optional[int] = Field(1, ge=0)
-    partition_percent: Optional[int] = Field(0, ge=0, le=100)
+    nbd_device: str = Field('/dev/nbd0')
+    jm_percent: int = Field(3, ge=0, le=100)
+    num_partitions: int = Field(1, ge=0)
+    partition_percent: int = Field(0, ge=0, le=100)
 
 
 @api.post('/make_gpt_partitions', responses={
