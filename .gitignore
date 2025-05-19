@@ -12,3 +12,4 @@ dist
 
 .ruff_cache
 .env
+.tox
