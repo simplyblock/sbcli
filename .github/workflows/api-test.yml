@@ -31,7 +31,7 @@ jobs:
 
     - name: Run tests
       run: |
-        pytest simplyblock_web \
+        pytest -v simplyblock_web \
           --entrypoint=${{ inputs.cluster_ip }} \
           --cluster=${{ inputs.cluster_id }} \
           --secret=${{ inputs.cluster_secret }}
