@@ -3,7 +3,7 @@
 import json
 import os
 import time
-from typing import Annotated, List, Optional, Union
+from typing import List, Optional, Union
 
 import cpuinfo
 import docker
@@ -127,14 +127,14 @@ def scan_devices():
 
 
 class SPDKParams(BaseModel):
-    server_ip: str = Field(default=None, pattern=utils.IP_PATTERN)
+    server_ip: str = Field(pattern=utils.IP_PATTERN)
     rpc_port: int = Field(constants.RPC_HTTP_PROXY_PORT, ge=1, le=65536)
     rpc_username: str
     rpc_password: str
     ssd_pcie: Optional[List[str]] = Field(None)
     spdk_debug: Optional[bool] = Field(False)
     l_cores: Optional[str] = Field(None)
-    spdk_mem: Optional[int] = Field(core_utils.parse_size('4GiB'))
+    spdk_mem: int = Field(core_utils.parse_size('4GiB'))
     total_mem: Optional[Union[int, str]] = Field('')
     multi_threading_enabled: Optional[bool] = Field(False)
     timeout: Optional[int] = Field(5 * 60)
@@ -441,10 +441,10 @@ def leave_swarm():
 
 
 class _GPTPartitionsParams(BaseModel):
-    nbd_device: Optional[str] = Field('/dev/nbd0')
-    jm_percent: Optional[int] = Field(3, ge=0, le=100)
-    num_partitions: Optional[int] = Field(1, ge=0)
-    partition_percent: Optional[int] = Field(0, ge=0, le=100)
+    nbd_device: str = Field('/dev/nbd0')
+    jm_percent: int = Field(3, ge=0, le=100)
+    num_partitions: int = Field(1, ge=0)
+    partition_percent: int = Field(0, ge=0, le=100)
 
 
 @api.post('/make_gpt_partitions', responses={
@@ -460,7 +460,7 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     sg_cmd_list = [
         f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}",
     ]
-    if partition_percent:
+    if body.partition_percent:
         perc_per_partition = body.partition_percent
     else:
         perc_per_partition = int((100 - body.jm_percent) / body.num_partitions)
@@ -504,11 +504,11 @@ def delete_gpt_partitions_for_dev(body: _DeviceParams):
         logger.debug(ret)
         time.sleep(1)
 
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+    device_name = os.popen(f"ls /sys/devices/pci0000:00/{body.device_pci}/nvme/nvme*/ | grep nvme").read().strip()
     if device_name:
         cmd_list = [
             f"parted -fs /dev/{device_name} mklabel gpt",
-            f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+            f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
         ]
 
         for cmd in cmd_list:
@@ -556,7 +556,7 @@ def bind_device_to_spdk(body: _DeviceParams):
 
 
 class _FirewallParams(BaseModel):
-    port_id: str
+    port_id: int
     port_type: str
     action: str
     rpc_port: int = Field(ge=1, le=65536)
