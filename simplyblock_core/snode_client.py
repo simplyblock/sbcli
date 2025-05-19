@@ -67,6 +67,10 @@ class SNodeClient:
 
         if ret_code in [500, 400]:
             raise SNodeClientException("Invalid http status: %s" % ret_code)
+
+        if ret_code == 422:
+            raise SNodeClientException(f"Request validation failed: '{response.text}'")
+
         logger.error("Unknown http status: %s", ret_code)
         return None, None
 
