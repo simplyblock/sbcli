@@ -508,7 +508,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(2.0 * small_pool_count), int(1.5 * large_pool_count)
+    return int(4.0 * small_pool_count), int(1.5 * large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
