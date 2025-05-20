@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 FROM simplyblock/simplyblock:new-image-cluster
 
+RUN apt-get update ; apt-get upgrade -y
+
 RUN apt-get install -y \
     wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi iptables \
     iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl

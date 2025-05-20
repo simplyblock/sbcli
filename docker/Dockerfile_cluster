@@ -1,11 +1,9 @@
 # syntax=docker/dockerfile:1
-FROM python:3.11-slim-bullseye
+FROM python:3.11.12-slim-bullseye
 
 RUN apt-get update ; apt-get upgrade -y
 
-RUN apt-get install -y wget nano
-
-RUN rm -rf /var/lib/apt/lists/*
+RUN apt-get install -y wget nano libc6
 
 ARG TARGETPLATFORM
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
@@ -23,8 +21,7 @@ WORKDIR /app
 
 COPY . /app
 
-RUN pip3 install --upgrade pip
-RUN pip3 install setuptools --upgrade
+RUN pip install --upgrade pip setuptools
 
 RUN pip install -r requirements.txt
 
