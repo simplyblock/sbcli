@@ -9,7 +9,7 @@ x-service-base: &service-base
 
 x-cluster-service: &cluster-service
     <<: *service-base
-    image: "simplyblock/simplyblock:new-image"
+    image: "${SIMPLYBLOCK_DOCKER_IMAGE}-cluster"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -25,7 +25,7 @@ services:
 
   fdb-server:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.42
+    image: foundationdb/foundationdb:7.3.56
     networks:
       - hostnet
     environment:
@@ -48,7 +48,7 @@ services:
 
   fdb-backup-agent:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.42
+    image: foundationdb/foundationdb:7.3.56
     entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
     networks:
       - hostnet
