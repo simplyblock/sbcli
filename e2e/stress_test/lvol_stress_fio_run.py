@@ -383,6 +383,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                 timeout=100000
             )
 
+            self.resize_lvol_clone()
+
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"],
                                                     log_file=clone_details["Log"])
