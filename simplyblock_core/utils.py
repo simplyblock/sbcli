@@ -1279,7 +1279,7 @@ def calculate_unisolated_cores(cores):
     elif total <= 28:
         return 3
     else:
-        return int(total * 0.15)
+        return math.ceil(total * 0.15)
 
 
 def get_core_indexes(core_to_index, list_of_cores):
@@ -1328,7 +1328,11 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
         else:
             # Distribute cores equally between the nodes
             node_0_cores = available_cores[0:q1] + available_cores[2 * q1:3 * q1]
-            node_1_cores = available_cores[q1:2 * q1] + available_cores[3 * q1:]
+            node_1_cores = available_cores[q1:2 * q1] + available_cores[3 * q1:4 * q1]
+            if len(available_cores) % 4 >= 2:
+                node_0_cores.append(available_cores[4 * q1])
+                node_1_cores.append(available_cores[4 * q1 + 1])
+
 
             # Ensure the number of isolated cores is the same for both nodes
             min_isolated_cores = min(len(node_0_cores), len(node_1_cores))

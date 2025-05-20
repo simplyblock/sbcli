@@ -3049,7 +3049,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+        snode.rpc_username, snode.rpc_password, timeout=10, retry=2)
 
     if "crypto" in lvol.lvol_type:
         base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"

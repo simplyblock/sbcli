@@ -495,7 +495,7 @@ class SshUtils:
         max_attempts = 50
         attempt = 0
 
-        kill_cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
+        kill_cmd = f"curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
         output, error = self.exec_command(node=node, command=kill_cmd)
         # record the time when the kill command was last sent
         last_kill_time = time.time()
