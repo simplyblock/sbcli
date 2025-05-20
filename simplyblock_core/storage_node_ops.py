@@ -2899,7 +2899,7 @@ def recreate_lvstore_on_sec(secondary_node):
             tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
 
         ### 7- add lvols to subsystems
-        executor = ThreadPoolExecutor(max_workers=100)
+        executor = ThreadPoolExecutor(max_workers=50)
         for lvol in lvol_list:
             a = executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state="non_optimized")
 
@@ -3006,7 +3006,7 @@ def recreate_lvstore(snode):
             # return False
 
     ### 9- add lvols to subsystems
-    executor = ThreadPoolExecutor(max_workers=100)
+    executor = ThreadPoolExecutor(max_workers=50)
     for lvol in lvol_list:
         a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
