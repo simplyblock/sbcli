@@ -100,7 +100,7 @@ class StorageNode(BaseNodeObject):
     nvmf_port: int = 4420
     physical_label: int = 0
     hublvol: HubLVol = None
-    full_page_unmap: bool = False
+    full_page_unmap: bool = True
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node

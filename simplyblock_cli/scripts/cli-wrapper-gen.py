@@ -31,32 +31,23 @@ def no_newline(text):
     return re.sub("\n", "", text)
 
 
-def required(item):
-    if "action" in item:
-        return False
-    elif "default" in item:
-        return False
-    elif "private" in item and item["private"]:
-        return False
-    elif "required" in item and item["required"]:
-        return True
-    elif not item["name"].startswith("--"):
-        return True
-    return False
+def argument_type(spec):
+    if isinstance(spec, dict) and ((regex := spec.get('regex')) is not None):
+        regex = escape_strings(regex)
+        return f"regex_type(r'{regex}')"
 
+    if spec == 'size':
+        return f"size_type()"
 
-def data_type_name(item):
-    if "action" in item:
-        return "marker"
-    text = item["type"]
-    if text == "str":
-        return "string"
-    elif text == "int":
-        return "integer"
-    elif text == "bool":
-        return "boolean"
-    else:
-        return "unknown"
+    if isinstance(spec, dict) and ((size := spec.get('size')) is not None):
+        min = "utils.parse_size('{}')".format(size['min']) if 'min' in size else None
+        max = "utils.parse_size('{}')".format(size['max']) if 'max' in size else None
+        return f"size_type(min={min}, max={max})"
+
+    if isinstance(spec, dict) and ((range := spec.get('range')) is not None):
+        return f"range_type({range['min']}, {range['max']})"
+
+    return spec
 
 
 def escape_python_string(text):
@@ -90,12 +81,12 @@ def default_value(item):
         return value
     elif type == "bool":
         return value if isinstance(value, bool) else value.lower() == "true"
+    elif type == "size" or (isinstance(type, dict) and 'size' in type):
+        return f"'{value}'"
+    elif isinstance(type, dict) and 'range' in type:
+        return f"{value}"
     else:
         raise "unknown data type %s" % type
-
-
-def split_value_range(value):
-    return re.sub("\\.\\.", ', ', value)
 
 
 def arg_value(item):
@@ -144,8 +135,6 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         for command in reference["commands"]:
             for subcommand in command["subcommands"]:
                 if "arguments" in subcommand:
-                    for argument in subcommand["arguments"]:
-                        argument["required"] = False if "default" not in argument else True
                     arguments = select_arguments(subcommand["arguments"])
                     parameters = select_parameters(subcommand["arguments"])
                     subcommand["arguments"] = arguments
@@ -155,20 +144,18 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment = jinja2.Environment(loader=templateLoader)
 
         environment.filters["no_newline"] = no_newline
-        environment.filters["data_type_name"] = data_type_name
+        environment.filters["argument_type"] = argument_type
         environment.filters["default_value"] = default_value
-        environment.filters["required"] = required
         environment.filters["get_description"] = get_description
         environment.filters["escape_strings"] = escape_strings
         environment.filters["make_identifier"] = make_identifier
         environment.filters["bool_value"] = bool_value
-        environment.filters["split_value_range"] = split_value_range
         environment.filters["escape_python_string"] = escape_python_string
         environment.filters["nargs"] = nargs
 
         template = environment.get_template("cli-wrapper.jinja2")
         output = template.render({"commands": reference["commands"]})
-        with open("%s/simplyblock_cli/cli.py" % base_path, "t+w") as target:
+        with open("%s/cli.py" % base_path, "t+w") as target:
             target.write(output)
 
         print("Successfully generated cli.py")

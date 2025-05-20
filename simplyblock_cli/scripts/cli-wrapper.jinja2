@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # PYTHON_ARGCOMPLETE_OK
 
-from simplyblock_cli.clibase import CLIWrapperBase
+from simplyblock_cli.clibase import CLIWrapperBase, range_type, regex_type, size_type
 from simplyblock_core import utils
 import logging
 import sys
@@ -44,7 +44,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, '{{ subcommand.name }}', '{{ subcommand.help | escape_strings | escape_python_string }}')
 
 {%- for argument in subcommand.arguments %}
-        subcommand.add_argument('{{ argument.name }}', help='{{ argument.help | escape_strings | escape_python_string }}', type={{ argument.type }}
+        subcommand.add_argument('{{ argument.name }}', help='{{ argument.help | escape_strings | escape_python_string }}', type={{ argument.type | argument_type }}
 {%- if argument.default is defined and argument.action is undefined %}, default={{ argument | default_value }}{% endif %}
 {%- if argument.nargs is defined %}, nargs={{ argument | nargs }}{% endif %}
 {%- if argument.action is defined %}, dest='{{ argument.action }}'{% endif %})
@@ -60,13 +60,12 @@ class CLIWrapper(CLIWrapperBase):
 {%- endfor -%}
 {%- endif -%}
 , help='{{ parameter.help | escape_strings | escape_python_string }}'
-{%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type }}{% endif %}
+{%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type | argument_type }}{% endif %}
 {%- if parameter.default is defined and parameter.action is undefined %}, default={{ parameter | default_value }}{% endif %}
 {%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
-{%- if parameter.required is defined %}, required={{ parameter | required }}{% endif %}
+{%- if parameter.required is defined %}, required={{ parameter.required }}{% endif %}
 {%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
 {%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
-{%- if parameter.value_range %}, choices=range({{ parameter.value_range | split_value_range }}){% endif %}
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
 {%- else %}
@@ -77,13 +76,12 @@ class CLIWrapper(CLIWrapperBase):
 {%- endfor -%}
 {%- endif -%}
 , help='{{ parameter.help | escape_strings | escape_python_string }}'
-{%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type }}{% endif %}
+{%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type | argument_type }}{% endif %}
 {%- if parameter.default is defined %}, default={{ parameter | default_value }}{% endif %}
 {%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
-{%- if parameter.required is defined %}, required={{ parameter | required }}{% endif %}
+{%- if parameter.required is defined %}, required={{ parameter.required }}{% endif %}
 {%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
 {%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
-{%- if parameter.value_range %}, choices=range({{ parameter.value_range | split_value_range }}){% endif %}
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
 {%- endif %}

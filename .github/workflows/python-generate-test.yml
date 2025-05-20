@@ -25,7 +25,7 @@ jobs:
         pip install build
     - name: Checking cli.py status
       run: |
-        ./scripts/generate.sh
+        ./simplyblock_cli/scripts/generate.sh
         changes="$(git diff simplyblock_cli/cli.py)"
         if [[ "${changes}" ]]; then
           echo "cli.py has changed after regeneration. Stopping."

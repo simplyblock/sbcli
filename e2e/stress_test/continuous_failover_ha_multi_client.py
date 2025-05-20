@@ -738,10 +738,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
 
-            # self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
-            # self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
+            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
+            sleep_n_sec(10)
+            self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
             
 
     def delete_random_lvols(self, count):
@@ -1065,8 +1066,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         while True:
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
-            # if iteration > 1:
-            #     self.restart_fio(iteration=iteration)
+            if iteration > 1:
+                self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
                 # self.delete_random_lvols(8)

@@ -148,7 +148,7 @@ class RPCClient:
             "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
-            "num_shared_buffers": 24576,
+            "num_shared_buffers": 30000,
             "buf_cache_size": 1024,
             "dif_insert_or_strip": False,
             "c2h_success": True,
@@ -398,7 +398,7 @@ class RPCClient:
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
-                           write_protection=False, full_page_unmap=False):
+                           write_protection=False, full_page_unmap=True):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -427,7 +427,7 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=False):
+                            full_page_unmap=True):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".

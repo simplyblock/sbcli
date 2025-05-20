@@ -495,7 +495,7 @@ class SshUtils:
         max_attempts = 50
         attempt = 0
 
-        kill_cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
+        kill_cmd = f"curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
         output, error = self.exec_command(node=node, command=kill_cmd)
         # record the time when the kill command was last sent
         last_kill_time = time.time()
@@ -656,20 +656,14 @@ class SshUtils:
         return output, error
 
     def delete_all_snapshots(self, node):
-        cmd = "%s snapshot list | grep -i snapshot | awk '{print $2}'" % self.base_cmd
-        output, error = self.exec_command(node=node, command=cmd)
+        patterns = ["snap", "ss", "snapshot"]
+        for pattern in patterns:
+            cmd = "%s snapshot list | grep -i %s | awk '{print $2}'" % (self.base_cmd, pattern)
+            output, error = self.exec_command(node=node, command=cmd)
 
-        list_snapshot = output.strip().split()
-        for snapshot_id in list_snapshot:
-            self.delete_snapshot(node=node, snapshot_id=snapshot_id)
-
-        
-        cmd = "%s snapshot list | grep -i ss | awk '{print $2}'" % self.base_cmd
-        output, error = self.exec_command(node=node, command=cmd)
-
-        list_snapshot = output.strip().split()
-        for snapshot_id in list_snapshot:
-            self.delete_snapshot(node=node, snapshot_id=snapshot_id)
+            list_snapshot = output.strip().split()
+            for snapshot_id in list_snapshot:
+                self.delete_snapshot(node=node, snapshot_id=snapshot_id)
 
     def find_files(self, node, directory):
         command = f"sudo find {directory} -maxdepth 1 -type f"
@@ -1731,7 +1725,7 @@ class SshUtils:
             node_ip (str): Mgmt Node IP to run command on
             cluster_id (str): Cluster id to put in suspended state
         """
-        cmd = f"{self.base_cmd} --dev cluster set {cluster_id} status suspended"
+        cmd = f"{self.base_cmd} --dev -d cluster set {cluster_id} status suspended"
         output, _ = self.exec_command(node_ip, cmd)
         return output.strip().split()
 
@@ -1741,6 +1735,10 @@ class SshUtils:
 
     #     self.exec_command(node_ip, f"sudo tmux new-session -d -s netstat_log 'bash -c \"while true; do netstat -s | grep \\\"segments dropped\\\" >> {netstat_log}; sleep 5; done\"'")
     #     self.exec_command(node_ip, f"sudo tmux new-session -d -s dmesg_log 'bash -c \"while true; do sudo dmesg | grep -i \\\"tcp\\\" >> {dmesg_log}; sleep 5; done\"'")
+    
+    def make_node_primary(self, node_ip, node_id):
+        make_primary_cmd = f"{self.base_cmd} --dev -d storage-node make-primary {node_id}"
+        self.exec_command(node_ip, make_primary_cmd)
 
 
 class RunnerK8sLog:

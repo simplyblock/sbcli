@@ -36,6 +36,7 @@ CONFIG_KEYS = [
     "jc_singleton_core",
 ]
 
+
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
 
@@ -507,7 +508,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(2.0 * small_pool_count), int(1.5 * large_pool_count)
+    return int(4.0 * small_pool_count), int(1.5 * large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -1278,7 +1279,7 @@ def calculate_unisolated_cores(cores):
     elif total <= 28:
         return 3
     else:
-        return int(total * 0.15)
+        return math.ceil(total * 0.15)
 
 
 def get_core_indexes(core_to_index, list_of_cores):
@@ -1327,7 +1328,11 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
         else:
             # Distribute cores equally between the nodes
             node_0_cores = available_cores[0:q1] + available_cores[2 * q1:3 * q1]
-            node_1_cores = available_cores[q1:2 * q1] + available_cores[3 * q1:]
+            node_1_cores = available_cores[q1:2 * q1] + available_cores[3 * q1:4 * q1]
+            if len(available_cores) % 4 >= 2:
+                node_0_cores.append(available_cores[4 * q1])
+                node_1_cores.append(available_cores[4 * q1 + 1])
+
 
             # Ensure the number of isolated cores is the same for both nodes
             min_isolated_cores = min(len(node_0_cores), len(node_1_cores))
@@ -1359,7 +1364,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
     return node_distribution
 
 
-def regenerate_config(new_config, old_config):
+def regenerate_config(new_config, old_config, force=False):
     if len(old_config.get("nodes")) != len(new_config.get("nodes")):
         logger.error("The number of node in old config not equal to the number of node in updated config")
         return False
@@ -1369,16 +1374,18 @@ def regenerate_config(new_config, old_config):
         if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
             logger.error("The socket is changed, please rerun sbcli configure without upgrade firstly")
             return False
-        if old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"]:
+        if old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or force:
             try:
                 isolated_cores = hexa_to_cpu_list(new_config["nodes"][i]["cpu_mask"])
             except ValueError:
                 logger.error(f"The updated cpu mask is incorrect {new_config['nodes'][i]['cpu_mask']}")
                 return False
+            number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
+            old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
             old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
             old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])
             old_config["nodes"][i]["isolated"] = isolated_cores
-            distribution = calculate_core_allocations(isolated_cores)
+            distribution = calculate_core_allocations(isolated_cores, number_of_alcemls)
             core_to_index = {core: idx for idx, core in enumerate(isolated_cores)}
             old_config["nodes"][i]["distribution"] ={
                 "app_thread_core": get_core_indexes(core_to_index, distribution[0]),
@@ -1402,8 +1409,7 @@ def regenerate_config(new_config, old_config):
             if nic not in all_nics:
                 logger.error(f"The nic {nic} is not a member of system nics {all_nics}")
                 return False
-        number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
-        old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
+
         small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
                                                                   len(isolated_cores),
                                                                   number_of_poller_cores or len(
@@ -1446,8 +1452,6 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     logger.debug(f"Cores by numa {cores_by_numa}")
     nics = detect_nics()
     nvmes = detect_nvmes(pci_allowed, pci_blocked)
-
-    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket)
 
     for nid in sockets_to_use:
         if nid in cores_by_numa:
@@ -1494,6 +1498,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     all_nvmes_neg1_per_node = [[] for _ in range(total_nodes)]
     for i, nvme_name in enumerate(nvme_numa_neg1):
         all_nvmes_neg1_per_node[i % total_nodes].append(nvme_name)
+
+    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, )
 
     all_nodes = []
     node_index = 0
@@ -1572,7 +1578,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     nodes_config["nodes"] = all_nodes
     nodes_config["isolated_cores"] = list(all_isolated_cores)
     nodes_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
-    return nodes_config, system_info
+    final_config = regenerate_config(nodes_config, nodes_config, True)
+    return final_config, system_info
 
 
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):

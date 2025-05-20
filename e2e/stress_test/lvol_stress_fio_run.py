@@ -28,11 +28,12 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 20
+        self.total_lvols = 10
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
         self.lvol_size = "10G"
+        self.int_lvol_size = 10
         self.fio_size = "1G"
         self.fio_threads = []
         self.clone_mount_details = {}
@@ -150,8 +151,9 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
         if not available_lvols:
             self.logger.warning("No available lvols to create snapshots and clones.")
             return
-        for _ in range(5):
+        for _ in range(3):
             lvol = random.choice(available_lvols)
+            self.int_lvol_size += 1
             snapshot_name = f"snap_{lvol}"
             temp_name = f"{lvol}_{random_char(2)}"
             if snapshot_name in self.snapshot_names:
@@ -231,6 +233,30 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             fio_thread.start()
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
+
+    def resize_lvol_clone(self):
+        lvols = random.sample(list(self.lvol_mount_details.keys()), 2)
+        self.int_lvol_size += 1
+        for lvol in lvols:
+            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
+            sleep_n_sec(10)
+            for node in self.storage_nodes:
+                files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                self.logger.info(f"Files in /etc/simplyblock: {files}")
+                if "core.react" in files:
+                    raise Exception("Core file present after lvol resize! Not continuing resize!!")
+        
+        clones = random.sample(list(self.clone_mount_details.keys()), 2)
+        for clone in clones:
+            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[clone]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
+            sleep_n_sec(10)
+            for node in self.storage_nodes:
+                files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                self.logger.info(f"Files in /etc/simplyblock: {files}")
+                if "core.react" in files:
+                    raise Exception("Core file present after lvol resize! Not continuing resize!!")
 
     def delete_random_lvols(self, count):
         """Delete random lvols"""
@@ -347,8 +373,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             sleep_n_sec(600)
-            self.delete_random_lvols(7)
-            self.create_lvols_with_fio(5)
+            self.delete_random_lvols(3)
+            self.create_lvols_with_fio(2)
             self.create_snapshots_and_clones()
 
             self.common_utils.manage_fio_threads(
@@ -356,6 +382,8 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                 threads=self.fio_threads,
                 timeout=100000
             )
+
+            self.resize_lvol_clone()
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"],
