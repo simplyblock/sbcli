@@ -307,6 +307,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__activate(subparser)
         self.init_cluster__list(subparser)
         self.init_cluster__status(subparser)
+        self.init_cluster__complete_expand(subparser)
         self.init_cluster__show(subparser)
         self.init_cluster__get(subparser)
         self.init_cluster__get_capacity(subparser)
@@ -475,6 +476,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'status', 'Shows a cluster\'s status')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__complete_expand(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'complete-expand', 'Create lvstore on newly added nodes to the cluster')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__show(self, subparser):
@@ -1056,6 +1061,8 @@ class CLIWrapper(CLIWrapperBase):
                 ret = self.cluster__list(sub_command, args)
             elif sub_command in ['status']:
                 ret = self.cluster__status(sub_command, args)
+            elif sub_command in ['complete-expand']:
+                ret = self.cluster__complete_expand(sub_command, args)
             elif sub_command in ['show']:
                 ret = self.cluster__show(sub_command, args)
             elif sub_command in ['get']:
