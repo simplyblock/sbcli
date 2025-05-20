@@ -3137,7 +3137,13 @@ def get_secondary_nodes(current_node):
     db_controller = DBController()
     nodes = []
     nod_found = False
-    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    if len(all_nodes) == 2:
+        for node in all_nodes:
+            if node.get_id() != current_node.get_id():
+                return [node.get_id()]
+
+    for node in all_nodes:
         if node.get_id() == current_node.get_id():
             nod_found = True
             continue
