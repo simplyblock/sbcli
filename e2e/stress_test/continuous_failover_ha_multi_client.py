@@ -264,7 +264,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
     def perform_random_outage(self):
         """Perform a random outage on the cluster."""
         random.shuffle(self.outage_types)
-        random.shuffle(self.sn_nodes)
+        # random.shuffle(self.sn_nodes)
         outage_type = self.outage_types[0]
         self.current_outage_node = self.sn_nodes[0]
 
