@@ -62,7 +62,7 @@ class Cluster(BaseModel):
     tls: bool = False
     is_re_balancing: bool = False
     storage_tiering: bool = True
-    s3_endpoint: str = "http://192.168.10.146:9000"
+    s3_endpoint: str = "http://192.168.10.141:9000"
     s3_bucket: str = "mybucket"
 
     def get_status_code(self):
