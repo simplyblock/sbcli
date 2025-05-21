@@ -3147,8 +3147,8 @@ def get_secondary_nodes(current_node):
         if node.get_id() == current_node.get_id():
             nod_found = True
             continue
-        # elif node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED] and node.mgmt_ip != current_node.mgmt_ip :
-        elif node.status == StorageNode.STATUS_ONLINE :
+        elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip :
+        # elif node.status == StorageNode.STATUS_ONLINE :
             if node.is_secondary_node:
                 nodes.append(node.get_id())
 
