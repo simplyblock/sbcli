@@ -90,6 +90,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     else:
         raid_bdev = jm_nvme_bdevs[0]
 
+    alceml_id = snode.get_id()
     alceml_name = f"alceml_jm_{snode.get_id()}"
     nvme_bdev = raid_bdev
     pba_init_mode = 3
@@ -107,7 +108,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
 
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, str(uuid.uuid4()), pba_init_mode=pba_init_mode,
+    ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
                                         alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
                                         pba_page_size=cluster.page_size_in_blocks,
                                         full_page_unmap=snode.full_page_unmap)
@@ -121,7 +122,6 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         logger.error(f"Failed to create {jm_bdev}")
         return False
 
-    alceml_id = str(uuid.uuid4())
     pt_name = ""
     subsystem_nqn = ""
     IP = ""
@@ -154,7 +154,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     ret = rpc_client.get_bdevs(raid_bdev)
 
     return JMDevice({
-        'uuid': snode.get_id(),
+        'uuid': alceml_id,
         'device_name': jm_bdev,
         'size': ret[0]["block_size"] * ret[0]["num_blocks"],
         'status': JMDevice.STATUS_ONLINE,
