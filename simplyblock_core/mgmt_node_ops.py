@@ -199,7 +199,7 @@ def remove_mgmt_node(uuid):
 
     logger.info("Leaving swarm...")
     node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
-    node_docker.swarm.leave()
+    node_docker.swarm.leave(force=True)
 
     mgmt_events.mgmt_remove(snode)
     logging.info("done")
