@@ -97,7 +97,7 @@ setup(
     entry_points={
         'console_scripts': [
             f'{COMMAND_NAME}=simplyblock_cli.cli:main',
-            'sbctl=simplyblock_cli.cli:main',
+            # 'sbctl=simplyblock_cli.cli:main',
         ]
     },
     include_package_data=True,
