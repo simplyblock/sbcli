@@ -845,7 +845,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         outage_type = self.perform_random_outage()
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-            # self.delete_random_lvols(6)
+            self.delete_random_lvols(6)
             if not self.k8s_test:
                 for node in self.storage_nodes:
                     self.ssh_obj.restart_docker_logging(
@@ -1070,7 +1070,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                # self.delete_random_lvols(8)
+                self.delete_random_lvols(8)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
                         self.ssh_obj.restart_docker_logging(
