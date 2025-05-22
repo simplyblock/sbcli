@@ -35,8 +35,8 @@ fi
 
 envsubst < "$DIR"/charts/sb-mgmt/latest/values-template.yaml > "$DIR"/charts/sb-mgmt/latest/values.yaml
 
-helm upgrade --install sb-mgmt "$DIR"/charts/sb-mgmt/latest/ \
+/usr/local/bin/helm upgrade --install sb-mgmt "$DIR"/charts/sb-mgmt/latest/ \
   --namespace simplyblock \
   --create-namespace
 
-kubectl wait --for=condition=Ready pod --all --namespace simplyblock --timeout=180s
+/usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace simplyblock --timeout=180s
