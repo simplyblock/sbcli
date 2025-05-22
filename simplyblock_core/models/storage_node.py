@@ -251,3 +251,23 @@ class StorageNode(BaseNodeObject):
         if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
             pass
             # raise RPCException('Failed to connect secondary lvstore to primary')
+
+    def create_alceml(self, name, nvme_bdev, uuid, **kwargs):
+        logger.info(f"Adding {name}")
+        alceml_cpu_mask = ""
+        alceml_worker_cpu_mask = ""
+        if self.alceml_cpu_cores:
+            alceml_cpu_mask = utils.decimal_to_hex_power_of_2(self.alceml_cpu_cores[self.alceml_cpu_index])
+            self.alceml_cpu_index = (self.alceml_cpu_index + 1) % len(self.alceml_cpu_cores)
+        if self.alceml_worker_cpu_cores:
+            alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
+                self.alceml_worker_cpu_cores[self.alceml_worker_cpu_index])
+            self.alceml_worker_cpu_index = (self.alceml_worker_cpu_index + 1) % len(self.alceml_worker_cpu_cores)
+
+        return self.rpc_client().bdev_alceml_create(
+            name, nvme_bdev, str(uuid.uuid4()),
+            alceml_cpu_mask=alceml_cpu_mask,
+            alceml_worker_cpu_mask=alceml_worker_cpu_mask,
+            full_page_unmap=self.full_page_unmap,
+            **kwargs,
+        )

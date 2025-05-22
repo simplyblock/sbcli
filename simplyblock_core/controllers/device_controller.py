@@ -144,28 +144,12 @@ def _def_create_device_stack(device_obj, snode, force=False):
     alceml_name = get_alceml_name(alceml_id)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    write_protection = False
-    if cluster.distr_ndcs > 1:
-        write_protection = True
     if alceml_name not in bdev_names:
-        logger.info(f"adding {alceml_name}")
-
-        alceml_cpu_mask = ""
-        if snode.alceml_cpu_cores:
-            alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-            snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
-
-        alceml_worker_cpu_mask = ""
-        if snode.alceml_worker_cpu_cores:
-            alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
-                snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
-            snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
-
-        ret = rpc_client.bdev_alceml_create(
-            alceml_name, nvme_bdev, alceml_id, pba_init_mode=2,
-            alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-            pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection,
-            full_page_unmap=snode.full_page_unmap,
+        ret = snode.create_alceml(
+            alceml_name, nvme_bdev, alceml_id,
+            pba_init_mode=2,
+            write_protection=cluster.distr_ndcs > 1,
+            pba_page_size=cluster.page_size_in_blocks,
         )
 
         if not ret:
@@ -904,23 +888,12 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
             #         logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
             #         # return False
             #     nvme_bdev = jm_device.testing_bdev
-            alceml_cpu_mask = ""
-            alceml_worker_cpu_mask = ""
             #
-            if snode.alceml_cpu_cores:
-                alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-                snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
-
-            if snode.alceml_worker_cpu_cores:
-                alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
-                    snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
-                snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
-
             cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-            ret = rpc_client.bdev_alceml_create(
-                jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(), pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
-                alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks,
-                full_page_unmap=snode.full_page_unmap
+            ret = snode.create_alceml(
+                jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
+                pba_init_mode=1,
+                pba_page_size=cluster.page_size_in_blocks,
             )
 
             if not ret:
