@@ -90,6 +90,15 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     else:
         raid_bdev = jm_nvme_bdevs[0]
 
+    test_name = ""
+    if snode.enable_test_device:
+        test_name = f"{raid_bdev}_test"
+        ret = rpc_client.bdev_passtest_create(test_name, raid_bdev)
+        if not ret:
+            logger.error(f"Failed to create passtest bdev {test_name}")
+            return False
+        raid_bdev = test_name
+
     alceml_name = f"alceml_jm_{snode.get_id()}"
 
     alceml_id = str(uuid.uuid4())
