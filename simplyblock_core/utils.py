@@ -1385,7 +1385,7 @@ def regenerate_config(new_config, old_config, force=False):
             old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
             old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])
             old_config["nodes"][i]["isolated"] = isolated_cores
-            distribution = calculate_core_allocations(isolated_cores, number_of_alcemls)
+            distribution = calculate_core_allocations(isolated_cores, number_of_alcemls + 1)
             core_to_index = {core: idx for idx, core in enumerate(isolated_cores)}
             old_config["nodes"][i]["distribution"] ={
                 "app_thread_core": get_core_indexes(core_to_index, distribution[0]),
