@@ -166,6 +166,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             )
 
         # Step 4: Resume cluster
+        sleep_n_sec(60)
         self.logger.info("Expanding the cluster")
         self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 

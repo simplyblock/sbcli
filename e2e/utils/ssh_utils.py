@@ -769,7 +769,7 @@ class SshUtils:
         time.sleep(10)
 
         configure_cmd = f"{self.base_cmd} -d sn configure --max-lvol {max_lvol} --max-size {max_prov_gb}G"
-        deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname} || {{ echo 'Deploy command failed'; exit 1; }}"
+        deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname}"
         
         self.logger.info(f"Deploying storage node: {node}")
         self.exec_command(node=node, command=configure_cmd)
