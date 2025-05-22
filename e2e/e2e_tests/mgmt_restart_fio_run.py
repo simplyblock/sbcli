@@ -147,9 +147,9 @@ class TestMgmtNodeReboot(TestClusterBase):
 
         # Step: Cluster status and health
         self.sbcli_utils.wait_for_cluster_status(status="active", timeout=600)
-        for node in self.sbcli_utils.get_storage_nodes()["results"]:
-            self.sbcli_utils.wait_for_storage_node_status(node_id=node["uuid"], status="online", timeout=300)
-            self.sbcli_utils.wait_for_health_status(node_id=node["uuid"], status=True, timeout=300)
+        for snode in self.sbcli_utils.get_storage_nodes()["results"]:
+            self.sbcli_utils.wait_for_storage_node_status(node_id=snode["uuid"], status="online", timeout=300)
+            self.sbcli_utils.wait_for_health_status(node_id=snode["uuid"], status=True, timeout=300)
 
         # Step: Wait for FIO (if not already done)
         if mode != "after_fio":
