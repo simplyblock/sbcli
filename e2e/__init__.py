@@ -85,7 +85,7 @@ def get_all_tests(custom=True, ha_test=False):
         # TestAddNodesDuringFioRun,
         # TestRestartNodeOnAnotherHost,
         TestSingleNodeResizeLvolCone,
-        TestMgmtNodeReboot,
+        # TestMgmtNodeReboot,
         # FioWorkloadTest,
         # TestMultiFioSnapshotDowntime,
         # TestManyLvolSameNode,

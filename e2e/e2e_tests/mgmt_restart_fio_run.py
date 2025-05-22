@@ -20,6 +20,7 @@ class TestMgmtNodeReboot(TestClusterBase):
 
         self.sbcli_utils.add_storage_pool(self.pool_name)
         lvol_details = {}
+        node = random.choice(self.fio_node)
 
         for i, _ in enumerate(self.storage_nodes):
             node_uuid = self.sbcli_utils.get_node_without_lvols()
@@ -29,17 +30,17 @@ class TestMgmtNodeReboot(TestClusterBase):
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for cmd in connect_ls:
-                self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+                self.ssh_obj.exec_command(node, cmd)
 
-            device = self.ssh_obj.get_lvol_vs_device(self.mgmt_nodes[0], lvol_id)
+            device = self.ssh_obj.get_lvol_vs_device(node, lvol_id)
             mount_path = f"{self.mount_base}/{lvol_name}"
             log_path = f"{self.log_base}/{lvol_name}.log"
-            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
-            self.ssh_obj.mount_path(self.mgmt_nodes[0], device, mount_path)
+            self.ssh_obj.format_disk(node, device)
+            self.ssh_obj.mount_path(node, device, mount_path)
 
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
-                args=(self.mgmt_nodes[0], None, mount_path, log_path),
+                args=(node, None, mount_path, log_path),
                 kwargs={
                     "size": "500M",
                     "name": f"{lvol_name}_fio",
@@ -77,13 +78,13 @@ class TestMgmtNodeReboot(TestClusterBase):
             clone_id = self.sbcli_utils.get_lvol_id(clone_name)
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
             for cmd in connect_ls:
-                self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+                self.ssh_obj.exec_command(node, cmd)
 
-            device = self.ssh_obj.get_lvol_vs_device(self.mgmt_nodes[0], clone_id)
+            device = self.ssh_obj.get_lvol_vs_device(node, clone_id)
             cl_mount = f"{self.mount_base}/{clone_name}"
             cl_log = f"{self.log_base}/{clone_name}.log"
-            self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
-            self.ssh_obj.mount_path(self.mgmt_nodes[0], device, cl_mount)
+            self.ssh_obj.format_disk(node, device)
+            self.ssh_obj.mount_path(node, device, cl_mount)
 
             lvol_details[lvol_name]["Clone"].update({
                 "ID": clone_id,
@@ -94,7 +95,7 @@ class TestMgmtNodeReboot(TestClusterBase):
 
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
-                args=(self.mgmt_nodes[0], None, cl_mount, cl_log),
+                args=(node, None, cl_mount, cl_log),
                 kwargs={
                     "size": "500M",
                     "name": f"{clone_name}_fio",
@@ -123,7 +124,7 @@ class TestMgmtNodeReboot(TestClusterBase):
 
         if mode == "after_fio":
             self.logger.info("Waiting for all FIO threads to complete before reboot...")
-            self.common_utils.manage_fio_threads(self.mgmt_nodes[0], fio_threads, timeout=1000)
+            self.common_utils.manage_fio_threads(node, fio_threads, timeout=1000)
         else:
             wait_map = {"1m": 60, "5m": 300, "10m": 600}
             sleep_n_sec(wait_map[mode])
@@ -153,12 +154,12 @@ class TestMgmtNodeReboot(TestClusterBase):
         # Step: Wait for FIO (if not already done)
         if mode != "after_fio":
             self.logger.info("Waiting for FIO to complete post reboot...")
-            self.common_utils.manage_fio_threads(self.mgmt_nodes[0], fio_threads, timeout=1000)
+            self.common_utils.manage_fio_threads(node, fio_threads, timeout=1000)
 
         # Step: FIO validation
         for lvol_name, lvol_detail in lvol_details.items():
             self.logger.info(f"Validating FIO logs for {lvol_name} and clone...")
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Log"])
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Clone"]["Log"])
+            self.common_utils.validate_fio_test(node=node, log_file=lvol_detail["Log"])
+            self.common_utils.validate_fio_test(node=node, log_file=lvol_detail["Clone"]["Log"])
 
         self.logger.info("TEST CASE PASSED !!!")
