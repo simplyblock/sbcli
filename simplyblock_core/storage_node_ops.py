@@ -1235,7 +1235,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         # logger.info("Done")
 
         logger.info("Setting node status to Active")
-        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, reconnect_on_online=False)
 
         for dev in snode.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
