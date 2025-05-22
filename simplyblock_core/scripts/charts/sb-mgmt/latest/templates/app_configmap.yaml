@@ -1,0 +1,105 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simplyblock-config
+  namespace: {{ .Release.Namespace }}
+
+data:
+  LOG_LEVEL: {{ .Values.log.level }}
+  FDB_CLUSTER_FILE_CONTENTS: {{ .Values.foundationdb.fdbClusterFileContent }}
+  LOG_DELETION_INTERVAL: {{ .Values.log.deletionInterval }}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simplyblock-haproxy-config
+  namespace: {{ .Release.Namespace }}
+data:
+  haproxy.cfg: |
+    global
+        log          fd@2 local2
+        chroot       /var/lib/haproxy
+        pidfile      /var/run/haproxy.pid
+        maxconn      4000
+        user         haproxy
+        group        haproxy
+        stats socket /var/lib/haproxy/stats expose-fd listeners
+        master-worker
+
+    resolvers kube-dns
+        nameserver dns1 kube-dns.kube-system.svc.cluster.local:53
+        resolve_retries 3
+        timeout resolve 1s
+        timeout retry   1s
+        hold other      10s
+        hold refused    10s
+        hold nx         10s
+        hold timeout    10s
+        hold valid      10s
+        hold obsolete   10s
+
+    defaults
+        timeout connect 10s
+        timeout client 120s
+        timeout server 120s
+        log global
+        mode http
+        option httplog
+
+    backend stat
+        stats enable
+        stats uri /
+        stats refresh 10s
+        stats show-legends
+        stats show-node
+        stats hide-version
+        stats auth admin:admin
+
+    backend wep_api_services
+        balance roundrobin
+        server-template webapi- 3 simplyblock-webappapi.{{ .Release.Namespace }}.svc.cluster.local:5000 check resolvers kube-dns init-addr libc,none
+
+    backend grafana_services
+        balance roundrobin
+        http-request set-path %[path,regsub(^/grafana/?,/)]
+        server-template grafana- 1 simplyblock-grafana.{{ .Release.Namespace }}.svc.cluster.local:3000 check resolvers kube-dns init-addr libc,none
+
+    backend graylog_services
+        balance roundrobin
+        http-request set-path %[path,regsub(^/graylog/?,/)]
+        server-template graylog- 1 simplyblock-graylog.{{ .Release.Namespace }}.svc.cluster.local:9000 check resolvers kube-dns init-addr libc,none
+
+    backend haproxy_services
+        http-request set-path %[path,regsub(^/haproxy/?,/)]
+        stats enable
+        stats uri /
+        stats refresh 10s
+        stats show-legends
+        stats show-node
+
+    backend graylog_input_services
+        mode tcp
+        balance roundrobin
+        server-template graylog_input- 1 simplyblock-graylog.{{ .Release.Namespace }}.svc.cluster.local:12201 check resolvers kube-dns init-addr libc,none
+
+    backend opensearch_services
+        balance roundrobin
+        server-template opensearch- 1 simplyblock-opensearch.{{ .Release.Namespace }}.svc.cluster.local:9200 check resolvers kube-dns init-addr libc,none
+
+    frontend web_api_front
+        bind *:80
+        use_backend grafana_services if { path /grafana } || { path_beg /grafana/ }
+        use_backend graylog_services if { path /graylog } || { path_beg /graylog/ }
+        use_backend haproxy_services if { path /haproxy } || { path_beg /haproxy/ }
+        default_backend wep_api_services
+
+    frontend graylog_input_front
+        bind *:12202
+        mode tcp
+        default_backend graylog_input_services
+
+    frontend opensearch_front
+        bind *:9200
+        default_backend opensearch_services

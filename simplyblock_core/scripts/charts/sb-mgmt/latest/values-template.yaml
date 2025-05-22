@@ -1,0 +1,25 @@
+graylog:
+  rootPasswordSha2: "${GRAYLOG_ROOT_PASSWORD_SHA2}"
+  passwordSecret: "${GRAYLOG_PASSWORD_SECRET}"
+
+cluster:
+  secret: "${CLUSTER_SECRET}"
+  id: "${CLUSTER_ID}"
+
+log:
+  deletionInterval: "${LOG_DELETION_INTERVAL}"
+  retentionPeriod: "${RETENTION_PERIOD}"
+  level: "${LOG_LEVEL}"
+  maxNumberIndex: "${MAX_NUMBER_OF_INDICES}"
+
+foundationdb:
+  fdbClusterFileContent: "${FDB_CLUSTER_FILE_CONTENTS}"
+
+grafana:
+  endpoint: "${GRAFANA_ENDPOINT}"
+
+image:
+  simplyblock: 
+    repository: "${SIMPLYBLOCK_REPOSITORY}"
+    tag: "${SIMPLYBLOCK_TAG}"
+    pullPolicy: "Always"

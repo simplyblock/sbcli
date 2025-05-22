@@ -1,0 +1,127 @@
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-mongodb
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-mongodb
+  ports:
+    - port: 27017
+      targetPort: 27017
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-opensearch
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-opensearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-graylog
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-graylog
+  ports:
+    - name: web
+      port: 9000
+      targetPort: 9000
+    - name: gelf-tcp
+      port: 12201
+      protocol: TCP
+      targetPort: 12201
+    - name: gelf-udp
+      port: 12201
+      protocol: UDP
+      targetPort: 12201
+  
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-prometheus
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-prometheus
+  ports:
+    - name: prometheus
+      port: 9090
+      targetPort: 9090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-thanos-sidecar
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-thanos-sidecar
+  ports:
+    - name: thanos-sidecar
+      port: 10901
+      targetPort: 10901
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-thanos-store
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-thanos-store
+  ports:
+    - name: thanos-store
+      port: 10901
+      targetPort: 10901
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-thanos-query
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-thanos-query
+  ports:
+    - name: thanos-query
+      port: 9091
+      targetPort: 9091
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-node-exporter
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-node-exporter
+  ports:
+    - name: node-exporter
+      port: 9100
+      targetPort: 9100
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-grafana
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-grafana
+  ports:
+    - name: grafana
+      port: 3000
+      targetPort: 3000

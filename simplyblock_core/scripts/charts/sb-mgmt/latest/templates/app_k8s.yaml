@@ -1,0 +1,828 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-fdb-server
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-fdb-server
+  template:
+    metadata:
+      labels:
+        app: simplyblock-fdb-server
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"  
+      containers:
+      - name: fdb-server
+        image: foundationdb/foundationdb:7.3.42
+        ports:
+        - containerPort: 4500
+        env:
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        - name: FDB_CLUSTER_FILE
+          value: "/etc/foundationdb/fdb.cluster"
+        - name: FDB_NETWORKING_MODE
+          value: "container"
+        volumeMounts:
+        - name: fdb-data
+          mountPath: /var/fdb/data
+        - name: fdb-logs
+          mountPath: /var/fdb/logs
+        - name: cluster-file
+          mountPath: /etc/foundationdb
+      volumes:
+      - name: fdb-data
+        hostPath:
+          path: /etc/foundationdb/data
+      - name: fdb-logs
+        hostPath:
+          path: /etc/foundationdb/logs
+      - name: cluster-file
+        hostPath:
+          path: /etc/foundationdb
+      hostNetwork: true
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-fdb-backup-agent
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-fdb-backup-agent
+  template:
+    metadata:
+      labels:
+        app: simplyblock-fdb-backup-agent
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true" 
+      containers:
+      - name: fdb-backup-agent
+        image: foundationdb/foundationdb:7.3.42
+        command: ["/usr/bin/backup_agent", "-C", "/etc/foundationdb/fdb.cluster"]
+        env:
+        - name: FDB_CLUSTER_FILE
+          value: "/etc/foundationdb/fdb.cluster"
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+      volumes:
+      - name: cluster-file
+        hostPath:
+          path: /etc/foundationdb/fdb.cluster
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: simplyblock-webappapi
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: simplyblock-webappapi
+  template:
+    metadata:
+      labels:
+        app: simplyblock-webappapi
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true" 
+      containers:
+      - name: webappapi
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        ports:
+        - containerPort: 5000
+        command: ["python", "simplyblock_web/app.py"]
+        env:
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        - name: FLASK_DEBUG
+          value: "False"
+        - name: FLASK_ENV
+          value: "production"
+        volumeMounts:
+        - name: fdb-config
+          mountPath: /etc/foundationdb
+      volumes:
+      - name: fdb-config
+        hostPath:
+          path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-storage-node-monitor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-storage-node-monitor
+  template:
+    metadata:
+      labels:
+        app: simplyblock-storage-node-monitor
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true" 
+      containers:
+      - name: storage-node-monitor
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["python", "simplyblock_core/services/storage_node_monitor.py"]
+        env:
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        volumeMounts:
+        - name: fdb-config
+          mountPath: /etc/foundationdb
+      volumes:
+      - name: fdb-config
+        hostPath:
+          path: /etc/foundationdb
+      
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-mgmt-node-monitor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-mgmt-node-monitor
+  template:
+    metadata:
+      labels:
+        app: simplyblock-mgmt-node-monitor
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: mgmt-node-monitor
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/mgmt_node_monitor.py"]
+          env:
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-caching-node-monitor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-caching-node-monitor
+  template:
+    metadata:
+      labels:
+        app: simplyblock-caching-node-monitor
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: caching-node-monitor
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/caching_node_monitor.py"]
+          env:
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-lvol-stats-collector
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-lvol-stats-collector
+  template:
+    metadata:
+      labels:
+        app: simplyblock-lvol-stats-collector
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: lvol-stats-collector
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/lvol_stat_collector.py"]
+          env:
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-cached-lvol-stats-collector
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-cached-lvol-stats-collector
+  template:
+    metadata:
+      labels:
+        app: simplyblock-cached-lvol-stats-collector
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: cached-lvol-stats-collector
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/cached_lvol_stat_collector.py"]
+          env:
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-main-distr-event-collector
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-main-distr-event-collector
+  template:
+    metadata:
+      labels:
+        app: simplyblock-main-distr-event-collector
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: main-distr-event-collector
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/main_distr_event_collector.py"]
+          env:
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-capacity-and-stats-collector
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-capacity-and-stats-collector
+  template:
+    metadata:
+      labels:
+        app: simplyblock-capacity-and-stats-collector
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+      - name: capacity-and-stats-collector
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["python", "simplyblock_core/services/capacity_and_stats_collector.py"]
+        env:
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        volumeMounts:
+        - mountPath: /etc/foundationdb
+          name: foundationdb-volume
+      volumes:
+      - name: foundationdb-volume
+        hostPath:
+          path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-capacity-monitor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-capacity-monitor
+  template:
+    metadata:
+      labels:
+        app: simplyblock-capacity-monitor
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+      - name: capacity-monitor
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["python", "simplyblock_core/services/cap_monitor.py"]
+        env:
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        volumeMounts:
+        - mountPath: /etc/foundationdb
+          name: foundationdb-volume
+      volumes:
+      - name: foundationdb-volume
+        hostPath:
+          path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-health-check
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-health-check
+  template:
+    metadata:
+      labels:
+        app: simplyblock-health-check
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+      - name: health-check
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["python", "simplyblock_core/services/health_check_service.py"]
+        env:
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        volumeMounts:
+        - mountPath: /etc/foundationdb
+          name: foundationdb-volume
+      volumes:
+      - name: foundationdb-volume
+        hostPath:
+          path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-device-monitor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-device-monitor
+  template:
+    metadata:
+      labels:
+        app: simplyblock-device-monitor
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+      - name: device-monitor
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["python", "simplyblock_core/services/device_monitor.py"]
+        env:
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
+        volumeMounts:
+        - mountPath: /etc/foundationdb
+          name: foundationdb-volume
+      volumes:
+      - name: foundationdb-volume
+        hostPath:
+          path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-lvol-monitor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-lvol-monitor
+  template:
+    metadata:
+      labels:
+        app: simplyblock-lvol-monitor
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+      - name: lvol-monitor
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["python", "simplyblock_core/services/lvol_monitor.py"]
+        env:
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        volumeMounts:
+        - mountPath: /etc/foundationdb
+          name: foundationdb-volume
+      volumes:
+      - name: foundationdb-volume
+        hostPath:
+          path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-cleanupfdb
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-cleanupfdb
+  template:
+    metadata:
+      labels:
+        app: simplyblock-cleanupfdb
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: cleanupfdb
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/workers/cleanup_foundationdb.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+            - name: LOG_DELETION_INTERVAL
+              value: "${LOG_DELETION_INTERVAL}"
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks-runner-restart
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks-runner-restart
+  template:
+    metadata:
+      labels:
+        app: simplyblock-tasks-runner-restart
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: tasks-runner-restart
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_restart.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks-runner-migration
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks-runner-migration
+  template:
+    metadata:
+      labels:
+        app: simplyblock-tasks-runner-migration
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: tasks-runner-migration
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_migration.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks-runner-failed-migration
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks-runner-failed-migration
+  template:
+    metadata:
+      labels:
+        app: simplyblock-tasks-runner-failed-migration
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: tasks-runner-failed-migration
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_failed_migration.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks-runner-cluster-status
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks-runner-cluster-status
+  template:
+    metadata:
+      labels:
+        app: simplyblock-tasks-runner-cluster-status
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: tasks-runner-cluster-status
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_cluster_status.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks-runner-new-device-migration
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks-runner-new-device-migration
+  template:
+    metadata:
+      labels:
+        app: simplyblock-tasks-runner-new-device-migration
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: tasks-runner-new-device-migration
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_new_dev_migration.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks-node-add-runner
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks-node-add-runner
+  template:
+    metadata:
+      labels:
+        app: simplyblock-tasks-node-add-runner
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: tasks-node-addrunner
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_node_add.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
+      volumes:
+        - name: foundationdb
+          hostPath:
+            path: /etc/foundationdb
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: simplyblock-haproxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: simplyblock-haproxy
+  template:
+    metadata:
+      labels:
+        app: simplyblock-haproxy
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+      - name: haproxy
+        image: haproxytech/haproxy-debian:latest
+        ports:
+        - containerPort: 80
+        - containerPort: 12202
+        - containerPort: 9200
+        env:
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
+        volumeMounts:
+        - name: haproxy-config
+          mountPath: /usr/local/etc/haproxy/haproxy.cfg
+          subPath: haproxy.cfg
+      volumes:
+      - name: haproxy-config
+        configMap:
+          name: simplyblock-haproxy-config
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet

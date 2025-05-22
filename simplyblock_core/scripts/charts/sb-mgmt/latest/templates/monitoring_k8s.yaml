@@ -1,0 +1,579 @@
+              
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-mongodb-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-mongodb
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-mongodb
+  template:
+    metadata:
+      labels:
+        app: simplyblock-mongodb
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: mongodb
+          image: mongo:6.0
+          volumeMounts:
+            - mountPath: /data/db
+              name: simplyblock-mongodb-data
+      volumes:
+        - name: simplyblock-mongodb-data
+          persistentVolumeClaim:
+            claimName: simplyblock-mongodb-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-os-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-opensearch
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-opensearch
+  template:
+    metadata:
+      labels:
+        app: simplyblock-opensearch
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.4.0
+          env:
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms1g -Xmx1g"
+            - name: bootstrap.memory_lock
+              value: "true"
+            - name: discovery.type
+              value: "single-node"
+            - name: action.auto_create_index
+              value: "false"
+            - name: plugins.security.ssl.http.enabled
+              value: "false"
+            - name: plugins.security.disabled
+              value: "true"
+          volumeMounts:
+            - mountPath: /usr/share/opensearch/data
+              name: simplyblock-os-data
+      volumes:
+        - name: simplyblock-os-data
+          persistentVolumeClaim:
+            claimName: simplyblock-os-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-graylog-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-graylog-journal
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-graylog
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-graylog
+  template:
+    metadata:
+      labels:
+        app: simplyblock-graylog
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: graylog
+          image: graylog/graylog:6.2.2
+          command: ["/usr/bin/tini", "--"]
+          args: ["wait-for-it", "simplyblock-opensearch:9200", "--", "/docker-entrypoint.sh"]
+          env:
+            - name: GRAYLOG_NODE_ID_FILE
+              value: "/usr/share/graylog/data/config/node-id"
+            - name: GRAYLOG_PASSWORD_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: simplyblock-graylog-secret
+                  key: GRAYLOG_PASSWORD_SECRET
+            - name: GRAYLOG_ROOT_PASSWORD_SHA2
+              valueFrom:
+                secretKeyRef:
+                  name: simplyblock-graylog-secret
+                  key: GRAYLOG_ROOT_PASSWORD_SHA2
+            - name: GRAYLOG_HTTP_BIND_ADDRESS
+              value: "0.0.0.0:9000"
+            - name: GRAYLOG_HTTP_EXTERNAL_URI
+              value: "http://localhost/graylog/"
+            - name: GRAYLOG_ELASTICSEARCH_HOSTS
+              value: "http://simplyblock-opensearch:9200"
+            - name: GRAYLOG_MONGODB_URI
+              value: "mongodb://simplyblock-mongodb:27017/graylog"
+            - name: GRAYLOG_SKIP_PREFLIGHT_CHECKS
+              value: "true"
+            - name: GRAYLOG_ROTATION_STRATEGY
+              value: "time"
+            - name: GRAYLOG_RETENTION_STRATEGY
+              value: "delete"
+            - name: GRAYLOG_ELASTICSEARCH_MAX_NUMBER_OF_INDICES
+              valueFrom:
+                secretKeyRef:
+                  name: simplyblock-graylog-secret
+                  key: MAX_NUMBER_OF_INDICES
+            - name: GRAYLOG_ELASTICSEARCH_MAX_TIME_PER_INDEX
+              value: "1d"
+            - name: GRAYLOG_RING_SIZE
+              value: "4096"
+            - name: GRAYLOG_INPUTBUFFER_RING_SIZE
+              value: "8192"
+            - name: GRAYLOG_VERSIONCHECKS
+              value: "false"
+          ports:
+            - containerPort: 5044
+            - containerPort: 5140
+              protocol: UDP
+            - containerPort: 5140
+            - containerPort: 5555
+            - containerPort: 5555
+              protocol: UDP
+            - containerPort: 12201
+            - containerPort: 12201
+              protocol: UDP
+            - containerPort: 13301
+            - containerPort: 13302
+          volumeMounts:
+            - mountPath: /usr/share/graylog/data/data
+              name: simplyblock-graylog-data
+            - mountPath: /usr/share/graylog/data/journal
+              name: simplyblock-graylog-journal
+      volumes:
+        - name: simplyblock-graylog-data
+          persistentVolumeClaim:
+            claimName: simplyblock-graylog-data
+        - name: simplyblock-graylog-journal
+          persistentVolumeClaim:
+            claimName: simplyblock-graylog-journal
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-prometheus-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-prometheus
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-prometheus
+  template:
+    metadata:
+      labels:
+        app: simplyblock-prometheus
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.44.0
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.no-lockfile"
+            - "--storage.tsdb.retention.time=30d"
+            - "--storage.tsdb.min-block-duration=2h"
+            - "--storage.tsdb.max-block-duration=2h"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/prometheus
+            - name: prometheus-data
+              mountPath: /prometheus
+      volumes:
+        - name: config-volume
+          configMap:
+            name: simplyblock-prometheus-config
+        - name: prometheus-data
+          persistentVolumeClaim:
+            claimName: simplyblock-prometheus-data
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-thanos-sidecar
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-thanos-sidecar
+  template:
+    metadata:
+      labels:
+        app: simplyblock-thanos-sidecar
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: thanos-sidecar
+          image: thanosio/thanos:v0.31.0
+          args:
+            - sidecar
+            - --tsdb.path=/prometheus
+            - --prometheus.url=http://simplyblock-prometheus:9090
+            - --objstore.config-file=/etc/thanos/objstore.yml
+          volumeMounts:
+            - name: prometheus-data
+              mountPath: /prometheus
+            - name: objstore-config
+              mountPath: /etc/thanos
+      volumes:
+        - name: prometheus-data
+          persistentVolumeClaim:
+            claimName: simplyblock-prometheus-data
+        - name: objstore-config
+          configMap:
+            name: simplyblock-objstore-config
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-thanos-store
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-thanos-store
+  template:
+    metadata:
+      labels:
+        app: simplyblock-thanos-store
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: thanos-store
+          image: thanosio/thanos:v0.31.0
+          args:
+            - store
+            - --objstore.config-file=/etc/thanos/objstore.yml
+            - --index-cache-size=500MB
+            - --chunk-pool-size=500MB
+          volumeMounts:
+            - name: objstore-config
+              mountPath: /etc/thanos
+      volumes:
+        - name: objstore-config
+          configMap:
+            name: simplyblock-objstore-config
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-thanos-query
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-thanos-query
+  template:
+    metadata:
+      labels:
+        app: simplyblock-thanos-query
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: thanos-query
+          image: thanosio/thanos:v0.31.0
+          args:
+            - query
+            - --http-address=0.0.0.0:9091
+            - --store=simplyblock-thanos-store:10901
+            - --store=simplyblock-thanos-sidecar:10901
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-thanos-compactor-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-thanos-compactor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-thanos-compactor
+  template:
+    metadata:
+      labels:
+        app: simplyblock-thanos-compactor
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: thanos-compactor
+          image: thanosio/thanos:v0.31.0
+          args:
+            - compact
+            - --data-dir=/data
+            - --objstore.config-file=/etc/thanos/objstore.yml
+            - --retention.resolution-raw=30d
+            - --retention.resolution-5m=60d
+            - --retention.resolution-1h=90d
+            - --compact.concurrency=1
+            - --wait
+          volumeMounts:
+            - name: objstore-config
+              mountPath: /etc/thanos
+            - name: compactor-data
+              mountPath: /data
+      volumes:
+        - name: objstore-config
+          configMap:
+            name: simplyblock-objstore-config
+        - name: compactor-data
+          persistentVolumeClaim:
+            claimName: simplyblock-thanos-compactor-data
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: simplyblock-node-exporter
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: simplyblock-node-exporter
+  template:
+    metadata:
+      labels:
+        app: simplyblock-node-exporter
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: node-exporter
+          image: prom/node-exporter:v1.7.0
+          args:
+            - '--path.procfs=/host/proc'
+            - '--path.sysfs=/host/sys'
+            - '--path.rootfs=/host'
+            - '--collector.filesystem.ignored-mount-points=^(/rootfs|/host|)/(sys|proc|dev|host|etc)($|/)'
+            - '--collector.filesystem.ignored-fs-types=^(sys|proc|auto|cgroup|devpts|ns|au|fuse.lxc|mqueue)(fs|)$'
+            - '--no-collector.ipvs'
+          ports:
+            - containerPort: 9100
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: root
+              mountPath: /host
+              readOnly: true
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: root
+          hostPath:
+            path: /
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-grafana-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-grafana
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-grafana
+  template:
+    metadata:
+      labels:
+        app: simplyblock-grafana
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      containers:
+        - name: grafana
+          image: grafana/grafana:10.0.12
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: "admin"
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: simplyblock-grafana-secrets
+                  key: CLUSTER_SECRET
+            - name: GF_ALERTING_ENABLED
+              value: "true"
+            - name: GF_PATHS_PROVISIONING
+              value: "/etc/grafana/provisioning"
+            - name: GF_INSTALL_PLUGINS
+              value: "grafana-opensearch-datasource"
+            - name: GF_SERVER_ROOT_URL
+              value: "http://localhost/grafana"
+            # - name: GF_SERVER_ROOT_URL
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: simplyblock-grafana-secrets
+            #       key: GRAFANA_ENDPOINT
+          volumeMounts:
+            - name: datasource-config
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: alerting-config
+              mountPath: /etc/grafana/provisioning/alerting
+            - name: dashboard-config
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboard-cluster
+              mountPath: /var/lib/grafana/dashboards/cluster.json
+              subPath: cluster.json
+            - name: dashboard-devices
+              mountPath: /var/lib/grafana/dashboards/devices.json
+              subPath: devices.json
+            - name: dashboard-lvols
+              mountPath: /var/lib/grafana/dashboards/lvols.json
+              subPath: lvols.json
+            - name: dashboard-nodes
+              mountPath: /var/lib/grafana/dashboards/nodes.json
+              subPath: nodes.json
+            - name: dashboard-pools
+              mountPath: /var/lib/grafana/dashboards/pools.json
+              subPath: pools.json
+            - name: dashboard-node-exporter
+              mountPath: /var/lib/grafana/dashboards/node-exporter.json
+              subPath: node-exporter.json
+            - name: grafana-data
+              mountPath: /var/lib/grafana
+      volumes:
+        - name: datasource-config
+          configMap:
+            name: simplyblock-grafana-datasource
+        - name: alerting-config
+          configMap:
+            name: simplyblock-grafana-alerting
+        - name: dashboard-config
+          configMap:
+            name: simplyblock-grafana-dashboard-config
+        - name: dashboard-cluster
+          configMap:
+            name: simplyblock-grafana-dashboard-cluster
+        - name: dashboard-devices
+          configMap:
+            name: simplyblock-grafana-dashboard-devices
+        - name: dashboard-lvols
+          configMap:
+            name: simplyblock-grafana-dashboard-lvols
+        - name: dashboard-nodes
+          configMap:
+            name: simplyblock-grafana-dashboard-nodes
+        - name: dashboard-pools
+          configMap:
+            name: simplyblock-grafana-dashboard-pools
+        - name: dashboard-node-exporter
+          configMap:
+            name: simplyblock-grafana-dashboard-node-exporter
+        - name: grafana-data
+          persistentVolumeClaim:
+            claimName: simplyblock-grafana-data
