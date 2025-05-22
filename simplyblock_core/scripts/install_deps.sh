@@ -10,7 +10,13 @@ sudo yum install hostname pkg-config git wget python3-pip yum-utils docker-ce do
 sudo systemctl enable docker
 sudo systemctl start docker
 
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+chmod 777 get_helm.sh
+./get_helm.sh
+rm -rf ./get_helm.sh
 
 if [[ 1 == $(yum info foundationdb-clients &> /dev/null ; echo $?) ]]
 then
