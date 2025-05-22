@@ -91,13 +91,12 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         raid_bdev = jm_nvme_bdevs[0]
 
     alceml_name = f"alceml_jm_{snode.get_id()}"
-    nvme_bdev = raid_bdev
 
     alceml_id = str(uuid.uuid4())
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ret = snode.create_alceml(
-        alceml_name, nvme_bdev, alceml_id,
+        alceml_name, raid_bdev, alceml_id,
         pba_init_mode=1 if after_restart else 3,
         pba_page_size=cluster.page_size_in_blocks,
     )
