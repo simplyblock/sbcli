@@ -33,9 +33,9 @@ else
     exit 1
 fi
 
-envsubst < "$DIR"/charts/sb-mgmt/latest/values-template.yaml > "$DIR"/charts/sb-mgmt/latest/values.yaml
+envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 
-/usr/local/bin/helm upgrade --install sb-mgmt "$DIR"/charts/sb-mgmt/latest/ \
+/usr/local/bin/helm upgrade --install sbcli "$DIR"/charts/ \
   --namespace simplyblock \
   --create-namespace
 
