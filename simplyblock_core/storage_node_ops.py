@@ -542,7 +542,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         ret = snode.create_alceml(
             jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-            pba_init_mode=1 if clear_data else 3,
+            pba_init_mode=3 if clear_data else 1,
             pba_page_size=cluster.page_size_in_blocks,
         )
 
