@@ -272,7 +272,7 @@ class StorageNode(BaseNodeObject):
             self.alceml_worker_cpu_index = (self.alceml_worker_cpu_index + 1) % len(self.alceml_worker_cpu_cores)
 
         return self.rpc_client().bdev_alceml_create(
-            name, nvme_bdev, str(uuid.uuid4()),
+            name, nvme_bdev, uuid,
             alceml_cpu_mask=alceml_cpu_mask,
             alceml_worker_cpu_mask=alceml_worker_cpu_mask,
             full_page_unmap=self.full_page_unmap,
