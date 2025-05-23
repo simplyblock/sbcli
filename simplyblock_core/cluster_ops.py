@@ -142,7 +142,7 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
-                   contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
+                   contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
 
     logger.info("Installing dependencies...")
@@ -163,22 +163,23 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{DEV_IP}:4500"
     ret = scripts.set_db_config(db_connection)
 
-    logger.info("Configuring docker swarm...")
-    c = docker.DockerClient(base_url=f"tcp://{DEV_IP}:2375", version="auto")
-    try:
-        if c.swarm.attrs and "ID" in c.swarm.attrs:
-            logger.info("Docker swarm found, leaving swarm now")
-            c.swarm.leave(force=True)
-            try:
-                c.volumes.get("monitoring_grafana_data").remove(force=True)
-            except:
-                pass
-            time.sleep(3)
+    if mode == "docker": 
+        logger.info("Configuring docker swarm...")
+        c = docker.DockerClient(base_url=f"tcp://{DEV_IP}:2375", version="auto")
+        try:
+            if c.swarm.attrs and "ID" in c.swarm.attrs:
+                logger.info("Docker swarm found, leaving swarm now")
+                c.swarm.leave(force=True)
+                try:
+                    c.volumes.get("monitoring_grafana_data").remove(force=True)
+                except:
+                    pass
+                time.sleep(3)
 
-        c.swarm.init(DEV_IP)
-        logger.info("Configuring docker swarm > Done")
-    except Exception as e:
-        print(e)
+            c.swarm.init(DEV_IP)
+            logger.info("Configuring docker swarm > Done")
+        except Exception as e:
+            print(e)
 
     if not cli_pass:
         cli_pass = utils.generate_string(10)
@@ -223,77 +224,90 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.enable_qos = enable_qos
     c.strict_node_anti_affinity = strict_node_anti_affinity
 
-    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
-    alert_resources_file = "alert_resources.yaml"
+    if mode == "docker": 
+        alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
+        alert_resources_file = "alert_resources.yaml"
 
-    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{alert_resources_file}.j2')
+        env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
+        template = env.get_template(f'{alert_resources_file}.j2')
 
-    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
-    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+        slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
+        email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
-    if slack_pattern.match(contact_point):
-        ALERT_TYPE = "slack"
-    elif email_pattern.match(contact_point):
-        ALERT_TYPE = "email"
-    else:
-        ALERT_TYPE = "slack"
-        contact_point = 'https://hooks.slack.com/services/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'
+        if slack_pattern.match(contact_point):
+            ALERT_TYPE = "slack"
+        elif email_pattern.match(contact_point):
+            ALERT_TYPE = "email"
+        else:
+            ALERT_TYPE = "slack"
+            contact_point = 'https://hooks.slack.com/services/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'
 
-    values = {
-        'CONTACT_POINT': contact_point,
-        'GRAFANA_ENDPOINT': c.grafana_endpoint,
-        'ALERT_TYPE': ALERT_TYPE,
-    }
+        values = {
+            'CONTACT_POINT': contact_point,
+            'GRAFANA_ENDPOINT': c.grafana_endpoint,
+            'ALERT_TYPE': ALERT_TYPE,
+        }
 
-    temp_dir = tempfile.mkdtemp()
+        temp_dir = tempfile.mkdtemp()
 
-    temp_file_path = os.path.join(temp_dir, alert_resources_file)
-    with open(temp_file_path, 'w') as file:
-        file.write(template.render(values))
+        temp_file_path = os.path.join(temp_dir, alert_resources_file)
+        with open(temp_file_path, 'w') as file:
+            file.write(template.render(values))
 
-    destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
-    try:
-        subprocess.run(['sudo', '-v'], check=True)  # sudo -v checks if the current user has sudo permissions
-        subprocess.run(['sudo', 'mv', temp_file_path, destination_file_path], check=True)
-        print(f"File moved to {destination_file_path} successfully.")
-    except subprocess.CalledProcessError as e:
-        print(f"An error occurred: {e}")
-    shutil.rmtree(temp_dir)
+        destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
+        try:
+            subprocess.run(['sudo', '-v'], check=True)  # sudo -v checks if the current user has sudo permissions
+            subprocess.run(['sudo', 'mv', temp_file_path, destination_file_path], check=True)
+            print(f"File moved to {destination_file_path} successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"An error occurred: {e}")
+        shutil.rmtree(temp_dir)
 
-    scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
-    prometheus_file = "prometheus.yml"
-    env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{prometheus_file}.j2')
-    values = {
-        'CLUSTER_ID': c.uuid,
-        'CLUSTER_SECRET': c.secret}
+        scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
+        prometheus_file = "prometheus.yml"
+        env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
+        template = env.get_template(f'{prometheus_file}.j2')
+        values = {
+            'CLUSTER_ID': c.uuid,
+            'CLUSTER_SECRET': c.secret}
 
-    temp_dir = tempfile.mkdtemp()
+        temp_dir = tempfile.mkdtemp()
 
-    file_path = os.path.join(temp_dir, prometheus_file)
-    with open(file_path, 'w') as file:
-        file.write(template.render(values))
+        file_path = os.path.join(temp_dir, prometheus_file)
+        with open(file_path, 'w') as file:
+            file.write(template.render(values))
 
-    prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
-    try:
-        subprocess.run(['sudo', 'mv', file_path, prometheus_file_path], check=True)
-        print(f"File moved to {prometheus_file_path} successfully.")
-    except subprocess.CalledProcessError as e:
-        print(f"An error occurred: {e}")
-    shutil.rmtree(temp_dir)
+        prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
+        try:
+            subprocess.run(['sudo', 'mv', file_path, prometheus_file_path], check=True)
+            print(f"File moved to {prometheus_file_path} successfully.")
+        except subprocess.CalledProcessError as e:
+            print(f"An error occurred: {e}")
+        shutil.rmtree(temp_dir)
 
 
-    logger.info("Deploying swarm stack ...")
-    log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint)
-    logger.info("Deploying swarm stack > Done")
+        logger.info("Deploying swarm stack ...")
+        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
+        ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
+                                log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint)
+        logger.info("Deploying swarm stack > Done")
 
-    if ret == 0:
-        logger.info("deploying swarm stack succeeded")
-    else:
-        logger.error("deploying swarm stack failed")
+        if ret == 0:
+            logger.info("deploying swarm stack succeeded")
+        else:
+            logger.error("deploying swarm stack failed")
+
+    elif mode == "kubernetes": 
+        logger.info("Deploying helm stack ...")
+        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
+        ret = scripts.deploy_k8s_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
+                                log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint)
+        logger.info("Deploying helm stack > Done")
+
+        if ret == 0:
+            logger.info("deploying helm stack succeeded")
+        else:
+            logger.error("deploying helm stack failed")
 
     logger.info("Configuring DB...")
     out = scripts.set_db_config_single()
@@ -394,7 +408,7 @@ directory={mount_point}
             logger.info("fio configuration file removed.")
     
 
-def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,blk_size, page_size_in_blocks, cli_pass,
+def deploy_cluster(storage_nodes,test,ha_type,mode,distr_ndcs,distr_npcs,enable_qos,ifname,blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_bs, distr_chunk_bs,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,
@@ -413,7 +427,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             blk_size, page_size_in_blocks,
             cli_pass, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
     
     time.sleep(5)

@@ -681,6 +681,13 @@ commands:
               - single
               - ha
             default: ha
+          - name: "--mode"
+            help: "Environment to deploy management services, default: docker "
+            dest: mode
+            type: str
+            choices:
+              - docker
+              - kubernetes
           - name: "--ha-jm-count"
             help: "HA JM count"
             dest: ha_jm_count
@@ -1050,6 +1057,14 @@ commands:
               - single
               - ha
             default: ha
+          - name: "--mode"
+            help: "Environment to deploy management services, default: docker "
+            dest: mode
+            type: str
+            choices:
+              - docker
+              - kubernetes
+            default: docker
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
             dest: enable_node_affinity
