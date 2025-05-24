@@ -512,7 +512,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         new_devices.append(nvme)
 
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE,
-                               NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_NEW]:
+                               NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_NEW, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             continue
 
