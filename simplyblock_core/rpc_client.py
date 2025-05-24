@@ -504,7 +504,6 @@ class RPCClient:
             params['disaster_recovery'] = disaster_recovery
             params['storage_tiering_id'] = params['vuid']
             params['ghost_capacity'] = ghost_capacity
-            params['is_raid_base'] = True
             params['fifo_main_capacity'] = fifo_main_capacity
             params['fifo_small_capacity'] = fifo_small_capacity
         return self._request("bdev_distrib_create", params)
