@@ -109,20 +109,26 @@ def _add_graylog_input(cluster_ip, password):
     return response.status_code == 201
 
 def _set_max_result_window(cluster_ip, max_window=100000):
-    
+
     health_url = f"http://{cluster_ip}:9200/_cluster/health"
 
     retries = 5
+    reachable=False
     while retries > 0:
         response_health = requests.get(health_url, timeout=5)
         if response_health.status_code == 200:
             logger.debug(f"opensearch cluster reachable...")
+            reachable=True
             break
         logger.debug(response_health.status_code)
         logger.debug("waiting for opensearch cluster to come up")
         retries -= 1
         time.sleep(3)
 
+    if not reachable:
+        logger.error(f"opensearch cluster not reachable...")
+        return False
+           
     url_existing_indices = f"http://{cluster_ip}:9200/_all/_settings"
     payload_existing = json.dumps({
         "settings": {
