@@ -2,7 +2,7 @@
 # encoding: utf-8
 
 import logging
-from flask import Flask
+from flask_openapi3 import OpenAPI
 
 from simplyblock_web import utils
 from simplyblock_web.blueprints import web_api_cluster, web_api_mgmt_node, web_api_device, \
@@ -16,8 +16,7 @@ logger = core_utils.get_logger(__name__)
 
 core_utils.init_sentry_sdk()
 
-
-app = Flask(__name__)
+app = OpenAPI(__name__)
 app.logger.setLevel(constants.LOG_WEB_LEVEL)
 app.url_map.strict_slashes = False
 
