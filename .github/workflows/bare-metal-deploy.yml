@@ -83,5 +83,5 @@ jobs:
         BS: ${{ inputs.bs }}
         CHUNK_BS: ${{ inputs.chunk_bs }}
         NR_HUGEPAGES: ${{ inputs.nr_hugepages }}
-        SBCLI_INSTALL_SOURCE: ${{ inputs.sbcli_source }}
+        SBCLI_BRANCH: ${{ inputs.sbcli_source }}
         SIMPLY_BLOCK_DOCKER_IMAGE: ${{ inputs.docker_image }}
