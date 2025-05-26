@@ -21,7 +21,7 @@ jobs:
       runs_on: self-hosted
       cluster: ${{ github.event.inputs.cluster }}
       docker_image: ${{ github.event.inputs.docker_image }}
-      sbcli_source: ${{ github.ref_name }}
+      sbcli_source: ${{ github.head_ref || github.ref_name }}
 
   test:
     needs: deploy

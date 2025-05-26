@@ -54,8 +54,8 @@ jobs:
     with:
       runs_on: self-hosted
       cluster: ${{ vars.ci_cluster }}
-      docker_image: public.ecr.aws/simply-block/simplyblock:${{ github.head_ref || github.ref_name }}
-      sbcli_source: ${{ github.repositoryUrl }}@${{ github.sha }}
+      docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
+      sbcli_source: ${{ github.head_ref || github.ref_name }}
 
   test:
     needs: deploy
