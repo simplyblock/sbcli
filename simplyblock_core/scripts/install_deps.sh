@@ -4,21 +4,21 @@ sudo yum install -y yum-utils
 sudo yum install -y https://repo.almalinux.org/almalinux/9/devel/aarch64/os/Packages/tuned-profiles-realtime-2.24.0-1.el9.noarch.rpm
 sudo yum install -y yum-utils xorg-x11-xauth nvme-cli fio tuned
 
-if $1 == "docker"; then
-sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-sudo yum install hostname pkg-config git wget python3-pip yum-utils docker-ce docker-ce-cli \
-  containerd.io docker-buildx-plugin docker-compose-plugin iptables pciutils -y
+if [[ "$1" == "docker" ]]; then
+  sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+  sudo yum install hostname pkg-config git wget python3-pip yum-utils docker-ce docker-ce-cli \
+    containerd.io docker-buildx-plugin docker-compose-plugin iptables pciutils -y
 
-sudo systemctl enable docker
-sudo systemctl start docker
+  sudo systemctl enable docker
+  sudo systemctl start docker
 
-elif $1 == "kubernetes"
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-chmod 777 get_helm.sh
-./get_helm.sh
-rm -rf ./get_helm.sh
+elif [[ "$1" == "kubernetes" ]]; then
+  curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+  sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+  curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+  chmod 777 get_helm.sh
+  ./get_helm.sh
+  rm -rf ./get_helm.sh
 fi
 
 if [[ 1 == $(yum info foundationdb-clients &> /dev/null ; echo $?) ]]
