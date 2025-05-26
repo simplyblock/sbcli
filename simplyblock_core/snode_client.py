@@ -44,8 +44,11 @@ class SNodeClient:
         except Exception as e:
             raise e
 
-        logger.debug("Response: status_code: %s, content: %s",
-                     response.status_code, response.content)
+        logger.debug(
+            "Response: status_code: %s, content: %s",
+             response.status_code,
+             response.json() if response.headers.get('Content-type') == 'application/json' else response.content
+        )
         ret_code = response.status_code
 
         result = None
