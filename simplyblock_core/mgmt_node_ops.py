@@ -19,8 +19,6 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 
 logger = logging.getLogger()
 
-config.load_kube_config()
-v1 = client.CoreV1Api()
 
 def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
 
@@ -138,6 +136,9 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
                     break
 
         elif mode == "kubernetes":
+            config.load_kube_config()
+            v1 = client.CoreV1Api()
+            
             current_node = socket.gethostname()
             logger.info(f"Waiting for FDB pod on this node: {current_node} to be active...")
             fdb_cont = None
