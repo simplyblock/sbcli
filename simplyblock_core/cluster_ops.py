@@ -146,7 +146,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
 
     logger.info("Installing dependencies...")
-    ret = scripts.install_deps()
+    ret = scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
     if not ifname:
@@ -157,13 +157,13 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.error(f"Error getting interface ip: {ifname}")
         return False
 
-    logger.info(f"Node IP: {DEV_IP}")
-    ret = scripts.configure_docker(DEV_IP)
-
     db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{DEV_IP}:4500"
     ret = scripts.set_db_config(db_connection)
 
     if mode == "docker": 
+        logger.info(f"Node IP: {DEV_IP}")
+        ret = scripts.configure_docker(DEV_IP)
+
         logger.info("Configuring docker swarm...")
         c = docker.DockerClient(base_url=f"tcp://{DEV_IP}:2375", version="auto")
         try:

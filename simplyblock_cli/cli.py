@@ -695,6 +695,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         subcommand.add_argument('cluster_secret', help='Cluster secret', type=str)
         subcommand.add_argument('ifname', help='Management interface name', type=str)
+        argument = subcommand.add_argument('--mode', help='Environment to deploy management services, default: docker ', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
 
     def init_control_plane__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all control plane nodes')

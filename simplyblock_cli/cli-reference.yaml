@@ -1778,6 +1778,14 @@ commands:
             help: "Management interface name"
             dest: ifname
             type: str
+          - name: "--mode"
+            help: "Environment to deploy management services, default: docker "
+            dest: mode
+            type: str
+            choices:
+              - docker
+              - kubernetes
+            default: docker
       - name: list
         help: "Lists all control plane nodes"
         arguments:

@@ -519,7 +519,8 @@ class CLIWrapperBase:
         cluster_ip = args.cluster_ip
         cluster_secret = args.cluster_secret
         ifname = args.ifname
-        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret)
+        mode = args.mode
+        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode)
 
     def control_plane__list(self, sub_command, args):
         return mgmt_ops.list_mgmt_nodes(args.json)

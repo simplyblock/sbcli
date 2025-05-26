@@ -22,8 +22,8 @@ def __run_script(args: list):
     return process.returncode
 
 
-def install_deps():
-    return __run_script(['bash', '-x', os.path.join(DIR_PATH, 'install_deps.sh')])
+def install_deps(mode):
+    return __run_script(['bash', '-x', os.path.join(DIR_PATH, 'install_deps.sh'), mode])
 
 
 def configure_docker(docker_ip):
