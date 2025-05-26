@@ -2,8 +2,12 @@ import base64
 import random
 import re
 import string
+from typing import Optional
 
 from flask import jsonify
+from pydantic import BaseModel, Field
+
+from simplyblock_core import utils as core_utils
 
 
 IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
@@ -99,3 +103,11 @@ def get_aws_region():
         pass
 
     return 'us-east-1'
+
+
+class UUIDPath(BaseModel):
+    uuid: str = Field(pattern=core_utils.UUID_PATTERN)
+
+
+class HistoryPath(UUIDPath):
+    history: Optional[str]
