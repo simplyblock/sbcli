@@ -1,19 +1,42 @@
 #!/usr/bin/env python
 # encoding: utf-8
-from simplyblock_core import utils as core_utils
-logger = core_utils.get_logger(__name__)
 
 import argparse
+import json
+import traceback
 
 from flask_openapi3 import OpenAPI
+from flask import Response
+from werkzeug.exceptions import HTTPException
 
 from simplyblock_web import utils
-from simplyblock_core import constants
+from simplyblock_core import constants, utils as core_utils
+
+logger = core_utils.get_logger(__name__)
 
 
 app = OpenAPI(__name__)
 app.url_map.strict_slashes = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
+
+
+@app.errorhandler(Exception)
+def handle_exception(exception: Exception):
+    """Return JSON instead of HTML for any exception."""
+    # start with the correct headers and status code from the error
+
+    return {
+        **{
+            attr: getattr(exception, attr)
+            for attr in ['code', 'name', 'description']
+            if hasattr(exception, attr)
+        },
+        'stacktrace': [
+            (frame.filename, frame.lineno, frame.name, frame.line)
+            for frame
+            in traceback.extract_tb(exception.__traceback__)
+        ]
+    }, exception.code if hasattr(exception, 'code') else 500
 
 
 @app.route('/', methods=['GET'])
