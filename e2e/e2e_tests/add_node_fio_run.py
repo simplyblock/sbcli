@@ -122,8 +122,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         sleep_n_sec(30)
 
         # Step 2: Suspend cluster
-        self.logger.info("Suspending the Cluster")
-        self.ssh_obj.suspend_cluster(self.mgmt_nodes[0], self.cluster_id)
+        # self.logger.info("Suspending the Cluster")
+        # self.ssh_obj.suspend_cluster(self.mgmt_nodes[0], self.cluster_id)
 
         # Step 3: Add new nodes
         self.logger.info("Adding new nodes")
@@ -135,13 +135,14 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
         new_nodes_id = []
         timestamp = int(datetime.now().timestamp())
+        cluster_details = None
         for ip in self.new_nodes:
             self.logger.info(f"Configuring and deploying storage node: {ip}")
             self.ssh_obj.deploy_storage_node(ip, max_lvol, max_prov)
             self.ssh_obj.add_storage_node(self.mgmt_nodes[0], self.cluster_id, ip,
                                           spdk_image=node_sample["spdk_image"],
                                           partitions=node_sample["num_partitions_per_dev"],
-                                          disable_ha_jm=node_sample["enable_ha_jm"],
+                                          disable_ha_jm= not node_sample["enable_ha_jm"],
                                           enable_test_device=node_sample["enable_test_device"],
                                           spdk_debug=node_sample["spdk_debug"])
             sleep_n_sec(60)
@@ -149,7 +150,13 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             self.storage_nodes.append(ip)
             containers = self.ssh_obj.get_running_containers(node_ip=ip)
             self.container_nodes[ip] = containers
-        
+
+            cluster_details = self.sbcli_utils.wait_for_cluster_status(
+                cluster_id=self.cluster_id,
+                status="in_expansion",
+                timeout=300
+                )
+
         for node in self.storage_nodes:
             self.ssh_obj.restart_docker_logging(
                 node_ip=node,
@@ -159,8 +166,9 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             )
 
         # Step 4: Resume cluster
-        self.logger.info("Resuming the Cluster")
-        self.sbcli_utils.activate_cluster(cluster_id=self.cluster_id)
+        sleep_n_sec(60)
+        self.logger.info("Expanding the cluster")
+        self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 
         for node in new_nodes_id:
             self.sbcli_utils.wait_for_storage_node_status(
@@ -173,6 +181,13 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
         self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
         sleep_n_sec(30)
+
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id,
+            status="active",
+            timeout=300
+            )
+        self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
 
         # Step 5: Create lvols on new nodes and validate
         for node in new_nodes_id:

@@ -564,6 +564,42 @@ class SbcliUtils:
         cluster_tasks = self.get_request(api_url=f"/cluster/get-tasks/{cluster_id}?limit=0")
         self.logger.debug(f"Cluster Tasks: {cluster_tasks}")
         return cluster_tasks["results"]
+
+    def get_cluster_details(self, cluster_id=None):
+        """Get Cluster details
+
+        Args:
+            cluster_id (str, optional): Get cluster details. Defaults to object cluster id.
+        """
+        cluster_id = self.cluster_id if not cluster_id else cluster_id
+        cluster_list = self.get_request(api_url="/cluster/")
+        self.logger.debug(f"Cluster List: {cluster_list}")
+
+        cluster_list = cluster_list["results"]
+
+        cluster_detail = None
+
+        for cluster in cluster_list:
+            if cluster["id"] == cluster_id:
+                cluster_detail = cluster
+        
+        if cluster_detail:
+            return cluster_detail
+        raise Exception(f"No Cluster with id: {cluster_id} found!!")
+    
+    def wait_for_cluster_status(self, cluster_id=None, status="active", timeout=60):
+        actual_status = None
+        while timeout > 0:
+            cluster_details = self.get_cluster_details(cluster_id=cluster_id)
+            actual_status = cluster_details["status"]
+            status = status if isinstance(status, list) else [status]
+            if actual_status in status:
+                return cluster_details
+            self.logger.info(f"Expected Status: {status} / Actual Status: {actual_status}")
+            sleep_n_sec(1)
+            timeout -= 1
+        raise TimeoutError(f"Timed out waiting for cluster status, {cluster_id},"
+                           f"Expected status: {status}, Actual status: {actual_status}")
     
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
         actual_status = None
@@ -645,6 +681,8 @@ class SbcliUtils:
                 timeout -= 1
             raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device_id}"
                                 f"Expected status: {status}, Actual status: {actual_status}")
+        
+    
 
     def list_migration_tasks(self, cluster_id):
         """List all migration tasks for a given cluster."""

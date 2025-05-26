@@ -5,14 +5,16 @@ import os
 import time
 import traceback
 import json
-
 import cpuinfo
 import requests
-from flask import Blueprint
+import yaml
+
 from flask import request
+from typing import List, Optional, Union
+from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException
 from jinja2 import Environment, FileSystemLoader
-import yaml
+from pydantic import BaseModel, Field
 
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
@@ -20,7 +22,7 @@ from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, p
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
-bp = Blueprint("snode", __name__, url_prefix="/snode")
+api = APIBlueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
@@ -91,7 +93,18 @@ def get_amazon_cloud_info():
         pass
 
 
-@bp.route('/scan_devices', methods=['GET'])
+@api.get('/scan_devices', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'required': ['nvme_devices', 'nvme_pcie_list', 'spdk_devices', 'spdk_pcie_list'],
+        'properties': {
+            'nvme_devices': {'type': 'array', 'items': {'type': 'string'}},
+            'nvme_pcie_list': {'type': 'array', 'items': {'type': 'string'}},
+            'spdk_devices': {'type': 'array', 'items': {'type': 'string'}},
+            'spdk_pcie_list': {'type': 'array', 'items': {'type': 'string'}},
+        },
+    })}}},
+})
 def scan_devices():
     _ = request.args.get('run_health_check', default=False, type=bool)
     out = {
@@ -145,10 +158,14 @@ def get_nodes_config():
         return {}
 
 
-@bp.route('/info', methods=['GET'])
+@api.get('/info', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'additionalProperties': True,
+    })}}},
+})
 def get_info():
-
-    out = {
+    return {
         "cluster_id": get_cluster_id(),
 
         "hostname": HOSTNAME,
@@ -172,24 +189,30 @@ def get_info():
         "cloud_instance": CLOUD_INFO,
         "nodes_config": get_nodes_config(),
     }
-    return utils.get_response(out)
 
 
-@bp.route('/join_swarm', methods=['POST'])
+@api.post('/join_swarm', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def join_swarm():
     return utils.get_response(True)
 
 
-@bp.route('/leave_swarm', methods=['GET'])
+@api.get('/leave_swarm', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def leave_swarm():
     return utils.get_response(True)
 
 
-@bp.route('/make_gpt_partitions', methods=['POST'])
-def make_gpt_partitions_for_nbd():
-    nbd_device = '/dev/nbd0'
-    jm_percent = 3
-    num_partitions = 1
+class _GPTPartitionsParams(BaseModel):
+    nbd_device: str = Field('/dev/nbd0')
+    jm_percent: int = Field(3, ge=0, le=100)
+    num_partitions: int = Field(0, ge=0)
 
     try:
         data = request.get_json()
@@ -199,19 +222,25 @@ def make_gpt_partitions_for_nbd():
     except Exception:
         pass
 
+@api.post('/make_gpt_partitions', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     cmd_list = [
-        f"parted -fs {nbd_device} mklabel gpt",
-        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\""
+        f"parted -fs {body.nbd_device} mklabel gpt",
+        f"parted -f {body.nbd_device} mkpart journal \"0%\" \"{body.jm_percent}%\""
     ]
     sg_cmd_list = [
-        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
+        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}",
     ]
-    perc_per_partition = int((100 - jm_percent) / num_partitions)
-    for i in range(num_partitions):
-        st = jm_percent + (i * perc_per_partition)
+    perc_per_partition = int((100 - body.jm_percent) / body.num_partitions)
+    for i in range(body.num_partitions):
+        st = body.jm_percent + (i * perc_per_partition)
         en = st + perc_per_partition
-        cmd_list.append(f"parted -f {nbd_device} mkpart part{(i+1)} \"{st}%\" \"{en}%\"")
-        sg_cmd_list.append(f"sgdisk -t {(i+2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
+        cmd_list.append(f"parted -f {body.nbd_device} mkpart part{(i+1)} \"{st}%\" \"{en}%\"")
+        sg_cmd_list.append(f"sgdisk -t {(i+2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}")
 
     for cmd in cmd_list+sg_cmd_list:
         logger.debug(cmd)
@@ -226,19 +255,15 @@ def make_gpt_partitions_for_nbd():
     return utils.get_response(True)
 
 
-@bp.route('/delete_dev_gpt_partitions', methods=['POST'])
-def delete_gpt_partitions_for_dev():
+class _DeviceParams(BaseModel):
+    device_pci: str
 
-    data = request.get_json()
 
-    if "device_pci" not in data:
-        return utils.get_response(False, "Required parameter is missing: device_pci")
-
-    device_pci = data['device_pci']
-
+@api.post('/delete_dev_gpt_partitions')
+def delete_gpt_partitions_for_dev(body: _DeviceParams):
     cmd_list = [
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
     ]
 
     for cmd in cmd_list:
@@ -247,10 +272,10 @@ def delete_gpt_partitions_for_dev():
         logger.debug(ret)
         time.sleep(1)
 
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+    device_name = os.popen(f"ls /sys/devices/pci0000:00/{body.device_pci}/nvme/nvme*/ | grep nvme").read().strip()
     cmd_list = [
         f"parted -fs /dev/{device_name} mklabel gpt",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
     ]
 
     for cmd in cmd_list:
@@ -278,37 +303,37 @@ else:
     SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 
 
-@bp.route('/spdk_process_start', methods=['POST'])
-def spdk_process_start():
-    data = request.get_json()
+class SPDKParams(BaseModel):
+    server_ip: str = Field(pattern=utils.IP_PATTERN)
+    rpc_port: int = Field(ge=1, lt=65536)
+    rpc_username: str
+    rpc_password: str
+    ssd_pcie: List[str] = Field([])
+    l_cores: str
+    namespace: Optional[str]
+    total_mem: Union[int, str] = Field('')
+    spdk_mem: int = Field(core_utils.parse_size('64GiB'))
+    system_mem: int = Field(core_utils.parse_size('4GiB'))
+    fdb_connection: str = Field('')
+    spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    cluster_ip: str = Field(pattern=utils.IP_PATTERN)
 
-    ssd_pcie_list = "none"
-    ssd_pcie_params = ""
-    if 'ssd_pcie' in data and data['ssd_pcie']:
-        ssd_pcie = data['ssd_pcie']
-        ssd_pcie_params = " -A " + " -A ".join(ssd_pcie)
-        ssd_pcie_list = " ".join(ssd_pcie)
+
+@api.post('/spdk_process_start', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_start(body: SPDKParams):
+    ssd_pcie_params = " ".join(" -A " + addr for addr in body.ssd_pcie) if body.ssd_pcie else "none"
+    ssd_pcie_list = " ".join(body.ssd_pcie)
 
     namespace = node_utils_k8s.get_namespace()
-    if 'namespace' in data:
-        namespace = data['namespace']
+    if body.namespace is not None:
+        namespace = body.namespace
         set_namespace(namespace)
 
-    total_mem_mib = ""
-    if 'total_mem' in data:
-        total_mem = core_utils.parse_size(data['total_mem'])
-        total_mem_mib = core_utils.convert_size(total_mem, 'MB')
-
-    spdk_mem = data.get('spdk_mem', core_utils.parse_size('64GiB'))
-    sys_memory = data.get('system_mem', core_utils.parse_size('4GiB'))
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-
-    if 'spdk_image' in data and data['spdk_image']:
-        spdk_image = data['spdk_image']
-
-    fdb_connection = ""
-    if 'fdb_connection' in data and data['fdb_connection']:
-        fdb_connection = data['fdb_connection']
+    total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MB') if body.total_mem else ""
 
     if _is_pod_up():
         logger.info("SPDK deployment found, removing...")
@@ -321,20 +346,20 @@ def spdk_process_start():
         env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         values = {
-            'SPDK_IMAGE': spdk_image,
-            "L_CORES": data['l_cores'],
-            'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
-            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB', round_up=True),
-            'MEM2_GEGA': core_utils.convert_size(sys_memory, 'GiB', round_up=True),
-            'SERVER_IP': data['server_ip'],
-            'RPC_PORT': data['rpc_port'],
-            'RPC_USERNAME': data['rpc_username'],
-            'RPC_PASSWORD': data['rpc_password'],
+            'SPDK_IMAGE': body.spdk_image,
+            "L_CORES": body.l_cores,
+            'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
+            'MEM_GEGA': core_utils.convert_size(body.spdk_mem, 'GiB', round_up=True),
+            'MEM2_GEGA': core_utils.convert_size(body.system_mem, 'GiB', round_up=True),
+            'SERVER_IP': body.server_ip,
+            'RPC_PORT': body.rpc_port,
+            'RPC_USERNAME': body.rpc_username,
+            'RPC_PASSWORD': body.rpc_password,
             'HOSTNAME': node_name,
             'NAMESPACE': namespace,
-            'FDB_CONNECTION': fdb_connection,
+            'FDB_CONNECTION': body.fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-            'GRAYLOG_SERVER_IP': data['cluster_ip'],
+            'GRAYLOG_SERVER_IP': body.cluster_ip,
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib
@@ -351,7 +376,11 @@ def spdk_process_start():
     return utils.get_response(msg)
 
 
-@bp.route('/spdk_process_kill', methods=['GET'])
+@api.get('/spdk_process_kill', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def spdk_process_kill():
     k8s_apps_v1 = core_utils.get_k8s_apps_client()
     k8s_core_v1 = core_utils.get_k8s_core_client()
@@ -395,7 +424,11 @@ def _is_pod_up():
     return False
 
 
-@bp.route('/spdk_process_is_up', methods=['GET'])
+@api.get('/spdk_process_is_up', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def spdk_process_is_up():
     if _is_pod_up():
         return utils.get_response(True)
@@ -403,9 +436,17 @@ def spdk_process_is_up():
         return utils.get_response(False, "SPDK container is not running")
 
 
-@bp.route('/get_file_content/<string:file_name>', methods=['GET'])
-def get_file_content(file_name):
-    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+class FilePath(BaseModel):
+    file_name: str
+
+
+@api.get('/get_file_content/<string:file_name>', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def get_file_content(path: FilePath):
+    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{path.file_name}")
     if out:
         return utils.get_response(out)
     elif err:
@@ -414,42 +455,62 @@ def get_file_content(file_name):
         return utils.get_response(None, err)
 
 
-@bp.route('/firewall_set_port', methods=['POST'])
-def firewall_set_port():
-    data = request.get_json()
-    if "port_id" not in data:
-        return utils.get_response(False, "Required parameter is missing: port_id")
-    if "port_type" not in data:
-        return utils.get_response(False, "Required parameter is missing: port_type")
-    if "action" not in data:
-        return utils.get_response(False, "Required parameter is missing: action")
+class _FirewallParams(BaseModel):
+    port_id: str
+    port_type: str
+    action: str
 
-    port_id = data['port_id']
-    port_type = data['port_type']
-    action = data['action']
-    container = "spdk-container"
 
+@api.post('/firewall_set_port', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def firewall_set_port(body: _FirewallParams):
     k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
-    resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
-    for pod in resp.items:
-        if pod.metadata.name.startswith(pod_name):
-            ret = node_utils_k8s.firewall_port_k8s(port_id, port_type, action=="block", k8s_core_v1, node_utils_k8s.get_namespace(), pod.metadata.name, container)
-            return utils.get_response(ret)
+
+    for pod in k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace()).items:
+        if not pod.metadata.name.startswith(pod_name):
+            continue
+
+        ret = node_utils_k8s.firewall_port_k8s(
+                body.port_id,
+                body.port_type,
+                body.action=="block",
+                k8s_core_v1,
+                node_utils_k8s.get_namespace(),
+                pod.metadata.name,
+                "spdk_container",
+        )
+        return utils.get_response(ret)
+
     return utils.get_response(False)
 
 
-@bp.route('/get_firewall', methods=['GET'])
+@api.get('/get_firewall', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
 def get_firewall():
     ret = node_utils_k8s.firewall_get_k8s()
     return utils.get_response(ret)
 
 
-@bp.route('/set_hugepages', methods=['POST'])
+@api.post('/set_hugepages', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def set_hugepages():
     return utils.get_response(True)
 
 
-@bp.route('/apply_config', methods=['POST'])
+@api.post('/apply_config', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def apply_config():
     node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
     if node_info.get("nodes"):

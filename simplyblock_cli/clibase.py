@@ -403,6 +403,10 @@ class CLIWrapperBase:
         cluster_id = args.cluster_id
         return cluster_ops.set(cluster_id, args.attr_name, args.attr_value)
 
+    def cluster__complete_expand(self, sub_command, args):
+        cluster_id = args.cluster_id
+        return cluster_ops.cluster_expand(cluster_id)
+
     def volume__add(self, sub_command, args):
         name = args.name
         size = args.size

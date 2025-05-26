@@ -284,8 +284,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.fio_threads.append(fio_thread)
 
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}")
-            # self.sbcli_utils.resize_lvol(self.lvol_mount_details[lvol]["ID"], f"{self.int_lvol_size}G")
-            # self.sbcli_utils.resize_lvol(self.clone_mount_details[clone_name]["ID"], f"{self.int_lvol_size}G")
+            self.sbcli_utils.resize_lvol(self.lvol_mount_details[lvol]["ID"], f"{self.int_lvol_size}G")
+            sleep_n_sec(10)
+            self.sbcli_utils.resize_lvol(self.clone_mount_details[clone_name]["ID"], f"{self.int_lvol_size}G")
 
 
     def run(self):

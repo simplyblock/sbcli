@@ -1229,6 +1229,14 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+      - name: complete-expand
+        help: "Create lvstore on newly added nodes to the cluster"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: show
         help: "Shows a cluster's statistics"
         arguments:

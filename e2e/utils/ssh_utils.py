@@ -335,7 +335,7 @@ class SshUtils:
         command = (
             f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_dump=1 --numjobs={numjobs} --nrfiles={nrfiles} "
+            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_avg_msec_opt} {iolog_opt} "
             f"{output_format}{output_file}"
         )
@@ -495,7 +495,7 @@ class SshUtils:
         max_attempts = 50
         attempt = 0
 
-        kill_cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
+        kill_cmd = f"curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
         output, error = self.exec_command(node=node, command=kill_cmd)
         # record the time when the kill command was last sent
         last_kill_time = time.time()
@@ -769,7 +769,7 @@ class SshUtils:
         time.sleep(10)
 
         configure_cmd = f"{self.base_cmd} -d sn configure --max-lvol {max_lvol} --max-size {max_prov_gb}G"
-        deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname} || {{ echo 'Deploy command failed'; exit 1; }}"
+        deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname}"
         
         self.logger.info(f"Deploying storage node: {node}")
         self.exec_command(node=node, command=configure_cmd)
@@ -1728,6 +1728,18 @@ class SshUtils:
         cmd = f"{self.base_cmd} --dev -d cluster set {cluster_id} status suspended"
         output, _ = self.exec_command(node_ip, cmd)
         return output.strip().split()
+    
+    def expand_cluster(self, node_ip, cluster_id):
+        """Completes cluster expansion and puts cluster ina active mode
+
+        Args:
+            node_ip (str): Mgmt Node IP to run command on
+            cluster_id (str): Cluster id to put in suspended state
+        """
+        cmd = f"{self.base_cmd} --dev -d cluster complete-expand {cluster_id}"
+        output, _ = self.exec_command(node_ip, cmd)
+        return output.strip().split()
+
 
     # def stop_netstat_dmesg_logging(self, node_ip):
     #     """Stop continuous netstat and dmesg logging without using watch."""
