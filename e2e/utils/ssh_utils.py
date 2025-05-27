@@ -413,7 +413,7 @@ class SshUtils:
         Returns:
             str: Output of file name
         """
-        cmd = f"cat {file_name}"
+        cmd = f"sudo cat {file_name}"
         output, _ = self.exec_command(node=node, command=cmd)
         return output
     
@@ -502,7 +502,7 @@ class SshUtils:
 
         while attempt < max_attempts:
             # Command to check the status of containers matching "spdk_"
-            status_cmd = "docker ps -a --filter 'name=spdk_' --format '{{.Status}}'"
+            status_cmd = "sudo docker ps -a --filter 'name=spdk_' --format '{{.Status}}'"
             status_output, err = self.exec_command(node=node, command=status_cmd)
             status_output = status_output.strip()
 
@@ -530,7 +530,7 @@ class SshUtils:
 
     def get_mount_points(self, node, base_path):
         """Get all mount points on the node."""
-        cmd = "mount | grep %s | awk '{print $3}'" % base_path
+        cmd = "sudo mount | grep %s | awk '{print $3}'" % base_path
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
 
@@ -572,7 +572,7 @@ class SshUtils:
         Returns:
             List: List of dictionary with device details
         """
-        cmd = "nvme list-subsys -o json"
+        cmd = "sudo nvme list-subsys -o json"
         out, _ = self.exec_command(node=node, command=cmd)
         try:
             subsys_info = json.loads(out)
@@ -1066,7 +1066,7 @@ class SshUtils:
                     source_node_ips = list(node_data_nic_ip)
                     source_node_ips.append(node_ip)
                     for source_node in source_node_ips:
-                        cmd = "ss -tnp | grep %s | awk '{print $5}'" % source_node
+                        cmd = "sudo ss -tnp | grep %s | awk '{print $5}'" % source_node
                         self.logger.info(f"Executing {cmd} on node: {node}")
                         ss_output, _ = self.exec_command(node, cmd)
                         self.logger.info(f"Output: {ss_output}")
@@ -1165,7 +1165,7 @@ class SshUtils:
         """
         try:
             # Check the current aio-max-nr value
-            check_cmd = "cat /proc/sys/fs/aio-max-nr"
+            check_cmd = "sudo cat /proc/sys/fs/aio-max-nr"
             current_value, _ = self.exec_command(node_ip, check_cmd)
 
             if current_value.strip() == str(value):
@@ -1283,10 +1283,10 @@ class SshUtils:
             remote_json_path = "/tmp/stack.json"
 
             # Create JSON file on the storage node
-            create_json_command = f"echo '{rpc_json_str}' > {remote_json_path}"
+            create_json_command = f"sudo echo '{rpc_json_str}' > sudo {remote_json_path}"
             self.exec_command(storage_node_ip, create_json_command)
 
-            find_container_cmd = "docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
+            find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
             container_name_output, _ = self.exec_command(storage_node_ip, find_container_cmd)
             if container_name_output:
                 container_name = container_name_output.strip()
@@ -1514,7 +1514,7 @@ class SshUtils:
         try:
             self.logger.info(f"Resetting iptables inside SPDK container on {node_ip}.")
 
-            find_container_cmd = "docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
+            find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
 
             container_name_output, _ = self.exec_command(node_ip, find_container_cmd)
 
@@ -1673,7 +1673,7 @@ class SshUtils:
         Returns:
             dict: Image name vs the Image hash
         """
-        cmd = "docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}'"
+        cmd = "sudo docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}'"
         output, _ = self.exec_command(node=node, command=cmd)
         image_map = {}
         for line in output.strip().split('\n'):

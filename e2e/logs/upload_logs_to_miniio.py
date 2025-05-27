@@ -18,7 +18,7 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "password")
 
 # SSH and Node Details
 BASTION_IP = os.getenv("BASTION_IP")
-KEY_PATH = os.path.expanduser("~/.ssh/simplyblock-us-east-2.pem")
+KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', "simplyblock-us-east-2.pem")}")
 USER = os.getenv("USER", "root")
 
 
