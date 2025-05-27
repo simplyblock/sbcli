@@ -5,7 +5,7 @@ import time
 
 # SSH Configuration
 BASTION_IP = os.getenv("BASTION_IP")
-KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', "simplyblock-us-east-2.pem")}")
+KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
 USER = os.getenv("USER", "root")
 
 # Node Lists
