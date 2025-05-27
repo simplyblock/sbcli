@@ -111,7 +111,8 @@ class CLIWrapperBase:
                                                                 args.nodes_per_socket, pci_allowed, pci_blocked)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
-        return storage_ops.deploy_cleaner()
+        storage_ops.deploy_cleaner()
+        return True  # remove once CLI changed to exceptions
 
     def storage_node__add_node(self, sub_command, args):
         cluster_id = args.cluster_id

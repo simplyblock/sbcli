@@ -210,7 +210,7 @@ def join_db():
         rpc_port = data['rpc_port']
 
     logger.info("Setting DB connection")
-    ret = scripts.set_db_config(db_connection)
+    scripts.set_db_config(db_connection)
 
     try:
         node_docker = get_docker_client()
