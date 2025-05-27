@@ -174,7 +174,7 @@ class _DBConnectionParams(BaseModel):
 })
 def join_db(body: _DBConnectionParams):
     logger.info("Setting DB connection")
-    ret = scripts.set_db_config(body.db_connection)
+    scripts.set_db_config(body.db_connection)
 
     try:
         node_docker = get_docker_client()

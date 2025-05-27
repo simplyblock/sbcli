@@ -2593,10 +2593,10 @@ def deploy(ifname, isolate_cores=False):
         logger.info(l.strip())
 
     logger.info("Installing dependencies...")
-    ret = scripts.install_deps()
+    scripts.install_deps()
 
     logger.info(f"Node IP: {dev_ip}")
-    ret = scripts.configure_docker(dev_ip)
+    scripts.configure_docker(dev_ip)
 
     start_storage_node_api_container(dev_ip)
 
@@ -2649,7 +2649,6 @@ def start_storage_node_api_container(node_ip):
 
 def deploy_cleaner():
     scripts.deploy_cleaner()
-    return True
 
 
 def get_host_secret(node_id):
