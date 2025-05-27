@@ -8,7 +8,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  mock-deploy:
+  mock-integration:
     runs-on: ubuntu-latest
     services:
       docker:
@@ -47,21 +47,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 10
 
-  deploy:
-    needs: [await-image, mock-deploy]
+  integration:
+    needs: [await-image, mock-integration]
     if: ${{ vars.ci_cluster != '' }}
-    uses: ./.github/workflows/bare-metal-deploy.yml
+    uses: ./.github/workflows/cluster-deployment.yml
     with:
-      runs_on: self-hosted
       cluster: ${{ vars.ci_cluster }}
       docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
       sbcli_source: ${{ github.head_ref || github.ref_name }}
-
-  test:
-    needs: deploy
-    uses: ./.github/workflows/api-test.yml
-    with:
-      runs_on: self-hosted
-      cluster_id: ${{ needs.deploy.outputs.cluster_id }}
-      cluster_ip: ${{ needs.deploy.outputs.cluster_ip }}
-      cluster_secret: ${{ needs.deploy.outputs.cluster_secret }}

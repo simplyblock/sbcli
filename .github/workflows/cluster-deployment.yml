@@ -1,15 +1,23 @@
 name: Deploy and test cluster
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       cluster:
         description: 'Cluster identifier'
         required: true
+        type: string
       docker_image:
         description: 'Docker image'
-        default: 'public.ecr.aws/simply-block/simplyblock:main'
-        required: false
+        type: string
+        required: true
+      sbcli_source:
+        description: 'Docker image'
+        type: string
+        required: true
+
+concurrency:
+  group: ${{ inputs.cluster }}
 
 permissions:
   contents: read
@@ -19,9 +27,9 @@ jobs:
     uses: ./.github/workflows/bare-metal-deploy.yml
     with:
       runs_on: self-hosted
-      cluster: ${{ github.event.inputs.cluster }}
-      docker_image: ${{ github.event.inputs.docker_image }}
-      sbcli_source: ${{ github.head_ref || github.ref_name }}
+      cluster: ${{ inputs.cluster }}
+      docker_image: ${{ inputs.docker_image }}
+      sbcli_source: ${{ inputs.sbcli_source }}
 
   test:
     needs: deploy
