@@ -112,10 +112,10 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 
     health_url = f"http://{cluster_ip}:9200/_cluster/health"
 
-    retries = 10
+    retries = 30
     reachable=False
     while retries > 0:
-        response_health = requests.get(health_url, timeout=5)
+        response_health = requests.get(health_url, timeout=10)
         if response_health.status_code == 200:
             logger.debug(f"opensearch cluster reachable...")
             reachable=True
