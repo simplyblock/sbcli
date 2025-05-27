@@ -53,11 +53,11 @@ def add_cluster():
     enable_qos = cl_data.get('enable_qos', False)
     strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
 
-    ret = cluster_ops.add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                                  distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-                                  qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
-
-    return utils.get_response(ret)
+    return utils.get_response(cluster_ops.add_cluster(
+        blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+        distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
+        qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity
+    ))
 
 
 @bp.route('/cluster', methods=['GET'], defaults={'uuid': None})
@@ -91,8 +91,7 @@ def cluster_capacity(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    ret = cluster_ops.get_capacity(uuid, history, is_json=True)
-    return utils.get_response(json.loads(ret))
+    return utils.get_response(cluster_ops.get_capacity(uuid, history))
 
 
 @bp.route('/cluster/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
@@ -103,12 +102,10 @@ def cluster_iostats(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
-    ret = {
+    return utils.get_response({
         "object_data": cluster.get_clean_dict(),
-        "stats": data or []
-    }
-    return utils.get_response(ret)
+        "stats": cluster_ops.get_iostats_history(uuid, history, with_sizes=True)
+    })
 
 
 @bp.route('/cluster/status/<string:uuid>', methods=['GET'])
@@ -117,8 +114,7 @@ def cluster_status(uuid):
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    data = cluster_ops.get_cluster_status(uuid, is_json=True)
-    return utils.get_response(json.loads(data))
+    return utils.get_response(cluster_ops.get_cluster_status(uuid))
 
 
 @bp.route('/cluster/get-logs/<string:uuid>', methods=['GET'])
@@ -136,8 +132,7 @@ def cluster_get_logs(uuid):
     except:
         pass
 
-    data = cluster_ops.get_logs(uuid, is_json=True, limit=limit)
-    return utils.get_response(json.loads(data))
+    return utils.get_response(cluster_ops.get_logs(uuid, limit=limit))
 
 
 @bp.route('/cluster/get-tasks/<string:uuid>', methods=['GET'])
@@ -182,7 +177,7 @@ def cluster_grace_startup(uuid):
         args=(uuid,))
     t.start()
     # FIXME: Any failure within the thread are not handled
-    return utils.get_response(True)
+    return utils.get_response(True), 202
 
 
 @bp.route('/cluster/activate/<string:uuid>', methods=['PUT'])
@@ -195,7 +190,7 @@ def cluster_activate(uuid):
         args=(uuid,))
     t.start()
     # FIXME: Any failure within the thread are not handled
-    return utils.get_response(True)
+    return utils.get_response(True), 202
 
 
 @bp.route('/cluster/allstats/<string:uuid>/history/<string:history>', methods=['GET'])
@@ -207,12 +202,10 @@ def cluster_allstats(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
-    ret = {
+    out["cluster"] = {
         "object_data": cluster.get_clean_dict(),
-        "stats": data or []
+        "stats": cluster_ops.get_iostats_history(uuid, history, with_sizes=True)
     }
-    out["cluster"] = ret
 
     list_nodes = []
     list_devices = []
@@ -285,6 +278,5 @@ def show_cluster(uuid):
     if cluster.status == Cluster.STATUS_INACTIVE:
         return utils.get_response("Cluster is inactive")
 
-    data = cluster_ops.list_all_info(uuid)
-    return utils.get_response(json.loads(data))
+    return utils.get_response(cluster_ops.list_all_info(uuid))
 
