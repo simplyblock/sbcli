@@ -1661,7 +1661,7 @@ class SshUtils:
             output, _ = self.exec_command(node=node, command=version_cmd)
             version = output.strip().split(":")[1].strip() if ":" in output else "UNKNOWN"
         except Exception as e:
-            self.logger.error(f"Failed to fetch sbcli-dev version from node {node}: {e}")
+            self.logger.error(f"Failed to fetch {self.base_cmd} version from node {node}: {e}")
         return version if version else "ERROR"
 
     def get_image_dict(self, node):

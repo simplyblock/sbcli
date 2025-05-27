@@ -123,7 +123,7 @@ class TestMajorUpgrade(TestClusterBase):
         self.logger.info("Step 8: Perform Upgrade")
         package_name = f"{self.base_cmd}=={self.target_version}" if self.target_version != "latest" else self.base_cmd
         self.ssh_obj.exec_command(self.mgmt_nodes[0], f"pip install {package_name} --upgrade")
-        upgrade_cmd = f"sbcli-dev cluster update {self.cluster_id} --cp-only false --restart true"
+        upgrade_cmd = f"{self.base_cmd} cluster update {self.cluster_id} --cp-only false --restart true"
         self.ssh_obj.exec_command(self.mgmt_nodes[0], upgrade_cmd)
         sleep_n_sec(180)
 
