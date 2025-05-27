@@ -14,7 +14,7 @@ spec:
         app: simplyblock-fdb-server
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"  
+        type: simplyblock-mgmt-plane  
       containers:
       - name: fdb-server
         image: foundationdb/foundationdb:7.3.42
@@ -71,7 +71,7 @@ spec:
         app: simplyblock-fdb-backup-agent
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true" 
+        type: simplyblock-mgmt-plane 
       containers:
       - name: fdb-backup-agent
         image: foundationdb/foundationdb:7.3.42
@@ -107,7 +107,7 @@ spec:
         app: simplyblock-webappapi
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true" 
+        type: simplyblock-mgmt-plane 
       containers:
       - name: webappapi
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -149,7 +149,7 @@ spec:
         app: simplyblock-storage-node-monitor
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true" 
+        type: simplyblock-mgmt-plane 
       containers:
       - name: storage-node-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -186,7 +186,7 @@ spec:
         app: simplyblock-mgmt-node-monitor
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: mgmt-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -222,7 +222,7 @@ spec:
         app: simplyblock-caching-node-monitor
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: caching-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -258,7 +258,7 @@ spec:
         app: simplyblock-lvol-stats-collector
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: lvol-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -294,7 +294,7 @@ spec:
         app: simplyblock-cached-lvol-stats-collector
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: cached-lvol-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -331,7 +331,7 @@ spec:
         app: simplyblock-main-distr-event-collector
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: main-distr-event-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -368,7 +368,7 @@ spec:
         app: simplyblock-capacity-and-stats-collector
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
       - name: capacity-and-stats-collector
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -404,7 +404,7 @@ spec:
         app: simplyblock-capacity-monitor
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
       - name: capacity-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -440,7 +440,7 @@ spec:
         app: simplyblock-health-check
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
       - name: health-check
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -476,7 +476,7 @@ spec:
         app: simplyblock-device-monitor
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
       - name: device-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -512,7 +512,7 @@ spec:
         app: simplyblock-lvol-monitor
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
       - name: lvol-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -548,7 +548,7 @@ spec:
         app: simplyblock-cleanupfdb
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: cleanupfdb
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -586,7 +586,7 @@ spec:
         app: simplyblock-tasks-runner-restart
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: tasks-runner-restart
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -622,7 +622,7 @@ spec:
         app: simplyblock-tasks-runner-migration
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: tasks-runner-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -658,7 +658,7 @@ spec:
         app: simplyblock-tasks-runner-failed-migration
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: tasks-runner-failed-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -694,7 +694,7 @@ spec:
         app: simplyblock-tasks-runner-cluster-status
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: tasks-runner-cluster-status
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -730,7 +730,7 @@ spec:
         app: simplyblock-tasks-runner-new-device-migration
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: tasks-runner-new-device-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -766,7 +766,7 @@ spec:
         app: simplyblock-tasks-node-add-runner
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: tasks-node-addrunner
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -801,7 +801,7 @@ spec:
         app: simplyblock-haproxy
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
       - name: haproxy
         image: haproxytech/haproxy-debian:latest

@@ -33,10 +33,21 @@ else
     exit 1
 fi
 
+NODE_NAME=$(hostname)
+
+/usr/local/bin/kubectl label nodes "$NODE_NAME" type=simplyblock-mgmt-plane --overwrite
+
+if [ $? -eq 0 ]; then
+  echo "Node $NODE_NAME labeled successfully."
+else
+  echo "Failed to label node $NODE_NAME."
+  exit 1
+fi
+
 envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 
 /usr/local/bin/helm upgrade --install sbcli "$DIR"/charts/ \
   --namespace simplyblock \
   --create-namespace
 
-/usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace simplyblock --timeout=180s
+/usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace simplyblock --timeout=300s

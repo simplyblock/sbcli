@@ -27,7 +27,7 @@ spec:
         app: simplyblock-mongodb
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: mongodb
           image: mongo:6.0
@@ -67,7 +67,7 @@ spec:
         app: simplyblock-opensearch
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: opensearch
           image: opensearchproject/opensearch:2.4.0
@@ -132,7 +132,7 @@ spec:
         app: simplyblock-graylog
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: graylog
           image: graylog/graylog:6.2.2
@@ -233,7 +233,7 @@ spec:
         app: simplyblock-prometheus
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: prometheus
           image: prom/prometheus:v2.44.0
@@ -274,7 +274,7 @@ spec:
         app: simplyblock-thanos-sidecar
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: thanos-sidecar
           image: thanosio/thanos:v0.31.0
@@ -313,7 +313,7 @@ spec:
         app: simplyblock-thanos-store
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: thanos-store
           image: thanosio/thanos:v0.31.0
@@ -347,7 +347,7 @@ spec:
         app: simplyblock-thanos-query
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: thanos-query
           image: thanosio/thanos:v0.31.0
@@ -387,7 +387,7 @@ spec:
         app: simplyblock-thanos-compactor
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: thanos-compactor
           image: thanosio/thanos:v0.31.0
@@ -429,7 +429,7 @@ spec:
         app: simplyblock-node-exporter
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: node-exporter
@@ -494,7 +494,7 @@ spec:
         app: simplyblock-grafana
     spec:
       nodeSelector:
-        node-role.kubernetes.io/control-plane: "true"
+        type: simplyblock-mgmt-plane
       containers:
         - name: grafana
           image: grafana/grafana:10.0.12
