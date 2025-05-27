@@ -22,6 +22,18 @@ elif [[ "$1" == "kubernetes" ]]; then
   chmod 777 get_helm.sh
   ./get_helm.sh
   rm -rf ./get_helm.sh
+
+  NODE_NAME=$(hostname)
+
+  /usr/local/bin/kubectl label nodes "$NODE_NAME" type=simplyblock-mgmt-plane --overwrite
+
+  if [ $? -eq 0 ]; then
+    echo "Node $NODE_NAME labeled successfully."
+  else
+    echo "Failed to label node $NODE_NAME."
+    exit 1
+  fi
+
 fi
 
 if [[ 1 == $(yum info foundationdb-clients &> /dev/null ; echo $?) ]]
