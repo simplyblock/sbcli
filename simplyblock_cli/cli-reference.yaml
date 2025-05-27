@@ -93,9 +93,9 @@ commands:
             help: "Cluster id"
             dest: cluster_id
             type: str
-          - name: "node_ip"
-            help: "IP of storage node to add"
-            dest: node_ip
+          - name: "node_addr"
+            help: "Address of storage node api to add, like <node-ip>:5000"
+            dest: node_addr
             type: str
           - name: "ifname"
             help: "Management interface name"

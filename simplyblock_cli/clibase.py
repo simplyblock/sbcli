@@ -115,7 +115,7 @@ class CLIWrapperBase:
 
     def storage_node__add_node(self, sub_command, args):
         cluster_id = args.cluster_id
-        node_ip = args.node_ip
+        node_addr = args.node_addr
         ifname = args.ifname
         data_nics = args.data_nics
         spdk_image = args.spdk_image
@@ -134,7 +134,7 @@ class CLIWrapperBase:
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
-            node_ip=node_ip,
+            node_addr=node_addr,
             iface_name=ifname,
             data_nics_list=data_nics,
             max_snap=max_snap,
