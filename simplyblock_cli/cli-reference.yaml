@@ -1253,6 +1253,15 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+      - name: suspend
+        help: "Put the cluster status to be suspended"
+        private: true
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: get-capacity
         help: "Gets a cluster's capacity"
         arguments:

@@ -389,7 +389,7 @@ class CLIWrapperBase:
     def cluster__delete(self, sub_command, args):
         return cluster_ops.delete_cluster(args.cluster_id)
 
-    def cluster_suspend(self, sub_command, args):
+    def cluster__suspend(self, sub_command, args):
         cluster_id = args.cluster_id
         return cluster_ops.suspend_cluster(cluster_id)
 
