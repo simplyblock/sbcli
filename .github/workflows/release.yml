@@ -5,8 +5,6 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,7 +31,7 @@ jobs:
 
       - name: Update simplyblock_core/env_var
         run: |
-          sed -i 's/sbcli-dev/sbctl/g' simplyblock_core/env_var
+          sed -i 's/sbcli-pre-beta/sbcli-pre/g' simplyblock_core/env_var
           version="${{ github.event.release.tag_name }}"
           echo "Replacing SIMPLY_BLOCK_VERSION with $version"
           sed -i "s/^SIMPLY_BLOCK_VERSION=.*/SIMPLY_BLOCK_VERSION=${version}/" simplyblock_core/env_var
@@ -43,3 +41,6 @@ jobs:
 
       - name: Publish package to pypi
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
