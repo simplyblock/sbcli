@@ -2,6 +2,7 @@ import base64
 import random
 import re
 import string
+import traceback
 
 from flask import jsonify
 
@@ -99,3 +100,18 @@ def get_aws_region():
         pass
 
     return 'us-east-1'
+
+
+def error_handler(exception: Exception):
+    """Return JSON instead of HTML for any exception."""
+
+    traceback.print_exception(exception)
+
+    return {
+        'exception': str(exception),
+        'stacktrace': [
+            (frame.filename, frame.lineno, frame.name, frame.line)
+            for frame
+            in traceback.extract_tb(exception.__traceback__)
+        ]
+    }, exception.code if hasattr(exception, 'code') else 500
