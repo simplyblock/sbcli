@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
 from simplyblock_core import utils as core_utils
-logger = core_utils.get_logger(__name__)
-
 import argparse
 
 from flask_openapi3 import OpenAPI
@@ -10,10 +8,13 @@ from flask_openapi3 import OpenAPI
 from simplyblock_web import utils
 from simplyblock_core import constants
 
+logger = core_utils.get_logger(__name__)
+
 
 app = OpenAPI(__name__)
 app.url_map.strict_slashes = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
+app.register_error_handler(Exception, utils.error_handler)
 
 
 @app.route('/', methods=['GET'])
