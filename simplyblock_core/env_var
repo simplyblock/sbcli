@@ -1,6 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
-SIMPLY_BLOCK_VERSION=1.0.481
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=18.0.62
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:constrain_graylog
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:main-latest
