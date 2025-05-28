@@ -1384,23 +1384,42 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         elif mode == "kubernetes": 
             k8s_config.load_kube_config()
             apps_v1 = k8s_client.AppsV1Api()
-            namespace = "simplyblock"     
+            namespace = "simplyblock"
+            
             image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-            image_without_tag = image_without_tag.split("/")
-            image_parts = "/".join(image_without_tag[-2:])
-            service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
+            image_parts = "/".join(image_without_tag.split("/")[-2:])
+            service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
+
+            # Update Deployments
             deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
-            if mgmt_image:
-                service_image = mgmt_image
             for deploy in deployments.items:
                 for c in deploy.spec.template.spec.containers:
                     if image_parts in c.image:
                         logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
                         c.image = service_image
+                        annotations = deploy.spec.template.metadata.annotations or {}
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.utcnow().isoformat()
+                        deploy.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_deployment(
                             name=deploy.metadata.name,
                             namespace=namespace,
                             body={"spec": {"template": deploy.spec.template}}
+                        )
+
+            # Update DaemonSets
+            daemonsets = apps_v1.list_namespaced_daemon_set(namespace=namespace)
+            for ds in daemonsets.items:
+                for c in ds.spec.template.spec.containers:
+                    if image_parts in c.image:
+                        logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
+                        c.image = service_image
+                        annotations = ds.spec.template.metadata.annotations or {}
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.utcnow().isoformat()
+                        ds.spec.template.metadata.annotations = annotations
+                        apps_v1.patch_namespaced_daemon_set(
+                            name=ds.metadata.name,
+                            namespace=namespace,
+                            body={"spec": {"template": ds.spec.template}}
                         )
 
         logger.info("Done updating mgmt cluster")
