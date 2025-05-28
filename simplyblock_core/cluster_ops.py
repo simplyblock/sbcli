@@ -11,6 +11,7 @@ import uuid
 from tracemalloc import Snapshot
 
 import docker
+from kubernetes import client as k8s_client, config as k8s_config
 import requests
 from jinja2 import Environment, FileSystemLoader
 
@@ -1362,22 +1363,48 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     except Exception as e:
         logger.error(e)
 
+    mode = "kubernetes"
     try:
         logger.info("Updating mgmt cluster")
-        cluster_docker = utils.get_docker_client(cluster_id)
-        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-        pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_without_tag = image_without_tag.split("/")
-        image_parts = "/".join(image_without_tag[-2:])
-        service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-        if mgmt_image:
-            service_image = mgmt_image
-        for service in cluster_docker.services.list():
-            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image']:
-                logger.info(f"Updating service {service.name}")
-                service.update(image=service_image, force_update=True)
+        if mode == "docker": 
+            cluster_docker = utils.get_docker_client(cluster_id)
+            logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
+            pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+            image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
+            image_without_tag = image_without_tag.split("/")
+            image_parts = "/".join(image_without_tag[-2:])
+            service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
+            if mgmt_image:
+                service_image = mgmt_image
+            for service in cluster_docker.services.list():
+                if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+                    logger.info(f"Updating service {service.name}")
+                    service.update(image=service_image, force_update=True)
+
+        elif mode == "kubernetes": 
+            k8s_config.load_kube_config()
+            apps_v1 = k8s_client.AppsV1Api()
+            namespace = "simplyblock"     
+            image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
+            image_without_tag = image_without_tag.split("/")
+            image_parts = "/".join(image_without_tag[-2:])
+            service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
+            deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
+            if mgmt_image:
+                service_image = mgmt_image
+            for deploy in deployments.items:
+                for c in deploy.spec.template.spec.containers:
+                    if image_parts in c.image:
+                        logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
+                        c.image = service_image
+                        apps_v1.patch_namespaced_deployment(
+                            name=deploy.metadata.name,
+                            namespace=namespace,
+                            body={"spec": {"template": deploy.spec.template}}
+                        )
+
         logger.info("Done updating mgmt cluster")
+
     except Exception as e:
         logger.exception(e)
 

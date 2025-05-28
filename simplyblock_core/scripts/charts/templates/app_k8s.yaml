@@ -805,6 +805,7 @@ spec:
       containers:
       - name: haproxy
         image: haproxytech/haproxy-debian:latest
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         ports:
         - containerPort: 80
         - containerPort: 12202
