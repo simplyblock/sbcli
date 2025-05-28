@@ -23,7 +23,7 @@ app.url_map.strict_slashes = False
 
 # Add routes
 app.register_api(web_api_cluster.api)
-app.register_blueprint(web_api_mgmt_node.bp)
+app.register_api(web_api_mgmt_node.api)
 app.register_blueprint(web_api_device.bp)
 app.register_blueprint(web_api_lvol.bp)
 app.register_blueprint(web_api_snapshot.bp)
