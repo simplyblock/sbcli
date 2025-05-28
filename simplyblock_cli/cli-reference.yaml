@@ -1091,6 +1091,12 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--admin-secret"
+            help: "Set admin secret, default is auto-generated"
+            dest: admin_secret
+            type: str
+            default: ""
+            private: true
       - name: add
         help: "Adds a new cluster"
         arguments:
@@ -1787,6 +1793,8 @@ commands:
             help: "Control plane node id"
             dest: node_id
             type: str
+      - name: get-secret
+        help: "Get admin secret"
   - name: "storage-pool"
     help: "Storage pool commands"
     aliases:

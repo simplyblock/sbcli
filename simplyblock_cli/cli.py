@@ -440,6 +440,8 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, true by default', type=bool, default=False, dest='enable_qos')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
+        if self.developer_mode:
+            argument = subcommand.add_argument('--admin-secret', help='Set admin secret, default is auto-generated', type=str, default='', dest='admin_secret')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -691,6 +693,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane__add(subparser)
         self.init_control_plane__list(subparser)
         self.init_control_plane__remove(subparser)
+        self.init_control_plane__get_secret(subparser)
 
 
     def init_control_plane__add(self, subparser):
@@ -707,6 +710,9 @@ class CLIWrapper(CLIWrapperBase):
     def init_control_plane__remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'remove', 'Removes a control plane node')
         subcommand.add_argument('node_id', help='Control plane node id', type=str)
+
+    def init_control_plane__get_secret(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-secret', 'Get admin secret')
 
 
     def init_storage_pool(self):
@@ -1051,6 +1057,7 @@ class CLIWrapper(CLIWrapperBase):
                     args.max_queue_size = 128
                     args.inflight_io_threshold = 4
                     args.enable_qos = False
+                    args.admin_secret = ''
                 ret = self.cluster__create(sub_command, args)
             elif sub_command in ['add']:
                 if not self.developer_mode:
@@ -1174,6 +1181,8 @@ class CLIWrapper(CLIWrapperBase):
                 ret = self.control_plane__list(sub_command, args)
             elif sub_command in ['remove']:
                 ret = self.control_plane__remove(sub_command, args)
+            elif sub_command in ['get-secret']:
+                ret = self.control_plane__get_secret(sub_command, args)
             else:
                 self.parser.print_help()
 

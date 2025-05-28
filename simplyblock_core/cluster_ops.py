@@ -143,7 +143,8 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, gr_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity):
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos,
+                   strict_node_anti_affinity, admin_secret=None):
 
     logger.info("Installing dependencies...")
     ret = scripts.install_deps()
@@ -192,7 +193,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.nqn = f"{constants.CLUSTER_NQN}:{c.uuid}"
     c.cli_pass = cli_pass
     c.secret = utils.generate_string(20)
-    grafana_secret = utils.generate_string(20)
+    if admin_secret:
+        adm_secret = admin_secret
+    else:
+        adm_secret = utils.generate_string(20)
     c.db_connection = db_connection
     if cap_warn and cap_warn > 0:
         c.cap_warn = cap_warn
@@ -286,7 +290,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, grafana_secret, c.uuid,
+    ret = scripts.deploy_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, adm_secret, c.uuid,
                                log_del_interval, metrics_retention_period, log_level, grafana_endpoint)
     logger.info("Deploying swarm stack > Done")
 
@@ -303,7 +307,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     _add_graylog_input(DEV_IP, c.secret)
 
-    _create_update_user(c.uuid, grafana_endpoint, grafana_secret, c.secret)
+    _create_update_user(c.uuid, grafana_endpoint, adm_secret, c.secret)
 
     c.status = Cluster.STATUS_UNREADY
     c.create_dt = str(datetime.datetime.now())
@@ -312,7 +316,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     cluster_events.cluster_create(c)
 
-    mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid, grafana_secret, grafana_endpoint)
+    mgmt_node_ops.add_mgmt_node(DEV_IP, c.uuid, adm_secret, grafana_endpoint)
 
     logger.info("New Cluster has been created")
     logger.info(c.uuid)
