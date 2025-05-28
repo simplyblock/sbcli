@@ -3,7 +3,7 @@ version: '3.8'
 services:
   ### monitoring ###
   mongodb:
-    image: "mongo:6.0"
+    image: "mongo:5.0"
     volumes:
       - "mongodb_data:/data/db"
     deploy:
@@ -31,7 +31,7 @@ services:
 
   graylog:
     hostname: "server"
-    image: "graylog/graylog:6.2.2"
+    image: "graylog/graylog:5.0"
     entrypoint: "/usr/bin/tini -- wait-for-it opensearch:9200 --  /docker-entrypoint.sh"
     environment:
       GRAYLOG_NODE_ID_FILE: "/usr/share/graylog/data/config/node-id"
