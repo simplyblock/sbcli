@@ -100,7 +100,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__add_node(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a storage node by its IP address')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
-        subcommand.add_argument('node_ip', help='IP of storage node to add', type=str)
+        subcommand.add_argument('node_addr', help='Address of storage node api to add, like <node-ip>:5000', type=str)
         subcommand.add_argument('ifname', help='Management interface name', type=str)
         argument = subcommand.add_argument('--journal-partition', help='1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space.', type=int, default=1, dest='partitions')
         if self.developer_mode:
