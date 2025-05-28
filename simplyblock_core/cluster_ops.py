@@ -1035,10 +1035,6 @@ def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes
     if not cluster:
         raise KeyError(f"Cluster not found {cluster_id}")
 
-    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-    if not nodes:
-        raise ValueError("no nodes found")
-
     if history_string:
         records_number = utils.parse_history_param(history_string)
         if not records_number:
