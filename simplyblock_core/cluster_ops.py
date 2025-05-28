@@ -1398,7 +1398,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = deploy.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.utcnow().isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
                         deploy.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_deployment(
                             name=deploy.metadata.name,
@@ -1414,7 +1414,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = ds.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.utcnow().isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
                         ds.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_daemon_set(
                             name=ds.metadata.name,
@@ -1430,18 +1430,19 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     if mgmt_only:
         return True
 
-    logger.info("Updating spdk image on storage nodes")
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-            try:
-                node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
-                img = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-                if spdk_image:
-                    img = spdk_image
-                logger.info(f"Pulling image {img}")
-                pull_docker_image_with_retry(node_docker, img)
-            except Exception as e:
-                logger.error(e)
+    if mode == "docker": 
+        logger.info("Updating spdk image on storage nodes")
+        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                try:
+                    node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
+                    img = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+                    if spdk_image:
+                        img = spdk_image
+                    logger.info(f"Pulling image {img}")
+                    pull_docker_image_with_retry(node_docker, img)
+                except Exception as e:
+                    logger.error(e)
 
     if not restart:
         return True
