@@ -254,8 +254,8 @@ while True:
             ping_check = health_controller._check_node_ping(snode.mgmt_ip)
             logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
             if not ping_check:
-                # time.sleep(1)
-                # ping_check = health_controller._check_node_ping(snode.mgmt_ip)
+                time.sleep(1)
+                ping_check = health_controller._check_node_ping(snode.mgmt_ip)
                 logger.info(f"Check 2: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
             # 2- check node API
