@@ -32,8 +32,6 @@ fi
 
 docker network create monitoring-net -d overlay --attachable
 
-docker node update --label-add app=graylog $(hostname)
-
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
 
 # wait for the services to become online
