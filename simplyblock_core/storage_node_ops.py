@@ -3190,7 +3190,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         write_protection = True
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
-        while distrib_vuid in distrib_list:
+        while distrib_vuid in distrib_vuids:
             distrib_vuid = utils.get_random_vuid()
 
         distrib_name = f"distrib_{distrib_vuid}"
