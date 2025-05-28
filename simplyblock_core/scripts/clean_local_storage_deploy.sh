@@ -6,8 +6,9 @@ sudo docker rm SNodeAPI --force
 sudo docker rm CachingNodeAPI --force
 sudo docker stack rm app
 sudo docker swarm leave --force
-sudo docker container prune -f
-#sudo docker image prune -a -f
-sudo docker volume prune -a -f
+sleep 2
 sudo service docker restart
+sudo docker container prune -f
+sudo docker volume prune -a -f
+sudo rm -rf /etc/foundationdb/data/
 echo "Done"

@@ -11,12 +11,12 @@ from simplyblock_core.controllers import lvol_controller, snapshot_controller
 
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller
+from simplyblock_core import db_controller, utils as core_utils
 
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("lvol", __name__)
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 @bp.route('/lvol', defaults={'uuid': None}, methods=['GET'])
@@ -25,26 +25,19 @@ def list_lvols(uuid):
     cluster_id = utils.get_cluster_id(request)
     lvols = []
     if uuid:
-        lvol = db_controller.get_lvol_by_id(uuid)
+        lvol = db.get_lvol_by_id(uuid)
         if lvol:
-            node = db_controller.get_storage_node_by_id(lvol.node_id)
+            node = db.get_storage_node_by_id(lvol.node_id)
             if node.cluster_id == cluster_id:
                 lvols = [lvol]
 
         if not lvols:
             return utils.get_response_error(f"LVol not found: {uuid}", 404)
     else:
-        lvols = db_controller.get_lvols(cluster_id)
+        lvols = db.get_lvols(cluster_id)
     data = []
     for lvol in lvols:
         tmp = lvol.get_clean_dict()
-        tmp['pool_name'] = db_controller.get_pool_by_id(lvol.pool_uuid).pool_name
-        # records_list = lvol_controller.get_io_stats(lvol.get_id(), history=None, parse_sizes=False)
-        # records_list = False
-        # if records_list:
-        #     tmp['iostats'] = records_list
-        # else:
-        tmp['iostats'] = []
         data.append(tmp)
     return utils.get_response(data)
 
@@ -52,17 +45,17 @@ def list_lvols(uuid):
 @bp.route('/lvol/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/lvol/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def lvol_iostats(uuid, history):
-    lvol = db_controller.get_lvol_by_id(uuid)
+    lvol = db.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    pool = db.get_pool_by_id(lvol.pool_uuid)
     if pool.secret:
         req_secret = request.headers.get('secret', "")
         if req_secret != pool.secret:
             return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
-    data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False)
+    data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": lvol.get_clean_dict(),
         "stats": data or []
@@ -72,11 +65,11 @@ def lvol_iostats(uuid, history):
 @bp.route('/lvol/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/lvol/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def lvol_capacity(uuid, history):
-    lvol = db_controller.get_lvol_by_id(uuid)
+    lvol = db.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    pool = db.get_pool_by_id(lvol.pool_uuid)
     if pool.secret:
         req_secret = request.headers.get('secret', "")
         if req_secret != pool.secret:
@@ -135,17 +128,17 @@ def add_lvol():
 
     name = cl_data['name']
     pool_id_or_name = cl_data['pool']
-    size = utils.parse_size(cl_data['size'])
+    size = core_utils.parse_size(cl_data['size'])
 
     pool = None
-    for p in db_controller.get_pools():
+    for p in db.get_pools():
         if pool_id_or_name == p.get_id() or pool_id_or_name == p.pool_name:
             pool = p
             break
     if not pool:
         return utils.get_response(None, f"Pool not found: {pool_id_or_name}", 400)
 
-    for lvol in db_controller.get_lvols():  # pass
+    for lvol in db.get_lvols():  # pass
         if lvol.pool_uuid == pool.get_id():
             if lvol.lvol_name == name:
                 return utils.get_response(lvol.get_id())
@@ -199,7 +192,7 @@ def add_lvol():
 
 @bp.route('/lvol/<string:uuid>', methods=['PUT'])
 def update_lvol(uuid):
-    lvol = db_controller.get_lvol_by_id(uuid)
+    lvol = db.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
@@ -238,11 +231,11 @@ def update_lvol(uuid):
 
 @bp.route('/lvol/<string:uuid>', methods=['DELETE'])
 def delete_lvol(uuid):
-    lvol = db_controller.get_lvol_by_id(uuid)
+    lvol = db.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    pool = db.get_pool_by_id(lvol.pool_uuid)
     if not pool:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
@@ -256,7 +249,7 @@ def delete_lvol(uuid):
 
 @bp.route('/lvol/resize/<string:uuid>', methods=['PUT'])
 def resize_lvol(uuid):
-    lvol = db_controller.get_lvol_by_id(uuid)
+    lvol = db.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
@@ -264,15 +257,15 @@ def resize_lvol(uuid):
     if 'size' not in cl_data:
         return utils.get_response(None, "missing required param: size", 400)
 
-    new_size = utils.parse_size(cl_data['size'])
+    new_size = core_utils.parse_size(cl_data['size'])
 
-    ret = lvol_controller.resize_lvol(uuid, new_size)
-    return utils.get_response(ret)
+    ret, error = lvol_controller.resize_lvol(uuid, new_size)
+    return utils.get_response(ret, error)
 
 
 @bp.route('/lvol/connect/<string:uuid>', methods=['GET'])
 def connect_lvol(uuid):
-    lvol = db_controller.get_lvol_by_id(uuid)
+    lvol = db.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
@@ -288,15 +281,15 @@ def create_snapshot():
     if 'snapshot_name' not in cl_data:
         return utils.get_response(None, "missing required param: snapshot_name", 400)
 
-    snapID = snapshot_controller.add(
+    snapID, err = snapshot_controller.add(
         cl_data['lvol_id'],
         cl_data['snapshot_name'])
-    return utils.get_response(snapID)
+    return utils.get_response(snapID, err, http_code=400)
 
 
 @bp.route('/lvol/inflate_lvol/<string:uuid>', methods=['PUT'])
 def inflate_lvol(uuid):
-    lvol = db_controller.get_lvol_by_id(uuid)
+    lvol = db.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
     if not lvol.cloned_from_snap:

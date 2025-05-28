@@ -48,6 +48,7 @@ services:
       GRAYLOG_ELASTICSEARCH_MAX_TIME_PER_INDEX: "1d"
       GRAYLOG_RING_SIZE: "4096"
       GRAYLOG_INPUTBUFFER_RING_SIZE: "8192"
+      GRAYLOG_VERSIONCHECKS: "false"
     ports:
     - "5044:5044/tcp"   # Beats
     - "5140:5140/udp"   # Syslog
@@ -62,28 +63,6 @@ services:
       - "graylog_data:/usr/share/graylog/data/data"
       - "graylog_journal:/usr/share/graylog/data/journal"
     deploy:
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
-
-  promagent:
-    image: simplyblock/promagent
-    environment:
-      ClusterID: "admin"
-      ClusterIP: "HAProxy"
-      ClusterSecret: "${CLUSTER_SECRET}"
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
-
-  pushgateway:
-    image: prom/pushgateway
-    deploy:
-      mode: global
       placement:
         constraints: [node.role == manager]
     networks:

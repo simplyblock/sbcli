@@ -13,7 +13,7 @@ spec:
       labels:
         app: spdk-app-{{ HOSTNAME }}
     spec:
-      serviceAccountName: storage-node-sa
+      serviceAccountName: simplyblock-storage-node-sa
       nodeSelector:
         kubernetes.io/hostname: {{ HOSTNAME }}
       hostNetwork: true
@@ -32,10 +32,10 @@ spec:
             path: /
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
         - name: etc-simplyblock
           hostPath:
-            path: /etc/simplyblock
+            path: /var/simplyblock
         - name: host-modules
           hostPath:
             path: /lib/modules
@@ -61,29 +61,72 @@ spec:
 
       initContainers:
         - name: copy-script
-          image: busybox
+          image: public.ecr.aws/simply-block/busybox
           command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+
+        - name: apply-config-to-node
+          image: alpine:3.19
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Installing tools..."
+              apk add --no-cache iproute2 curl grep
+
+              NODE_IP=$(ip route get 1.1.1.1 | grep -oE 'src [0-9.]+' | awk '{print $2}')
+              echo "Detected node IP: ${NODE_IP}"
+
+              echo "Sending config to ${NODE_IP}..."
+              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://${NODE_IP}:5000/snode/apply_config \
+                -H "Content-Type: application/json" \
+                -d '{}')
+
+              echo "Response code: ${RESPONSE}"
+              if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
+                echo "Failed to send config to ${NODE_IP}, exiting."
+                exit 1
+              fi
 
       containers:
 
       - name: spdk-container
         image: {{ SPDK_IMAGE }}
         imagePullPolicy: "Always"
-        command: ["/root/scripts/run_distr.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
+        command:
+          - sh
+          - -c
+          - |
+            if [ ! -e /dev/fd ]; then
+              ln -s /proc/self/fd /dev/fd
+            fi
+            /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
         env:
+          - name: SSD_PCIE
+            value: "{{ SSD_PCIE }}"
+          - name: PCI_ALLOWED
+            value: "{{ PCI_ALLOWED }}"
+          - name: TOTAL_HP
+            value: "{{ TOTAL_HP }}"
+          - name: RPC_PORT
+            value: "{{ RPC_PORT }}"
           - name: SPDKCSI_SECRET
             valueFrom:
               secretKeyRef:
-                name: spdkcsi-secret
+                name: simplyblock-csi-secret
                 key: secret.json
           - name: CLUSTER_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: spdkcsi-cm
+                name: simplyblock-csi-cm
                 key: config.json
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c", "sudo modprobe nbd || echo failed to modprobe nbd"]
         securityContext:
           privileged: true
         volumeMounts:
@@ -159,3 +202,4 @@ spec:
         - name: dockercontainerlogdirectory
           mountPath: /var/log/pods
           readOnly: true
+          

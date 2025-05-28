@@ -71,13 +71,13 @@ class TestManyLvolSameNode(TestClusterBase):
 
     def mount_and_run_fio(self, lvol_name, fs_type):
         """Mounts the logical volume and runs FIO workload"""
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
         # Connect LVOL
         start_time = time.time()
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
         end_time = time.time()
 
         time_taken = end_time - start_time

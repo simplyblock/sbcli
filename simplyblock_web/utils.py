@@ -1,10 +1,24 @@
-import math
+import base64
 import random
 import re
 import string
-import requests
 
 from flask import jsonify
+
+
+IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+
+
+def response_schema(result_schema: dict) -> dict:
+    return {
+        'type': 'object',
+        'required': ['status', 'results'],
+        'properties': {
+            'status': {'type': 'boolean'},
+            'results': result_schema,
+            'error': {'type': 'string'},
+        },
+    }
 
 
 def get_response(data, error=None, http_code=None):
@@ -37,40 +51,6 @@ def generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def parse_size(size_string: str):
-    try:
-        x = int(size_string)
-        return x
-    except Exception:
-        pass
-    try:
-        if size_string:
-            size_string = size_string.lower()
-            size_string = size_string.replace(" ", "")
-            size_string = size_string.replace("b", "")
-            size_number = int(size_string[:-1])
-            size_v = size_string[-1]
-            one_k = 1000
-            multi = 0
-            if size_v == "k":
-                multi = 1
-            elif size_v == "m":
-                multi = 2
-            elif size_v == "g":
-                multi = 3
-            elif size_v == "t":
-                multi = 4
-            else:
-                print(f"Error parsing size: {size_string}")
-                return -1
-            return int(size_number * math.pow(one_k, multi))
-        else:
-            return -1
-    except:
-        print(f"Error parsing size: {size_string}")
-        return -1
-
-
 def validate_cpu_mask(spdk_cpu_mask):
     return re.match("^(0x|0X)?[a-fA-F0-9]+$", spdk_cpu_mask)
 
@@ -89,17 +69,31 @@ def get_int_value_or_default(data, key, default):
 
 
 def get_cluster_id(request):
-    au = request.headers["Authorization"]
-    if len(au.split()) == 2:
-        cluster_id = au.split()[0]
-        cluster_secret = au.split()[1]
-        return cluster_id
+    if "Authorization" in request.headers and request.headers["Authorization"]:
+        au = request.headers["Authorization"]
+        if len(au.split()) == 2:
+            cluster_id = au.split()[0]
+            cluster_secret = au.split()[1]
+            if cluster_id and cluster_id == "Basic":
+                try:
+                    tkn = base64.b64decode(cluster_secret).decode('utf-8')
+                    if tkn:
+                        cluster_id = tkn.split(":")[0]
+                        cluster_secret = tkn.split(":")[1]
+                except Exception as e:
+                    print(e)
+                    return
+
+            return cluster_id
 
 
 def get_aws_region():
     try:
         from ec2_metadata import ec2_metadata
-        data = ec2_metadata.instance_identity_document
+        import requests
+        session = requests.session()
+        session.timeout = 3
+        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
         return data["region"]
     except:
         pass

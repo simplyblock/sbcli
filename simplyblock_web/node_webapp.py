@@ -1,21 +1,17 @@
 #!/usr/bin/env python
 # encoding: utf-8
+from simplyblock_core import utils as core_utils
+logger = core_utils.get_logger(__name__)
+
 import argparse
-import logging
 
-from flask import Flask
+from flask_openapi3 import OpenAPI
 
-import utils
+from simplyblock_web import utils
 from simplyblock_core import constants
 
-logger_handler = logging.StreamHandler()
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-logger = logging.getLogger()
-logger.addHandler(logger_handler)
-logger.setLevel(constants.LOG_LEVEL)
 
-
-app = Flask(__name__)
+app = OpenAPI(__name__)
 app.url_map.strict_slashes = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 
@@ -26,9 +22,10 @@ def status():
 
 
 MODES = [
-    "storage_node",
     "caching_docker_node",
     "caching_kubernetes_node",
+    "storage_node",
+    "storage_node_k8s",
 ]
 
 parser = argparse.ArgumentParser()
@@ -40,17 +37,21 @@ if __name__ == '__main__':
 
     mode = args.mode
     if mode == "caching_docker_node":
-        from blueprints import node_api_basic, node_api_caching_docker
-        app.register_blueprint(node_api_basic.bp)
-        app.register_blueprint(node_api_caching_docker.bp)
+        from simplyblock_web.blueprints import node_api_basic, node_api_caching_docker
+        app.register_api(node_api_basic.api)
+        app.register_api(node_api_caching_docker.api)
 
     if mode == "caching_kubernetes_node":
-        from blueprints import node_api_basic, node_api_caching_ks
-        app.register_blueprint(node_api_basic.bp)
-        app.register_blueprint(node_api_caching_ks.bp)
+        from simplyblock_web.blueprints import node_api_basic, node_api_caching_ks
+        app.register_api(node_api_basic.api)
+        app.register_api(node_api_caching_ks.api)
 
     if mode == "storage_node":
-        from blueprints import snode_ops
-        app.register_blueprint(snode_ops.bp)
+        from simplyblock_web.blueprints import snode_ops
+        app.register_api(snode_ops.api)
+
+    if mode == "storage_node_k8s":
+        from simplyblock_web.blueprints import snode_ops_k8s
+        app.register_api(snode_ops_k8s.api)
 
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)

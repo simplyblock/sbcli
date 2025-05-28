@@ -1,0 +1,57 @@
+name: Integration Tests
+
+on:
+  pull_request
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mock-integration:
+    runs-on: ubuntu-latest
+    services:
+      docker:
+        image: docker:24.0.5
+        options: --privileged
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Compose
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build and start containers
+        run: |
+          docker compose -f docker-compose-dev.yml up --build -d
+
+      - name: Run endpoint checks inside mgmt-server
+        run: |
+          docker compose -f docker-compose-dev.yml exec mgmt-server python manual_testing/check_endpoints.py
+
+      - name: Stop and clean up
+        if: always()
+        run: |
+          docker compose -f docker-compose-dev.yml logs
+          docker compose -f docker-compose-dev.yml down --volumes --remove-orphans
+
+  await-image:
+    name: Await docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for image to be built succeed
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'build'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
+  integration:
+    needs: [await-image, mock-integration]
+    if: ${{ vars.ci_cluster != '' }}
+    uses: ./.github/workflows/cluster-deployment.yml
+    with:
+      cluster: ${{ vars.ci_cluster }}
+      docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
+      sbcli_source: ${{ github.head_ref || github.ref_name }}

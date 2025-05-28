@@ -2,18 +2,19 @@
 # encoding: utf-8
 
 import logging
+import time
 
 from flask import Blueprint
 from flask import request
 
 from simplyblock_web import utils
-from simplyblock_core import db_controller
+from simplyblock_core import db_controller, utils as core_utils
 from simplyblock_core.controllers import snapshot_controller
 
 
 logger = logging.getLogger(__name__)
 
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 bp = Blueprint("snapshot", __name__)
 
 
@@ -25,10 +26,10 @@ def create_snapshot():
     if 'snapshot_name' not in cl_data:
         return utils.get_response(None, "missing required param: snapshot_name", 400)
 
-    snapID = snapshot_controller.add(
+    snapID, err = snapshot_controller.add(
         cl_data['lvol_id'],
         cl_data['snapshot_name'])
-    return utils.get_response(snapID)
+    return utils.get_response(snapID, err, http_code=400)
 
 
 @bp.route('/snapshot/<string:uuid>', methods=['DELETE'])
@@ -40,12 +41,14 @@ def delete_snapshot(uuid):
 @bp.route('/snapshot', methods=['GET'])
 def list_snapshots():
     cluster_id = utils.get_cluster_id(request)
-    snaps = db_controller.get_snapshots()
+    snaps = db.get_snapshots()
     data = []
     for snap in snaps:
         if snap.cluster_id != cluster_id:
             continue
-        data.append(snap.get_clean_dict())
+        d = snap.get_clean_dict()
+        d["created_at"] = str(snap.created_at)
+        data.append(d)
     return utils.get_response(data)
 
 
@@ -59,10 +62,8 @@ def clone_snapshot():
 
     new_size = 0
     if 'new_size' in cl_data:
-        new_size = utils.parse_size(cl_data['new_size'])
+        new_size = core_utils.parse_size(cl_data['new_size'])
 
-    res, msg = snapshot_controller.clone(
+    clone_id, error = snapshot_controller.clone(
         cl_data['snapshot_id'], cl_data['clone_name'], new_size)
-    if res:
-        return utils.get_response(msg)
-    return utils.get_response(None, msg)
+    return utils.get_response(clone_id, error, http_code=400)

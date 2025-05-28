@@ -22,7 +22,7 @@ spec:
             medium: HugePages
       containers:
       - name: spdk-container
-        image: hamdykhader/spdk:core
+        image: simplyblock/spdk-core:latest
         env:
           - name: SPDK_CPU_MASK
             value: "0x1"
@@ -44,7 +44,7 @@ spec:
             memory: 1024Mi
 
       - name: spdk-proxy-container
-        image: hamdykhader/spdk:core
+        image: simplyblock/spdk-core:latest
         command: ["python", "/root/scripts/spdk_http_proxy_server.py"]
         volumeMounts:
         - name: socket-dir
@@ -58,3 +58,4 @@ spec:
           value: "secret"
         - name: RPC_PASSWORD
           value: "secret"
+          

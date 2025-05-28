@@ -14,8 +14,7 @@ from flask import request
 from kubernetes.client import ApiException
 from jinja2 import Environment, FileSystemLoader
 
-from simplyblock_core import constants, shell_utils
-
+from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
@@ -29,19 +28,14 @@ default_namespace = 'default'
 namespace_id_file = '/etc/simplyblock/namespace'
 pod_name = 'cnode-spdk-deployment'
 
-
-config.load_incluster_config()
-k8s_apps_v1 = client.AppsV1Api()
-k8s_core_v1 = client.CoreV1Api()
-
 TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
 cpu_info = cpuinfo.get_cpu_info()
-hostname, _, _ = node_utils.run_command("hostname -s")
+hostname, _, _ = shell_utils.run_command("hostname -s")
 system_id = ""
 try:
-    system_id, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+    system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 except:
     pass
 
@@ -70,10 +64,10 @@ def set_namespace(namespace):
 def scan_devices():
     run_health_check = request.args.get('run_health_check', default=False, type=bool)
     out = {
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
     }
     return utils.get_response(out)
 
@@ -85,9 +79,6 @@ def spdk_process_start():
     spdk_cpu_mask = None
     if 'spdk_cpu_mask' in data:
         spdk_cpu_mask = data['spdk_cpu_mask']
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
     node_cpu_count = os.cpu_count()
 
     namespace = get_namespace()
@@ -105,12 +96,7 @@ def spdk_process_start():
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
-    if spdk_mem:
-        spdk_mem = int(spdk_mem / (1024 * 1024))
-    else:
-        spdk_mem = 64096
-
-    spdk_mem_gega = int(spdk_mem / 1024)
+    spdk_mem = data.get('spdk_mem', core_utils.parse_size('64GiB'))
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
 
@@ -130,8 +116,8 @@ def spdk_process_start():
         values = {
             'SPDK_IMAGE': spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
-            'SPDK_MEM': spdk_mem,
-            'MEM_GEGA': spdk_mem_gega,
+            'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
+            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB'),
             'SERVER_IP': data['server_ip'],
             'RPC_PORT': data['rpc_port'],
             'RPC_USERNAME': data['rpc_username'],
@@ -142,6 +128,7 @@ def spdk_process_start():
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
+        k8s_apps_v1 = core_utils.get_k8s_apps_client()
         resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
         msg = f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}"
         logger.info(msg)
@@ -153,7 +140,8 @@ def spdk_process_start():
 
 @bp.route('/spdk_process_kill', methods=['GET'])
 def spdk_process_kill():
-
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    k8s_apps_v1 = core_utils.get_k8s_apps_client()
     try:
         namespace = get_namespace()
         resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
@@ -179,6 +167,7 @@ def spdk_process_kill():
 
 
 def _is_pod_up():
+    k8s_core_v1 = core_utils.get_k8s_core_client()
     resp = k8s_core_v1.list_namespaced_pod(get_namespace())
     for pod in resp.items:
         if pod.metadata.name.startswith(pod_name):
@@ -212,13 +201,13 @@ def get_info():
         "hugepages": node_utils.get_huge_memory(),
         "memory_details": node_utils.get_memory_details(),
 
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
 
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
-        "network_interface": node_utils.get_nics_data()
+        "network_interface": core_utils.get_nics_data()
     }
     return utils.get_response(out)
 
@@ -236,7 +225,7 @@ def connect_to_nvme():
     nqn = data['nqn']
     st = f"nvme connect --transport=tcp --traddr={ip} --trsvcid={port} --nqn={nqn}"
     logger.debug(st)
-    out, err, ret_code = node_utils.run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
@@ -251,7 +240,7 @@ def disconnect_device():
     data = request.get_json()
     dev_path = data['dev_path']
     st = f"nvme disconnect --device={dev_path}"
-    out, err, ret_code = node_utils.run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
@@ -263,7 +252,7 @@ def disconnect_nqn():
     data = request.get_json()
     nqn = data['nqn']
     st = f"nvme disconnect --nqn={nqn}"
-    out, err, ret_code = node_utils.run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
@@ -273,7 +262,7 @@ def disconnect_nqn():
 @bp.route('/disconnect_all', methods=['POST'])
 def disconnect_all():
     st = "nvme disconnect-all"
-    out, err, ret_code = node_utils.run_command(st)
+    out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)

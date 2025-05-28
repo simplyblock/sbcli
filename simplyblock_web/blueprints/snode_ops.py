@@ -1,27 +1,29 @@
 #!/usr/bin/env python
 # encoding: utf-8
 import json
-import logging
-import math
 import os
 import time
+from typing import List, Optional, Union
 
 import cpuinfo
 import docker
 import requests
 from docker.types import LogConfig
-from flask import Blueprint
-from flask import request
+from flask_openapi3 import APIBlueprint
+from pydantic import BaseModel, Field
 
+from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils
 
-from simplyblock_core import scripts, constants, shell_utils
+logger = core_utils.get_logger(__name__)
 
-logger = logging.getLogger(__name__)
-
-bp = Blueprint("snode", __name__, url_prefix="/snode")
+api = APIBlueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
+
+
+class _RPCPortQuery(BaseModel):
+    rpc_port: Optional[int] = Field(constants.RPC_HTTP_PROXY_PORT)
 
 
 def get_google_cloud_info():
@@ -82,121 +84,130 @@ def get_amazon_cloud_info():
         pass
 
 
-def get_docker_client():
-    ip = os.getenv("DOCKER_IP")
-    if not ip:
-        for ifname in node_utils.get_nics_data():
-            if ifname in ["eth0", "ens0"]:
-                ip = node_utils.get_nics_data()[ifname]['ip']
-                break
-    return docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=60 * 5)
+def get_docker_client(timeout=60):
+    try:
+        cl = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=timeout)
+        cl.info()
+        return cl
+    except:
+        ip = os.getenv("DOCKER_IP")
+        if not ip:
+            for ifname in core_utils.get_nics_data():
+                if ifname in ["eth0", "ens0"]:
+                    ip = core_utils.get_nics_data()[ifname]['ip']
+                    break
+        cl = docker.DockerClient(base_url=f"tcp://{ip}:2375", version="auto", timeout=timeout)
+        try:
+            cl.info()
+            return cl
+        except:
+            pass
 
 
-@bp.route('/scan_devices', methods=['GET'])
+@api.get('/scan_devices', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'required': ['nvme_devices', 'nvme_pcie_list', 'spdk_devices', 'spdk_pcie_list'],
+        'properties': {
+            'nvme_devices': {'type': 'array', 'items': {'type': 'string'}},
+            'nvme_pcie_list': {'type': 'array', 'items': {'type': 'string'}},
+            'spdk_devices': {'type': 'array', 'items': {'type': 'string'}},
+            'spdk_pcie_list': {'type': 'array', 'items': {'type': 'string'}},
+        },
+    })}}},
+})
 def scan_devices():
-    run_health_check = request.args.get('run_health_check', default=False, type=bool)
     out = {
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
     }
     return utils.get_response(out)
 
 
-@bp.route('/spdk_process_start', methods=['POST'])
-def spdk_process_start():
-    try:
-        data = request.get_json()
-    except:
-        data = {}
+class SPDKParams(BaseModel):
+    server_ip: str = Field(pattern=utils.IP_PATTERN)
+    rpc_port: int = Field(constants.RPC_HTTP_PROXY_PORT, ge=1, le=65536)
+    rpc_username: str
+    rpc_password: str
+    ssd_pcie: Optional[List[str]] = Field(None)
+    spdk_debug: Optional[bool] = Field(False)
+    l_cores: Optional[str] = Field(None)
+    spdk_mem: int = Field(core_utils.parse_size('4GiB'))
+    total_mem: Optional[Union[int, str]] = Field('')
+    multi_threading_enabled: Optional[bool] = Field(False)
+    timeout: Optional[int] = Field(5 * 60)
+    spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
 
-    set_debug = None
-    if 'spdk_debug' in data and data['spdk_debug']:
-        set_debug = data['spdk_debug']
 
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in data:
-        spdk_cpu_mask = data['spdk_cpu_mask']
+@api.post('/spdk_process_start', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_start(body: SPDKParams):
+    ssd_pcie_params = " -A " + " -A ".join(body.ssd_pcie) if body.ssd_pcie else ""
+    ssd_pcie_list = " ".join(body.ssd_pcie) if body.ssd_pcie else "none"
+    spdk_debug = '1' if body.spdk_debug else ''
+    total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MiB') if body.total_mem else ''
+    spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
-    spdk_mem = None
-    if 'spdk_mem' in data:
-        spdk_mem = data['spdk_mem']
-
-    multi_threading_enabled = False
-    if 'multi_threading_enabled' in data:
-        multi_threading_enabled = bool(data['multi_threading_enabled'])
-
-    timeout = 60*5
-    if 'timeout' in data:
-        try:
-            timeout = int(data['timeout'])
-        except:
-            pass
-
-    if spdk_mem:
-        spdk_mem = int(utils.parse_size(spdk_mem) / (1000 * 1000))
-    else:
-        spdk_mem = 4000
-
-    node_docker = get_docker_client()
+    node_docker = get_docker_client(timeout=60*3)
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
-        if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
+        if node.attrs["Name"] in [f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"]:
             logger.info(f"{node.attrs['Name']} container found, removing...")
-            node.stop()
+            node.stop(timeout=3)
             node.remove(force=True)
-            time.sleep(2)
 
-    spdk_debug = ""
-    if set_debug:
-        spdk_debug = "1"
-
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-    if 'spdk_image' in data and data['spdk_image']:
-        spdk_image = data['spdk_image']
-        # node_docker.images.pull(spdk_image)
-
-    if "cluster_ip" in data and data['cluster_ip']:
-        cluster_ip = data['cluster_ip']
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
+    if body.cluster_ip is not None:
+        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{body.cluster_ip}:12202"})
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
     container = node_docker.containers.run(
-        spdk_image,
-        f"/root/scripts/run_distr.sh {spdk_cpu_mask} {spdk_mem} {spdk_debug}",
-        name="spdk",
+        body.spdk_image,
+        f"/root/scripts/run_distr_with_ssd.sh {body.l_cores} {spdk_mem_mib} {spdk_debug}",
+        name=f"spdk_{body.rpc_port}",
         detach=True,
         privileged=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
             '/etc/simplyblock:/etc/simplyblock',
-            '/var/tmp:/var/tmp',
+            f'/var/tmp/spdk_{body.rpc_port}:/var/tmp',
             '/dev:/dev',
+            f'/tmp/shm_{body.rpc_port}/:/dev/shm/',
             '/lib/modules/:/lib/modules/',
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
             '/sys:/sys'],
+        environment=[
+            f"RPC_PORT={body.rpc_port}",
+            f"ssd_pcie={ssd_pcie_params}",
+            f"PCI_ALLOWED={ssd_pcie_list}",
+            f"TOTAL_HP={total_mem_mib}",
+        ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
     container2 = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_core/services/spdk_http_proxy_server.py",
-        name="spdk_proxy",
+        name=f"spdk_proxy_{body.rpc_port}",
         detach=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
-            '/var/tmp:/var/tmp'
+            f'/var/tmp/spdk_{body.rpc_port}:/var/tmp',
         ],
         environment=[
-            f"SERVER_IP={data['server_ip']}",
-            f"RPC_PORT={data['rpc_port']}",
-            f"RPC_USERNAME={data['rpc_username']}",
-            f"RPC_PASSWORD={data['rpc_password']}",
-            f"MULTI_THREADING_ENABLED={multi_threading_enabled}",
-            f"TIMEOUT={timeout}",
+            f"SERVER_IP={body.server_ip}",
+            f"RPC_PORT={body.rpc_port}",
+            f"RPC_USERNAME={body.rpc_username}",
+            f"RPC_PASSWORD={body.rpc_password}",
+            f"MULTI_THREADING_ENABLED={body.multi_threading_enabled}",
+            f"TIMEOUT={body.timeout}",
         ]
         # restart_policy={"Name": "always"}
     )
@@ -217,37 +228,77 @@ def spdk_process_start():
         False, f"Container create max retries reached, Container status: {status}, Is Running: {is_running}")
 
 
-@bp.route('/spdk_process_kill', methods=['GET'])
-def spdk_process_kill():
+@api.get('/spdk_process_kill', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_kill(query: _RPCPortQuery):
     node_docker = get_docker_client()
     for cont in node_docker.containers.list(all=True):
-        if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
+        if cont.attrs["Name"] in [f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"]:
             cont.stop(timeout=3)
             cont.remove(force=True)
     return utils.get_response(True)
 
 
-@bp.route('/spdk_process_is_up', methods=['GET'])
-def spdk_process_is_up():
-    node_docker = get_docker_client()
-    for cont in node_docker.containers.list(all=True):
-        if cont.attrs['Name'] == "/spdk":
-            status = cont.attrs['State']["Status"]
-            is_running = cont.attrs['State']["Running"]
-            if is_running:
+@api.get('/spdk_process_is_up', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_is_up(query: _RPCPortQuery):
+    try:
+        node_docker = get_docker_client()
+        for cont in node_docker.containers.list(all=True):
+            if cont.attrs['Name'] == f"/spdk_{query.rpc_port}":
+                status = cont.attrs['State']["Status"]
+                is_running = cont.attrs['State']["Running"]
+                if is_running:
+                    return utils.get_response(True)
+                else:
+                    return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
+    except Exception as e:
+        logger.error(e)
+    return utils.get_response(True)
+
+
+
+@api.get('/spdk_proxy_restart', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_proxy_restart(query: _RPCPortQuery):
+    try:
+        node_docker = get_docker_client()
+        for cont in node_docker.containers.list(all=True):
+            if cont.attrs['Name'] == f"/spdk_proxy_{query.rpc_port}":
+                cont.restart()
                 return utils.get_response(True)
-            else:
-                return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
-    return utils.get_response(False, "SPDK container not found")
+    except Exception as e:
+        logger.error(e)
+        return utils.get_response(False, str(e))
+
+    return utils.get_response(True)
 
 
 def get_cluster_id():
-    out, _, _ = node_utils.run_command(f"cat {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"cat {cluster_id_file}")
     return out
 
-@bp.route('/get_file_content/<string:file_name>', methods=['GET'])
-def get_file_content(file_name):
-    out, err, _ = node_utils.run_command(f"cat /etc/simplyblock/{file_name}")
+
+class FilePath(BaseModel):
+    file_name: str
+
+
+@api.get('/get_file_content/<string:file_name>', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def get_file_content(path: FilePath):
+    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{path.file_name}")
     if out:
         return utils.get_response(out)
     elif err:
@@ -257,17 +308,17 @@ def get_file_content(file_name):
 
 
 def set_cluster_id(cluster_id):
-    out, _, _ = node_utils.run_command(f"echo {cluster_id} > {cluster_id_file}")
-    return out
+    ret = os.popen(f"echo {cluster_id} > {cluster_id_file}").read().strip()
+    return ret
 
 
 def delete_cluster_id():
-    out, _, _ = node_utils.run_command(f"rm -f {cluster_id_file}")
+    out, _, _ = shell_utils.run_command(f"rm -f {cluster_id_file}")
     return out
 
 
 def get_node_lsblk():
-    out, err, rc = node_utils.run_command("lsblk -J")
+    out, err, rc = shell_utils.run_command("lsblk -J")
     if rc != 0:
         logger.error(err)
         return []
@@ -275,11 +326,41 @@ def get_node_lsblk():
     return data
 
 
+def get_nodes_config():
+    file_path = constants.NODES_CONFIG_FILE
+    try:
+        # Open and read the JSON file
+        with open(file_path, "r") as file:
+            nodes_config = json.load(file)
 
-@bp.route('/info', methods=['GET'])
+        # Open and read the read_only JSON file
+        with open(f"{file_path}_read_only", "r") as file:
+            read_only_nodes_config = json.load(file)
+        if nodes_config != read_only_nodes_config:
+            logger.error("The nodes config has been changed, "
+                         "Please run sbcli sn configure-upgrade before adding the storage node")
+            return {}
+        for i in range(len(nodes_config.get("nodes"))):
+            if not core_utils.validate_node_config(nodes_config.get("nodes")[i]):
+                return {}
+        return nodes_config
+
+    except FileNotFoundError:
+        logger.error(f"The file '{file_path}' does not exist.")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON: {e}")
+        return {}
+
+
+@api.get('/info', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'additionalProperties': True,
+    })}}},
+})
 def get_info():
-
-    out = {
+    return utils.get_response({
         "cluster_id": get_cluster_id(),
 
         "hostname": HOSTNAME,
@@ -292,62 +373,63 @@ def get_info():
         "hugepages": node_utils.get_huge_memory(),
         "memory_details": node_utils.get_memory_details(),
 
-        "nvme_devices": node_utils._get_nvme_devices(),
-        "nvme_pcie_list": node_utils._get_nvme_pcie_list(),
+        "nvme_devices": node_utils.get_nvme_devices(),
+        "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
 
-        "spdk_devices": node_utils._get_spdk_devices(),
-        "spdk_pcie_list": node_utils._get_spdk_pcie_list(),
+        "spdk_devices": node_utils.get_spdk_devices(),
+        "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
-        "network_interface": node_utils.get_nics_data(),
+        "network_interface": core_utils.get_nics_data(),
 
         "cloud_instance": CLOUD_INFO,
 
         "lsblk": get_node_lsblk(),
-    }
-    return utils.get_response(out)
+        "nodes_config": get_nodes_config(),
+    })
 
 
-@bp.route('/join_swarm', methods=['POST'])
-def join_swarm():
-    data = request.get_json()
-    cluster_ip = data['cluster_ip']
-    cluster_id = data['cluster_id']
-    join_token = data['join_token']
-    db_connection = data['db_connection']
+class _JoinSwarmParams(BaseModel):
+    cluster_ip: str = Field(pattern=utils.IP_PATTERN)
+    cluster_id: str = Field(pattern=core_utils.UUID_PATTERN)
+    join_token: str
+    db_connection: str
 
+
+@api.post('/join_swarm', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def join_swarm(body: _JoinSwarmParams):
     logger.info("Setting DB connection")
-    scripts.set_db_config(db_connection)
-    set_cluster_id(cluster_id)
+    scripts.set_db_config(body.db_connection)
+    set_cluster_id(body.cluster_id)
 
     logger.info("Joining Swarm")
     node_docker = get_docker_client()
     if node_docker.info()["Swarm"]["LocalNodeState"] in ["active", "pending"]:
         logger.info("Node is part of another swarm, leaving swarm")
-        node_docker.swarm.leave(force=True)
-        time.sleep(2)
-    node_docker.swarm.join([f"{cluster_ip}:2377"], join_token)
-    retries = 10
-    while retries > 0:
-        if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
-            break
-        logger.info("Waiting for node to be active...")
-        retries -= 1
-        time.sleep(1)
-    logger.info("Joining docker swarm > Done")
+        try:
+            node_docker.swarm.leave(force=True)
+            time.sleep(2)
+        except Exception as e:
+            logger.error(e)
 
     try:
-        nodes = node_docker.containers.list(all=True)
-        for node in nodes:
-            if node.attrs["Name"] == "/spdk_proxy":
-                node_docker.containers.get(node.attrs["Id"]).restart()
-                break
-    except:
-        pass
+        node_docker.swarm.join([f"{body.cluster_ip}:2377"], body.join_token)
+        logger.info("Joining docker swarm > Done")
+    except Exception as e:
+        logger.error(e)
+        return utils.get_response(False, str(e))
 
     return utils.get_response(True)
 
 
-@bp.route('/leave_swarm', methods=['GET'])
+@api.get('/leave_swarm', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
 def leave_swarm():
     delete_cluster_id()
     try:
@@ -358,33 +440,36 @@ def leave_swarm():
     return utils.get_response(True)
 
 
-@bp.route('/make_gpt_partitions', methods=['POST'])
-def make_gpt_partitions_for_nbd():
-    nbd_device = '/dev/nbd0'
-    jm_percent = '3'
-    num_partitions = 1
+class _GPTPartitionsParams(BaseModel):
+    nbd_device: str = Field('/dev/nbd0')
+    jm_percent: int = Field(3, ge=0, le=100)
+    num_partitions: int = Field(1, ge=0)
+    partition_percent: int = Field(0, ge=0, le=100)
 
-    try:
-        data = request.get_json()
-        nbd_device = data['nbd_device']
-        jm_percent = data['jm_percent']
-        num_partitions = data['num_partitions']
-    except:
-        pass
 
+@api.post('/make_gpt_partitions', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     cmd_list = [
-        f"parted -fs {nbd_device} mklabel gpt",
-        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\""
+        f"parted -fs {body.nbd_device} mklabel gpt",
+        f"parted -f {body.nbd_device} mkpart journal \"0%\" \"{body.jm_percent}%\""
     ]
     sg_cmd_list = [
-        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
+        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}",
     ]
-    perc_per_partition = int((100 - jm_percent) / num_partitions)
-    for i in range(num_partitions):
-        st = jm_percent + (i * perc_per_partition)
+    if body.partition_percent:
+        perc_per_partition = body.partition_percent
+    else:
+        perc_per_partition = int((100 - body.jm_percent) / body.num_partitions)
+
+    for i in range(body.num_partitions):
+        st = body.jm_percent + (i * perc_per_partition)
         en = st + perc_per_partition
-        cmd_list.append(f"parted -f {nbd_device} mkpart part{(i+1)} \"{st}%\" \"{en}%\"")
-        sg_cmd_list.append(f"sgdisk -t {(i+2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}")
+        cmd_list.append(f"parted -f {body.nbd_device} mkpart part{(i+1)} \"{st}%\" \"{en}%\"")
+        sg_cmd_list.append(f"sgdisk -t {(i+2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}")
 
     for cmd in cmd_list+sg_cmd_list:
         logger.debug(cmd)
@@ -399,19 +484,18 @@ def make_gpt_partitions_for_nbd():
     return utils.get_response(True)
 
 
-@bp.route('/delete_dev_gpt_partitions', methods=['POST'])
-def delete_gpt_partitions_for_dev():
+class _DeviceParams(BaseModel):
+    device_pci: str
 
-    data = request.get_json()
 
-    if "device_pci" not in data:
-        return utils.get_response(False, "Required parameter is missing: device_pci")
-
-    device_pci = data['device_pci']
-
+@api.post('/delete_dev_gpt_partitions')
+def delete_gpt_partitions_for_dev(body: _DeviceParams):
     cmd_list = [
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+        f"echo \"nvme\" > /sys/bus/pci/devices/{body.device_pci}/driver_override",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+
     ]
 
     for cmd in cmd_list:
@@ -420,10 +504,46 @@ def delete_gpt_partitions_for_dev():
         logger.debug(ret)
         time.sleep(1)
 
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+    device_name = os.popen(f"ls /sys/devices/pci0000:00/{body.device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+    if device_name:
+        cmd_list = [
+            f"parted -fs /dev/{device_name} mklabel gpt",
+            f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        ]
+
+        for cmd in cmd_list:
+            logger.debug(cmd)
+            ret = os.popen(cmd).read().strip()
+            logger.debug(ret)
+            time.sleep(1)
+
+    return utils.get_response(True)
+
+
+CPU_INFO = cpuinfo.get_cpu_info()
+HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
+SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
+CLOUD_INFO = {}
+if not os.environ.get("WITHOUT_CLOUD_INFO"):
+    CLOUD_INFO = get_amazon_cloud_info()
+    if not CLOUD_INFO:
+        CLOUD_INFO = get_google_cloud_info()
+
+    if not CLOUD_INFO:
+        CLOUD_INFO = get_equinix_cloud_info()
+
+    if CLOUD_INFO:
+        SYSTEM_ID = CLOUD_INFO["id"]
+
+
+@api.post('/bind_device_to_spdk')
+def bind_device_to_spdk(body: _DeviceParams):
     cmd_list = [
-        f"parted -fs /dev/{device_name} mklabel gpt",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        f"echo \"\" > /sys/bus/pci/devices/{body.device_pci}/driver_override",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/bind",
+        f"echo \"uio_pci_generic\" > /sys/bus/pci/devices/{body.device_pci}/driver_override",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers_probe",
     ]
 
     for cmd in cmd_list:
@@ -435,42 +555,63 @@ def delete_gpt_partitions_for_dev():
     return utils.get_response(True)
 
 
-CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = node_utils.run_command("hostname -s")
-SYSTEM_ID = ""
-CLOUD_INFO = get_amazon_cloud_info()
-if not CLOUD_INFO:
-    CLOUD_INFO = get_google_cloud_info()
-
-if not CLOUD_INFO:
-    CLOUD_INFO = get_equinix_cloud_info()
-
-if CLOUD_INFO:
-    SYSTEM_ID = CLOUD_INFO["id"]
-else:
-    SYSTEM_ID, _, _ = node_utils.run_command("dmidecode -s system-uuid")
+class _FirewallParams(BaseModel):
+    port_id: int
+    port_type: str
+    action: str
+    rpc_port: int = Field(ge=1, le=65536)
 
 
-@bp.route('/bind_device_to_spdk', methods=['POST'])
-def bind_device_to_spdk():
-    data = request.get_json()
-    if "device_pci" not in data:
-        return utils.get_response(False, "Required parameter is missing: device_pci")
+@api.post('/firewall_set_port', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def firewall_set_port(body: _FirewallParams):
+    ret = node_utils.firewall_port(
+            body.port_id,
+            body.port_type,
+            block=(body.action == "block"),
+            rpc_port=body.rpc_port
+    )
+    return utils.get_response(ret)
 
-    device_pci = data['device_pci']
 
-    cmd_list = [
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
-        f"echo \"\" > /sys/bus/pci/devices/{device_pci}/driver_override",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/bind",
-        f"echo \"uio_pci_generic\" > /sys/bus/pci/devices/{device_pci}/driver_override",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers_probe",
-    ]
+@api.get('/get_firewall', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def get_firewall(query: _RPCPortQuery):
+    ret = node_utils.firewall_get(str(query.rpc_port))
+    return utils.get_response(ret)
 
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
+
+@api.post('/set_hugepages', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def set_hugepages():
+    node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
+    if node_info.get("nodes"):
+        nodes = node_info["nodes"]
+    else:
+        logger.error("Please run sbcli sn configure before adding the storage node, "
+                     "If you run it and the config has been manually changed please "
+                     "run 'sbcli sn configure-upgrade'")
+        return utils.get_response(False, "Please run sbcli sn configure before adding the storage node")
+
+    if not core_utils.validate_config(node_info):
+        return utils.get_response(False, "Config validation is incorrect")
+
+    # Set Huge page memory
+    huge_page_memory_dict = {}
+    for node_config in nodes:
+        numa = node_config["socket"]
+        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+    for numa, huge_page_memory in huge_page_memory_dict.items():
+        num_pages = huge_page_memory // (2048 * 1024)
+        core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)

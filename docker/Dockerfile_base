@@ -1,10 +1,24 @@
 # syntax=docker/dockerfile:1
 FROM python:3.9-slim
 
-RUN apt-get update; apt-get install -y \
-    wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi \
-    iproute2 pciutils sudo nano parted gdisk ssh; \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update ; apt-get upgrade -y
+
+RUN apt-get install -y \
+    wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi iptables \
+    iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl
+
+
+RUN install -m 0755 -d /etc/apt/keyrings
+RUN curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+RUN chmod a+r /etc/apt/keyrings/docker.asc
+RUN echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" | \
+    tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+RUN apt-get update ; apt-get install docker-ce-cli -y
+RUN apt-get upgrade -y
+
+RUN rm -rf /var/lib/apt/lists/*
 
 ARG TARGETPLATFORM
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
@@ -18,9 +32,9 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
 
 WORKDIR /app
 
-# pip install
+RUN pip3 install --upgrade pip
+RUN pip3 install setuptools --upgrade
+
 COPY requirements.txt requirements.txt
-COPY simplyblock_web/requirements.txt simplyblock_web/requirements.txt
 
 RUN pip3 install -r requirements.txt
-RUN pip3 install -r simplyblock_web/requirements.txt

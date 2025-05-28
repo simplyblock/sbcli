@@ -1,0 +1,85 @@
+name: Deploy cluster
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:  # Has to be an input
+        description: Platform to execute on
+        type: string
+        default: ubuntu-latest
+      cluster:
+        required: true
+        type: string
+      docker_image:
+        required: true
+        type: string
+      sbcli_source:
+        required: true
+        type: string
+      ndcs:
+        required: false
+        type: number
+        default: 1
+      npcs:
+        required: false
+        type: number
+        default: 1
+      bs:
+        required: false
+        type: number
+        default: 4096
+      chunk_bs:
+        required: false
+        type: number
+        default: 4096
+      nr_hugepages:
+        required: false
+        type: number
+        default: 2048
+
+    outputs:
+      cluster_ip:
+        description: "The cluster's IP"
+        value: ${{ jobs.deploy.outputs.cluster_ip }}
+      cluster_id:
+        description: "The cluster's ID"
+        value: ${{ jobs.deploy.outputs.cluster_id }}
+      cluster_secret:
+        description: "The cluster secret"
+        value: ${{ jobs.deploy.outputs.cluster_secret }}
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.runs_on }}
+
+    outputs:
+      cluster_id: ${{ steps.deployment.outputs.cluster_id }}
+      cluster_ip: ${{ steps.deployment.outputs.cluster_ip }}
+      cluster_secret: ${{ steps.deployment.outputs.cluster_secret }}
+
+    steps:
+    - name: Checkout sbcli
+      uses: actions/checkout@v4
+      with:
+        path: sbcli
+
+    - name: Checkout deployment tooling
+      uses: actions/checkout@v4
+      with:
+        repository: simplyblock-io/simplyBlockDeploy
+        path: deploy
+
+    - name: Deploy cluster
+      id: deployment
+      run: |
+        cd deploy/bare-metal
+        eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
+        ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-size 400G --number-of-devices 1 --sbcli-cmd sbcli-dev --spdk-debug
+      env:
+        NDCS: ${{ inputs.ndcs }}
+        NPCS: ${{ inputs.npcs }}
+        BS: ${{ inputs.bs }}
+        CHUNK_BS: ${{ inputs.chunk_bs }}
+        NR_HUGEPAGES: ${{ inputs.nr_hugepages }}
+        SBCLI_BRANCH: ${{ inputs.sbcli_source }}
+        SIMPLY_BLOCK_DOCKER_IMAGE: ${{ inputs.docker_image }}

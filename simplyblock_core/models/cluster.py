@@ -14,6 +14,7 @@ class Cluster(BaseModel):
     STATUS_DEGRADED = "degraded"
     STATUS_UNREADY = "unready"
     STATUS_IN_ACTIVATION = "in_activation"
+    STATUS_IN_EXPANSION = "in_expansion"
 
     STATUS_CODE_MAP = {
         STATUS_ACTIVE: 1,
@@ -22,6 +23,9 @@ class Cluster(BaseModel):
 
         STATUS_SUSPENDED: 10,
         STATUS_DEGRADED: 11,
+        STATUS_UNREADY: 12,
+        STATUS_IN_ACTIVATION: 13,
+        STATUS_IN_EXPANSION: 14,
 
     }
 
@@ -54,6 +58,7 @@ class Cluster(BaseModel):
     secret: str = ""
     strict_node_anti_affinity: bool = False
     tls: bool = False
+    is_re_balancing: bool = False
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

@@ -1,22 +1,12 @@
 # coding=utf-8
 import time
 import os
-import logging
-import sys
 
-from simplyblock_core import cluster_ops, constants
+from simplyblock_core import constants, utils
 from simplyblock_core.db_controller import DBController
 
-from graypy import GELFTCPHandler
 
-# Configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = utils.get_logger(__name__)
 
 logger.info("Starting FDB cleanup script...")
 

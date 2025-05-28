@@ -8,13 +8,13 @@ from flask import Blueprint, request
 
 
 from simplyblock_web import utils
-from simplyblock_core import db_controller
+from simplyblock_core import db_controller, utils as core_utils
 from simplyblock_core.controllers import caching_node_controller
 
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("cnode", __name__)
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 @bp.route('/cachingnode', methods=['POST'])
@@ -33,7 +33,6 @@ def add_node_to_cluster():
 
     data_nics_list = []
     spdk_cpu_mask = None
-    spdk_mem = None
     spdk_image = None
     namespace = None
     multipathing = True
@@ -41,11 +40,9 @@ def add_node_to_cluster():
     if 'spdk_cpu_mask' in cl_data:
         spdk_cpu_mask = cl_data['spdk_cpu_mask']
 
-    if 'spdk_mem' in cl_data:
-        mem = cl_data['spdk_mem']
-        spdk_mem = utils.parse_size(mem)
-        if spdk_mem < 1 * 1024 * 1024:
-            return utils.get_response_error(f"SPDK memory:{mem} must be larger than 1G", 400)
+    spdk_mem = core_utils.parse_size(cl_data['spdk_mem']) if 'spdk_mem' in cl_data else None
+    if spdk_mem is not None and spdk_mem < core_utils.parse_size('1GiB'):
+        return utils.get_response_error(f"SPDK memory:{spdk_mem} must be larger than 1G", 400)
 
     if 'spdk_image' in cl_data:
         spdk_image = cl_data['spdk_image']
@@ -68,16 +65,16 @@ def add_node_to_cluster():
 @bp.route('/cachingnode/<string:uuid>', methods=['GET'])
 def list_caching_nodes(uuid):
     if uuid:
-        node = db_controller.get_caching_node_by_id(uuid)
+        node = db.get_caching_node_by_id(uuid)
         if not node:
-            node = db_controller.get_storage_node_by_hostname(uuid)
+            node = db.get_caching_node_by_hostname(uuid)
 
         if node:
             nodes = [node]
         else:
             return utils.get_response_error(f"node not found: {uuid}", 404)
     else:
-        nodes = db_controller.get_caching_nodes()
+        nodes = db.get_caching_nodes()
     data = []
     for node in nodes:
         d = node.get_clean_dict()
@@ -91,7 +88,7 @@ def get_caching_node_by_system_id(uuid):
     if not uuid:
         return utils.get_response(None, "missing required url param: uuid", 400)
 
-    nodes = db_controller.get_caching_nodes()
+    nodes = db.get_caching_nodes()
     node_found = None
     for node in nodes:
         if node.system_uuid == uuid:
@@ -108,7 +105,7 @@ def get_caching_node_by_system_id(uuid):
 
 @bp.route('/cachingnode/connect/<string:uuid>', methods=['PUT'])
 def caching_node_connect(uuid):
-    cnode = db_controller.get_caching_node_by_id(uuid)
+    cnode = db.get_caching_node_by_id(uuid)
     if not cnode:
         return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 
@@ -117,7 +114,7 @@ def caching_node_connect(uuid):
         return utils.get_response(None, "missing required param: lvol_id", 400)
 
     lvol_id = cl_data['lvol_id']
-    lvol = db_controller.get_lvol_by_id(lvol_id)
+    lvol = db.get_lvol_by_id(lvol_id)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {lvol_id}", 404)
 
@@ -128,7 +125,7 @@ def caching_node_connect(uuid):
 
 @bp.route('/cachingnode/disconnect/<string:uuid>', methods=['PUT'])
 def caching_node_disconnect(uuid):
-    cnode = db_controller.get_caching_node_by_id(uuid)
+    cnode = db.get_caching_node_by_id(uuid)
     if not cnode:
         return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 
@@ -137,7 +134,7 @@ def caching_node_disconnect(uuid):
         return utils.get_response(None, "missing required param: lvol_id", 400)
 
     lvol_id = cl_data['lvol_id']
-    lvol = db_controller.get_lvol_by_id(lvol_id)
+    lvol = db.get_lvol_by_id(lvol_id)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {lvol_id}", 404)
 
@@ -148,7 +145,7 @@ def caching_node_disconnect(uuid):
 
 @bp.route('/cachingnode/lvols/<string:uuid>', methods=['GET'])
 def caching_node_list_lvols(uuid):
-    cnode = db_controller.get_caching_node_by_id(uuid)
+    cnode = db.get_caching_node_by_id(uuid)
     if not cnode:
         return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 
@@ -171,7 +168,7 @@ def caching_node_list_lvols(uuid):
 
 @bp.route('/cachingnode/recreate/<string:uuid>', methods=['GET'])
 def recreate_caching_node(uuid):
-    cnode = db_controller.get_caching_node_by_id(uuid)
+    cnode = db.get_caching_node_by_id(uuid)
     if not cnode:
         return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 

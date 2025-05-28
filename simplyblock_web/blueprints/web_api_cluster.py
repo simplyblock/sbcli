@@ -7,16 +7,17 @@ import threading
 from flask import Blueprint
 from flask import request
 
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers import tasks_controller, device_controller, lvol_controller
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller, cluster_ops
+from simplyblock_core import db_controller, cluster_ops, storage_node_ops
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core import utils as core_utils
 
 logger = logging.getLogger(__name__)
 
 bp = Blueprint("cluster", __name__)
-db_controller = db_controller.DBController()
+db = db_controller.DBController()
 
 
 @bp.route('/cluster', methods=['POST'])
@@ -67,11 +68,11 @@ def list_clusters(uuid):
     if cluster_id == "admin":
         clusters_list = db_controller.get_clusters()
         if uuid:
-            cl = db_controller.get_cluster_by_id(uuid)
+            cl = db.get_cluster_by_id(uuid)
             if cl:
                 clusters_list = [cl]
     else:
-        cl = db_controller.get_cluster_by_id(cluster_id)
+        cl = db.get_cluster_by_id(cluster_id)
         if cl:
             clusters_list = [cl]
 
@@ -86,24 +87,24 @@ def list_clusters(uuid):
 @bp.route('/cluster/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/cluster/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def cluster_capacity(uuid, history):
-    cluster = db_controller.get_cluster_by_id(uuid)
+    cluster = db.get_cluster_by_id(uuid)
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
     ret = cluster_ops.get_capacity(uuid, history, is_json=True)
-    return utils.get_response(ret)
+    return utils.get_response(json.loads(ret))
 
 
 @bp.route('/cluster/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/cluster/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def cluster_iostats(uuid, history):
-    cluster = db_controller.get_cluster_by_id(uuid)
+    cluster = db.get_cluster_by_id(uuid)
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
-    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False)
+    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": cluster.get_clean_dict(),
         "stats": data or []
@@ -113,41 +114,55 @@ def cluster_iostats(uuid, history):
 
 @bp.route('/cluster/status/<string:uuid>', methods=['GET'])
 def cluster_status(uuid):
-    cluster = db_controller.get_cluster_by_id(uuid)
+    cluster = db.get_cluster_by_id(uuid)
     if not cluster:
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
-    data = cluster_ops.show_cluster(uuid, is_json=True)
+    data = cluster_ops.get_cluster_status(uuid, is_json=True)
     return utils.get_response(json.loads(data))
 
 
 @bp.route('/cluster/get-logs/<string:uuid>', methods=['GET'])
 def cluster_get_logs(uuid):
-    cluster = db_controller.get_cluster_by_id(uuid)
+    cluster = db.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     if cluster.status == Cluster.STATUS_INACTIVE:
         return utils.get_response("Cluster already inactive")
 
-    data = cluster_ops.get_logs(uuid, is_json=True)
+    limit = 50
+    try:
+        args = request.args
+        limit = int(args.get('limit', limit))
+    except:
+        pass
+
+    data = cluster_ops.get_logs(uuid, is_json=True, limit=limit)
     return utils.get_response(json.loads(data))
 
 
 @bp.route('/cluster/get-tasks/<string:uuid>', methods=['GET'])
 def cluster_get_tasks(uuid):
-    cluster = db_controller.get_cluster_by_id(uuid)
+    cluster = db.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     if cluster.status == Cluster.STATUS_INACTIVE:
         return utils.get_response("Cluster is inactive")
 
-    tasks = tasks_controller.list_tasks(uuid, is_json=True)
+    limit = 50
+    try:
+        args = request.args
+        limit = int(args.get('limit', limit))
+    except:
+        pass
+
+    tasks = tasks_controller.list_tasks(uuid, is_json=True, limit=limit)
     return utils.get_response(json.loads(tasks))
 
 
 @bp.route('/cluster/gracefulshutdown/<string:uuid>', methods=['PUT'])
 def cluster_grace_shutdown(uuid):
-    cluster = db_controller.get_cluster_by_id(uuid)
+    cluster = db.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     t = threading.Thread(
@@ -160,7 +175,7 @@ def cluster_grace_shutdown(uuid):
 
 @bp.route('/cluster/gracefulstartup/<string:uuid>', methods=['PUT'])
 def cluster_grace_startup(uuid):
-    cluster = db_controller.get_cluster_by_id(uuid)
+    cluster = db.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     t = threading.Thread(
@@ -173,7 +188,7 @@ def cluster_grace_startup(uuid):
 
 @bp.route('/cluster/activate/<string:uuid>', methods=['PUT'])
 def cluster_activate(uuid):
-    cluster = db_controller.get_cluster_by_id(uuid)
+    cluster = db.get_cluster_by_id(uuid)
     if not cluster:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
     t = threading.Thread(
@@ -182,3 +197,95 @@ def cluster_activate(uuid):
     t.start()
     # FIXME: Any failure within the thread are not handled
     return utils.get_response(True)
+
+
+@bp.route('/cluster/allstats/<string:uuid>/history/<string:history>', methods=['GET'])
+@bp.route('/cluster/allstats/<string:uuid>', methods=['GET'], defaults={'history': None})
+def cluster_allstats(uuid, history):
+    out = {}
+    cluster = db.get_cluster_by_id(uuid)
+    if not cluster:
+        logger.error(f"Cluster not found {uuid}")
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    data = cluster_ops.get_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
+    ret = {
+        "object_data": cluster.get_clean_dict(),
+        "stats": data or []
+    }
+    out["cluster"] = ret
+
+    list_nodes = []
+    list_devices = []
+    for node in db.get_storage_nodes_by_cluster_id(uuid):
+        data = storage_node_ops.get_node_iostats_history(node.get_id(), history, parse_sizes=False, with_sizes=True)
+        list_nodes.append( {
+            "object_data": node.get_clean_dict(),
+            "stats": data or [] })
+        for dev in node.nvme_devices:
+            data = device_controller.get_device_iostats(uuid, history, parse_sizes=False)
+            ret = {
+                "object_data": dev.get_clean_dict(),
+                "stats": data or []
+            }
+            list_devices.append(ret)
+
+    out["storage_nodes"] = list_nodes
+
+    out["devices"] = list_devices
+
+    list_pools = []
+    for pool in db.get_pools(uuid):
+        records = db.get_pool_stats(pool, 1)
+        d = []
+        for r in records:
+            d.append(r.get_clean_dict())
+
+        ret = {
+            "object_data": pool.get_clean_dict(),
+            "stats": d or []
+        }
+        list_pools.append(ret)
+
+    out["pools"] = list_pools
+
+    list_lvols = []
+    for lvol in db.get_lvols():
+        records_list = db.get_lvol_stats(lvol, limit=1)
+        data = []
+        for r in records_list:
+            data.append(r.get_clean_dict())
+
+        ret = {
+            "object_data": lvol.get_clean_dict(),
+            "stats": data
+        }
+        list_lvols.append(ret)
+
+    out["lvols"] = list_lvols
+
+    return utils.get_response(out)
+
+
+@bp.route('/cluster/activate/<string:uuid>', methods=['DELETE'])
+def cluster_delete(uuid):
+    cluster = db.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    ret = cluster_ops.delete_cluster(uuid)
+    return utils.get_response(ret)
+
+
+@bp.route('/cluster/show/<string:uuid>', methods=['GET'])
+def show_cluster(uuid):
+    cluster = db.get_cluster_by_id(uuid)
+    if not cluster:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    if cluster.status == Cluster.STATUS_INACTIVE:
+        return utils.get_response("Cluster is inactive")
+
+    data = cluster_ops.list_all_info(uuid)
+    return utils.get_response(json.loads(data))
+

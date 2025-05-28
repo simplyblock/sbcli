@@ -1,0 +1,158 @@
+#!/usr/bin/env python
+# PYTHON_ARGCOMPLETE_OK
+
+from simplyblock_cli.clibase import CLIWrapperBase, range_type, regex_type, size_type
+from simplyblock_core import utils
+import logging
+import sys
+
+class CLIWrapper(CLIWrapperBase):
+
+    def __init__(self):
+        self.developer_mode = True if "--dev" in sys.argv else False
+        if self.developer_mode:
+            idx = sys.argv.index("--dev")
+            args = sys.argv[0:idx]
+            for i in range(idx + 1, len(sys.argv)):
+                args.append(sys.argv[i])
+            sys.argv = args
+
+        self.logger = utils.get_logger()
+        self.init_parser()
+
+{%- for command in commands %}
+        self.init_{{ command.name | make_identifier }}()
+{%- endfor %}
+        super().__init__()
+
+{%- for command in commands %}
+
+    def init_{{ command.name | make_identifier }}(self):
+        subparser = self.add_command('{{ command.name }}', '{{ command.help | escape_strings | escape_python_string }}'{% if command.aliases is defined %}, aliases=[{% for alias in command.aliases %}'{{ alias }}',{% endfor %}]{% endif %})
+
+{%- for subcommand in command.subcommands %}
+{%- if subcommand.private %}
+        if self.developer_mode:
+            self.init_{{ command.name | make_identifier }}__{{ subcommand.name | make_identifier }}(subparser)
+{%- else %}
+        self.init_{{ command.name | make_identifier }}__{{ subcommand.name | make_identifier }}(subparser)
+{%- endif %}
+{%- endfor %}
+
+{% for subcommand in command.subcommands %}
+    def init_{{ command.name | make_identifier }}__{{ subcommand.name | make_identifier }}(self, subparser):
+        subcommand = self.add_sub_command(subparser, '{{ subcommand.name }}', '{{ subcommand.help | escape_strings | escape_python_string }}')
+
+{%- for argument in subcommand.arguments %}
+        subcommand.add_argument('{{ argument.name }}', help='{{ argument.help | escape_strings | escape_python_string }}', type={{ argument.type | argument_type }}
+{%- if argument.default is defined and argument.action is undefined %}, default={{ argument | default_value }}{% endif %}
+{%- if argument.nargs is defined %}, nargs={{ argument | nargs }}{% endif %}
+{%- if argument.action is defined %}, dest='{{ argument.action }}'{% endif %})
+{%- if argument.completer is defined %}.completer = self.{{ argument.completer }}{% endif %}
+{%- endfor -%}
+{%- for parameter in subcommand.parameters %}
+{%- if parameter.private %}
+        if self.developer_mode:
+            argument = subcommand.add_argument('{{ parameter.name }}'
+{%- if parameter.aliases -%}
+{%- for alias in parameter.aliases -%}
+, '{{ alias }}'
+{%- endfor -%}
+{%- endif -%}
+, help='{{ parameter.help | escape_strings | escape_python_string }}'
+{%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type | argument_type }}{% endif %}
+{%- if parameter.default is defined and parameter.action is undefined %}, default={{ parameter | default_value }}{% endif %}
+{%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
+{%- if parameter.required is defined %}, required={{ parameter.required }}{% endif %}
+{%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
+{%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
+{%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
+{%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
+{%- else %}
+        argument = subcommand.add_argument('{{ parameter.name }}'
+{%- if parameter.aliases -%}
+{%- for alias in parameter.aliases -%}
+, '{{ alias }}'
+{%- endfor -%}
+{%- endif -%}
+, help='{{ parameter.help | escape_strings | escape_python_string }}'
+{%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type | argument_type }}{% endif %}
+{%- if parameter.default is defined %}, default={{ parameter | default_value }}{% endif %}
+{%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
+{%- if parameter.required is defined %}, required={{ parameter.required }}{% endif %}
+{%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
+{%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
+{%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
+{%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
+{%- endif %}
+{%- endfor %}
+{% endfor -%}
+{%- endfor %}
+
+    def run(self):
+        args = self.parser.parse_args()
+        if args.debug:
+            self.logger.setLevel(logging.DEBUG)
+        else:
+            self.logger.setLevel(logging.INFO)
+
+        logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
+        ret = ""
+        args_dict = args.__dict__
+
+{%- for command in commands %}
+{%- if loop.index == 1 %}
+        if args.command in ['{{ command.name }}'{% if command.aliases is defined %}{% for alias in command.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+{%- else %}
+        elif args.command in ['{{ command.name }}'{% if command.aliases is defined %}{% for alias in command.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+{%- endif %}
+            sub_command = args_dict['{{ command.name }}']
+{%- for subcommand in command.subcommands %}
+{%- if loop.index == 1 %}
+            if sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+{%- else %}
+            elif sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+{%- endif -%}
+{%- for argument in subcommand.arguments -%}
+{%- if argument.dest is defined and argument.dest != argument.name %}
+                args.{{ argument.dest }} = args.{{ argument.name }}
+{%- endif -%}
+{%- endfor %}
+{%- set ns = namespace(if_opened = False) %}
+{%- for parameter in subcommand.parameters -%}
+{%- if parameter.private is defined and parameter.private %}
+{%- if not ns.if_opened %}
+                if not self.developer_mode:
+{%- set ns.if_opened = True %}
+{%- endif %}
+                    args.{{ parameter.dest }} = {{ parameter | default_value }}
+{%- endif -%}
+{%- endfor -%}
+{%- if subcommand.private %}
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.{{ command.name | make_identifier }}__{{ subcommand.name | make_identifier }}(sub_command, args)
+{%- else %}
+                ret = self.{{ command.name | make_identifier }}__{{ subcommand.name | make_identifier }}(sub_command, args)
+{%- endif -%}
+{%- endfor %}
+            else:
+                self.parser.print_help()
+{% endfor %}
+        else:
+            self.parser.print_help()
+
+        if not ret:
+            exit(1)
+
+        print(ret)
+
+
+def main():
+    utils.init_sentry_sdk()
+    cli = CLIWrapper()
+    cli.run()
+

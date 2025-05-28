@@ -2324,6 +2324,19 @@
             "type": "timeseries"
         },
         {
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 63
+            },
+            "id": 29,
+            "panels": [],
+            "title": "health_check",
+            "type": "row"
+        },
+        {
             "datasource": {
                 "type": "prometheus",
                 "uid": "PBFA97CFB590B2093"
@@ -2383,8 +2396,8 @@
             "gridPos": {
                 "h": 7,
                 "w": 7,
-                "x": 14,
-                "y": 56
+                "x": 0,
+                "y": 64
             },
             "id": 16,
             "options": {
@@ -2416,7 +2429,7 @@
             "type": "timeseries"
         }
     ],
-    "refresh": "",
+    "refresh": "5s",
     "schemaVersion": 38,
     "style": "dark",
     "tags": [],
@@ -2444,7 +2457,7 @@
                     "query": "query_result((cluster_read_io{cluster=~\".*\"}  and on() (absent(_{_=\"admin\"}) and absent(_{_=\"${__user.login}\"}))) or on() (cluster_read_io{cluster=\"${__user.login}\"}  unless on() (absent(_{_!=\"admin\"}) and absent(_{_=\"${user.login}\"}))))",
                     "refId": "PrometheusVariableQueryEditor-VariableQuery"
                 },
-                "refresh": 2,
+                "refresh": 1,
                 "regex": "/.*cluster=\"([^\"]*).*/",
                 "skipUrlSync": false,
                 "sort": 1,

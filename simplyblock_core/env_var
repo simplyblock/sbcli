@@ -2,4 +2,4 @@ SIMPLY_BLOCK_COMMAND_NAME=sbcli-admin
 SIMPLY_BLOCK_VERSION=0.0.4
 
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:admin
-DOCKER_USER=hamdysimplyblock
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:main-latest

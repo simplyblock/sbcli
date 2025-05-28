@@ -16,60 +16,13 @@ from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = lg.getLogger()
 
 db_controller = DBController()
-
-
-def addNvmeDevices(rpc_client, devs, snode):
-    devices = []
-    ret = rpc_client.bdev_nvme_controller_list()
-    ctr_map = {}
-    try:
-        if ret:
-            ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
-    except:
-        pass
-
-    for index, pcie in enumerate(devs):
-        if pcie in ctr_map:
-            nvme_controller = ctr_map[pcie]
-            nvme_bdevs = []
-            for bdev in rpc_client.get_bdevs():
-                if bdev['name'].startswith(nvme_controller):
-                    nvme_bdevs.append(bdev['name'])
-        else:
-            pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
-            nvme_controller = "nvme_%s" % pci_st
-            nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
-            time.sleep(2)
-
-        for nvme_bdev in nvme_bdevs:
-            rpc_client.bdev_examine(nvme_bdev)
-            time.sleep(3)
-            ret = rpc_client.get_bdevs(nvme_bdev)
-            nvme_dict = ret[0]
-            nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
-            model_number = nvme_driver_data['ctrlr_data']['model_number']
-            total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
-
-            devices.append(
-                NVMeDevice({
-                    'uuid': str(uuid.uuid4()),
-                    'device_name': nvme_dict['name'],
-                    'size': total_size,
-                    'pcie_address': nvme_driver_data['pci_address'],
-                    'model_id': model_number,
-                    'serial_number': nvme_driver_data['ctrlr_data']['serial_number'],
-                    'nvme_bdev': nvme_bdev,
-                    'nvme_controller': nvme_controller,
-                    'node_id': snode.get_id(),
-                    'cluster_id': snode.cluster_id,
-                    'status': NVMeDevice.STATUS_ONLINE
-                }))
-    return devices
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None, multipathing=True):
@@ -135,6 +88,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.multipathing = multipathing
 
     # check for memory
+    spdk_mem_min = utils.parse_size('1GiB')
     if "memory_details" in node_info and node_info['memory_details']:
         memory_details = node_info['memory_details']
         logger.info("Node Memory info")
@@ -144,13 +98,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
         logger.info(f"HP Total: {utils.humanbytes(huge_total)}")
         huge_free = memory_details['huge_free']
         logger.info(f"HP Free: {utils.humanbytes(huge_free)}")
-        # if huge_free < 1 * 1024 * 1024:
-        #     logger.warning(f"Free hugepages are less than 1G: {utils.humanbytes(huge_free)}")
         if not spdk_mem:
-            if huge_total > 1024 * 1024 * 1024:
+            if huge_total > spdk_mem_min:
                 spdk_mem = huge_total
             else:
-                logger.error(f"Free hugepages are less than 1G: {utils.humanbytes(huge_total)}")
+                logger.error(f"Free hugepages are less than {utils.humanbytes(spdk_mem_min)}: {utils.humanbytes(huge_total)}")
                 return False
 
     logger.info(f"Deploying SPDK with HP: {utils.humanbytes(spdk_mem)}")
@@ -195,7 +147,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # logger.info(f"Free Hugepages detected: {utils.humanbytes(mem)}")
 
     # adding devices
-    nvme_devs = addNvmeDevices(rpc_client, node_info['spdk_pcie_list'], snode)
+    nvme_devs = addNvmeDevices(rpc_client, snode, node_info['spdk_pcie_list'])
     if not nvme_devs:
         logger.error("No NVMe devices was found!")
         return False
@@ -204,11 +156,11 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.write_to_db(db_controller.kv_store)
     ssd_dev = nvme_devs[0]
 
-    if spdk_mem < 1024*1024:
-        logger.error("Hugepages must be larger than 1G")
+    if spdk_mem < spdk_mem_min:
+        logger.error(f"Hugepages must be larger than {utils.humanbytes(spdk_mem_min)}")
         return False
 
-    mem = spdk_mem - 1024*1024*1024
+    mem = spdk_mem - spdk_mem_min
     snode.hugepages = mem
     logger.info(f"Hugepages to be used: {utils.humanbytes(mem)}")
 
@@ -273,7 +225,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     # create tmp ocf
     logger.info(f"Creating first ocf bdev...")
 
-    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100*1024*1024)/512))
+    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int(utils.parse_size('100MiB')/512))
     if not ret:
         logger.error("Failed ot create tmp malloc")
         return False
@@ -356,7 +308,7 @@ def recreate(node_id):
     # create tmp ocf
     logger.info(f"Creating first ocf bdev...")
 
-    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int((100 * 1024 * 1024) / 512))
+    ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int(utils.parse_size('100MiB') / 512))
     if not ret:
         logger.error("Failed ot create tmp malloc")
         return False
@@ -642,7 +594,7 @@ def deploy(ifname):
     cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
     container = node_docker.containers.run(
         cont_image,
-        "python simplyblock_web/caching_node_app.py",
+        "python simplyblock_web/node_webapp.py caching_kubernetes_node",
         detach=True,
         privileged=True,
         name="CachingNodeAPI",
@@ -660,7 +612,7 @@ def deploy(ifname):
         ]
     )
     logger.info(f"Pulling SPDK image {constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE}")
-    node_docker.images.pull(constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
+    pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE)
     return f"{dev_ip}:5000"
 
 
