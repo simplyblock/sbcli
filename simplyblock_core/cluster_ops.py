@@ -2,6 +2,7 @@
 import datetime
 import json
 import os
+import socket
 import re
 import tempfile
 import shutil
@@ -176,6 +177,21 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             time.sleep(3)
 
         c.swarm.init(DEV_IP)
+        
+        hostname = socket.gethostname()
+        current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
+        if current_node:
+            current_spec = current_node.attrs["Spec"]
+            current_labels = current_spec.get("Labels", {})
+            current_labels["app"] = "graylog"
+            current_spec["Labels"] = current_labels
+
+            current_node.update(current_spec)
+            
+            logger.info(f"Labeled node '{hostname}' with app=graylog")
+        else:
+            logger.warning("Could not find current node for labeling")
+
         logger.info("Configuring docker swarm > Done")
     except Exception as e:
         print(e)
@@ -1339,7 +1355,8 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         if mgmt_image:
             service_image = mgmt_image
         for service in cluster_docker.services.list():
-            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
+            "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
                 service.update(image=service_image, force_update=True)
         logger.info("Done updating mgmt cluster")

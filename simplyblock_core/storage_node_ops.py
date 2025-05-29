@@ -778,13 +778,13 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     return new_devs
 
 
-def add_node(cluster_id, node_ip, iface_name, data_nics_list,
+def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
              partition_size="", ha_jm_count=3, full_page_unmap=False):
-    snode_api = SNodeClient(node_ip)
+    snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
         nodes = node_info["nodes_config"]["nodes"]
@@ -804,7 +804,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             logger.error("Cluster not found: %s", cluster_id)
             return False
 
-        logger.info(f"Adding Storage node: {node_ip}")
+        logger.info(f"Adding Storage node: {node_addr}")
 
         if not node_info:
             logger.error("SNode API is not reachable")
@@ -908,7 +908,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         if ssd_pcie:
             for ssd in ssd_pcie:
                 for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-                    if node.api_endpoint == node_ip:
+                    if node.api_endpoint == node_addr:
                         if ssd in node.ssd_pcie:
                             logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
                             return False
@@ -935,7 +935,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
 
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if n.api_endpoint == node_ip:
+            if n.api_endpoint == node_addr:
                 total_mem += n.spdk_mem
         total_mem += utils.parse_size("500m")
         logger.info("Deploying SPDK")
@@ -999,7 +999,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
         snode.rpc_username = rpc_user
         snode.rpc_password = rpc_pass
         snode.cluster_id = cluster_id
-        snode.api_endpoint = node_ip
+        snode.api_endpoint = node_addr
         snode.host_secret = utils.generate_string(20)
         snode.ctrl_secret = utils.generate_string(20)
         snode.number_of_distribs = number_of_distribs
@@ -3190,7 +3190,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         write_protection = True
     for _ in range(snode.number_of_distribs):
         distrib_vuid = utils.get_random_vuid()
-        while distrib_vuid in distrib_list:
+        while distrib_vuid in distrib_vuids:
             distrib_vuid = utils.get_random_vuid()
 
         distrib_name = f"distrib_{distrib_vuid}"

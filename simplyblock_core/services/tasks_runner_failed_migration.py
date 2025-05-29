@@ -102,20 +102,24 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         time.sleep(3)
 
-    if "migration" in task.function_params:
+    try:
+        if "migration" in task.function_params:
+            mig_info = task.function_params["migration"]
+            res = rpc_client.distr_migration_status(**mig_info)
+            out = utils.handle_task_result(task, res)
+            dev_failed_task = tasks_controller.get_failed_device_mig_task(task.cluster_id, task.device_id)
+            if not dev_failed_task:
+                device_controller.device_set_failed_and_migrated(task.device_id)
 
-        mig_info = task.function_params["migration"]
-        res = rpc_client.distr_migration_status(**mig_info)
-        out = utils.handle_task_result(task, res)
-        dev_failed_task = tasks_controller.get_failed_device_mig_task(task.cluster_id, task.device_id)
-        if not dev_failed_task:
-            device_controller.device_set_failed_and_migrated(task.device_id)
+            return out
+    except Exception as e:
+        logger.error(f"Failed to get migration task status")
+        logger.exception(e)
+        task.function_result = "Failed to get migration status"
 
-        return out
-    else:
-        task.retry += 1
-        task.write_to_db(db.kv_store)
-        return False
+    task.retry += 1
+    task.write_to_db(db.kv_store)
+    return False
 
 
 logger = utils.get_logger(__name__)
@@ -134,7 +138,8 @@ while True:
             for task in tasks:
                 if task.function_name == JobSchedule.FN_FAILED_DEV_MIG:
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
+                        active_task = tasks_controller.get_active_node_mig_task(
+                            task.cluster_id, task.node_id, task.function_params["distr_name"])
                         if active_task:
                             logger.info("task found on same node, retry")
                             continue
