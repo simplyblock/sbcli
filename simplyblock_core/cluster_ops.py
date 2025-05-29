@@ -247,23 +247,23 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.strict_node_anti_affinity = strict_node_anti_affinity
     c.mode = mode
 
+    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
+    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+    if slack_pattern.match(contact_point):
+        ALERT_TYPE = "slack"
+    elif email_pattern.match(contact_point):
+        ALERT_TYPE = "email"
+    else:
+        ALERT_TYPE = "slack"
+        contact_point = 'https://hooks.slack.com/services/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'
+
     if mode == "docker": 
         alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
         alert_resources_file = "alert_resources.yaml"
 
         env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template(f'{alert_resources_file}.j2')
-
-        slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
-        email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-
-        if slack_pattern.match(contact_point):
-            ALERT_TYPE = "slack"
-        elif email_pattern.match(contact_point):
-            ALERT_TYPE = "email"
-        else:
-            ALERT_TYPE = "slack"
-            contact_point = 'https://hooks.slack.com/services/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'
 
         values = {
             'CONTACT_POINT': contact_point,
