@@ -830,7 +830,7 @@ data:
             type: slack
             settings:
               username: grafana_bot
-              url: 'https://hooks.slack.com/services/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'
+              url: '{{ .Values.grafana.contactPoint }}'
               title: |
                 '{{ "{{" }} template "slack.title" . {{ "}}" }}'
               text: |

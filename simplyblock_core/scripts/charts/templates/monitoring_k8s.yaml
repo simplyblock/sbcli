@@ -30,7 +30,7 @@ spec:
         type: simplyblock-mgmt-plane
       containers:
         - name: mongodb
-          image: mongo:6.0
+          image: mongo:5.0
           volumeMounts:
             - mountPath: /data/db
               name: simplyblock-mongodb-data
@@ -135,7 +135,7 @@ spec:
         type: simplyblock-mgmt-plane
       containers:
         - name: graylog
-          image: graylog/graylog:6.2.2
+          image: graylog/graylog:5.0
           command: ["/usr/bin/tini", "--"]
           args: ["wait-for-it", "simplyblock-opensearch:9200", "--", "/docker-entrypoint.sh"]
           env:

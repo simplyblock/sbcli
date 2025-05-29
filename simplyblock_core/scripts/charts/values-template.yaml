@@ -17,6 +17,7 @@ foundationdb:
 
 grafana:
   endpoint: "${GRAFANA_ENDPOINT}"
+  contactPoint: "${CONTACT_POINT}"
 
 image:
   simplyblock: 

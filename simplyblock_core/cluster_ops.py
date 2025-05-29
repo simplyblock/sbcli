@@ -324,7 +324,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         ret = scripts.deploy_k8s_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                                log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint)
+                                log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint, contact_point)
         logger.info("Deploying helm stack > Done")
 
         if ret == 0:
