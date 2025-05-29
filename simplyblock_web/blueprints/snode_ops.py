@@ -22,10 +22,6 @@ api = APIBlueprint("snode", __name__, url_prefix="/snode")
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
 
 
-class _RPCPortQuery(BaseModel):
-    rpc_port: Optional[int] = Field(constants.RPC_HTTP_PROXY_PORT)
-
-
 def get_google_cloud_info():
     try:
         headers = {'Metadata-Flavor': 'Google'}
@@ -229,7 +225,7 @@ def spdk_process_start(body: SPDKParams):
         'type': 'boolean'
     })}}},
 })
-def spdk_process_kill(query: _RPCPortQuery):
+def spdk_process_kill(query: utils.RPCPortParams):
     for name in {f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"}:
         core_utils.remove_container(get_docker_client(), name)
     return utils.get_response(True)
@@ -240,7 +236,7 @@ def spdk_process_kill(query: _RPCPortQuery):
         'type': 'boolean'
     })}}},
 })
-def spdk_process_is_up(query: _RPCPortQuery):
+def spdk_process_is_up(query: utils.RPCPortParams):
     try:
         node_docker = get_docker_client()
         for cont in node_docker.containers.list(all=True):
@@ -262,7 +258,7 @@ def spdk_process_is_up(query: _RPCPortQuery):
         'type': 'boolean'
     })}}},
 })
-def spdk_proxy_restart(query: _RPCPortQuery):
+def spdk_proxy_restart(query: utils.RPCPortParams):
     try:
         node_docker = get_docker_client()
         for cont in node_docker.containers.list(all=True):
@@ -478,12 +474,8 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     return utils.get_response(True)
 
 
-class _DeviceParams(BaseModel):
-    device_pci: str
-
-
 @api.post('/bind_device_to_nvme')
-def bind_device_to_nvme(body: _DeviceParams):
+def bind_device_to_nvme(body: utils.DeviceParams):
     device_path = f"/sys/bus/pci/devices/{body.device_pci}"
     driver_link = f"{device_path}/driver"
     cmd_list = []
@@ -519,7 +511,7 @@ def bind_device_to_nvme(body: _DeviceParams):
 
 
 @api.post('/delete_dev_gpt_partitions')
-def delete_gpt_partitions_for_dev(body: _DeviceParams):
+def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
     bind_device_to_nvme(body)
 
     device_pci = body.device_pci
@@ -559,7 +551,7 @@ if not os.environ.get("WITHOUT_CLOUD_INFO"):
 
 
 @api.post('/bind_device_to_spdk')
-def bind_device_to_spdk(body: _DeviceParams):
+def bind_device_to_spdk(body: utils.DeviceParams):
     cmd_list = [
         f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
         f"echo \"\" > /sys/bus/pci/devices/{body.device_pci}/driver_override",
@@ -604,8 +596,8 @@ def firewall_set_port(body: _FirewallParams):
         'type': 'string'
     })}}},
 })
-def get_firewall(query: _RPCPortQuery):
-    ret = node_utils.firewall_get(str(query.rpc_port))
+def get_firewall(body: utils.RPCPortParams):
+    ret = node_utils.firewall_get(str(body.rpc_port))
     return utils.get_response(ret)
 
 
