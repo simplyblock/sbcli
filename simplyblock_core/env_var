@@ -2,5 +2,5 @@ SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre-beta
 SIMPLY_BLOCK_VERSION=0.0.6
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.5-Hotfix
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.3-PRE-Hotfix-upgrade
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:main-latest
