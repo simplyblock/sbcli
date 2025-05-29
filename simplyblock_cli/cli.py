@@ -310,6 +310,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__complete_expand(subparser)
         self.init_cluster__show(subparser)
         self.init_cluster__get(subparser)
+        if self.developer_mode:
+            self.init_cluster__suspend(subparser)
         self.init_cluster__get_capacity(subparser)
         self.init_cluster__get_io_stats(subparser)
         self.init_cluster__get_logs(subparser)
@@ -488,6 +490,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__get(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get', 'Gets a cluster\'s information')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__suspend(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'suspend', 'Put the cluster status to be suspended')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__get_capacity(self, subparser):
@@ -1067,6 +1073,12 @@ class CLIWrapper(CLIWrapperBase):
                 ret = self.cluster__show(sub_command, args)
             elif sub_command in ['get']:
                 ret = self.cluster__get(sub_command, args)
+            elif sub_command in ['suspend']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.cluster__suspend(sub_command, args)
             elif sub_command in ['get-capacity']:
                 ret = self.cluster__get_capacity(sub_command, args)
             elif sub_command in ['get-io-stats']:
