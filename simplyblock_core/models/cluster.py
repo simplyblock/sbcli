@@ -66,7 +66,8 @@ class Cluster(BaseModel):
     aws_secret_key: str = "barfoobarfoo"
     s3_endpoint: str = "http://192.168.10.146:9000"
     s3_bucket: str = "mybucket"
-
+    s3_lcpu_mask: str = "0x00000000"
+    s3_thread_pool_size: int = 32
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
             return self.STATUS_CODE_MAP[self.status]

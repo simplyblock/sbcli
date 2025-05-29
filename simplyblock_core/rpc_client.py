@@ -279,14 +279,14 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio, disaster_recovery=False):
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
             "cluster_sz": cluster_sz,
             "clear_method": clear_method,
             "not_evict_lvstore_md_pages": True,
-            # "disaster_recovery": True, # toggle then when the node needs to be created in disaster recovery mode
+            "disaster_recovery": disaster_recovery,
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
         }
         return self._request("bdev_lvol_create_lvstore", params)
@@ -447,6 +447,12 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         return self._request("bdev_alceml_create", params)
        
+    def distr_toggle_disaster_recovery_status(self, enable=True):
+        params = {
+            "disaster_recovery": enable
+        }
+        return self._request("distr_toggle_disaster_recovery_status", params)
+
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
@@ -470,6 +476,7 @@ class RPCClient:
                 return ret
         except Exception:
             pass
+
         params = {
             "name": name,
             "jm_names": ",".join(jm_names),
@@ -496,8 +503,6 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
 
         if support_storage_tiering:
-            # generate a random int
-            # storage_tiering_id = random.randint(0,  2**16 - 2)
             params['support_storage_tiering'] = support_storage_tiering
             params['secondary_stg_name'] = secondary_stg_name
             params['secondary_io_timeout_us'] = secondary_io_timeout_us
@@ -508,12 +513,17 @@ class RPCClient:
             params['fifo_small_capacity'] = fifo_small_capacity
         return self._request("bdev_distrib_create", params)
 
-    def bdev_s3_create(self, name, local_testing, local_endpoint):
+    def bdev_s3_create(self, name, local_testing, local_endpoint, uuid=None, bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=32):
         params = {
             "name": name,
             "local_testing": local_testing,
             "local_endpoint": local_endpoint,
+            'bdb_lcpu_mask': bdb_lcpu_mask,
+            's3_lcpu_mask': s3_lcpu_mask,
+            's3_thread_pool_size': s3_thread_pool_size
         }
+        if uuid:
+            params['uuid'] = uuid
         return self._request("bdev_s3_create", params)
 
     def bdev_s3_delete(self, **params):
