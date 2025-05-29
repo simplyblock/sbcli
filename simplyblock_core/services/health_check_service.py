@@ -197,7 +197,7 @@ while True:
                             connected_jms.append(remote_device.get_id())
 
                     for jm_id in snode.jm_ids:
-                        if jm_id not in connected_jms:
+                        if jm_id and jm_id not in connected_jms:
                             for nd in db.get_storage_nodes():
                                 if nd.jm_device and nd.jm_device.get_id() == jm_id:
                                     if nd.status == StorageNode.STATUS_ONLINE:
