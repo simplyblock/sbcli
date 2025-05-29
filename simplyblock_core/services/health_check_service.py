@@ -227,7 +227,7 @@ while True:
                     if snode.secondary_node_id:
 
                         lvstore_check &= health_controller._check_node_hublvol(
-                            snode, node_bdev_names=node_bdev_names, node_lvols_nqns=subsystem_list)
+                            snode, node_bdev_names=node_bdev_names, node_lvols_nqns=subsystems)
 
                         second_node_1 = db.get_storage_node_by_id(snode.secondary_node_id)
                         if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
