@@ -146,7 +146,7 @@ class StorageNode(BaseNodeObject):
             #
             # raise
 
-    def create_hublvol(self, cluster_nqn):
+    def create_hublvol(self):
         """Create a hublvol for this node's lvstore
         """
         logger.info(f'Creating hublvol on {self.get_id()}')
@@ -159,7 +159,7 @@ class StorageNode(BaseNodeObject):
                 raise RPCException('Failed to create hublvol')
             self.hublvol = HubLVol({
                 'uuid': hublvol_uuid,
-                'nqn': f'{cluster_nqn}:lvol:{hublvol_uuid}',
+                'nqn': f'{self.host_nqn}:lvol:{hublvol_uuid}',
                 'bdev_name': f'{self.lvstore}/hublvol',
                 'model_number': str(uuid4()),
                 'nguid': utils.generate_hex_string(16),
@@ -212,6 +212,13 @@ class StorageNode(BaseNodeObject):
                 return True
             except RPCException:
                 pass
+        else:
+            try:
+                self.create_hublvol()
+                return True
+            except RPCException as e:
+                logger.error("Error establishing hublvol: %s", e.message)
+                # return False
 
         return self.hublvol
 
