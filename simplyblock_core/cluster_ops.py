@@ -245,6 +245,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
     c.strict_node_anti_affinity = strict_node_anti_affinity
+    c.mode = mode
 
     if mode == "docker": 
         alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
@@ -1363,10 +1364,9 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     except Exception as e:
         logger.error(e)
 
-    mode = "kubernetes"
     try:
         logger.info("Updating mgmt cluster")
-        if mode == "docker": 
+        if cluster.mode == "docker": 
             cluster_docker = utils.get_docker_client(cluster_id)
             logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
             pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
@@ -1381,7 +1381,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                     logger.info(f"Updating service {service.name}")
                     service.update(image=service_image, force_update=True)
 
-        elif mode == "kubernetes": 
+        elif cluster.mode == "kubernetes": 
             k8s_config.load_kube_config()
             apps_v1 = k8s_client.AppsV1Api()
             namespace = "simplyblock"
@@ -1430,7 +1430,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     if mgmt_only:
         return True
 
-    if mode == "docker": 
+    if cluster.mode == "docker": 
         logger.info("Updating spdk image on storage nodes")
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
