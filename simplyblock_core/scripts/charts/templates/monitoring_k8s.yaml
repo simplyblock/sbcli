@@ -438,7 +438,7 @@ spec:
             - '--path.procfs=/host/proc'
             - '--path.sysfs=/host/sys'
             - '--path.rootfs=/host'
-            - '--collector.filesystem.ignored-mount-points=^(/rootfs|/host|)/(sys|proc|dev|host|etc)($|/)'
+            - '--collector.filesystem.ignored-mount-points=^(/rootfs|/host|)/(sys|proc|dev|host|etc|var/lib/docker/.+|var/lib/kubelet/pods/.+)($|/)'
             - '--collector.filesystem.ignored-fs-types=^(sys|proc|auto|cgroup|devpts|ns|au|fuse.lxc|mqueue)(fs|)$'
             - '--no-collector.ipvs'
           ports:
@@ -447,11 +447,14 @@ spec:
             - name: proc
               mountPath: /host/proc
               readOnly: true
+              mountPropagation: HostToContainer
             - name: sys
               mountPath: /host/sys
+              mountPropagation: HostToContainer
               readOnly: true
             - name: root
-              mountPath: /host
+              mountPath: /host/root
+              mountPropagation: HostToContainer
               readOnly: true
       volumes:
         - name: proc
