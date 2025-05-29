@@ -20,18 +20,45 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         self.read_only = kwargs.get("read_only", False)
         self.continue_from_log = kwargs.get("continue_from_log", False)
         self.start_from = 600
+        self.lvol_size = "500M"
+        self.storage_nodes_uuid = []
+        self.lvol_node = None
 
     def setup_environment(self):
-        self.node = self.mgmt_nodes[0]
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes['results']:
+            self.storage_nodes_uuid.append(result["uuid"])
+
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self.lvol_node = self.sbcli_utils.get_node_without_lvols()
-        self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
+        lvol_name = "load_lvol"
+        for i in range(1, self.start_from + 1):
+            self.sbcli_utils.add_lvol(
+                lvol_name=f"{lvol_name}_{i}",
+                pool_name=self.pool_name,
+                size=self.lvol_size,
+                crypto=False,
+                key1=self.lvol_crypt_keys[0],
+                key2=self.lvol_crypt_keys[1]
+            )
+            sleep_n_sec(2)
 
     def create_and_shutdown_restart(self, count):
-        self.total_lvols = count
-        self.create_lvols()
+        lvol_name = "load_lvol"
+        for i in range(count + 1, count + self.step + 1):
+            self.sbcli_utils.add_lvol(
+                lvol_name=f"{lvol_name}_{i}",
+                pool_name=self.pool_name,
+                size=self.lvol_size,
+                crypto=False,
+                key1=self.lvol_crypt_keys[0],
+                key2=self.lvol_crypt_keys[1]
+            )
+            sleep_n_sec(2)
+        
+        self.lvol_node = random.choice(self.storage_nodes_uuid)
+        count = count + self.step
 
-        self.logger.info(f"[{count}] Initiating graceful shutdown...")
+        self.logger.info(f"[{count}] Initiating graceful shutdown {self.lvol_node}...")
         shutdown_start = datetime.now()
         self.sbcli_utils.suspend_node(node_uuid=self.lvol_node, expected_error_code=[503])
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "suspended", timeout=4000)
@@ -40,7 +67,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "offline", timeout=4000)
         shutdown_end = datetime.now()
 
-        self.logger.info(f"[{count}] Shutdown complete, restarting node...")
+        self.logger.info(f"[{count}] Shutdown complete, restarting node {self.lvol_node}...")
         restart_start = datetime.now()
         self.sbcli_utils.restart_node(node_uuid=self.lvol_node, expected_error_code=[503])
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "online", timeout=4000)
@@ -50,7 +77,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         return shutdown_end - shutdown_start, restart_end - restart_start
 
     def write_to_log(self, lvol_count, shutdown_time, restart_time):
-        entry = [lvol_count, shutdown_time.total_seconds(), restart_time.total_seconds()]
+        entry = [lvol_count, shutdown_time.total_seconds() - 10, restart_time.total_seconds()]
         write_header = not self.output_file.exists()
         with open(self.output_file, 'a', newline='') as f:
             writer = csv.writer(f)
@@ -102,7 +129,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         if self.continue_from_log:
             previous = self.parse_existing_log()
             if previous:
-                start = max([entry['lvol_count'] for entry in previous]) + self.step
+                start = max([entry['lvol_count'] for entry in previous])
 
         for count in range(start, self.max_lvols + 1, self.step):
             shutdown_time, restart_time = self.create_and_shutdown_restart(count)

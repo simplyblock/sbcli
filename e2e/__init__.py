@@ -47,6 +47,9 @@ from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMul
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade
 
 
+from load_tests.lvol_outage_load import TestLvolOutageLoadTest
+
+
 ALL_TESTS = [
     TestLvolFioNpcsCustom,
     TestLvolFioNpcs0,
@@ -128,5 +131,12 @@ def get_stress_tests():
 def get_upgrade_tests():
     tests = [
         TestMajorUpgrade
+    ]
+    return tests
+
+
+def get_load_tests():
+    tests = [
+        TestLvolOutageLoadTest
     ]
     return tests
