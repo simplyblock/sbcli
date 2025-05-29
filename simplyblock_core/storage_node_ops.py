@@ -1488,6 +1488,14 @@ def restart_storage_node(
     if max_snap:
         snode.max_snap = max_snap
 
+    if not snode.l_cores:
+        if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
+            nodes = node_info["nodes_config"]["nodes"]
+            for node in nodes:
+                if node['cpu_mask'] == snode.spdk_cpu_mask:
+                    snode.l_cores = node['l-cores']
+                    break
+
     if max_prov:
         if not isinstance(max_prov, int):
             try:
