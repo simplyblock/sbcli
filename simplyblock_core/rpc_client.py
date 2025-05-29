@@ -286,7 +286,7 @@ class RPCClient:
             "cluster_sz": cluster_sz,
             "clear_method": clear_method,
             "not_evict_lvstore_md_pages": True,
-            # "disaster_recovery": True,
+            # "disaster_recovery": True, # toggle then when the node needs to be created in disaster recovery mode
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
         }
         return self._request("bdev_lvol_create_lvstore", params)
