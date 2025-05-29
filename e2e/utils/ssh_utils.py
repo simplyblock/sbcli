@@ -335,7 +335,7 @@ class SshUtils:
         command = (
             f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_dump=1 --numjobs={numjobs} --nrfiles={nrfiles} "
+            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_avg_msec_opt} {iolog_opt} "
             f"{output_format}{output_file}"
         )
@@ -413,7 +413,7 @@ class SshUtils:
         Returns:
             str: Output of file name
         """
-        cmd = f"cat {file_name}"
+        cmd = f"sudo cat {file_name}"
         output, _ = self.exec_command(node=node, command=cmd)
         return output
     
@@ -495,14 +495,14 @@ class SshUtils:
         max_attempts = 50
         attempt = 0
 
-        kill_cmd = "curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
+        kill_cmd = f"curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
         output, error = self.exec_command(node=node, command=kill_cmd)
         # record the time when the kill command was last sent
         last_kill_time = time.time()
 
         while attempt < max_attempts:
             # Command to check the status of containers matching "spdk_"
-            status_cmd = "docker ps -a --filter 'name=spdk_' --format '{{.Status}}'"
+            status_cmd = "sudo docker ps -a --filter 'name=spdk_' --format '{{.Status}}'"
             status_output, err = self.exec_command(node=node, command=status_cmd)
             status_output = status_output.strip()
 
@@ -530,7 +530,7 @@ class SshUtils:
 
     def get_mount_points(self, node, base_path):
         """Get all mount points on the node."""
-        cmd = "mount | grep %s | awk '{print $3}'" % base_path
+        cmd = "sudo mount | grep %s | awk '{print $3}'" % base_path
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
 
@@ -572,7 +572,7 @@ class SshUtils:
         Returns:
             List: List of dictionary with device details
         """
-        cmd = "nvme list-subsys -o json"
+        cmd = "sudo nvme list-subsys -o json"
         out, _ = self.exec_command(node=node, command=cmd)
         try:
             subsys_info = json.loads(out)
@@ -656,20 +656,14 @@ class SshUtils:
         return output, error
 
     def delete_all_snapshots(self, node):
-        cmd = "%s snapshot list | grep -i snapshot | awk '{print $2}'" % self.base_cmd
-        output, error = self.exec_command(node=node, command=cmd)
+        patterns = ["snap", "ss", "snapshot"]
+        for pattern in patterns:
+            cmd = "%s snapshot list | grep -i %s | awk '{print $2}'" % (self.base_cmd, pattern)
+            output, error = self.exec_command(node=node, command=cmd)
 
-        list_snapshot = output.strip().split()
-        for snapshot_id in list_snapshot:
-            self.delete_snapshot(node=node, snapshot_id=snapshot_id)
-
-        
-        cmd = "%s snapshot list | grep -i ss | awk '{print $2}'" % self.base_cmd
-        output, error = self.exec_command(node=node, command=cmd)
-
-        list_snapshot = output.strip().split()
-        for snapshot_id in list_snapshot:
-            self.delete_snapshot(node=node, snapshot_id=snapshot_id)
+            list_snapshot = output.strip().split()
+            for snapshot_id in list_snapshot:
+                self.delete_snapshot(node=node, snapshot_id=snapshot_id)
 
     def find_files(self, node, directory):
         command = f"sudo find {directory} -maxdepth 1 -type f"
@@ -775,7 +769,7 @@ class SshUtils:
         time.sleep(10)
 
         configure_cmd = f"{self.base_cmd} -d sn configure --max-lvol {max_lvol} --max-size {max_prov_gb}G"
-        deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname} || {{ echo 'Deploy command failed'; exit 1; }}"
+        deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname}"
         
         self.logger.info(f"Deploying storage node: {node}")
         self.exec_command(node=node, command=configure_cmd)
@@ -1072,7 +1066,7 @@ class SshUtils:
                     source_node_ips = list(node_data_nic_ip)
                     source_node_ips.append(node_ip)
                     for source_node in source_node_ips:
-                        cmd = "ss -tnp | grep %s | awk '{print $5}'" % source_node
+                        cmd = "sudo ss -tnp | grep %s | awk '{print $5}'" % source_node
                         self.logger.info(f"Executing {cmd} on node: {node}")
                         ss_output, _ = self.exec_command(node, cmd)
                         self.logger.info(f"Output: {ss_output}")
@@ -1171,7 +1165,7 @@ class SshUtils:
         """
         try:
             # Check the current aio-max-nr value
-            check_cmd = "cat /proc/sys/fs/aio-max-nr"
+            check_cmd = "sudo cat /proc/sys/fs/aio-max-nr"
             current_value, _ = self.exec_command(node_ip, check_cmd)
 
             if current_value.strip() == str(value):
@@ -1289,10 +1283,10 @@ class SshUtils:
             remote_json_path = "/tmp/stack.json"
 
             # Create JSON file on the storage node
-            create_json_command = f"echo '{rpc_json_str}' > {remote_json_path}"
+            create_json_command = f"sudo echo '{rpc_json_str}' > sudo {remote_json_path}"
             self.exec_command(storage_node_ip, create_json_command)
 
-            find_container_cmd = "docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
+            find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
             container_name_output, _ = self.exec_command(storage_node_ip, find_container_cmd)
             if container_name_output:
                 container_name = container_name_output.strip()
@@ -1520,7 +1514,7 @@ class SshUtils:
         try:
             self.logger.info(f"Resetting iptables inside SPDK container on {node_ip}.")
 
-            find_container_cmd = "docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
+            find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
 
             container_name_output, _ = self.exec_command(node_ip, find_container_cmd)
 
@@ -1667,7 +1661,7 @@ class SshUtils:
             output, _ = self.exec_command(node=node, command=version_cmd)
             version = output.strip().split(":")[1].strip() if ":" in output else "UNKNOWN"
         except Exception as e:
-            self.logger.error(f"Failed to fetch sbcli-dev version from node {node}: {e}")
+            self.logger.error(f"Failed to fetch {self.base_cmd} version from node {node}: {e}")
         return version if version else "ERROR"
 
     def get_image_dict(self, node):
@@ -1679,7 +1673,7 @@ class SshUtils:
         Returns:
             dict: Image name vs the Image hash
         """
-        cmd = "docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}'"
+        cmd = "sudo docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}'"
         output, _ = self.exec_command(node=node, command=cmd)
         image_map = {}
         for line in output.strip().split('\n'):
@@ -1731,9 +1725,21 @@ class SshUtils:
             node_ip (str): Mgmt Node IP to run command on
             cluster_id (str): Cluster id to put in suspended state
         """
-        cmd = f"{self.base_cmd} --dev cluster set {cluster_id} status suspended"
+        cmd = f"{self.base_cmd} --dev -d cluster set {cluster_id} status suspended"
         output, _ = self.exec_command(node_ip, cmd)
         return output.strip().split()
+    
+    def expand_cluster(self, node_ip, cluster_id):
+        """Completes cluster expansion and puts cluster ina active mode
+
+        Args:
+            node_ip (str): Mgmt Node IP to run command on
+            cluster_id (str): Cluster id to put in suspended state
+        """
+        cmd = f"{self.base_cmd} --dev -d cluster complete-expand {cluster_id}"
+        output, _ = self.exec_command(node_ip, cmd)
+        return output.strip().split()
+
 
     # def stop_netstat_dmesg_logging(self, node_ip):
     #     """Stop continuous netstat and dmesg logging without using watch."""
@@ -1741,6 +1747,10 @@ class SshUtils:
 
     #     self.exec_command(node_ip, f"sudo tmux new-session -d -s netstat_log 'bash -c \"while true; do netstat -s | grep \\\"segments dropped\\\" >> {netstat_log}; sleep 5; done\"'")
     #     self.exec_command(node_ip, f"sudo tmux new-session -d -s dmesg_log 'bash -c \"while true; do sudo dmesg | grep -i \\\"tcp\\\" >> {dmesg_log}; sleep 5; done\"'")
+    
+    def make_node_primary(self, node_ip, node_id):
+        make_primary_cmd = f"{self.base_cmd} --dev -d storage-node make-primary {node_id}"
+        self.exec_command(node_ip, make_primary_cmd)
 
 
 class RunnerK8sLog:

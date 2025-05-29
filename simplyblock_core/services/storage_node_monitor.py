@@ -135,7 +135,7 @@ def update_cluster_status(cluster_id):
     cluster = db.get_cluster_by_id(cluster_id)
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
-    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
+    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
         return
 
     next_current_status = get_next_cluster_status(cluster_id)
@@ -254,8 +254,8 @@ while True:
             ping_check = health_controller._check_node_ping(snode.mgmt_ip)
             logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
             if not ping_check:
-                # time.sleep(1)
-                # ping_check = health_controller._check_node_ping(snode.mgmt_ip)
+                time.sleep(1)
+                ping_check = health_controller._check_node_ping(snode.mgmt_ip)
                 logger.info(f"Check 2: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
             # 2- check node API

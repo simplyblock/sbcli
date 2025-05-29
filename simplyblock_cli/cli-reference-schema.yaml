@@ -108,6 +108,32 @@ properties:
                     - help
                     - type
                     - dest
+                  not:
+                    anyOf:
+                      - description: Private arguments cannot be required
+                        x-intellij-html-description: Private arguments cannot be required
+                        properties:
+                          private:
+                            enum:
+                              - true
+                          required:
+                            enum:
+                              - true
+                        required: ["private", "required"]
+                      - description: Arguments with actions cannot be required
+                        x-intellij-html-description: Arguments with actions cannot be required
+                        properties:
+                          required:
+                            enum:
+                              - true
+                        required: ["action", "required"]
+                      - description: Arguments with default values cannot be required
+                        x-intellij-html-description: Arguments with default values cannot be required
+                        properties:
+                          required:
+                            enum:
+                              - true
+                        required: ["default", "required"]
                   properties:
                     name:
                       type: string
@@ -165,25 +191,72 @@ properties:
                         </ul>
                       default: false
                     type:
-                      type: string
                       description: |
-                        The parameter type of the positional argument or parameter.
-                        Valid options are:
-                        - str
-                        - bool
-                        - int
+                        The data type of the argument. If applicable, conversion from the textual representation
+                        is done automatically when parsing.
                       x-intellij-html-description: |
-                        The parameter type of the positional argument or parameter.<br>
-                        Valid options are:<br>
-                        <ul>
-                        <li>str</li>
-                        <li>bool</li>
-                        <li>int</li>
-                        </ul>
-                      enum:
-                        - str
-                        - bool
-                        - int
+                        The data type of the argument. If applicable, conversion from the textual representation
+                        is done automatically when parsing.
+                      oneOf:
+                        - type: string
+                          description: |
+                            Simple data types representing either integer, string, boolean, or data size.
+                          x-intellij-html-description: |
+                            Simple data types representing either integer, string, boolean, or data size.
+                          enum:
+                            - int
+                            - str
+                            - bool
+                            - size
+                        - type: object
+                          description: |
+                            Valid arguments are integers within a specific range. Minimum is inclusive and maximum is exclusive.
+                          x-intellij-html-description: |
+                            Valid arguments are integers within a specific range. Minimum is inclusive and maximum is exclusive.
+                          additionalProperties: false
+                          properties:
+                            range:
+                              type: object
+                              required:
+                                - min
+                                - max
+                              properties:
+                                min:
+                                  type: integer
+                                max:
+                                  type: integer
+                        - type: object
+                          description: |
+                            Valid arguments are strings matched against the given regex.
+                          x-intellij-html-description: |
+                            Valid arguments are strings matched against the given regex.
+                          additionalProperties: false
+                          properties:
+                            regex:
+                              type: string
+                        - type: object
+                          description: |
+                            A data size. Minimum and maximum are optional. If neither is given, use the string version
+                            instead.
+                          x-intellij-html-description: |
+                            A data size. Minimum and maximum are optional. If neither is given, use the string version
+                            instead.
+                          additionalProperties: false
+                          minProperties: 1
+                          properties:
+                            size:
+                              type: object
+                              properties:
+                                min:
+                                  oneOf:
+                                    - type: integer
+                                    - type: string
+                                      pattern: '^\d+([kKMGTPEZ]i?)?B?$'
+                                max:
+                                  oneOf:
+                                    - type: integer
+                                    - type: string
+                                      pattern: '^\d+([kKMGTPEZ]i?)?B?$'
                     completer:
                       type: string
                       description: The completer value of the positional argument or parameter.
@@ -230,11 +303,3 @@ properties:
                           oneOf:
                             - type: string
                             - type: integer
-                    value_range:
-                        type: string
-                        description: |
-                          The value range of the positional argument or parameter.
-                          Value ranges are defined as <min_inclusive>..<max_exclusive>: 0..128
-                        x-intellij-html-description: |
-                          The value range of the positional argument or parameter.<br>
-                          Value ranges are defined as <pre><min_inclusive>..<max_exclusive></pre>: <pre>0..128</pre>

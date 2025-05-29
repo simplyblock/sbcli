@@ -1313,7 +1313,7 @@
                             }
                         ]
                     },
-                    "unit": "bytes"
+                    "unit": "binBps"
                 },
                 "overrides": []
             },

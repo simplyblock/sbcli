@@ -96,6 +96,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, mount_path, log_path,),
                                         kwargs={"name": f"fio_run_{i}",
                                                 "runtime": 350,
+                                                "time_based": True,
                                                 "debug": self.fio_debug})
             fio_thread.start()
             fio_threads.append(fio_thread)
@@ -145,6 +146,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, mount_path, log_path,),
                                         kwargs={"name": f"fio_run_cl_{i}",
                                                 "runtime": 350,
+                                                "time_based": True,
                                                 "debug": self.fio_debug})
             fio_thread.start()
             fio_threads.append(fio_thread)
@@ -186,8 +188,8 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
         for i in range(1,6):
             log_path = f"{self.log_path}_{i}"
             cl_log_path = f"{self.log_path}_cl_{i}"
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes,log_file=log_path)
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes,log_file=cl_log_path)
+            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],log_file=log_path)
+            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],log_file=cl_log_path)
         
         lvol_check_sum = {}
         

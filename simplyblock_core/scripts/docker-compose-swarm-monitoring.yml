@@ -3,12 +3,14 @@ version: '3.8'
 services:
   ### monitoring ###
   mongodb:
-    image: "mongo:6.0"
+    image: "mongo:5.0"
     volumes:
       - "mongodb_data:/data/db"
     deploy:
       placement:
-        constraints: [node.role == manager]
+        constraints:
+          - node.role == manager
+          - node.labels.app == graylog
     networks:
       - monitoring-net
 
@@ -25,13 +27,15 @@ services:
       - "os_data:/usr/share/opensearch/data"
     deploy:
       placement:
-        constraints: [node.role == manager]
+        constraints:
+          - node.role == manager
+          - node.labels.app == graylog
     networks:
       - monitoring-net
 
   graylog:
     hostname: "server"
-    image: "graylog/graylog:6.2.2"
+    image: "graylog/graylog:5.0"
     entrypoint: "/usr/bin/tini -- wait-for-it opensearch:9200 --  /docker-entrypoint.sh"
     environment:
       GRAYLOG_NODE_ID_FILE: "/usr/share/graylog/data/config/node-id"
@@ -64,29 +68,9 @@ services:
       - "graylog_journal:/usr/share/graylog/data/journal"
     deploy:
       placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
-
-#  promagent:
-#    image: simplyblock/promagent
-#    environment:
-#      ClusterID: "${CLUSTER_ID}"
-#      ClusterIP: "HAProxy"
-#      ClusterSecret: "${CLUSTER_SECRET}"
-#    deploy:
-#      mode: global
-#      placement:
-#        constraints: [node.role == manager]
-#    networks:
-#      - monitoring-net
-
-  pushgateway:
-    image: prom/pushgateway
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
+        constraints:
+          - node.role == manager
+          - node.labels.app == graylog
     networks:
       - monitoring-net
 

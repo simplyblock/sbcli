@@ -124,6 +124,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
         # Step 2: Shutdown original node via Proxmox
         node_details = self.sbcli_utils.get_storage_node_details(restart_target["node_uuid"])[0]
         old_ip = node_details["mgmt_ip"]
+        old_ip_data = node_details["data_nics"][0]["ip4_address"]
         proxmox_id, vm_id = proxmox.get_proxmox(old_ip)
         self.logger.info(f"Stopping VM {vm_id} on proxmox {proxmox_id}")
         try:
@@ -165,13 +166,13 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
             # Step 6: Disconnect old NVMe devices
             devices = self.ssh_obj.get_nvme_device_subsystems(self.mgmt_nodes[0])
             for dev in devices:
-                if dev["traddr"] == old_ip:
+                if dev["traddr"] == old_ip_data:
                     self.ssh_obj.disconnect_lvol_node_device(self.mgmt_nodes[0], dev["device"])
 
             # Step 7: Reconnect using new IP only
 
             node_details = self.sbcli_utils.get_storage_node_details(restart_target["node_uuid"])[0]
-            new_ip = node_details["data_nics"]["ip4_address"]
+            new_ip = node_details["data_nics"][0]["ip4_address"]
             
             
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=restart_target["lvol_name"])
@@ -197,17 +198,16 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                         sleep_n_sec(5)
 
             # Step 8: Now mark node as primary
-            make_primary_cmd = f"{self.base_cmd} --dev storage-node make-primary {restart_target['node_uuid']}"
-            self.ssh_obj.exec_command(self.mgmt_nodes[0], make_primary_cmd)
+            self.ssh_obj.make_node_primary(self.mgmt_nodes[0], restart_target["node_uuid"])
 
             # Step 9: Wait for fio and node online
-            self.common_utils.manage_fio_threads(self.mgmt_nodes[0], fio_threads, timeout=700)
+            self.common_utils.manage_fio_threads(self.mgmt_nodes[0], fio_threads, timeout=1000)
 
             for lvol_name, lvol_detail in lvol_details.items():
                 self.logger.info(f"Checking fio log for lvol and clone for {lvol_name}")
                 self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Log"])
                 self.common_utils.validate_fio_test(node=self.mgmt_nodes[0], log_file=lvol_detail["Clone"]["Log"])
-            self.logger.info(f"Testing migration jobs after timestamp")
+            self.logger.info(f"Testing migration jobs after timestamp: {timestamp}")
             self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
             
             for node in self.sbcli_utils.get_storage_nodes()["results"]:

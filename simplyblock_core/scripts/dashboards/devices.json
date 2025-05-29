@@ -753,7 +753,7 @@
                             }
                         ]
                     },
-                    "unit": "bytes"
+                    "unit": "binBps"
                 },
                 "overrides": []
             },
@@ -1322,7 +1322,7 @@
                             }
                         ]
                     },
-                    "unit": "bytes"
+                    "unit": "binBps"
                 },
                 "overrides": []
             },

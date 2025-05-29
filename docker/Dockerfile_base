@@ -32,12 +32,9 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
 
 WORKDIR /app
 
-# pip install
-COPY requirements.txt requirements.txt
-COPY simplyblock_web/requirements.txt simplyblock_web/requirements.txt
-
 RUN pip3 install --upgrade pip
 RUN pip3 install setuptools --upgrade
 
+COPY requirements.txt requirements.txt
+
 RUN pip3 install -r requirements.txt
-RUN pip3 install -r simplyblock_web/requirements.txt

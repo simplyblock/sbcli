@@ -2,6 +2,7 @@
 import datetime
 import json
 import os
+import socket
 import re
 import tempfile
 import shutil
@@ -176,6 +177,21 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             time.sleep(3)
 
         c.swarm.init(DEV_IP)
+        
+        hostname = socket.gethostname()
+        current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
+        if current_node:
+            current_spec = current_node.attrs["Spec"]
+            current_labels = current_spec.get("Labels", {})
+            current_labels["app"] = "graylog"
+            current_spec["Labels"] = current_labels
+
+            current_node.update(current_spec)
+            
+            logger.info(f"Labeled node '{hostname}' with app=graylog")
+        else:
+            logger.warning("Could not find current node for labeling")
+
         logger.info("Configuring docker swarm > Done")
     except Exception as e:
         print(e)
@@ -676,6 +692,79 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False):
         cluster.write_to_db(db_controller.kv_store)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
+    return True
+
+
+def cluster_expand(cl_id):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if not cluster:
+        logger.error(f"Cluster not found {cl_id}")
+        return False
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_IN_EXPANSION,
+                              Cluster.STATUS_READONLY, Cluster.STATUS_DEGRADED]:
+        logger.error(f"Cluster status is not expected: {cluster.status}")
+        return False
+
+    ols_status = cluster.status
+    set_cluster_status(cl_id, Cluster.STATUS_IN_EXPANSION)
+
+    records = db_controller.get_cluster_capacity(cluster)
+    max_size = records[0]['size_total']
+
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    for snode in snodes:
+        if snode.status != StorageNode.STATUS_ONLINE or snode.lvstore:  # pass
+            continue
+
+        if cluster.ha_type == "ha" and not snode.secondary_node_id:
+
+            secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
+            if not secondary_nodes:
+                logger.error(f"Failed to expand cluster, No enough secondary nodes")
+                set_cluster_status(cl_id, ols_status)
+                return False
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            snode.secondary_node_id = secondary_nodes[0]
+            snode.write_to_db()
+
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            sec_node.lvstore_stack_secondary_1 = snode.get_id()
+            sec_node.write_to_db()
+
+        # # set node online
+        # logger.info("Setting node status to Active")
+        # storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        #
+        # # set devices online
+        # for dev in snode.nvme_devices:
+        #     if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+        #         ret = device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_ONLINE)
+
+        ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if ret:
+            snode.lvstore_status = "ready"
+            snode.write_to_db()
+
+        else:
+            snode.lvstore_status = "failed"
+            snode.write_to_db()
+            logger.error(f"Failed to create lvstore on node {snode.get_id()}")
+            logger.error("Failed to expand cluster")
+            set_cluster_status(cl_id, ols_status)
+            return False
+
+
+    # if not cluster.cluster_max_size:
+    #     cluster = db_controller.get_cluster_by_id(cl_id)
+    #     cluster.cluster_max_size = max_size
+    #     cluster.cluster_max_devices = dev_count
+    #     cluster.cluster_max_nodes = len(online_nodes)
+    #     cluster.write_to_db(db_controller.kv_store)
+    set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
+    logger.info("Cluster expanded successfully")
     return True
 
 
@@ -1266,7 +1355,8 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         if mgmt_image:
             service_image = mgmt_image
         for service in cluster_docker.services.list():
-            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
+            "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
                 service.update(image=service_image, force_update=True)
         logger.info("Done updating mgmt cluster")

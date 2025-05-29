@@ -1,6 +1,5 @@
 foundationdb==7.3.3
 requests
-numpy
 prettytable>=3.10.0
 docker
 psutil
@@ -21,3 +20,4 @@ prometheus-client
 ec2-metadata
 flask-swagger-ui
 sentry-sdk[flask]
+flask-openapi3

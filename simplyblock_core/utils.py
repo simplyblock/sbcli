@@ -36,6 +36,7 @@ CONFIG_KEYS = [
     "jc_singleton_core",
 ]
 
+
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
 
@@ -308,7 +309,7 @@ def process_records(records, records_count, keys=None):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"ping -c 1 -W 3 {ip} > /dev/null")
+    response = os.system(f"ping -c 3 -W 3 {ip} > /dev/null")
     if response == 0:
         logger.debug(f"{ip} is UP")
         return True
@@ -507,7 +508,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(2.0 * small_pool_count), int(1.5 * large_pool_count)
+    return int(4.0 * small_pool_count), int(1.5 * large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -1278,7 +1279,7 @@ def calculate_unisolated_cores(cores):
     elif total <= 28:
         return 3
     else:
-        return int(total * 0.15)
+        return math.ceil(total * 0.15)
 
 
 def get_core_indexes(core_to_index, list_of_cores):
@@ -1327,7 +1328,11 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
         else:
             # Distribute cores equally between the nodes
             node_0_cores = available_cores[0:q1] + available_cores[2 * q1:3 * q1]
-            node_1_cores = available_cores[q1:2 * q1] + available_cores[3 * q1:]
+            node_1_cores = available_cores[q1:2 * q1] + available_cores[3 * q1:4 * q1]
+            if len(available_cores) % 4 >= 2:
+                node_0_cores.append(available_cores[4 * q1])
+                node_1_cores.append(available_cores[4 * q1 + 1])
+
 
             # Ensure the number of isolated cores is the same for both nodes
             min_isolated_cores = min(len(node_0_cores), len(node_1_cores))
@@ -1359,25 +1364,28 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
     return node_distribution
 
 
-def regenerate_config(new_config, old_config):
+def regenerate_config(new_config, old_config, force=False):
     if len(old_config.get("nodes")) != len(new_config.get("nodes")):
         logger.error("The number of node in old config not equal to the number of node in updated config")
         return False
+    all_nics = detect_nics()
     for i in range(len(old_config.get("nodes"))):
         validate_node_config(new_config.get("nodes")[i])
         if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
             logger.error("The socket is changed, please rerun sbcli configure without upgrade firstly")
             return False
-        if old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"]:
+        if old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or force:
             try:
                 isolated_cores = hexa_to_cpu_list(new_config["nodes"][i]["cpu_mask"])
             except ValueError:
                 logger.error(f"The updated cpu mask is incorrect {new_config['nodes'][i]['cpu_mask']}")
                 return False
+            number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
+            old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
             old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
             old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])
             old_config["nodes"][i]["isolated"] = isolated_cores
-            distribution = calculate_core_allocations(isolated_cores)
+            distribution = calculate_core_allocations(isolated_cores, number_of_alcemls + 1)
             core_to_index = {core: idx for idx, core in enumerate(isolated_cores)}
             old_config["nodes"][i]["distribution"] ={
                 "app_thread_core": get_core_indexes(core_to_index, distribution[0]),
@@ -1396,8 +1404,12 @@ def regenerate_config(new_config, old_config):
             number_of_distribs = number_of_distribs_cores
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
-        number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
-        old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
+        old_config["nodes"][i]["nic_ports"] = new_config["nodes"][i]["nic_ports"]
+        for nic in old_config["nodes"][i]["nic_ports"]:
+            if nic not in all_nics:
+                logger.error(f"The nic {nic} is not a member of system nics {all_nics}")
+                return False
+
         small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
                                                                   len(isolated_cores),
                                                                   number_of_poller_cores or len(
@@ -1415,14 +1427,19 @@ def regenerate_config(new_config, old_config):
     huge_total = memory_details.get("huge_total")
     total_free_memory = free_memory + huge_total
     total_required_memory = 0
+    all_isolated_cores = set()
     for node in old_config["nodes"]:
         if len(node["ssd_pcis"]) == 0:
             logger.error(f"There are not enough SSD devices on numa node {node['socket']}")
             return False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
+        node_cores_set = set(node["isolated"])
+        all_isolated_cores.update(node_cores_set)
     if total_free_memory < total_required_memory:
             logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
             return False
+    old_config["isolated_cores"] = list(all_isolated_cores)
+    old_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
     return old_config
 
 
@@ -1435,8 +1452,6 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     logger.debug(f"Cores by numa {cores_by_numa}")
     nics = detect_nics()
     nvmes = detect_nvmes(pci_allowed, pci_blocked)
-
-    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket)
 
     for nid in sockets_to_use:
         if nid in cores_by_numa:
@@ -1484,6 +1499,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     for i, nvme_name in enumerate(nvme_numa_neg1):
         all_nvmes_neg1_per_node[i % total_nodes].append(nvme_name)
 
+    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, )
+
     all_nodes = []
     node_index = 0
     for nid in sockets_to_use:
@@ -1522,15 +1539,9 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
 
             nvme_neg1_list = all_nvmes_neg1_per_node[node_index]
             for nvme_name in nvme_neg1_list:
-                node_info["ssd_pcis"].append({
-                    "device": nvme_name,
-                    "pci_address": nvmes[nvme_name]["pci_address"]
-                })
+                node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
             for nvme_name in nvme_per_core_group[idx]:
-                node_info["ssd_pcis"].append({
-                    "device": nvme_name,
-                    "pci_address": nvmes[nvme_name]["pci_address"]
-                })
+                node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
             number_of_alcemls = len(node_info["ssd_pcis"])
             node_info["number_of_alcemls"] = number_of_alcemls
             small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
@@ -1553,16 +1564,22 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     huge_total = memory_details.get("huge_total")
     total_free_memory = free_memory + huge_total
     total_required_memory = 0
+    all_isolated_cores = set()
     for node in all_nodes:
         if len(node["ssd_pcis"]) == 0:
             logger.error(f"There are not enough SSD devices on numa node {node['socket']}")
             return False, False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
+        node_cores_set = set(node["isolated"])
+        all_isolated_cores.update(node_cores_set)
     if total_free_memory < total_required_memory:
             logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
             return False, False
     nodes_config["nodes"] = all_nodes
-    return nodes_config, system_info
+    nodes_config["isolated_cores"] = list(all_isolated_cores)
+    nodes_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
+    final_config = regenerate_config(nodes_config, nodes_config, True)
+    return final_config, system_info
 
 
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
@@ -1603,8 +1620,6 @@ def validate_node_config(node):
         "distrib_cpu_cores", "jc_singleton_core"
     ]
 
-    required_ssd_pci_fields = ["device", "pci_address"]
-
     # Check top-level fields
     for field in required_top_fields:
         if field not in node:
@@ -1620,10 +1635,9 @@ def validate_node_config(node):
 
     # Check ssd_pcis fields
     for ssd in node["ssd_pcis"]:
-        for field in required_ssd_pci_fields:
-            if field not in ssd:
-                logger.error(f"Missing required SSD field '{field}' in node: {node.get('socket')}")
-                return False
+        if not is_valid_pci_address(ssd):
+            logger.error(f"Missing required SSD field '{ssd}' in node: {node.get('socket')}")
+            return False
 
     if not node["isolated"]:
         logger.error(f"'isolated' list is empty in node: {node.get('socket')}")
@@ -1633,6 +1647,11 @@ def validate_node_config(node):
         logger.error(f"'l-cores' string is empty in node: {node.get('socket')}")
         return False
     return True
+
+
+def is_valid_pci_address(address):
+    pattern = r'^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$'
+    return re.fullmatch(pattern, address) is not None
 
 
 def get_system_cores():
