@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
 SIMPLY_BLOCK_VERSION=18.0.63
 
-SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:manohar-storage-tiering2
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:manohar-storage-tiering2
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:storage-tiering-ha-sanitizer
