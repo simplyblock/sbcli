@@ -5,20 +5,21 @@ import math
 import os
 import time
 import traceback
+from typing import Optional
 
 import cpuinfo
 import yaml
-from flask import Blueprint
-from flask import request
+from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException
 from jinja2 import Environment, FileSystemLoader
+from pydantic import BaseModel, Field
 
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils
 
 logger = logging.getLogger(__name__)
 
-bp = Blueprint("caching_node_k", __name__, url_prefix="/cnode")
+api = APIBlueprint("caching_node_k", __name__, url_prefix="/cnode")
 
 
 node_name = os.environ.get("HOSTNAME")
@@ -59,33 +60,37 @@ def set_namespace(namespace):
     return True
 
 
-@bp.route('/scan_devices', methods=['GET'])
+@api.get('/scan_devices')
 def scan_devices():
-    request.args.get('run_health_check', default=False, type=bool)
-    out = {
+    return utils.get_response({
         "nvme_devices": node_utils.get_nvme_devices(),
         "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
         "spdk_devices": node_utils.get_spdk_devices(),
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
-    }
-    return utils.get_response(out)
+    })
 
 
-@bp.route('/spdk_process_start', methods=['POST'])
-def spdk_process_start():
-    data = request.get_json()
+class _SPDKParams(BaseModel):
+    spdk_cpu_mask: Optional[str]
+    namespace: Optional[str]
+    spdk_mem: int = Field(core_utils.parse_size('64GiB'))
+    server_ip: str = Field(pattern=utils.IP_PATTERN)
+    rpc_port: int = Field(constants.RPC_HTTP_PROXY_PORT, ge=1, le=65536)
+    rpc_username: str
+    rpc_password: str
+    spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
 
-    spdk_cpu_mask = None
-    if 'spdk_cpu_mask' in data:
-        spdk_cpu_mask = data['spdk_cpu_mask']
-    node_cpu_count = os.cpu_count()
+
+@api.post('/spdk_process_start')
+def spdk_process_start(body: _SPDKParams):
+    node_cpu_count = os.cpu_count() or 1
 
     namespace = get_namespace()
-    if 'namespace' in data:
-        namespace = data['namespace']
-        set_namespace(namespace)
+    if body.namespace is not None:
+        set_namespace(body.namespace)
 
-    if spdk_cpu_mask:
+    if body.spdk_cpu_mask is not None:
+        spdk_cpu_mask = body.spdk_cpu_mask
         requested_cpu_count = len(format(int(spdk_cpu_mask, 16), 'b'))
         if requested_cpu_count > node_cpu_count:
             return utils.get_response(
@@ -94,13 +99,6 @@ def spdk_process_start():
                 f"is larger than the node's cpu count: {node_cpu_count}")
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
-
-    spdk_mem = data.get('spdk_mem', core_utils.parse_size('64GiB'))
-
-    spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
-
-    if 'spdk_image' in data and data['spdk_image']:
-        spdk_image = data['spdk_image']
 
     if _is_pod_up():
         logger.info("SPDK deployment found, removing...")
@@ -113,14 +111,14 @@ def spdk_process_start():
         env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('caching_deploy_spdk.yaml.j2')
         values = {
-            'SPDK_IMAGE': spdk_image,
+            'SPDK_IMAGE': body.spdk_image,
             'SPDK_CPU_MASK': spdk_cpu_mask,
-            'SPDK_MEM': core_utils.convert_size(spdk_mem, 'MiB'),
-            'MEM_GEGA': core_utils.convert_size(spdk_mem, 'GiB'),
-            'SERVER_IP': data['server_ip'],
-            'RPC_PORT': data['rpc_port'],
-            'RPC_USERNAME': data['rpc_username'],
-            'RPC_PASSWORD': data['rpc_password'],
+            'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
+            'MEM_GEGA': core_utils.convert_size(body.spdk_mem, 'GiB'),
+            'SERVER_IP': body.server_ip,
+            'RPC_PORT': body.rpc_port,
+            'RPC_USERNAME': body.rpc_username,
+            'RPC_PASSWORD': body.rpc_password,
             'HOSTNAME': node_name,
             'NAMESPACE': namespace,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
@@ -137,7 +135,7 @@ def spdk_process_start():
     return utils.get_response(msg)
 
 
-@bp.route('/spdk_process_kill', methods=['GET'])
+@api.get('/spdk_process_kill')
 def spdk_process_kill():
     k8s_core_v1 = core_utils.get_k8s_core_client()
     k8s_apps_v1 = core_utils.get_k8s_apps_client()
@@ -178,18 +176,15 @@ def _is_pod_up():
     return False
 
 
-@bp.route('/spdk_process_is_up', methods=['GET'])
+@api.get('/spdk_process_is_up')
 def spdk_process_is_up():
-    if _is_pod_up():
-        return utils.get_response(True)
-    else:
-        return utils.get_response(False, "SPDK container is not running")
+    pod_is_up = _is_pod_up()
+    return utils.get_response(pod_is_up, "SPDK container is not running" if not pod_is_up else None)
 
 
-@bp.route('/info', methods=['GET'])
+@api.get('/info')
 def get_info():
-
-    out = {
+    return utils.get_response({
         "hostname": hostname,
         "system_id": system_id,
 
@@ -207,22 +202,17 @@ def get_info():
         "spdk_pcie_list": node_utils.get_spdk_pcie_list(),
 
         "network_interface": core_utils.get_nics_data()
-    }
-    return utils.get_response(out)
+    })
 
 
-@bp.route('/join_db', methods=['POST'])
+@api.post('/join_db')
 def join_db():
     return utils.get_response(True)
 
 
-@bp.route('/nvme_connect', methods=['POST'])
-def connect_to_nvme():
-    data = request.get_json()
-    ip = data['ip']
-    port = data['port']
-    nqn = data['nqn']
-    st = f"nvme connect --transport=tcp --traddr={ip} --trsvcid={port} --nqn={nqn}"
+@api.post('/nvme_connect')
+def connect_to_nvme(body: utils.NVMEConnectParams):
+    st = f"nvme connect --transport=tcp --traddr={body.ip} --trsvcid={body.port} --nqn={body.nqn}"
     logger.debug(st)
     out, err, ret_code = shell_utils.run_command(st)
     logger.debug(ret_code)
@@ -234,60 +224,37 @@ def connect_to_nvme():
         return utils.get_response(ret_code, error=err)
 
 
-@bp.route('/disconnect_device', methods=['POST'])
-def disconnect_device():
-    data = request.get_json()
-    dev_path = data['dev_path']
-    st = f"nvme disconnect --device={dev_path}"
-    out, err, ret_code = shell_utils.run_command(st)
+@api.post('/disconnect')
+def disconnect(body: utils.DisconnectParams):
+    if body.nqn is not None:
+        cmd = f'nvme disconnect --device={body.device_path}'
+    elif body.device_path is not None:
+        cmd = f'nvme disconnect --nqn={body.nqn}'
+    elif body.all is not None:
+        cmd = 'nvme disconnect-all'
+    else:
+        pass  # unreachable
+
+    out, err, ret_code = shell_utils.run_command(cmd)
     logger.debug(ret_code)
     logger.debug(out)
     logger.debug(err)
     return utils.get_response(ret_code)
 
 
-@bp.route('/disconnect_nqn', methods=['POST'])
-def disconnect_nqn():
-    data = request.get_json()
-    nqn = data['nqn']
-    st = f"nvme disconnect --nqn={nqn}"
-    out, err, ret_code = shell_utils.run_command(st)
-    logger.debug(ret_code)
-    logger.debug(out)
-    logger.debug(err)
-    return utils.get_response(ret_code)
+class _GPTPartitionsParams(BaseModel):
+    nbd_device: str = Field('/dev/nbd0')
+    jm_percent: int = Field(10, ge=0, le=100)
 
 
-@bp.route('/disconnect_all', methods=['POST'])
-def disconnect_all():
-    st = "nvme disconnect-all"
-    out, err, ret_code = shell_utils.run_command(st)
-    logger.debug(ret_code)
-    logger.debug(out)
-    logger.debug(err)
-    return utils.get_response(ret_code)
-
-
-
-
-@bp.route('/make_gpt_partitions', methods=['POST'])
-def make_gpt_partitions_for_nbd():
-    nbd_device = '/dev/nbd0'
-    jm_percent = 10
-
-    try:
-        data = request.get_json()
-        nbd_device = data['nbd_device']
-        jm_percent = data['jm_percent']
-    except Exception:
-        pass
-
+@api.post('/make_gpt_partitions')
+def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     cmd_list = [
-        f"parted -fs {nbd_device} mklabel gpt",
-        f"parted -f {nbd_device} mkpart journal \"0%\" \"{jm_percent}%\""
+        f"parted -fs {body.nbd_device} mklabel gpt",
+        f"parted -f {body.nbd_device} mkpart journal \"0%\" \"{body.jm_percent}%\""
     ]
     sg_cmd_list = [
-        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {nbd_device}",
+        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}",
     ]
 
     for cmd in cmd_list+sg_cmd_list:
@@ -303,20 +270,11 @@ def make_gpt_partitions_for_nbd():
     return utils.get_response(True)
 
 
-
-@bp.route('/delete_dev_gpt_partitions', methods=['POST'])
-def delete_gpt_partitions_for_dev():
-
-    data = request.get_json()
-
-    if "device_pci" not in data:
-        return utils.get_response(False, "Required parameter is missing: device_pci")
-
-    device_pci = data['device_pci']
-
+@api.post('/delete_dev_gpt_partitions')
+def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
     cmd_list = [
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
     ]
 
     for cmd in cmd_list:
@@ -325,10 +283,10 @@ def delete_gpt_partitions_for_dev():
         logger.debug(ret)
         time.sleep(1)
 
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+    device_name = os.popen(f"ls /sys/devices/pci0000:00/{body.device_pci}/nvme/nvme*/ | grep nvme").read().strip()
     cmd_list = [
         f"parted -fs /dev/{device_name} mklabel gpt",
-        f"echo -n \"{device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
     ]
 
     for cmd in cmd_list:
