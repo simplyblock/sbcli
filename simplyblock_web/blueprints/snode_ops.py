@@ -140,6 +140,9 @@ class SPDKParams(BaseModel):
     timeout: Optional[int] = Field(5 * 60)
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
+    storage_tiering: Optional[bool] = Field(default=True)
+    aws_access_key_id: Optional[str] = Field(None)
+    aws_secret_access_key: Optional[str] = Field(None)
 
 
 @api.post('/spdk_process_start', responses={
@@ -167,6 +170,17 @@ def spdk_process_start(body: SPDKParams):
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
+    env_vars =[
+            f"RPC_PORT={body.rpc_port}",
+            f"ssd_pcie={ssd_pcie_params}",
+            f"PCI_ALLOWED={ssd_pcie_list}",
+            f"TOTAL_HP={total_mem_mib}",
+        ]
+    if body.storage_tiering:
+        env_vars.extend([
+                        f"AWS_ACCESS_KEY_ID={body.aws_access_key_id}",
+            f"AWS_SECRET_ACCESS_KEY={body.aws_secret_access_key}",
+        ])
     container = node_docker.containers.run(
         body.spdk_image,
         f"/root/scripts/run_distr_with_ssd.sh {body.l_cores} {spdk_mem_mib} {spdk_debug}",
@@ -183,15 +197,7 @@ def spdk_process_start(body: SPDKParams):
             '/lib/modules/:/lib/modules/',
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
             '/sys:/sys'],
-        environment=[
-            f"RPC_PORT={body.rpc_port}",
-            f"ssd_pcie={ssd_pcie_params}",
-            f"PCI_ALLOWED={ssd_pcie_list}",
-            f"TOTAL_HP={total_mem_mib}",
-            "AWS_ACCESS_KEY_ID=foobar",
-            "AWS_SECRET_ACCESS_KEY=barfoobarfoo",
-        ]
-        # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
+        environment=env_vars
     )
     container2 = node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
@@ -211,7 +217,6 @@ def spdk_process_start(body: SPDKParams):
             f"MULTI_THREADING_ENABLED={body.multi_threading_enabled}",
             f"TIMEOUT={body.timeout}",
         ]
-        # restart_policy={"Name": "always"}
     )
     retries = 10
     while retries > 0:

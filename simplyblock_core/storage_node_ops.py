@@ -708,13 +708,12 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
 
     if this_node.lvstore_stack_secondary_1:
         org_node = db_controller.get_storage_node_by_id(this_node.lvstore_stack_secondary_1)
-        if org_node:
-            if org_node.jm_device and org_node.jm_device.status == JMDevice.STATUS_ONLINE:
-                remote_devices.append(org_node.jm_device)
-            for jm_id in org_node.jm_ids:
-                jm_dev = db_controller.get_jm_device_by_id(jm_id)
-                if jm_dev and jm_dev not in remote_devices:
-                    remote_devices.append(jm_dev)
+        if org_node.jm_device and org_node.jm_device.status == JMDevice.STATUS_ONLINE:
+            remote_devices.append(org_node.jm_device)
+        for jm_id in org_node.jm_ids:
+            jm_dev = db_controller.get_jm_device_by_id(jm_id)
+            if jm_dev and jm_dev not in remote_devices:
+                remote_devices.append(jm_dev)
 
     if len(remote_devices) < 2:
         for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
@@ -949,7 +948,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
-                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory)
+                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, storage_tiering=cluster.storage_tiering, aws_access_key=cluster.aws_access_key, aws_secret_key=cluster.aws_secret_key)
             time.sleep(5)
 
         except Exception as e:
