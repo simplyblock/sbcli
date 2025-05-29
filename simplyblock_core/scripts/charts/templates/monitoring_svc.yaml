@@ -108,7 +108,8 @@ spec:
   selector:
     app: simplyblock-node-exporter
   ports:
-    - name: node-exporter
+    - name: simplyblock-node-exporter
+      protocol: TCP
       port: 9100
       targetPort: 9100
 

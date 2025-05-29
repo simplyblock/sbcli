@@ -430,19 +430,19 @@ spec:
     spec:
       nodeSelector:
         type: simplyblock-mgmt-plane
-      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: node-exporter
           image: prom/node-exporter:v1.7.0
           args:
             - '--path.procfs=/host/proc'
             - '--path.sysfs=/host/sys'
-            - '--path.rootfs=/host'
+            - '--path.rootfs=/host/root'
             - '--collector.filesystem.ignored-mount-points=^(/rootfs|/host|)/(sys|proc|dev|host|etc|var/lib/docker/.+|var/lib/kubelet/pods/.+)($|/)'
             - '--collector.filesystem.ignored-fs-types=^(sys|proc|auto|cgroup|devpts|ns|au|fuse.lxc|mqueue)(fs|)$'
             - '--no-collector.ipvs'
           ports:
             - containerPort: 9100
+              protocol: TCP
           volumeMounts:
             - name: proc
               mountPath: /host/proc

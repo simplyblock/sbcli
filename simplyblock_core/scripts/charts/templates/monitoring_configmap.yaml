@@ -27,12 +27,9 @@ data:
         kubernetes_sd_configs:
         - role: endpoints
         relabel_configs:
-          - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_namespace]
-            action: keep
-            regex: (simplyblock-node-exporter|node-exporter);{{ .Release.Namespace }}
-          - source_labels: [__meta_kubernetes_endpoints_name]
-            action: keep
-            regex: node-exporter
+        - source_labels: [__meta_kubernetes_endpoints_name]
+          action: keep
+          regex: 'simplyblock-node-exporter'
 
 ---
 apiVersion: v1
