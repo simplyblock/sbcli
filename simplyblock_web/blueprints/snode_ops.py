@@ -141,8 +141,8 @@ class SPDKParams(BaseModel):
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
     storage_tiering: Optional[bool] = Field(default=True)
-    aws_access_key_id: Optional[str] = Field(None)
-    aws_secret_access_key: Optional[str] = Field(None)
+    aws_access_key: Optional[str] = Field(None)
+    aws_secret_key: Optional[str] = Field(None)
 
 
 @api.post('/spdk_process_start', responses={
@@ -178,8 +178,8 @@ def spdk_process_start(body: SPDKParams):
         ]
     if body.storage_tiering:
         env_vars.extend([
-                        f"AWS_ACCESS_KEY_ID={body.aws_access_key_id}",
-            f"AWS_SECRET_ACCESS_KEY={body.aws_secret_access_key}",
+            f"AWS_ACCESS_KEY_ID={body.aws_access_key}",
+            f"AWS_SECRET_ACCESS_KEY={body.aws_secret_key}",
         ])
     container = node_docker.containers.run(
         body.spdk_image,
