@@ -2,5 +2,5 @@ SIMPLY_BLOCK_COMMAND_NAME=sbcli-alsh
 SIMPLY_BLOCK_VERSION=18.0.66
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:alsh
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:alsh-test
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:main-latest
