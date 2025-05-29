@@ -518,8 +518,8 @@ class RPCClient:
             "name": name,
             "local_testing": local_testing,
             "local_endpoint": local_endpoint,
-            'bdb_lcpu_mask': bdb_lcpu_mask,
-            's3_lcpu_mask': s3_lcpu_mask,
+            'bdb_lcpu_mask': int(bdb_lcpu_mask, 16) if isinstance(bdb_lcpu_mask, str) else bdb_lcpu_mask,
+            's3_lcpu_mask': int(s3_lcpu_mask, 16) if isinstance(s3_lcpu_mask, str) else s3_lcpu_mask,
             's3_thread_pool_size': s3_thread_pool_size
         }
         if uuid:
