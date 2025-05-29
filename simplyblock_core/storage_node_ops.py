@@ -3088,34 +3088,37 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 def get_sorted_ha_jms(current_node):
     db_controller = DBController()
     jm_count = {}
-    mgmt_ips = []
-    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE):  # pass
-            continue
-        if node.mgmt_ip == current_node.mgmt_ip:
-            continue
-        if node.mgmt_ip in mgmt_ips:
-            continue
-
-        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-            jm_count[node.jm_device.get_id()] = 1
-            mgmt_ips.append(node.mgmt_ip)
+    jm_dev_to_mgmt_ip = {}
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE):  # pass
+        if node.get_id() == current_node.get_id():  # pass
             continue
-        if node.mgmt_ip == current_node.mgmt_ip or not node.jm_ids:
+
+        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE and node.jm_device.get_id():
+            jm_count[node.jm_device.get_id()] = 0
+            jm_dev_to_mgmt_ip[node.jm_device.get_id()] = node.mgmt_ip
+
+    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
+        if node.get_id() == current_node.get_id():  # pass
+            continue
+        if not node.jm_ids:
             continue
         for rem_jm_id in node.jm_ids:
             if rem_jm_id in jm_count:
                 jm_count[rem_jm_id] += 1
 
+    mgmt_ips = []
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
     out = []
     for jm_id in jm_count.keys():
         if jm_id:
+            if jm_dev_to_mgmt_ip[jm_id] in mgmt_ips:
+                continue
+            if jm_dev_to_mgmt_ip[jm_id] == current_node.mgmt_ip:
+                continue
+            mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
             out.append(jm_count)
-    return out[:constants.HA_JM_COUNT]
+    return out[:constants.HA_JM_COUNT-1]
 
 
 def get_node_jm_names(current_node, remote_node=None):
@@ -3130,6 +3133,9 @@ def get_node_jm_names(current_node, remote_node=None):
 
     if current_node.enable_ha_jm:
         for jm_id in current_node.jm_ids:
+            if not jm_id:
+                continue
+
             if remote_node:
                 if remote_node.jm_device.get_id() == jm_id:
                     jm_list.append(remote_node.jm_device.jm_bdev)
