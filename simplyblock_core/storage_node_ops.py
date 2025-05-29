@@ -3111,7 +3111,11 @@ def get_sorted_ha_jms(current_node):
                 jm_count[rem_jm_id] += 1
 
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
-    return list(jm_count.keys())[:3]
+    out = []
+    for jm_id in jm_count.keys():
+        if jm_id:
+            out.append(jm_count)
+    return out[:constants.HA_JM_COUNT]
 
 
 def get_node_jm_names(current_node, remote_node=None):
