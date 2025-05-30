@@ -1488,6 +1488,14 @@ def restart_storage_node(
     if max_snap:
         snode.max_snap = max_snap
 
+    if not snode.l_cores:
+        if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
+            nodes = node_info["nodes_config"]["nodes"]
+            for node in nodes:
+                if node['cpu_mask'] == snode.spdk_cpu_mask:
+                    snode.l_cores = node['l-cores']
+                    break
+
     if max_prov:
         if not isinstance(max_prov, int):
             try:
@@ -1753,6 +1761,15 @@ def restart_storage_node(
             if devs:
                 dev = db_controller.get_jm_device_by_id(devs[0])
                 snode.remote_jm_devices.append(dev)
+        if not snode.jm_ids:
+            snode.jm_ids = []
+            for rem_jm in snode.remote_jm_devices:
+                if rem_jm.get_id():
+                    snode.jm_ids.append(rem_jm.get_id())
+
+            snode.jm_ids = snode.jm_ids[:constants.HA_JM_COUNT-1]
+            snode.write_to_db(db_controller.kv_store)
+
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.health_check = True
     snode.lvstore_status = ""
@@ -3080,30 +3097,37 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 def get_sorted_ha_jms(current_node):
     db_controller = DBController()
     jm_count = {}
-    mgmt_ips = []
-    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE):  # pass
-            continue
-        if node.mgmt_ip == current_node.mgmt_ip:
-            continue
-        if node.mgmt_ip in mgmt_ips:
-            continue
-
-        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-            jm_count[node.jm_device.get_id()] = 1
-            mgmt_ips.append(node.mgmt_ip)
+    jm_dev_to_mgmt_ip = {}
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
-        if (node.get_id() == current_node.get_id() or node.status != StorageNode.STATUS_ONLINE):  # pass
+        if node.get_id() == current_node.get_id():  # pass
             continue
-        if node.mgmt_ip == current_node.mgmt_ip or not node.jm_ids:
+
+        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE and node.jm_device.get_id():
+            jm_count[node.jm_device.get_id()] = 0
+            jm_dev_to_mgmt_ip[node.jm_device.get_id()] = node.mgmt_ip
+
+    for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
+        if node.get_id() == current_node.get_id():  # pass
+            continue
+        if not node.jm_ids:
             continue
         for rem_jm_id in node.jm_ids:
             if rem_jm_id in jm_count:
                 jm_count[rem_jm_id] += 1
 
+    mgmt_ips = []
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
-    return list(jm_count.keys())[:3]
+    out = []
+    for jm_id in jm_count.keys():
+        if jm_id:
+            if jm_dev_to_mgmt_ip[jm_id] in mgmt_ips:
+                continue
+            if jm_dev_to_mgmt_ip[jm_id] == current_node.mgmt_ip:
+                continue
+            mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
+            out.append(jm_id)
+    return out[:constants.HA_JM_COUNT-1]
 
 
 def get_node_jm_names(current_node, remote_node=None):
@@ -3118,6 +3142,9 @@ def get_node_jm_names(current_node, remote_node=None):
 
     if current_node.enable_ha_jm:
         for jm_id in current_node.jm_ids:
+            if not jm_id:
+                continue
+
             if remote_node:
                 if remote_node.jm_device.get_id() == jm_id:
                     jm_list.append(remote_node.jm_device.jm_bdev)
@@ -3290,9 +3317,8 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         sec_rpc_client.bdev_examine(snode.raid)
         sec_rpc_client.bdev_wait_for_examine()
 
-        cluster_nqn = db_controller.get_cluster_by_id(snode.cluster_id).nqn
         try:
-            snode.create_hublvol(cluster_nqn)
+            snode.create_hublvol()
 
         except RPCException as e:
             logger.error("Error establishing hublvol: %s", e.message)

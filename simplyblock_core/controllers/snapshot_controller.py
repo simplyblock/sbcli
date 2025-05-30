@@ -424,7 +424,6 @@ def clone(snapshot_id, clone_name, new_size=0):
             return False, msg
 
     lvol = LVol()
-    lvol.uuid = str(uuid.uuid4())
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
     lvol.max_size = snap.lvol.max_size
@@ -494,7 +493,7 @@ def clone(snapshot_id, clone_name, new_size=0):
         if error:
             return False, error
         lvol.nodes = [snode.get_id()]
-        lvol.lvol_uuid = lvol_bdev['uuid']
+        lvol.uuid = lvol_bdev['uuid']
         lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
     if lvol.ha_type == "ha":
@@ -550,7 +549,7 @@ def clone(snapshot_id, clone_name, new_size=0):
                 lvol.remove(db_controller.kv_store)
                 return False, error
 
-            lvol.lvol_uuid = lvol_bdev['uuid']
+            lvol.uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
         if secondary_node:

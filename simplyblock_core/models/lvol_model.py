@@ -39,7 +39,6 @@ class LVol(BaseModel):
     lvol_name: str = ""
     lvol_priority_class: int = 0
     lvol_type: str = "lvol"
-    lvol_uuid: str = ""
     lvs_name: str = ""
     max_size: int = 0
     mem_diff: dict = {}
