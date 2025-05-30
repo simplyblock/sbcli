@@ -10,7 +10,7 @@ cluster_commands = [
     "sbcli-dev cluster show",
     "sbcli-dev cluster get-capacity",
     "sbcli-dev cluster get-io-stats",
-    "sbcli-dev cluster get-logs",
+    "sbcli-dev cluster get-logs --limit 0",
     "sbcli-dev lvol list --cluster-id",
 ]
 
