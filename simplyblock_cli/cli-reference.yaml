@@ -135,12 +135,6 @@ commands:
             type: bool
             action: store_true
             private: true
-          - name: "--full-page-unmap"
-            help: "Enable use_map_whole_page_on_1st_write flaf in bdev_distrib_create and bdev_alceml_create"
-            dest: full_page_unmap
-            type: bool
-            action: store_true
-            private: true
           - name: "--iobuf_small_bufsize"
             help: "bdev_set_options param"
             dest: small_bufsize

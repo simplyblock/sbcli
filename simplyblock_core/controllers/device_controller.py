@@ -154,13 +154,13 @@ def _def_create_device_stack(device_obj, snode, force=False):
             ret = rpc_client.bdev_alceml_create(
                 alceml_name, nvme_bdev, alceml_id, pba_init_mode=2, alceml_cpu_mask=alceml_cpu_mask,
                 pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection,
-                full_page_unmap=snode.full_page_unmap
+                full_page_unmap=cluster.full_page_unmap
             )
             snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
         else:
             ret = rpc_client.bdev_alceml_create(
                 alceml_name, nvme_bdev, alceml_id, pba_init_mode=2, pba_page_size=cluster.page_size_in_blocks,
-                write_protection=write_protection, full_page_unmap=snode.full_page_unmap
+                write_protection=write_protection, full_page_unmap=cluster.full_page_unmap
             )
 
         if not ret:
@@ -915,7 +915,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
             ret = rpc_client.bdev_alceml_create(
                 jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(), pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
                 alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks,
-                full_page_unmap=snode.full_page_unmap
+                full_page_unmap=cluster.full_page_unmap
             )
 
             if not ret:
