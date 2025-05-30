@@ -2988,6 +2988,14 @@ def recreate_lvstore(snode):
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
+            for bdev in snode.lvstore_stack:
+                if bdev['type'] == "bdev_distr":
+                    name = bdev['name']
+                    ret = sec_rpc_client.distr_debug_placement_map_dump(name)
+                    if ret:
+                        logger.info(f"distr_debug_placement_map_dump for distr {name} on node {sec_node.get_id()}")
+                        logger.info(ret)
+
             # time.sleep(1)
             ### 4- set leadership to false
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
@@ -3378,6 +3386,11 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 if not ret:
                     return False, "Failed to send cluster map"
                 # time.sleep(1)
+            ret = rpc_client.distr_debug_placement_map_dump(name)
+            if ret:
+                logger.info(f"distr_debug_placement_map_dump for distr {name} on node {snode.get_id()}")
+                logger.info(ret)
+
 
         elif type == "bdev_lvstore" and lvstore_stack and not primary_node:
             ret = rpc_client.create_lvstore(**params)

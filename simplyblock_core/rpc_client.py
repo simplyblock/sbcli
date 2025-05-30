@@ -1073,3 +1073,10 @@ class RPCClient:
         if ana_state:
             params["ana_state"] = ana_state
         return self._request2("nvmf_subsystem_add_listener", params)
+
+
+    def distr_debug_placement_map_dump(self, name):
+        params = {
+            "name": name,
+        }
+        return self._request("distr_debug_placement_map_dump", params)
