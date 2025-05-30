@@ -190,9 +190,9 @@ jobs:
         n=0
         until [ "$n" -ge 100 ]
         do
-          response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
+          response=$(curl -s "$CLUSTER_API_GATEWAY_ENDPOINT/clusters/$CLUSTER_UUID" \
             -H "Content-Type: application/json" \
-            -H "Authorization: $CLUSTER_UUID $CLUSTER_SECRET")
+            -H "Authorization: Bearer $CLUSTER_SECRET")
           
           status=$(echo $response | jq -r '.results[0].status')
           
@@ -208,6 +208,6 @@ jobs:
         echo "Cluster status is not active"
         exit 1
       env:
-        CLUSTER_API_GATEWAY_ENDPOINT: ${{ steps.deployment.outputs.cluster_ip }}
+        CLUSTER_API_GATEWAY_ENDPOINT: ${{ steps.deployment.outputs.cluster_ip }}/api/v2
         CLUSTER_UUID: ${{ steps.deployment.outputs.cluster_id }}
         CLUSTER_SECRET: ${{ steps.deployment.outputs.cluster_secret }}
