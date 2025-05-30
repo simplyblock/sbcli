@@ -11,14 +11,16 @@ import cpuinfo
 import requests
 from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException, V1DeleteOptions
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, PackageLoader
 import yaml
 from pydantic import BaseModel, Field
 
-from . import snode_ops
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
+
+from . import docker as snode_ops
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -232,10 +234,6 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     return utils.get_response(True)
 
 
-class _DeviceParams(BaseModel):
-    device_pci: str
-
-
 api.post('/delete_dev_gpt_partitions')(snode_ops.delete_gpt_partitions_for_dev)
 
 
@@ -315,7 +313,7 @@ def spdk_process_start(body: SPDKParams):
     logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
     try:
-        env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
+        env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         values = {
             'SPDK_IMAGE': body.spdk_image,
             "L_CORES": body.l_cores,
@@ -379,7 +377,7 @@ def spdk_process_start(body: SPDKParams):
             )
             logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
 
-        env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
+        env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
