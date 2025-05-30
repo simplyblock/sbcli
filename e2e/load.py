@@ -120,6 +120,7 @@ try:
         read_only=args.read_log,
         continue_from_log=args.continue_from_log
     )
+    test_obj.setup()
     test_obj.cleanup_logs()
     test_obj.configure_sysctl_settings()
     test_obj.run()
