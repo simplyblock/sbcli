@@ -33,7 +33,6 @@ def call(request):
     return functools.partial(
             util.api_call,
             options.entrypoint,
-            options.cluster,
             options.secret,
             log_func=print,
     )
@@ -41,19 +40,17 @@ def call(request):
 
 @pytest.fixture(scope='module')
 def pool(call, cluster):
-    pool_uuid = call('POST', '/pool', data={'name': 'poolX', 'cluster_id': cluster, 'no_secret': True})
+    pool_uuid = call('POST', f'/clusters/{cluster}/pools', data={'name': 'poolX', 'secret': False})
     yield pool_uuid
-    call('DELETE', f'/pool/{pool_uuid}')
+    call('DELETE', f'/clusters/{cluster}/pools/{pool_uuid}')
 
 
 @pytest.fixture(scope='module')
 def lvol(call, cluster, pool):
-    pool_name = call('GET', f'/pool/{pool}')[0]['pool_name']
-    lvol_uuid = call('POST', '/lvol', data={
+    lvol_uuid = call('POST', f'/clusters/{cluster}/pools/{pool}/volumes', data={
         'name': 'lvolX',
-        'size': '1G',
-        'pool': pool_name}
-    )
+        'size': '2G',
+    })
     yield lvol_uuid
-    call('DELETE', f'/lvol/{lvol_uuid}')
-    util.await_deletion(call, f'/lvol/{lvol_uuid}')
+    call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
+    util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')

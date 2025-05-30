@@ -15,7 +15,7 @@ db_controller = DBController()
 c = Cluster()
 
 print("waiting for mgmt node to be up...")
-time.sleep(10)
+time.sleep(30)
 
 BASE_URL = "http://mgmt-server:5000"
 CLUSTER_UUID = str(uuid.uuid4())
