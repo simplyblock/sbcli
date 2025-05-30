@@ -3114,7 +3114,7 @@ def get_sorted_ha_jms(current_node):
     out = []
     for jm_id in jm_count.keys():
         if jm_id:
-            out.append(jm_count)
+            out.append(jm_id)
     return out[:constants.HA_JM_COUNT]
 
 
