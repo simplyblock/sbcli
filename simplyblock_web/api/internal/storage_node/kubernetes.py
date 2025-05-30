@@ -15,7 +15,7 @@ from jinja2 import Environment, FileSystemLoader
 import yaml
 from pydantic import BaseModel, Field
 
-from . import snode_ops
+from .docker import bind_device_to_spdk
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, pod_name
@@ -559,4 +559,4 @@ def apply_config():
 
     return utils.get_response(True)
 
-api.post('/bind_device_to_spdk')(snode_ops.bind_device_to_spdk)
+api.post('/bind_device_to_spdk')(bind_device_to_spdk)
