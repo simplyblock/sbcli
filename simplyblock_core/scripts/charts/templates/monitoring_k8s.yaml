@@ -5,11 +5,12 @@ metadata:
   name: simplyblock-mongodb-data
   namespace: {{ .Release.Namespace }}
 spec:
+  storageClassName: openebs-local-hostpath
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 5Gi
+      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -45,6 +46,7 @@ metadata:
   name: simplyblock-os-data
   namespace: {{ .Release.Namespace }}
 spec:
+  storageClassName: openebs-local-hostpath
   accessModes:
     - ReadWriteOnce
   resources:
@@ -98,6 +100,7 @@ metadata:
   name: simplyblock-graylog-data
   namespace: {{ .Release.Namespace }}
 spec:
+  storageClassName: openebs-local-hostpath
   accessModes:
     - ReadWriteOnce
   resources:
@@ -110,6 +113,7 @@ metadata:
   name: simplyblock-graylog-journal
   namespace: {{ .Release.Namespace }}
 spec:
+  storageClassName: openebs-local-hostpath
   accessModes:
     - ReadWriteOnce
   resources:
@@ -210,6 +214,7 @@ metadata:
   name: simplyblock-prometheus-data
   namespace: {{ .Release.Namespace }}
 spec:
+  storageClassName: openebs-local-hostpath
   accessModes:
     - ReadWriteOnce
   resources:
@@ -364,6 +369,7 @@ metadata:
   name: simplyblock-thanos-compactor-data
   namespace: {{ .Release.Namespace }}
 spec:
+  storageClassName: openebs-local-hostpath
   accessModes:
     - ReadWriteOnce
   resources:
@@ -474,6 +480,7 @@ metadata:
   name: simplyblock-grafana-data
   namespace: {{ .Release.Namespace }}
 spec:
+  storageClassName: openebs-local-hostpath
   accessModes:
     - ReadWriteOnce
   resources:

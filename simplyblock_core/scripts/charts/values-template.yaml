@@ -24,3 +24,7 @@ image:
     repository: "${SIMPLYBLOCK_REPOSITORY}"
     tag: "${SIMPLYBLOCK_TAG}"
     pullPolicy: "Always"
+
+openebs:
+  enabled: true
+  
