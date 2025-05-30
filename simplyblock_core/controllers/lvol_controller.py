@@ -407,7 +407,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.create_dt = str(datetime.now())
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
-    lvol.uuid = uid or str(uuid.uuid4())
     lvol.guid = utils.generate_hex_string(16)
     lvol.vuid = vuid
     lvol.lvol_bdev = f"LVOL_{vuid}"
@@ -498,7 +497,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 return False, error
 
             lvol.nodes = [host_node.get_id()]
-            lvol.lvol_uuid = lvol_bdev['uuid']
+            lvol.uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
         else:
             msg = f"Host node in not online: {host_node.get_id()}"
@@ -557,7 +556,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 lvol.remove(db_controller.kv_store)
                 return False, error
 
-            lvol.lvol_uuid = lvol_bdev['uuid']
+            lvol.uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
 
@@ -615,14 +614,14 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
                 ret = rpc_client.create_lvol(**params)
             else:
                 ret = rpc_client.bdev_lvol_register(
-                    lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
+                    lvol.lvol_bdev, lvol.lvs_name, lvol.uuid, lvol.blobid, lvol.lvol_priority_class)
 
         elif type == "bdev_lvol_clone":
             if is_primary:
                 ret = rpc_client.lvol_clone(**params)
             else:
                 ret = rpc_client.bdev_lvol_clone_register(
-                    lvol.lvol_bdev, lvol.snapshot_name, lvol.lvol_uuid, lvol.blobid)
+                    lvol.lvol_bdev, lvol.snapshot_name, lvol.uuid, lvol.blobid)
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
@@ -1101,10 +1100,9 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Hostname": lvol.hostname,
             "HA": lvol.ha_type,
             "BlobID": lvol.blobid or "",
-            "LVolUUID": lvol.lvol_uuid or "",
             # "Priority": lvol.lvol_priority_class,
             "Status": lvol.status,
-            "IO Err": lvol.io_error,
+            "Type": lvol.lvol_type,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
         })
