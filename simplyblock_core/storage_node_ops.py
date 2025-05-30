@@ -1761,6 +1761,15 @@ def restart_storage_node(
             if devs:
                 dev = db_controller.get_jm_device_by_id(devs[0])
                 snode.remote_jm_devices.append(dev)
+        if not snode.jm_ids:
+            snode.jm_ids = []
+            for rem_jm in snode.remote_jm_devices:
+                if rem_jm.get_id():
+                    snode.jm_ids.append(rem_jm.get_id())
+
+            snode.jm_ids = snode.jm_ids[:constants.HA_JM_COUNT-1]
+            snode.write_to_db(db_controller.kv_store)
+
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.health_check = True
     snode.lvstore_status = ""
