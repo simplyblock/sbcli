@@ -210,15 +210,16 @@ def set_node_online(node):
                 device_controller.device_set_online(dev.get_id())
 
 
-def set_node_offline(node):
+def set_node_offline(node, set_devs_offline=False):
     if node.status != StorageNode.STATUS_UNREACHABLE:
         # set node unavailable
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
 
-        # # set devices unavailable
-        # for dev in node.nvme_devices:
-        #     if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-        #         device_controller.device_set_unavailable(dev.get_id())
+        if set_devs_offline:
+            # set devices unavailable
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+                    device_controller.device_set_unavailable(dev.get_id())
 
         # # set jm dev offline
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
@@ -346,7 +347,7 @@ while True:
                     # add node to auto restart
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
                                           Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
-                        set_node_offline(snode)
+                        set_node_offline(snode, set_devs_offline=not spdk_process)
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
@@ -354,7 +355,7 @@ while True:
                         set_node_down(snode)
 
                 else:
-                    set_node_offline(snode)
+                    set_node_offline(snode, set_devs_offline=not spdk_process)
 
             if ping_check and node_api_check and spdk_process and not node_rpc_check:
                 # restart spdk proxy cont
