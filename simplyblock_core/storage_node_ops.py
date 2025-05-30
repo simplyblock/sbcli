@@ -3126,7 +3126,7 @@ def get_sorted_ha_jms(current_node):
             if jm_dev_to_mgmt_ip[jm_id] == current_node.mgmt_ip:
                 continue
             mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
-            out.append(jm_count)
+            out.append(jm_id)
     return out[:constants.HA_JM_COUNT-1]
 
 
