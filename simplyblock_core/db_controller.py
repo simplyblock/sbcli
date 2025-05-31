@@ -95,6 +95,14 @@ class DBController(metaclass=Singleton):
         ret = sorted(ret, key=lambda x: x.create_dt)
         return ret
 
+    def get_caching_nodes_by_cluster_id(self, cluster_id) -> List[CachingNode]:
+        ret = CachingNode().read_from_db(self.kv_store)
+        nodes = []
+        for n in ret:
+            if n.cluster_id == cluster_id:
+                nodes.append(n)
+        return sorted(nodes, key=lambda x: x.create_dt)
+
     def get_caching_node_by_id(self, id)  -> Optional[CachingNode]:
         ret = CachingNode().read_from_db(self.kv_store, id)
         if ret:
