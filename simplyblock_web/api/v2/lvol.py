@@ -1,0 +1,193 @@
+from typing import Literal, Optional, Tuple
+
+from flask import abort, url_for
+from flask_openapi3 import APIBlueprint
+from pydantic import BaseModel, Field
+
+from simplyblock_core.db_controller import DBController
+from simplyblock_core import utils as core_utils
+from simplyblock_core.controllers import lvol_controller, snapshot_controller
+
+from .pool import PoolPath
+from . import util
+
+
+api = APIBlueprint('volume', __name__, url_prefix='/cluster/<cluster_id>/pool/<pool_id>/volume')
+db = DBController()
+
+
+@api.get('/')
+def list(path: PoolPath):
+    return [
+        lvol.get_clean_dict()
+        for lvol
+        in db.get_lvols_by_pool_id(path.pool().get_id())
+    ]
+
+
+class LVolParams(BaseModel):
+    name: str
+    size: int
+    crypto_key: Optional[Tuple[str, str]] = None
+    max_rw_iops: int = Field(0, ge=0)
+    max_rw_mbytes: int = Field(0, ge=0)
+    max_r_mbytes: int = Field(0, ge=0)
+    max_w_mbytes: int = Field(0, ge=0)
+    ha_type: Optional[Literal['single', 'ha']]
+    host_id: Optional[str] = None
+    lvol_priority_class: Literal[0, 1] = 0
+    namespace: Optional[str] = None
+    pvc_name: Optional[str] = None
+
+
+@api.post('/')
+def add(path: PoolPath, body: LVolParams):
+    if db.get_lvol_by_name(body.name) is not None:
+        abort(409, f'Volume {body.name} exists')
+
+
+    ret, error = lvol_controller.add_lvol_ha(
+        name=body.name,
+        size=body.size,
+        pool_id_or_name=path.pool().get_id(),
+        use_crypto=body.crypto_key is not None,
+        max_size=0,
+        max_rw_iops=body.rw_iops,
+        max_rw_mbytes=body.rw_mbytes,
+        max_r_mbytes=body.r_mbytes,
+        max_w_mbytes=body.w_mbytes,
+        host_id_or_name=body.host_id,
+        ha_type=body.ha_type if body.ha_type is not None else 'default',
+        crypto_key1=body.crypto_key[0] if body.crypto_key is not None else None,
+        crypto_key2=body.crypto_key[1] if body.crypto_key is not None else None,
+        use_comp=False,
+        distr_vuid=0,
+        lvol_priority_class=body.lvol_priority_class,
+        namespace=body.namespace,
+        pvc_name=body.pvc_name,
+    )
+    if not ret:
+        raise ValueError(error)
+
+
+instance_api = APIBlueprint('volume instance', __name__, url_prefix='/<volume_id>')
+
+
+class VolumePath(PoolPath):
+    volume_id: str = Field(pattern=core_utils.UUID_PATTERN)
+
+    def volume(self):
+        volume = db.get_lvol_by_id(self.volume_id)
+        if volume is None:
+            abort(404, 'Volume not found')
+        return volume
+
+
+class UpdatableLVolParams(BaseModel):
+    name: Optional[str] = None
+    max_rw_iops: Optional[int] = Field(None, ge=0)
+    max_rw_mbytes: Optional[int] = Field(None, ge=0)
+    max_r_mbytes: Optional[int] = Field(None, ge=0)
+    max_w_mbytes: Optional[int] = Field(None, ge=0)
+
+
+@instance_api.put('/')
+def update(path: VolumePath, body: UpdatableLVolParams):
+    if not lvol_controller.set_lvol(
+        uuid=path.volume().get_id(),
+        **{
+            key: value
+            for key, value
+            in body.model_dump().items()
+            if key in body.model_fields_set
+        },
+    ):
+        raise ValueError('Failed to update lvol')
+
+
+@instance_api.delete('/')
+def delete(path: VolumePath):
+    volume = path.volume()
+    if not lvol_controller.delete_lvol(volume.get_id()):
+        raise ValueError('Failed to delete volume')
+
+
+class _ResizeParams(BaseModel):
+    size: int = Field(gt=0)
+
+
+@instance_api.post('/resize')
+def resize(path: VolumePath, body: _ResizeParams):
+    volume = path.volume()
+    success, msg = lvol_controller.resize_lvol(volume.get_id(), body.size)
+    if not success:
+        raise ValueError(msg)
+
+
+@instance_api.post('/inflate')
+def inflate(path: VolumePath):
+    volume = path.volume()
+    if not volume.cloned_from_snap:
+        abort(400, 'Volume must be cloned')
+    if not lvol_controller.inflate_lvol(volume.get_id()):
+        raise ValueError('Failed to inflate volume')
+
+
+@instance_api.get('/connect')
+def connect(path: VolumePath):
+    volume = path.volume()
+    details_or_false = lvol_controller.connect_lvol(volume.get_id())
+    if not details_or_false:
+        raise ValueError('Failed to query connection details')
+    return details_or_false
+
+
+@instance_api.get('/capacity')
+def capacity(path: VolumePath, query: util.HistoryQuery):
+    volume = path.volume()
+    records_or_false = lvol_controller.get_capacity(volume.get_id(), query.history, parse_sizes=False)
+    if not records_or_false:
+        raise ValueError('Failed to compute capacity')
+    return records_or_false
+
+
+@instance_api.get('/iostats')
+def iostats(path: VolumePath, query: util.HistoryQuery):
+    volume = path.volume()
+    records_or_false = lvol_controller.get_io_stats(
+        volume.get_id(),
+        query.history,
+        parse_sizes=False,
+        with_sizes=True
+    )
+    if not records_or_false:
+        raise ValueError('Failed to compute iostats')
+    return records_or_false
+
+
+@instance_api.get('/snapshot')
+def snapshot(path: VolumePath):
+    volume = path.volume()
+    return [
+        snapshot.get_clean_dict()
+        for snapshot
+        in db.get_snapshots()
+        if snapshot.lvol.get_id() == volume.get_id()
+    ]
+
+
+class _SnapshotParams(BaseModel):
+    name: str
+
+
+@instance_api.post('/snapshot')
+def create_snapshot(path: VolumePath, body: _SnapshotParams):
+    snapshot_id, err = snapshot_controller.add(
+        path.volume().get_id(), body.snapshot_name
+    )
+    if err is not None:
+        raise ValueError('Failed to create snapshot')
+    return None, 201, {'Location': url_for('snapshot', cluster_id=path.cluster_id, snapshot_id=snapshot_id)}  # TODO
+
+
+api.register_api(instance_api)
