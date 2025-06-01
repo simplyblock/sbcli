@@ -272,18 +272,18 @@ while True:
                     capacity_dict = {}
                     stats = []
                     logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
-                    if snode.get_id() in all_node_lvols_stats and lvol.uuid in all_node_lvols_stats[snode.get_id()]:
-                        stats.append(all_node_lvols_stats[snode.get_id()][lvol.uuid])
+                    if snode.get_id() in all_node_lvols_stats and lvol.lvol_uuid in all_node_lvols_stats[snode.get_id()]:
+                        stats.append(all_node_lvols_stats[snode.get_id()][lvol.lvol_uuid])
 
-                    if snode.get_id() in all_node_bdev_names and lvol.uuid in all_node_bdev_names[snode.get_id()]:
-                        capacity_dict = all_node_bdev_names[snode.get_id()][lvol.uuid]
+                    if snode.get_id() in all_node_bdev_names and lvol.lvol_uuid in all_node_bdev_names[snode.get_id()]:
+                        capacity_dict = all_node_bdev_names[snode.get_id()][lvol.lvol_uuid]
 
                     if lvol.ha_type == "ha":
                         sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
                         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                             logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
-                            if lvol.uuid in all_node_lvols_stats[sec_node.get_id()]:
-                                stats.append(all_node_lvols_stats[sec_node.get_id()][lvol.uuid])
+                            if lvol.lvol_uuid in all_node_lvols_stats[sec_node.get_id()]:
+                                stats.append(all_node_lvols_stats[sec_node.get_id()][lvol.lvol_uuid])
 
                     record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
                     if record:
