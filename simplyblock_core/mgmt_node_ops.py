@@ -138,17 +138,9 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
         elif mode == "kubernetes":
             config.load_kube_config()
             v1 = k8s_client.CoreV1Api()
-            apps_v1 = k8s_client.AppsV1Api()
             namespace = "simplyblock"
-            statefulset_name = "simplyblock-opensearch"
 
-            response = apps_v1.patch_namespaced_stateful_set(
-                name=statefulset_name,
-                namespace=namespace,
-                body=constants.patch
-            )
-
-            print(f"Patched StatefulSet {statefulset_name}: {response.status.replicas} replicas")
+            utils.patch_opensearch_statefulset(namespace)
 
             current_node = socket.gethostname()
             logger.info(f"Waiting for FDB pod on this node: {current_node} to be active...")
@@ -156,7 +148,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             retries = 30
             while retries > 0 and fdb_cont is None:
                 logger.info(f"Looking for FDB pod on node {current_node}...")
-                pods = v1.list_namespaced_pod(namespace="simplyblock", label_selector="app=simplyblock-fdb-server").items
+                pods = v1.list_namespaced_pod(namespace=namespace, label_selector="app=simplyblock-fdb-server").items
                 for pod in pods:
                     if pod.spec.node_name == current_node:
                         fdb_cont = pod

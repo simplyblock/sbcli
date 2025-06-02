@@ -18,6 +18,7 @@ import docker
 from prettytable import PrettyTable
 from graypy import GELFTCPHandler
 from docker.errors import APIError, DockerException, ImageNotFound
+from kubernetes import client as k8s_client, config
 import psutil
 
 from simplyblock_core import constants
@@ -1749,3 +1750,48 @@ def get_k8s_apps_client():
 def get_k8s_core_client():
     config.load_incluster_config()
     return client.CoreV1Api()
+
+
+def strip_env_var(env_list, var_name):
+    return [env for env in env_list if env.name != var_name]
+
+def patch_opensearch_statefulset(namespace):
+    config.load_kube_config()
+    apps_v1 = k8s_client.AppsV1Api()
+
+    statefulset_name = "simplyblock-opensearch"
+
+    ss = apps_v1.read_namespaced_stateful_set(statefulset_name, namespace)
+
+    for container in ss.spec.template.spec.containers:
+        if container.name == "opensearch":
+            existing_env = container.env or []
+            cleaned_env = strip_env_var(existing_env, "discovery.type")
+            for new_env in constants.env_patch:
+                cleaned_env = strip_env_var(cleaned_env, new_env["name"])
+                cleaned_env.append(k8s_client.V1EnvVar(**new_env))
+            container.env = cleaned_env
+
+    patch_body = {
+        "spec": {
+            "replicas": 3,
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "opensearch",
+                            "env": [e.to_dict() for e in container.env]
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    response = apps_v1.patch_namespaced_stateful_set(
+        name=statefulset_name,
+        namespace=namespace,
+        body=patch_body
+    )
+
+    logger.info(f"Patched StatefulSet {statefulset_name}: {response.status.replicas} replicas")
