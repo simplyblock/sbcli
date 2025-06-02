@@ -36,6 +36,8 @@ fi
 
 envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 
+/usr/local/bin/helm dependency build "$DIR"/charts/
+
 /usr/local/bin/helm upgrade --install sbcli "$DIR"/charts/ \
   --namespace simplyblock \
   --create-namespace
