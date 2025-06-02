@@ -4,8 +4,7 @@ import json
 import logging
 import threading
 
-from flask import Blueprint
-from flask import request
+from flask import abort, Blueprint, request
 
 from simplyblock_core.controllers import tasks_controller, device_controller, lvol_controller
 from simplyblock_web import utils
@@ -102,9 +101,17 @@ def cluster_iostats(uuid, history):
         logger.error(f"Cluster not found {uuid}")
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
 
+    limit = int(request.args.get('limit', 20))
+    if limit > 1000:
+        abort(400, 'Limit must be <=1000')
+
     return utils.get_response({
         "object_data": cluster.get_clean_dict(),
-        "stats": cluster_ops.get_iostats_history(uuid, history, with_sizes=True)
+        "stats": cluster_ops.get_iostats_history(
+            uuid, history, 
+            records_count=limit,
+            with_sizes=True
+        ),
     })
 
 
