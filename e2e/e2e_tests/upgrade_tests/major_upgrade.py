@@ -28,6 +28,7 @@ class TestMajorUpgrade(TestClusterBase):
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
         self.base_version = kwargs.get("base_version")
         self.target_version = kwargs.get("target_version")
         self.snapshot_name = "upgrade_snap"

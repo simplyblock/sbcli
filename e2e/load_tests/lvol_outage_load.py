@@ -1,6 +1,7 @@
 import random
 import threading
 import csv
+from logger_config import setup_logger
 import matplotlib.pyplot as plt
 from datetime import datetime
 from pathlib import Path
@@ -14,12 +15,13 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
         self.output_file = Path(kwargs.get("output_file", "lvol_outage_log.csv"))
-        self.max_lvols = kwargs.get("max_lvols", 40)
-        self.step = kwargs.get("step", 10)
+        self.max_lvols = kwargs.get("max_lvols", 1200)
+        self.step = kwargs.get("step", 100)
         self.read_only = kwargs.get("read_only", False)
         self.continue_from_log = kwargs.get("continue_from_log", False)
-        self.start_from = 10
+        self.start_from = 600
         self.lvol_size = "3G"
         self.storage_nodes_uuid = []
         self.lvol_node = None
@@ -27,6 +29,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         self.mount_base = "/mnt/"
         self.log_base = f"{Path.home()}/"
         self.fio_threads = []
+        self.logger.info(f"Running load test with Max Lvol:{self.max_lvols}, Start: {self.start_from}, Step:{self.step}")
 
     def setup_environment(self):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
