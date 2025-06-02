@@ -1,6 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=18.0.73
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-alsh
+SIMPLY_BLOCK_VERSION=18.0.74
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:alsh
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:main-latest
