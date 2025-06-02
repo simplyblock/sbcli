@@ -39,26 +39,27 @@ spec:
         - name: simplyblock-mongodb-data
           persistentVolumeClaim:
             claimName: simplyblock-mongodb-data
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: simplyblock-os-data
-  namespace: {{ .Release.Namespace }}
-spec:
-  storageClassName: openebs-local-hostpath
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
+# ---
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: simplyblock-os-data
+#   namespace: {{ .Release.Namespace }}
+# spec:
+#   storageClassName: openebs-local-hostpath
+#   accessModes:
+#     - ReadWriteOnce
+#   resources:
+#     requests:
+#       storage: 10Gi
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: simplyblock-opensearch
   namespace: {{ .Release.Namespace }}
 spec:
+  serviceName: simplyblock-opensearch
   replicas: 1
   selector:
     matchLabels:
@@ -70,6 +71,16 @@ spec:
     spec:
       nodeSelector:
         type: simplyblock-mgmt-plane
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - simplyblock-opensearch
+              topologyKey: "kubernetes.io/hostname"
       containers:
         - name: opensearch
           image: opensearchproject/opensearch:2.4.0
@@ -89,10 +100,19 @@ spec:
           volumeMounts:
             - mountPath: /usr/share/opensearch/data
               name: simplyblock-os-data
-      volumes:
-        - name: simplyblock-os-data
-          persistentVolumeClaim:
-            claimName: simplyblock-os-data
+      # volumes:
+      #   - name: simplyblock-os-data
+      #     persistentVolumeClaim:
+      #       claimName: simplyblock-os-data
+  volumeClaimTemplates:
+    - metadata:
+        name: simplyblock-os-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: openebs-local-hostpath
+        resources:
+          requests:
+            storage: 10Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

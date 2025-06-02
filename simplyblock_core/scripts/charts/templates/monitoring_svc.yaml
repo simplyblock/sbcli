@@ -23,6 +23,10 @@ spec:
   ports:
     - port: 9200
       targetPort: 9200
+      name: http
+    - port: 9300
+      targetPort: 9300
+      name: transport
 ---
 apiVersion: v1
 kind: Service
@@ -30,6 +34,7 @@ metadata:
   name: simplyblock-graylog
   namespace: {{ .Release.Namespace }}
 spec:
+  clusterIP: None
   selector:
     app: simplyblock-graylog
   ports:
