@@ -145,3 +145,37 @@ NODES_CONFIG_FILE = "/etc/simplyblock/sn_config_file"
 SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
+
+env_patch = [
+    {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},
+    {"name": "bootstrap.memory_lock", "value": "true"},
+    {"name": "action.auto_create_index", "value": "false"},
+    {"name": "plugins.security.ssl.http.enabled", "value": "false"},
+    {"name": "plugins.security.disabled", "value": "true"},
+    {"name": "discovery.seed_hosts", "value": ",".join([
+        "simplyblock-opensearch-0.simplyblock-opensearch",
+        "simplyblock-opensearch-1.simplyblock-opensearch",
+        "simplyblock-opensearch-2.simplyblock-opensearch"
+    ])},
+    {"name": "cluster.initial_master_nodes", "value": ",".join([
+        "simplyblock-opensearch-0",
+        "simplyblock-opensearch-1",
+        "simplyblock-opensearch-2"
+    ])}
+]
+
+patch = {
+    "spec": {
+        "replicas": 3,
+        "template": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "opensearch",
+                        "env": env_patch
+                    }
+                ]
+            }
+        }
+    }
+}
