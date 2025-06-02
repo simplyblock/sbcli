@@ -21,7 +21,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         self.step = kwargs.get("step", 100)
         self.read_only = kwargs.get("read_only", False)
         self.continue_from_log = kwargs.get("continue_from_log", False)
-        self.start_from = 600
+        self.start_from = kwargs.get("start_from", 600)
         self.lvol_size = "3G"
         self.storage_nodes_uuid = []
         self.lvol_node = None
@@ -97,7 +97,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
             client_node = random.choice(self.fio_node)
             lvol_name = f"{base_lvol_name}_{i}"
             self.sbcli_utils.add_lvol(
-                lvol_name=f"{lvol_name}_{i}",
+                lvol_name=lvol_name,
                 pool_name=self.pool_name,
                 size=self.lvol_size,
                 crypto=False,
