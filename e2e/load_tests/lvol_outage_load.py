@@ -16,13 +16,14 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.output_file = Path(kwargs.get("output_file", "lvol_outage_log.csv"))
+        self.output_dir = Path("logs")
+        self.output_file = self.output_dir / kwargs.get("output_file", "lvol_outage_log.csv")
         self.max_lvols = kwargs.get("max_lvols", 1200)
         self.step = kwargs.get("step", 100)
         self.read_only = kwargs.get("read_only", False)
         self.continue_from_log = kwargs.get("continue_from_log", False)
         self.start_from = kwargs.get("start_from", 600)
-        self.lvol_size = "3G"
+        self.lvol_size = "2G"
         self.storage_nodes_uuid = []
         self.lvol_node = None
         self.fio_size = "250M"
@@ -206,7 +207,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
-        plt.savefig("lvol_shutdown_restart_graph.png")
+        plt.savefig(self.output_dir / "lvol_shutdown_restart_graph.png")
         plt.show()
 
     def run(self):
