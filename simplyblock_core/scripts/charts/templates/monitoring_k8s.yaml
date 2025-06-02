@@ -1,23 +1,11 @@
-              
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: simplyblock-mongodb-data
-  namespace: {{ .Release.Namespace }}
-spec:
-  storageClassName: openebs-local-hostpath
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: simplyblock-mongodb
   namespace: {{ .Release.Namespace }}
 spec:
+  serviceName: simplyblock-mongodb
   replicas: 1
   selector:
     matchLabels:
@@ -29,29 +17,36 @@ spec:
     spec:
       nodeSelector:
         type: simplyblock-mgmt-plane
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - simplyblock-mongodb
+              topologyKey: "kubernetes.io/hostname"
       containers:
         - name: mongodb
           image: mongo:5.0
+          command:
+          - mongod
+          - "--replSet"
+          - rs0
+          - "--bind_ip_all"
           volumeMounts:
             - mountPath: /data/db
               name: simplyblock-mongodb-data
-      volumes:
-        - name: simplyblock-mongodb-data
-          persistentVolumeClaim:
-            claimName: simplyblock-mongodb-data
-# ---
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: simplyblock-os-data
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   storageClassName: openebs-local-hostpath
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 10Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: simplyblock-mongodb-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: openebs-local-hostpath
+        resources:
+          requests:
+            storage: 5Gi
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -100,10 +95,6 @@ spec:
           volumeMounts:
             - mountPath: /usr/share/opensearch/data
               name: simplyblock-os-data
-      # volumes:
-      #   - name: simplyblock-os-data
-      #     persistentVolumeClaim:
-      #       claimName: simplyblock-os-data
   volumeClaimTemplates:
     - metadata:
         name: simplyblock-os-data

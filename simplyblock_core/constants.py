@@ -152,6 +152,7 @@ env_patch = [
     {"name": "action.auto_create_index", "value": "false"},
     {"name": "plugins.security.ssl.http.enabled", "value": "false"},
     {"name": "plugins.security.disabled", "value": "true"},
+    {"name": "discovery.type", "value": ""},
     {"name": "discovery.seed_hosts", "value": ",".join([
         "simplyblock-opensearch-0.simplyblock-opensearch",
         "simplyblock-opensearch-1.simplyblock-opensearch",
