@@ -140,7 +140,7 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": 128,
-            "max_queue_depth": 64,
+            "max_queue_depth": 256,
             "abort_timeout_sec": 5,
             "ack_timeout": 2048,
             "zcopy": True,
