@@ -1091,6 +1091,41 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--support-storage-tiering"
+            help: "Enable storage tiering for the cluster"
+            dest: storage_tiering
+            type: bool
+            default: false
+          - name: "--s3-endpoint"
+            help: "S3 endpoint for storage tiering"
+            dest: s3_endpoint
+            type: str
+            default: ""
+          - name: "--s3-bucket"
+            help: "S3 bucket for storage tiering"
+            dest: s3_bucket
+            type: str
+            default: ""
+          - name: "--s3-access-key"
+            help: "S3 access key for storage tiering"
+            dest: s3_access_key
+            type: str
+            default: ""
+          - name: "--s3-secret-key"
+            help: "S3 secret key for storage tiering"
+            dest: s3_secret_key
+            type: str
+            default: ""
+          - name: "--s3-workerpool-mask"
+            help: "S3 workerpool mask for storage tiering"
+            dest: s3_workerpool_mask
+            type:
+              regex: "^(0x|0X)?[a-fA-F0-9]+$"
+          - name: "--s3-workerpool-size"
+            help: "S3 workerpool size for storage tiering"
+            dest: s3_workerpool_size
+            type: int
+            default: 32
       - name: add
         help: "Adds a new cluster"
         arguments:
@@ -1191,6 +1226,41 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--support-storage-tiering"
+            help: "Enable storage tiering for the cluster"
+            dest: storage_tiering
+            type: bool
+            default: false
+          - name: "--s3-endpoint"
+            help: "S3 endpoint for storage tiering"
+            dest: s3_endpoint
+            type: str
+            default: ""
+          - name: "--s3-bucket"
+            help: "S3 bucket for storage tiering"
+            dest: s3_bucket
+            type: str
+            default: ""
+          - name: "--s3-access-key"
+            help: "S3 access key for storage tiering"
+            dest: s3_access_key
+            type: str
+            default: ""
+          - name: "--s3-secret-key"
+            help: "S3 secret key for storage tiering"
+            dest: s3_secret_key
+            type: str
+            default: ""
+          - name: "--s3-workerpool-mask"
+            help: "S3 workerpool mask for storage tiering"
+            dest: s3_workerpool_mask
+            type:
+              regex: "^(0x|0X)?[a-fA-F0-9]+$"
+          - name: "--s3-workerpool-size"
+            help: "S3 workerpool size for storage tiering"
+            dest: s3_workerpool_size
+            type: int
+            default: 32
       - name: activate
         help: >
           Activates a cluster.

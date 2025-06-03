@@ -3414,6 +3414,12 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None, storage_tie
                 snode_id = snode.get_id()
                 params['secondary_stg_name'] = 's3_{}'.format(snode_id.split("-")[0])
                 params['support_storage_tiering'] = True
+                params['ghost_capacity'] = 1
+                params['fifo_main_capacity'] = 1
+                params['fifo_small_capacity'] = 1
+                # params['ghost_capacity'] = (snode.total_capacity/snode.number_of_distrib) * 0.25
+                # params['fifo_main_capacity'] = 0.1 * params['ghost_capacity']
+                # params['fifo_small_capacity'] = 0.2 * params['ghost_capacity']
                 s3_bdev_create(snode.get_id(), params['secondary_stg_name'], local_testing=True, local_endpoint=endpoint, bucket_name=bucket_name)
             if snode.distrib_cpu_cores:
                 distrib_cpu_mask = utils.decimal_to_hex_power_of_2(snode.distrib_cpu_cores[snode.distrib_cpu_index])
