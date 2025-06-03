@@ -449,7 +449,7 @@ def get_file_content(path: FilePath):
 
 
 class _FirewallParams(BaseModel):
-    port_id: str
+    port_id: int
     port_type: str
     action: str
 
