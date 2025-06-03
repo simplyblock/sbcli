@@ -230,6 +230,35 @@ def list(all=False):
     return utils.print_table(data)
 
 
+def backup(snapshot_uuid):
+    snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+    if not snap:
+        msg = f"Snapshot not found: {snapshot_uuid}"
+        logger.error(msg)
+        return False, msg
+
+    snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
+    if not snode:
+        msg = f"Storage node not found: {snap.lvol.node_id}"
+        logger.error(msg)
+        return False, msg
+
+    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    ret = rpc_client.bdev_lvol_backup_snapshot(snap.snap_uuid, timeout_us=1000000, dev_page_size=2 * 1024 * 1024, nmax_retries=4, nmax_flush_jobs=4)
+    if not ret:
+        msg = f"Failed to backup snapshot: {snap.snap_bdev}"
+        logger.error(msg)
+        return False, msg
+
+    times = 5
+    while times > 0:
+        resp = rpc_client.bdev_lvol_get_snapshot_backup_status(lvol_name=snap.snap_uuid)
+        time.sleep(3)
+        times = times - 1
+        print(resp)
+    logger.info("Done")
+    return True, ""
+
 def delete(snapshot_uuid, force_delete=False):
     snap = db_controller.get_snapshot_by_id(snapshot_uuid)
     if not snap:

@@ -600,6 +600,10 @@ class CLIWrapperBase:
         success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
         return details
 
+    def snapshot__backup(self, sub_command, args):
+        snapshot_id = args.snapshot_id
+        return snapshot_controller.backup(snapshot_id)
+
     def caching_node__deploy(self, sub_command, args):
         return caching_node_controller.deploy(args.ifname)
 

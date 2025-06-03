@@ -1042,6 +1042,20 @@ class RPCClient:
         }
         return self._request("bdev_lvol_clone_register", params)
 
+    def bdev_lvol_backup_snapshot(self, lvol_name, timeout_us, dev_page_size, nmax_retries=4, nmax_flush_jobs=4):
+         params = {
+             'lvol_name': lvol_name,
+             'timeout_us': timeout_us,
+             'dev_page_size': dev_page_size,
+             'nmax_retries': nmax_retries,
+             'nmax_flush_jobs': nmax_flush_jobs
+         }
+         return self._request("bdev_lvol_backup_snapshot", params)
+
+    def bdev_lvol_get_snapshot_backup_status(self, lvol_name):
+        params = { 'lvol_name': lvol_name }
+        return self._request("bdev_lvol_get_snapshot_backup_status", params)
+
     def distr_replace_id_in_map_prob(self, storage_ID_from, storage_ID_to):
         params = {
             "storage_ID_from": storage_ID_from,

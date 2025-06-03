@@ -784,6 +784,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__list(subparser)
         self.init_snapshot__delete(subparser)
         self.init_snapshot__clone(subparser)
+        self.init_snapshot__backup(subparser)
 
 
     def init_snapshot__add(self, subparser):
@@ -805,6 +806,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
+
+    def init_snapshot__backup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'backup', 'Backs up a snapshot to a s3 storage using storage tiering')
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
 
 
     def init_caching_node(self):
@@ -1212,6 +1217,8 @@ class CLIWrapper(CLIWrapperBase):
                 ret = self.snapshot__delete(sub_command, args)
             elif sub_command in ['clone']:
                 ret = self.snapshot__clone(sub_command, args)
+            elif sub_command in ['backup']:
+                ret = self.snapshot__backup(sub_command, args)
             else:
                 self.parser.print_help()
 
