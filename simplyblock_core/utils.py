@@ -19,6 +19,8 @@ from prettytable import PrettyTable
 from graypy import GELFTCPHandler
 from docker.errors import APIError, DockerException, ImageNotFound
 from kubernetes import client as k8s_client, config
+from kubernetes.stream import stream
+
 import psutil
 
 from simplyblock_core import constants
@@ -26,8 +28,6 @@ from simplyblock_core import shell_utils
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
-from simplyblock_web.node_utils_k8s import pod_exec
-
 
 CONFIG_KEYS = [
     "app_thread_core",
@@ -1769,8 +1769,32 @@ def initiate_mongodb_rs():
 
     full_command = f'mongosh --eval \'{js_command}\''
 
-    output = pod_exec(pod_name, namespace, container, full_command, k8s_core_v1)
-    logger.debug("ReplicaSet Init Output:\n", output)
+
+    exec_command = ["/bin/sh", "-c", full_command]
+
+    resp = stream(k8s_core_v1.connect_get_namespaced_pod_exec,
+                  pod_name,
+                  namespace,
+                  command=exec_command,
+                  container=container,
+                  stderr=True, stdin=False,
+                  stdout=True, tty=False,
+                  _preload_content=False)
+
+    result = ""
+    while resp.is_open():
+        resp.update(timeout=1)
+        if resp.peek_stdout():
+            result = resp.read_stdout()
+            print(f"STDOUT: \n{result}")
+        if resp.peek_stderr():
+            print(f"STDERR: \n{resp.read_stderr()}")
+
+    resp.close()
+
+    if resp.returncode != 0:
+        raise Exception(resp.readline_stderr())
+    logger.debug("ReplicaSet Init Output:\n", result)
 
 def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
     ready_pods = 0
@@ -1786,4 +1810,4 @@ def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
                 ready_pods += 1
 
     return ready_pods == expected_replicas
-    
+
