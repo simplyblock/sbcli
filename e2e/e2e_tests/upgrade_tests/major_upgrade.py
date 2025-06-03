@@ -135,6 +135,10 @@ class TestMajorUpgrade(TestClusterBase):
             cmd = f"pip install {package_name} --upgrade"
             self.ssh_obj.exec_command(snode, cmd)
             sleep_n_sec(10)
+            cmd = f"{self.base_cmd} sn configure"
+            self.ssh_obj.exec_command(snode, cmd)
+            sleep_n_sec(10)
+
             cmd = f"{self.base_cmd} sn deploy"
             self.ssh_obj.exec_command(snode, cmd)
             sleep_n_sec(10)
