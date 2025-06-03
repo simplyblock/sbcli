@@ -513,6 +513,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__get_logs(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-logs', 'Returns a cluster\'s status logs')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        argument = subcommand.add_argument('--json', help='Return JSON formatted logs', dest='json', action='store_true')
         argument = subcommand.add_argument('--limit', help='show last number of logs, default 50', type=int, default=50, dest='limit')
 
     def init_cluster__get_secret(self, subparser):
