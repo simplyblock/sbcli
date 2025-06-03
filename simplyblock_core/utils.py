@@ -1793,7 +1793,7 @@ def initiate_mongodb_rs():
 
     if resp.returncode != 0:
         raise Exception(resp.readline_stderr())
-    logger.debug("ReplicaSet Init Output:\n", result)
+    logger.debug(f"ReplicaSet Init Output:\n{result}")
 
 def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
     ready_pods = 0
