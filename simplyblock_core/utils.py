@@ -18,7 +18,6 @@ import docker
 from prettytable import PrettyTable
 from graypy import GELFTCPHandler
 from docker.errors import APIError, DockerException, ImageNotFound
-from kubernetes import client as k8s_client, config
 from kubernetes.stream import stream
 
 import psutil
@@ -1754,7 +1753,7 @@ def get_k8s_core_client():
     return client.CoreV1Api()
 
 def initiate_mongodb_rs():
-    k8s_core_v1 = get_k8s_core_client()
+    k8s_core_v1 = client.CoreV1Api()
     namespace = "simplyblock"
     container = "mongodb"
     pod_name = "simplyblock-mongodb-0"

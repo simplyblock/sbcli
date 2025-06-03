@@ -148,7 +148,7 @@ LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
 os_env_patch = [
     {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},
-    {"name": "bootstrap.memory_lock", "value": "true"},
+    {"name": "bootstrap.memory_lock", "value": "false"},
     {"name": "action.auto_create_index", "value": "false"},
     {"name": "plugins.security.ssl.http.enabled", "value": "false"},
     {"name": "plugins.security.disabled", "value": "true"},
