@@ -329,7 +329,7 @@ class SshUtils:
         log_avg_msec = kwargs.get("log_avg_msec", 1000)
         log_avg_msec_opt = f"--log_avg_msec={log_avg_msec}" if log_avg_msec else ""
 
-        iolog_base = kwargs.get("iolog_file", f"/tmp/{name}_iolog.txt")
+        iolog_base = kwargs.get("iolog_file", None)
         iolog_opt = f"--write_iolog={iolog_base}" if iolog_base else ""
 
         command = (
