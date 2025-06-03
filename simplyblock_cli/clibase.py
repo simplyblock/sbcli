@@ -382,8 +382,7 @@ class CLIWrapperBase:
 
     def cluster__get_logs(self, sub_command, args):
         cluster_logs = cluster_ops.get_logs(**args.__dict__)
-
-        if args.is_json:
+        if hasattr(args, 'json') and args.json:
             return json.dumps(cluster_logs, indent=2)
         else:
             return utils.print_table(cluster_logs)
