@@ -256,7 +256,7 @@ while True:
                                 nodes_ports_blocked[snode.get_id()] = [port]
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
-            set_node_health_check(snode, health_check_status)
+            set_node_health_check(snode, bool(health_check_status))
 
     time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
 
