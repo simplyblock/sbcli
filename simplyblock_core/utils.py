@@ -26,6 +26,8 @@ from simplyblock_core import shell_utils
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
+from simplyblock_web.node_utils_k8s import pod_exec
+
 
 CONFIG_KEYS = [
     "app_thread_core",
@@ -1750,3 +1752,38 @@ def get_k8s_apps_client():
 def get_k8s_core_client():
     config.load_incluster_config()
     return client.CoreV1Api()
+
+def initiate_mongodb_rs():
+    k8s_core_v1 = get_k8s_core_client()
+    namespace = "simplyblock"
+    container = "mongodb"
+    pod_name = "simplyblock-mongodb-0"
+
+    js_command = (
+        'rs.initiate({_id: "rs0", members: ['
+        '{_id: 0, host: "simplyblock-mongodb-0.simplyblock-mongodb:27017", priority: 2},'
+        '{_id: 1, host: "simplyblock-mongodb-1.simplyblock-mongodb:27017", priority: 1},'
+        '{_id: 2, host: "simplyblock-mongodb-2.simplyblock-mongodb:27017", priority: 1}'
+        ']})'
+    )
+
+    full_command = f'mongosh --eval \'{js_command}\''
+
+    output = pod_exec(pod_name, namespace, container, full_command, k8s_core_v1)
+    logger.debug("ReplicaSet Init Output:\n", output)
+
+def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
+    ready_pods = 0
+    pods = k8s_core_v1.list_namespaced_pod(
+        namespace=namespace,
+        label_selector=f"app={statefulset_name}"
+    ).items
+
+    for pod in pods:
+        statuses = pod.status.container_statuses or []
+        for status in statuses:
+            if status.name == "mongodb" and status.ready:
+                ready_pods += 1
+
+    return ready_pods == expected_replicas
+    

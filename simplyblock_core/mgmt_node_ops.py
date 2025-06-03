@@ -16,7 +16,6 @@ from simplyblock_core.controllers import mgmt_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
 
-
 logger = logging.getLogger()
 
 
@@ -140,15 +139,46 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             v1 = k8s_client.CoreV1Api()
             apps_v1 = k8s_client.AppsV1Api()
             namespace = "simplyblock"
-            statefulset_name = "simplyblock-opensearch"
-
+            os_statefulset_name = "simplyblock-opensearch"
+            mongodb_statefulset_name = "simplyblock-mongodb"
+            graylog_deploy_name = "simplyblock-graylog"
+            
             response = apps_v1.patch_namespaced_stateful_set(
-                name=statefulset_name,
+                name=os_statefulset_name,
                 namespace=namespace,
-                body=constants.patch
+                body=constants.os_patch
             )
 
-            print(f"Patched StatefulSet {statefulset_name}: {response.status.replicas} replicas")
+            logger.info(f"Patched StatefulSet {os_statefulset_name}: {response.status.replicas} replicas")
+
+            response = apps_v1.patch_namespaced_stateful_set(
+                name=mongodb_statefulset_name,
+                namespace=namespace,
+                body=constants.mongodb_patch
+            )
+
+            logger.info(f"Patched StatefulSet {mongodb_statefulset_name}: {response.status.replicas} replicas")
+            max_wait = 120 
+            interval = 5
+            waited = 0
+            while waited < max_wait:
+                if utils.all_pods_ready(v1, mongodb_statefulset_name, namespace, 3):
+                    logger.info("All MongoDB pods are ready.")
+                    break
+                time.sleep(interval)
+                waited += interval
+            else:
+                raise TimeoutError("MongoDB pods did not become ready in time.")
+
+            utils.initiate_mongodb_rs()
+
+            response = apps_v1.patch_namespaced_deployment(
+                name=graylog_deploy_name,
+                namespace=namespace,
+                body=constants.graylog_patch
+            )
+
+            logger.info("Patched Graylog MongoDB URI for replicaset support")
 
             current_node = socket.gethostname()
             logger.info(f"Waiting for FDB pod on this node: {current_node} to be active...")

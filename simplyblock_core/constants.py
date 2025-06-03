@@ -146,7 +146,7 @@ SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
-env_patch = [
+os_env_patch = [
     {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},
     {"name": "bootstrap.memory_lock", "value": "true"},
     {"name": "action.auto_create_index", "value": "false"},
@@ -165,7 +165,7 @@ env_patch = [
     ])}
 ]
 
-patch = {
+os_patch = {
     "spec": {
         "replicas": 3,
         "template": {
@@ -173,7 +173,41 @@ patch = {
                 "containers": [
                     {
                         "name": "opensearch",
-                        "env": env_patch
+                        "env": os_env_patch
+                    }
+                ]
+            }
+        }
+    }
+}
+
+mongodb_patch = {
+    "spec": {
+        "replicas": 3
+    }
+}
+
+graylog_env_patch = [
+    {
+        "name": "GRAYLOG_MONGODB_URI",
+        "value": (
+            "mongodb://"
+            "simplyblock-mongodb-0.simplyblock-mongodb:27017,"
+            "simplyblock-mongodb-1.simplyblock-mongodb:27017,"
+            "simplyblock-mongodb-2.simplyblock-mongodb:27017/graylog?"
+            "replicaSet=rs0"
+        )
+    }
+]
+
+graylog_patch = {
+    "spec": {
+        "template": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "graylog",
+                        "env": graylog_env_patch
                     }
                 ]
             }

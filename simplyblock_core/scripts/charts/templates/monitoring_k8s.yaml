@@ -35,6 +35,17 @@ spec:
           - "--replSet"
           - rs0
           - "--bind_ip_all"
+          readinessProbe:
+            exec:
+              command:
+                - mongosh
+                - --eval
+                - "db.adminCommand('ping')"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
           volumeMounts:
             - mountPath: /data/db
               name: simplyblock-mongodb-data
