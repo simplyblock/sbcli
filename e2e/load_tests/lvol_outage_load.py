@@ -87,7 +87,8 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
                     "nrfiles": 5,
                     "iodepth": 1,
                     "numjobs": 6,
-                    "runtime": 500,
+                    "runtime": 72000,
+                    "time_based": True,
                 },
             )
             fio_thread.start()
@@ -145,17 +146,14 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
                     "nrfiles": 5,
                     "iodepth": 1,
                     "numjobs": 6,
-                    "runtime": 500,
+                    "runtime": 72000,
+                    "time_based": True,
                 },
             )
             fio_thread.start()
             self.fio_threads.append(fio_thread)
         
         count = count + self.step
-
-        self.common_utils.manage_fio_threads(
-            self.fio_node, self.fio_threads, timeout=1000
-        )
 
         self.logger.info(f"[{count}] Initiating graceful shutdown {self.lvol_node}...")
         shutdown_start = datetime.now()
@@ -243,3 +241,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         finally:
             results = self.parse_existing_log()
             self.generate_graph(results)
+
+            for node in self.fio_node:
+                self.ssh_obj.kill_processes(node=node,
+                                            process_name="fio")
