@@ -275,13 +275,13 @@ def spdk_proxy_restart(query: _RPCPortQuery):
         node_docker = get_docker_client()
         for cont in node_docker.containers.list(all=True):
             if cont.attrs['Name'] == f"/spdk_proxy_{query.rpc_port}":
-                cont.restart()
+                cont.restart(timeout=3)
                 return utils.get_response(True)
     except Exception as e:
         logger.error(e)
         return utils.get_response(False, str(e))
 
-    return utils.get_response(True)
+    return utils.get_response(False, f"container not found: /spdk_proxy_{query.rpc_port}")
 
 
 def get_cluster_id():
