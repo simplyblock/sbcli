@@ -2858,7 +2858,7 @@ def recreate_lvstore_on_sec(secondary_node):
 
         cluster = db_controller.get_cluster_by_id(primary_node.cluster_id)
         ### 1- create distribs and raid
-        ret, err = _create_bdev_stack(secondary_node, primary_node.lvstore_stack, primary_node=primary_node, storage_tiering=cluster.storage_tiering, endpoint=cluster.endpoint, bucket_name=cluster.s3_bucket)
+        ret, err = _create_bdev_stack(secondary_node, primary_node.lvstore_stack, primary_node=primary_node, storage_tiering=cluster.storage_tiering, endpoint=cluster.s3_endpoint, bucket_name=cluster.s3_bucket)
         if err:
             logger.error(f"Failed to recreate lvstore on node {secondary_node.get_id()}")
             logger.error(err)
@@ -2925,7 +2925,7 @@ def recreate_lvstore(snode):
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
     ### 1- create distribs and raid
-    ret, err = _create_bdev_stack(snode, [], storage_tiering=cluster.storage_tiering, endpoint=cluster.endpoint, bucket_name=cluster.s3_bucket)
+    ret, err = _create_bdev_stack(snode, [], storage_tiering=cluster.storage_tiering, endpoint=cluster.s3_endpoint, bucket_name=cluster.s3_bucket)
     if err:
         logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
         logger.error(err)
