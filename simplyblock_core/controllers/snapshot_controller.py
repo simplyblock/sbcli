@@ -255,9 +255,13 @@ def backup(snapshot_uuid):
         resp = rpc_client.bdev_lvol_get_snapshot_backup_status(lvol_name=snap.snap_uuid)
         time.sleep(3)
         times = times - 1
-        print(resp)
-    logger.info("Done")
-    return True, ""
+        if resp == "SUCCEEDED":
+            snap.backedup_at = str(datetime.datetime.now(datetime.timezone.utc))
+            snap.write_to_db(db_controller.kv_store)
+            logger.info("Done")
+            return True, ""
+
+    return False, f"Failed to backup snapshot: {snap.snap_bdev}, status: {resp}"
 
 def delete(snapshot_uuid, force_delete=False):
     snap = db_controller.get_snapshot_by_id(snapshot_uuid)

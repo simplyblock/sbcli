@@ -22,3 +22,4 @@ class SnapShot(BaseModel):
     snap_ref_id: str = ""
     snap_uuid: str = ""
     vuid: int = 0
+    backedup_at: str = ""
