@@ -1397,6 +1397,7 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
         return False
     cap_stats_keys = [
         "date",
+        "size_prov",
         "size_total",
         "size_used",
         "size_free",
