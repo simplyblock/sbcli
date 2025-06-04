@@ -361,6 +361,30 @@ def spdk_process_start(body: SPDKParams):
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
         k8s_core_v1 = core_utils.get_k8s_core_client()
+        # check if the pod with the same name already exists, if exists, delete it
+        try:
+            resp = k8s_core_v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+            if resp:
+                logger.info(f"Pod with name '{pod_name}' already exists, deleting it...")
+                # delete a pod and wait for it to be deleted
+                k8s_core_v1.delete_namespaced_pod(name=pod_name, namespace=namespace)
+                # wait for the pod to be deleted
+                retries = 10
+                while retries > 0:
+                    try:
+                        resp = k8s_core_v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+                        print(f"Pod {pod_name} is still present...")
+                        time.sleep(3)
+                    except ApiException as e:
+                        if e.status == 404:
+                            print(f"Pod {pod_name} has been deleted.")
+                            break
+                        else:
+                            print(f"Error while waiting for pod deletion: {e}")
+        except ApiException as e:
+            if e.status != 404:
+                logger.error(f"Error checking pod existence: {e}")
+                return utils.get_response(False, f"Error checking pod existence: {e}")
         resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
         msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}"
         logger.info(msg)
