@@ -87,7 +87,6 @@ def lvol_capacity(uuid, history):
                 "util": record["size_util"],
                 "prov_util": record["size_prov_util"],
             })
-
     ret = {
         "object_data": lvol.get_clean_dict(),
         "stats": out or []

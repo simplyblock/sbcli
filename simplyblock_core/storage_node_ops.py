@@ -1073,7 +1073,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         qpair = cluster.qpair_count
-        ret = rpc_client.transport_create("TCP", qpair)
+        ret = rpc_client.transport_create("TCP", qpair,512*(req_cpu_count+1))
         if not ret:
             logger.error(f"Failed to create transport TCP with qpair: {qpair}")
             return False

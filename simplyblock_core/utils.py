@@ -1374,13 +1374,14 @@ def regenerate_config(new_config, old_config, force=False):
         if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
             logger.error("The socket is changed, please rerun sbcli configure without upgrade firstly")
             return False
-        if old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or force:
+        number_of_alcemls = len(new_config["nodes"][i]["ssd_pcis"])
+        if (old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or
+                len(old_config["nodes"][i]["ssd_pcis"]) != len(new_config["nodes"][i]["ssd_pcis"]) or force):
             try:
                 isolated_cores = hexa_to_cpu_list(new_config["nodes"][i]["cpu_mask"])
             except ValueError:
                 logger.error(f"The updated cpu mask is incorrect {new_config['nodes'][i]['cpu_mask']}")
                 return False
-            number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
             old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
             old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
             old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])

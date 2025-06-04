@@ -36,4 +36,4 @@ sudo chmod 777 /etc/simplyblock
 
 sudo sh -c 'echo 1 >  /proc/sys/vm/drop_caches'
 
-sudo sed -i 's/ProcessSizeMax=.*/ProcessSizeMax=10G/' /etc/systemd/coredump.conf
+sudo sed -i 's/^#\?\s*ProcessSizeMax=.*/ProcessSizeMax=10G/' /etc/systemd/coredump.conf

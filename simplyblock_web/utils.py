@@ -105,7 +105,7 @@ def get_aws_region():
 def error_handler(exception: Exception):
     """Return JSON instead of HTML for any exception."""
 
-    traceback.print_exception(exception)
+    traceback.print_exception(type(exception), exception, exception.__traceback__)
 
     return {
         'exception': str(exception),
@@ -114,4 +114,4 @@ def error_handler(exception: Exception):
             for frame
             in traceback.extract_tb(exception.__traceback__)
         ]
-    }, exception.code if hasattr(exception, 'code') else 500
+    }, getattr(exception, 'code', 500)
