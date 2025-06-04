@@ -5,6 +5,7 @@ metadata:
   namespace: {{ NAMESPACE }}
   labels:
     app: spdk-app-{{ HOSTNAME }}
+    role: simplyblock-storage-node
 spec:
   restartPolicy: Never
   serviceAccountName: simplyblock-storage-node-sa
