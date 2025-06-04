@@ -170,6 +170,9 @@ def spdk_process_start(body: SPDKParams):
             else:
                 logger.error(f"Failed to remove {node.attrs['Name']}: {e}")
                 raise
+        except Exception as e:
+            logger.exception(f"Unexpected error while removing {node.attrs['Name']}: {e}")
+            raise
 
     if body.cluster_ip is not None:
         log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{body.cluster_ip}:12202"})
