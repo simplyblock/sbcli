@@ -115,32 +115,32 @@ spec:
         resources:
           requests:
             storage: 10Gi
-# ---
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: simplyblock-graylog-data
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   storageClassName: openebs-local-hostpath
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 5Gi
-# ---
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: simplyblock-graylog-journal
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   storageClassName: openebs-local-hostpath
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-graylog-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  #storageClassName: openebs-local-hostpath
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-graylog-journal
+  namespace: {{ .Release.Namespace }}
+spec:
+  #storageClassName: openebs-local-hostpath
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -224,26 +224,24 @@ spec:
               name: simplyblock-graylog-journal
       volumes:
         - name: simplyblock-graylog-data
-          hostPath:
-            path: /var/graylog-data
-            type: DirectoryOrCreate          
+          persistentVolumeClaim:
+            claimName: simplyblock-graylog-data
         - name: simplyblock-graylog-journal
-          hostPath:
-            path: /var/graylog-journal
-            type: DirectoryOrCreate  
-# ---
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: simplyblock-prometheus-data
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   storageClassName: openebs-local-hostpath
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 5Gi
+          persistentVolumeClaim:
+            claimName: simplyblock-graylog-journal
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-prometheus-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  #storageClassName: openebs-local-hostpath
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
 
 ---
 apiVersion: apps/v1
@@ -283,9 +281,8 @@ spec:
           configMap:
             name: simplyblock-prometheus-config
         - name: prometheus-data
-          hostPath:
-            path: /var/prometheus-data
-            type: DirectoryOrCreate   
+          persistentVolumeClaim:
+            claimName: simplyblock-prometheus-data
 
 ---
 apiVersion: apps/v1
@@ -387,19 +384,19 @@ spec:
             - --store=simplyblock-thanos-store:10901
             - --store=simplyblock-thanos-sidecar:10901
 
-# ---
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: simplyblock-thanos-compactor-data
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   storageClassName: openebs-local-hostpath
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-thanos-compactor-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  #storageClassName: openebs-local-hostpath
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
 
 ---
 apiVersion: apps/v1
@@ -441,9 +438,8 @@ spec:
           configMap:
             name: simplyblock-objstore-config
         - name: compactor-data
-          hostPath:
-            path: /var/compactor-data
-            type: DirectoryOrCreate   
+          persistentVolumeClaim:
+            claimName: simplyblock-thanos-compactor-data
 
 ---
 apiVersion: apps/v1
@@ -499,19 +495,19 @@ spec:
           hostPath:
             path: /
 
-# ---
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: simplyblock-grafana-data
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   storageClassName: openebs-local-hostpath
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: simplyblock-grafana-data
+  namespace: {{ .Release.Namespace }}
+spec:
+  #storageClassName: openebs-local-hostpath
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
 
 ---
 apiVersion: apps/v1
@@ -611,6 +607,5 @@ spec:
           configMap:
             name: simplyblock-grafana-dashboard-node-exporter
         - name: grafana-data
-          hostPath:
-            path: /var/grafana-data
-            type: DirectoryOrCreate 
+          persistentVolumeClaim:
+            claimName: simplyblock-grafana-data
