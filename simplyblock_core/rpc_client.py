@@ -575,7 +575,7 @@ class RPCClient:
             "num_io_queues": 128
         }
         if multipath:
-            params["multipath"] = "enable"
+            params["multipath"] = "failover"
         else:
             params["multipath"] = "disable"
         return self._request("bdev_nvme_attach_controller", params)
