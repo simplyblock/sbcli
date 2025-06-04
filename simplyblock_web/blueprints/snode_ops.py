@@ -158,12 +158,12 @@ def spdk_process_start(body: SPDKParams):
     node_docker = get_docker_client(timeout=60*3)
     nodes = node_docker.containers.list(all=True)
     for node in nodes:
-        if node.attrs["Name"] in [f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"]:
-            logger.info(f"{node.attrs['Name']} container found, removing...")
         try:
-            node.stop(timeout=3)
-            node.remove(force=True)
-            logger.info(f"{node.attrs['Name']} container removed successfully.")
+            if node.attrs["Name"] in [f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"]:
+                logger.info(f"{node.attrs['Name']} container found, removing...")
+                node.stop(timeout=3)
+                node.remove(force=True)
+                logger.info(f"{node.attrs['Name']} container removed successfully.")
         except APIError as e:
             if "removal of container" in str(e) and "is already in progress" in str(e):
                 logger.warning(f"{node.attrs['Name']} removal is already in progress, ignoring.")
