@@ -644,6 +644,7 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
                         logger.info(f"Connecting {name} to {this_node.get_id()}")
                         rpc_client.bdev_nvme_attach_controller_tcp(
                             name, dev.nvmf_nqn, ip, dev.nvmf_port, multipath=True)
+                        rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
                 else:
                     logger.info(f"Connecting {name} to {this_node.get_id()}")
                     rpc_client.bdev_nvme_attach_controller_tcp(
@@ -736,6 +737,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
                         logger.info(f"Connecting {name} to {this_node.get_id()}")
                         ret = rpc_client.bdev_nvme_attach_controller_tcp(
                             name, org_dev.nvmf_nqn, ip, org_dev.nvmf_port, multipath=True)
+                        rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
                     # if ret:
                     org_dev.status = JMDevice.STATUS_ONLINE

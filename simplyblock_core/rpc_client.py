@@ -634,7 +634,7 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": 0,
+            "bdev_retry_count": 1,
             "transport_retry_count": 3,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec" : 0,
@@ -1074,3 +1074,10 @@ class RPCClient:
         if ana_state:
             params["ana_state"] = ana_state
         return self._request2("nvmf_subsystem_add_listener", params)
+
+    def bdev_nvme_set_multipath_policy(self, name, policy):  # policy: active_active or active_passive
+        params = {
+            "name": name,
+            "policy": policy,
+        }
+        return self._request("bdev_nvme_set_multipath_policy", params)
