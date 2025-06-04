@@ -582,13 +582,7 @@ def deploy(ifname):
 
     node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto", timeout=60 * 5)
     # create the api container
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] == "/CachingNodeAPI":
-            logger.info("CachingNodeAPI container found, removing...")
-            node.stop()
-            node.remove(force=True)
-            time.sleep(2)
+    utils.remove_container(node_docker, '/CachingNodeAPI')
 
     logger.info("Creating CachingNodeAPI container")
     cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
