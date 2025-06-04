@@ -181,11 +181,44 @@ os_patch = {
     }
 }
 
+mongodb_command_patch = [
+    "mongod",
+    "--replSet", "rs0",
+    "--bind_ip_all"
+]
+
+mongodb_readiness_probe = {
+    "exec": {
+        "command": [
+            "mongosh",
+            "--eval",
+            "db.adminCommand('ping')"
+        ]
+    },
+    "initialDelaySeconds": 5,
+    "periodSeconds": 10,
+    "timeoutSeconds": 5,
+    "failureThreshold": 3,
+    "successThreshold": 1
+}
+
 mongodb_patch = {
     "spec": {
-        "replicas": 3
+        "replicas": 3,
+        "template": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "mongodb",
+                        "command": mongodb_command_patch,
+                        "readinessProbe": mongodb_readiness_probe
+                    }
+                ]
+            }
+        }
     }
 }
+
 
 graylog_env_patch = [
     {
