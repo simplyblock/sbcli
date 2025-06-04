@@ -114,7 +114,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
 
     pt_name = ""
     subsystem_nqn = ""
-    IP = ""
+    ip_list = []
     if snode.enable_ha_jm:
         # add pass through
         pt_name = f"{jm_bdev}_PT"
@@ -127,19 +127,24 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
         logger.info(f"add {pt_name} to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, alceml_id, alceml_id.split("-")[0])
         if not ret:
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
 
-        IP = None
         for iface in snode.data_nics:
             if iface.ip4_address:
                 tr_type = iface.get_transport_type()
                 logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                 ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
-                IP = iface.ip4_address
-                break
+                ip_list.append(iface.ip4_address)
+
+    if len(ip_list) > 1:
+        IP = ",".join(ip_list)
+        multipath = True
+    else:
+        IP = ip_list[0]
+        multipath = False
 
     ret = rpc_client.get_bdevs(raid_bdev)
 
@@ -157,6 +162,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'nvmf_nqn': subsystem_nqn,
         'nvmf_ip': IP,
         'nvmf_port': snode.nvmf_port,
+        'nvmf_multipath': multipath,
     })
 
 
@@ -193,7 +199,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
 
     pt_name = ""
     subsystem_nqn = ""
-    IP = ""
+    ip_list = []
     if snode.enable_ha_jm:
         # add pass through
         pt_name = f"{jm_bdev}_PT"
@@ -206,19 +212,24 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
         logger.info(f"add {pt_name} to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, alceml_id, alceml_id.split("-")[0])
         if not ret:
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
 
-        IP = None
         for iface in snode.data_nics:
             if iface.ip4_address:
                 tr_type = iface.get_transport_type()
                 logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                 ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
-                IP = iface.ip4_address
-                break
+                ip_list.append(iface.ip4_address)
+
+    if len(ip_list) > 1:
+        IP = ",".join(ip_list)
+        multipath = True
+    else:
+        IP = ip_list[0]
+        multipath = False
 
     return JMDevice({
         'uuid': alceml_id,
@@ -236,6 +247,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'nvmf_nqn': subsystem_nqn,
         'nvmf_ip': IP,
         'nvmf_port': snode.nvmf_port,
+        'nvmf_multipath': multipath,
     })
 
 
@@ -287,21 +299,27 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("creating subsystem %s", subsystem_nqn)
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
-    IP = None
+    ip_list = []
     for iface in snode.data_nics:
         if iface.ip4_address:
             tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
-            IP = iface.ip4_address
-            break
+            ip_list.append(iface.ip4_address)
+
     logger.info(f"add {pt_name} to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, alceml_id, alceml_id.split("-")[0])
     if not ret:
         logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
         return None
-    # if snode.enable_test_device:
-    #     nvme.testing_bdev = test_name
+
+    if len(ip_list) > 1:
+        IP = ",".join(ip_list)
+        multipath = True
+    else:
+        IP = ip_list[0]
+        multipath = False
+
     nvme.alceml_bdev = alceml_bdev
     nvme.pt_bdev = pt_name
     nvme.qos_bdev = qos_bdev
@@ -310,6 +328,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     nvme.nvmf_ip = IP
     nvme.nvmf_port = snode.nvmf_port
     nvme.io_error = False
+    nvme.nvmf_multipath = multipath
     # if nvme.status != NVMeDevice.STATUS_NEW:
     #     nvme.status = NVMeDevice.STATUS_ONLINE
     return nvme
@@ -560,7 +579,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
             logger.info("creating subsystem %s", subsystem_nqn)
             ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
             logger.info(f"add {pt_name} to subsystem")
-            ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+            ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, snode.get_id(), snode.get_id().split("-")[0])
             if not ret:
                 logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
                 return False
@@ -570,7 +589,6 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
                     tr_type = iface.get_transport_type()
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                     ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
-                    break
 
     return True
 
@@ -621,16 +639,22 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
                 #     logger.info(f"detaching {name} from {this_node.get_id()}")
                 #     rpc_client.bdev_nvme_detach_controller(name)
                 #     time.sleep(1)
-
-                logger.info(f"Connecting {name} to {this_node.get_id()}")
-                rpc_client.bdev_nvme_attach_controller_tcp(name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port)
+                if dev.nvmf_multipath:
+                    for ip in dev.nvmf_ip.split(","):
+                        logger.info(f"Connecting {name} to {this_node.get_id()}")
+                        rpc_client.bdev_nvme_attach_controller_tcp(
+                            name, dev.nvmf_nqn, ip, dev.nvmf_port, multipath=True)
+                else:
+                    logger.info(f"Connecting {name} to {this_node.get_id()}")
+                    rpc_client.bdev_nvme_attach_controller_tcp(
+                        name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port, multipath=False)
                 ret = rpc_client.get_bdevs(bdev_name)
                 if not ret:
                     logger.error(f"Failed to connect to device: {dev.get_id()}")
                     continue
             dev.remote_bdev = bdev_name
             remote_devices.append(dev)
-            # distr_controller.send_dev_status_event(dev, dev.status, this_node)
+
     return remote_devices
 
 
@@ -707,14 +731,26 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
                     rpc_client.bdev_nvme_detach_controller(name)
                     time.sleep(1)
 
-                logger.info(f"Connecting {name} to {this_node.get_id()}")
-                ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                    name, org_dev.nvmf_nqn, org_dev.nvmf_ip, org_dev.nvmf_port)
-                if ret:
+                if org_dev.nvmf_multipath:
+                    for ip in org_dev.nvmf_ip.split(","):
+                        logger.info(f"Connecting {name} to {this_node.get_id()}")
+                        ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                            name, org_dev.nvmf_nqn, ip, org_dev.nvmf_port, multipath=True)
+
+                    # if ret:
                     org_dev.status = JMDevice.STATUS_ONLINE
+                    # else:
+                    #     logger.error(f"failed to connect to remote JM {name}")
+                    #     org_dev.status = JMDevice.STATUS_UNAVAILABLE
                 else:
-                    logger.error(f"failed to connect to remote JM {name}")
-                    org_dev.status = JMDevice.STATUS_UNAVAILABLE
+                    logger.info(f"Connecting {name} to {this_node.get_id()}")
+                    ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                        name, org_dev.nvmf_nqn, org_dev.nvmf_ip, org_dev.nvmf_port, multipath=False)
+                    if ret:
+                        org_dev.status = JMDevice.STATUS_ONLINE
+                    else:
+                        logger.error(f"failed to connect to remote JM {name}")
+                        org_dev.status = JMDevice.STATUS_UNAVAILABLE
                 new_devs.append(org_dev)
             else:
                 org_dev.status = JMDevice.STATUS_UNAVAILABLE
