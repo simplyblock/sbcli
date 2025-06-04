@@ -75,13 +75,8 @@ def spdk_process_start():
         rpc_sock = data['rpc_sock']
 
     node_docker = get_docker_client()
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] in [f"/spdk_{rpc_port}", f"/spdk_proxy_{rpc_port}"]:
-            logger.info(f"{node.attrs['Name']} container found, removing...")
-            node.stop()
-            node.remove(force=True)
-            time.sleep(2)
+    for name in {f"/spdk_{rpc_port}", f"/spdk_proxy_{rpc_port}"}:
+        core_utils.remove_container(node_docker, name)
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
 

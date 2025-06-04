@@ -1753,3 +1753,15 @@ def get_k8s_apps_client():
 def get_k8s_core_client():
     config.load_incluster_config()
     return client.CoreV1Api()
+
+
+def remove_container(client: docker.DockerClient, name, timeout=3):
+    try:
+        container = client.containers.get(name)
+        container.stop(timeout=timeout)
+        container.remove()
+    except docker.errors.NotFound:
+        pass
+    except docker.errors.APIError as e:
+        if 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
+            raise

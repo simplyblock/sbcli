@@ -62,13 +62,8 @@ def spdk_process_start(body: SPDKParams):
     spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
     node_docker = get_docker_client()
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
-            logger.info(f"{node.attrs['Name']} container found, removing...")
-            node.stop()
-            node.remove(force=True)
-            time.sleep(2)
+    for name in {"/spdk", "/spdk_proxy"}:
+        core_utils.remove_container(node_docker, name)
 
     pull_docker_image_with_retry(node_docker, body.spdk_image)
 
@@ -135,12 +130,8 @@ class _SPDKKillQuery(BaseModel):
     })}}},
 })
 def spdk_process_kill(query: _SPDKKillQuery):
-    node_docker = get_docker_client()
-    for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
-        if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
-            cont.stop()
-            cont.remove(force=query.force)
+    for name in {"/spdk", "/spdk_proxy"}:
+        core_utils.remove_container(get_docker_client(), name)
     return utils.get_response(True)
 
 
