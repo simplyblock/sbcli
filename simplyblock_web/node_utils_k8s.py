@@ -99,7 +99,7 @@ def pod_exec(name, namespace, container, command, k8s_core_v1):
                 stderr_result += resp.read_stderr()
 
     except Exception as e:
-        raise RuntimeError(f"Error executing command in pod '{name}': {str(e)}")
+        raise RuntimeError(f"Error executing command in pod '{name}'") from e
 
     finally:
         resp.close()
