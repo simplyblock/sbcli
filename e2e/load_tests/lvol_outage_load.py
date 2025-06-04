@@ -174,7 +174,10 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         return shutdown_end - shutdown_start, restart_end - restart_start
 
     def write_to_log(self, lvol_count, shutdown_time, restart_time):
-        entry = [lvol_count, shutdown_time.total_seconds() - 10, restart_time.total_seconds()]
+        if isinstance(shutdown_time, int):
+            entry = [lvol_count, shutdown_time, restart_time]
+        else:
+            entry = [lvol_count, shutdown_time.total_seconds() - 10, restart_time.total_seconds()]
         write_header = not self.output_file.exists()
         with open(self.output_file, 'a', newline='') as f:
             writer = csv.writer(f)
