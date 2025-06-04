@@ -6,7 +6,6 @@ metadata:
   name: simplyblock-mongodb
   namespace: {{ .Release.Namespace }}
 spec:
-  clusterIP: None 
   selector:
     app: simplyblock-mongodb
   ports:
