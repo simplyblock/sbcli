@@ -159,6 +159,10 @@ spec:
     spec:
       nodeSelector:
         type: simplyblock-mgmt-plane
+      securityContext:
+        fsGroup: 1100
+        supplementalGroups:
+          - 0 
       containers:
         - name: graylog
           image: graylog/graylog:5.0
@@ -263,6 +267,10 @@ spec:
     spec:
       nodeSelector:
         type: simplyblock-mgmt-plane
+      securityContext:
+        fsGroup: 65534
+        supplementalGroups:
+          - 0   
       containers:
         - name: prometheus
           image: prom/prometheus:v2.44.0
@@ -531,6 +539,10 @@ spec:
     spec:
       nodeSelector:
         type: simplyblock-mgmt-plane
+      securityContext:
+        fsGroup: 472
+        supplementalGroups:
+          - 0
       containers:
         - name: grafana
           image: grafana/grafana:10.0.12
