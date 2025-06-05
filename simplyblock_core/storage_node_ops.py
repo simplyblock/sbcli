@@ -1475,7 +1475,7 @@ def restart_storage_node(
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol,
                                                           snode.max_prov,
-                                                          snode.cpu)
+                                                          len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask)))
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -1499,6 +1499,7 @@ def restart_storage_node(
         logger.error(
             f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
 
+    snode.spdk_mem = spdk_mem
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
         spdk_debug = True
