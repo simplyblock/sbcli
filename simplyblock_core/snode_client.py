@@ -124,11 +124,7 @@ class SNodeClient:
         return self._request("POST", "join_swarm", params)
 
     def spdk_process_kill(self, rpc_port):
-        params = {"rpc_port": rpc_port}
-        try:
-            return self._request("GET", "spdk_process_kill", params)
-        except Exception as e:
-            return False
+        return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port})
 
     def leave_swarm(self):
         return self._request("GET", "leave_swarm")

@@ -1,4 +1,4 @@
-# coding=utf-8
+# coding=utf- 8
 import datetime
 import json
 import math
@@ -27,7 +27,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient, RPCException
-from simplyblock_core.snode_client import SNodeClient
+from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
@@ -1328,6 +1328,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                     pci_address.append(dev.pcie_address)
     except Exception as e:
         logger.exception(e)
+        return False
 
     set_node_status(node_id, StorageNode.STATUS_REMOVED)
 
@@ -2060,7 +2061,11 @@ def shutdown_storage_node(node_id, force=False):
     #     distr_controller.disconnect_device(dev)
 
     logger.info("Stopping SPDK")
-    SNodeClient(snode.api_endpoint, timeout=30, retry=1).spdk_process_kill(snode.rpc_port)
+    try:
+        SNodeClient(snode.api_endpoint, timeout=30, retry=1).spdk_process_kill(snode.rpc_port)
+    except SNodeClientException:
+        logger.error('Failed to kill SPDK')
+        return False
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
