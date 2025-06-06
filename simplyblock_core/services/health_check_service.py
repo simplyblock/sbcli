@@ -193,8 +193,11 @@ while True:
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
                     for remote_device in snode.remote_jm_devices:
-                        if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
+                        check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
+                        if check:
                             connected_jms.append(remote_device.get_id())
+                        else:
+                            node_remote_devices_check = False
 
                     for jm_id in snode.jm_ids:
                         if jm_id and jm_id not in connected_jms:
@@ -204,13 +207,13 @@ while True:
                                         node_remote_devices_check = False
                                     break
 
-                    if snode.lvstore_stack_secondary_1:
-                        primary_node = db.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-                        if primary_node:
-                            for jm_id in primary_node.jm_ids:
-                                # if jm_id not in connected_jms:
-                                #    node_remote_devices_check = False
-                                    break
+                    # if snode.lvstore_stack_secondary_1:
+                    #     primary_node = db.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
+                    #     if primary_node:
+                    #         for jm_id in primary_node.jm_ids:
+                    #             # if jm_id not in connected_jms:
+                    #             #    node_remote_devices_check = False
+                    #                 break
 
                     if not node_remote_devices_check and cluster.status in [
                         Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
