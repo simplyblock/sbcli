@@ -48,25 +48,44 @@ class ManagementStressUtils:
                 mem_vals.append(float(row['memory_percent']))
                 disk_vals.append(float(row['disk_percent']))
 
-        plt.figure(figsize=(12, 6))
+        os.makedirs("logs", exist_ok=True)
 
-        plt.plot(batches, cpu_vals, label='CPU %', marker='o')
-        plt.plot(batches, mem_vals, label='Memory %', marker='s')
-        plt.plot(batches, disk_vals, label='Disk %', marker='^')
-
+        # CPU Graph
+        plt.figure(figsize=(10, 5))
+        plt.plot(batches, cpu_vals, label='CPU %', marker='o', color='tab:red')
         for i in range(len(batches)):
             plt.annotate(f"{cpu_vals[i]:.1f}%", (batches[i], cpu_vals[i]), textcoords="offset points", xytext=(0,5), ha='center')
-            plt.annotate(f"{mem_vals[i]:.1f}%", (batches[i], mem_vals[i]), textcoords="offset points", xytext=(0,-10), ha='center')
-            plt.annotate(f"{disk_vals[i]:.1f}%", (batches[i], disk_vals[i]), textcoords="offset points", xytext=(0,-20), ha='center')
-
         plt.xlabel('Batch Index')
-        plt.ylabel('% Usage')
-        plt.title('System Resource Usage Per Batch')
-        plt.legend()
+        plt.ylabel('CPU Usage (%)')
+        plt.title('CPU Usage Per Batch')
         plt.grid(True)
         plt.tight_layout()
-        os.makedirs("logs", exist_ok=True)
-        plt.savefig("logs/resource_usage_graph.png")
+        plt.savefig("logs/cpu_usage_per_batch.png")
+
+        # Memory Graph
+        plt.figure(figsize=(10, 5))
+        plt.plot(batches, mem_vals, label='Memory %', marker='s', color='tab:blue')
+        for i in range(len(batches)):
+            plt.annotate(f"{mem_vals[i]:.1f}%", (batches[i], mem_vals[i]), textcoords="offset points", xytext=(0,5), ha='center')
+        plt.xlabel('Batch Index')
+        plt.ylabel('Memory Usage (%)')
+        plt.title('Memory Usage Per Batch')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("logs/memory_usage_per_batch.png")
+
+        # Disk Graph
+        plt.figure(figsize=(10, 5))
+        plt.plot(batches, disk_vals, label='Disk %', marker='^', color='tab:green')
+        for i in range(len(batches)):
+            plt.annotate(f"{disk_vals[i]:.1f}%", (batches[i], disk_vals[i]), textcoords="offset points", xytext=(0,5), ha='center')
+        plt.xlabel('Batch Index')
+        plt.ylabel('Disk Usage (%)')
+        plt.title('Disk Usage Per Batch')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("logs/disk_usage_per_batch.png")
+
         plt.show()
 
     @staticmethod
