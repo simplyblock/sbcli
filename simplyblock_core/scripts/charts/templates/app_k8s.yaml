@@ -838,18 +838,18 @@ spec:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: fluent-bit
-  namespace: logging
+  name: simplyblock-fluent-bit
+  namespace: {{ .Release.Namespace }}
   labels:
-    k8s-app: fluent-bit
+    app: simplyblock-fluent-bit
 spec:
   selector:
     matchLabels:
-      k8s-app: fluent-bit
+      app: simplyblock-fluent-bit
   template:
     metadata:
       labels:
-        k8s-app: fluent-bit
+        app: simplyblock-fluent-bit
     spec:
       nodeSelector:
         type: simplyblock-mgmt-plane
@@ -879,4 +879,4 @@ spec:
             path: /var/lib/docker/containers
         - name: config
           configMap:
-            name: fluent-bit-config
+            name: simplyblock-fluent-bit-config

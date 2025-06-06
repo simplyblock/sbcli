@@ -109,8 +109,8 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: fluent-bit-config
-  namespace: logging
+  name: simplyblock-fluent-bit-config
+  namespace: {{ .Release.Namespace }}
 data:
   fluent-bit.conf: |
     [SERVICE]
