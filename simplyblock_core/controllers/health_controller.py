@@ -591,7 +591,13 @@ def check_remote_device(device_id):
                 continue
             logger.info(f"Connecting to node: {node.get_id()}")
             rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
-            result &= check_bdev(f'remote_{device.alceml_bdev}n1', rpc_client=rpc_client)
+            name = f'remote_{device.alceml_bdev}n1'
+            bdev_info = rpc_client.get_bdevs(name)
+            logger.log(DEBUG if bdev_info else ERROR, f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+            result &= bool(bdev_info)
+            if bdev_info and device.nvmf_multipath:
+                logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
+
 
     return result
 
