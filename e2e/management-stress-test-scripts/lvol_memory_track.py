@@ -735,8 +735,7 @@ class TestLvolMemory:
 
     def run(self):
         stop_event = threading.Event()
-        continuous_thread = threading.Thread(target=self.collect_continuous_data, args=(stop_event,))
-        continuous_thread.start()
+        continuous_thread = None
 
         time.sleep(60)
         self.log("Creating pool...")
@@ -750,6 +749,10 @@ class TestLvolMemory:
                 lvol_idx = (batch - 1) * self.batch_size + lvol
                 lvol_name = f"test_lvol_{lvol_idx}"
                 self.create_lvol(lvol_name)
+
+                if not continuous_thread:
+                    continuous_thread = threading.Thread(target=self.collect_continuous_data, args=(stop_event,))
+                    continuous_thread.start()
 
                 # Gather data after each lvol creation
                 fdb_size, prometheus_size, graylog_size = self.gather_data()
