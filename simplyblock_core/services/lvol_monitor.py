@@ -6,7 +6,8 @@ from datetime import datetime
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.controllers import health_controller, lvol_events
+from simplyblock_core.controllers import health_controller, lvol_events, lvol_controller, tasks_controller
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
@@ -104,6 +105,20 @@ while True:
                             logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
                             lvol_events.lvol_delete(lvol)
                             lvol.remove(db.kv_store)
+                            # check for full devices
+                            full_devs_ids = []
+                            all_devs_ids = []
+                            for dev in snode.nvme_devices:
+                                if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED ]:
+                                    continue
+                                all_devs_ids.append(dev.get_id())
+                                if dev.status == NVMeDevice.STATUS_CANNOT_ALLOCATE:
+                                    full_devs_ids.append(dev.get_id())
+
+                            if 0 < len(full_devs_ids) == len(all_devs_ids):
+                                logger.info(f"All devices are full, starting expansion migrations")
+                                for dev_id in full_devs_ids:
+                                    tasks_controller.add_new_device_mig_task(dev_id)
 
                         elif ret == 1: # deletion is in progress.
                             logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
