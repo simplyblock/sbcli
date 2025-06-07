@@ -151,6 +151,8 @@ spec:
       app: simplyblock-storage-node-monitor
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-storage-node-monitor
     spec:
@@ -188,6 +190,8 @@ spec:
       app: simplyblock-mgmt-node-monitor
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-mgmt-node-monitor
     spec:
@@ -224,6 +228,8 @@ spec:
       app: simplyblock-caching-node-monitor
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-caching-node-monitor
     spec:
@@ -260,6 +266,8 @@ spec:
       app: simplyblock-lvol-stats-collector
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-lvol-stats-collector
     spec:
@@ -296,6 +304,8 @@ spec:
       app: simplyblock-cached-lvol-stats-collector
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-cached-lvol-stats-collector
     spec:
@@ -333,6 +343,8 @@ spec:
       app: simplyblock-main-distr-event-collector
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-main-distr-event-collector
     spec:
@@ -370,6 +382,8 @@ spec:
       app: simplyblock-capacity-and-stats-collector
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-capacity-and-stats-collector
     spec:
@@ -406,6 +420,8 @@ spec:
       app: simplyblock-capacity-monitor
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-capacity-monitor
     spec:
@@ -442,6 +458,8 @@ spec:
       app: simplyblock-health-check
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-health-check
     spec:
@@ -478,6 +496,8 @@ spec:
       app: simplyblock-device-monitor
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-device-monitor
     spec:
@@ -514,6 +534,8 @@ spec:
       app: simplyblock-lvol-monitor
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-lvol-monitor
     spec:
@@ -550,6 +572,8 @@ spec:
       app: simplyblock-cleanupfdb
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-cleanupfdb
     spec:
@@ -588,6 +612,8 @@ spec:
       app: simplyblock-tasks-runner-restart
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-tasks-runner-restart
     spec:
@@ -624,6 +650,8 @@ spec:
       app: simplyblock-tasks-runner-migration
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-tasks-runner-migration
     spec:
@@ -660,6 +688,8 @@ spec:
       app: simplyblock-tasks-runner-failed-migration
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-tasks-runner-failed-migration
     spec:
@@ -732,6 +762,8 @@ spec:
       app: simplyblock-tasks-runner-new-device-migration
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-tasks-runner-new-device-migration
     spec:
@@ -768,6 +800,8 @@ spec:
       app: simplyblock-tasks-node-add-runner
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
       labels:
         app: simplyblock-tasks-node-add-runner
     spec:
