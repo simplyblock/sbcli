@@ -44,7 +44,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
         return False
 
     logger.info(f"Node IP: {DEV_IP}")
-    ret = scripts.configure_docker(DEV_IP)
+    scripts.configure_docker(DEV_IP)
 
     db_connection = cluster_data['db_connection']
     scripts.set_db_config(db_connection)

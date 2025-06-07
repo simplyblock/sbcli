@@ -93,25 +93,16 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     alceml_id = snode.get_id()
     alceml_name = f"alceml_jm_{snode.get_id()}"
     nvme_bdev = raid_bdev
-    pba_init_mode = 3
-    if after_restart:
-        pba_init_mode = 1
-    alceml_cpu_mask = ""
-    alceml_worker_cpu_mask = ""
-    if snode.alceml_cpu_cores:
-        alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-        snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
-    if snode.alceml_worker_cpu_cores:
-        alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
-            snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
-        snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
-                                        alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-                                        pba_page_size=cluster.page_size_in_blocks,
-                                        full_page_unmap=cluster.full_page_unmap)
+    ret = snode.create_alceml(
+        alceml_name, nvme_bdev, alceml_id,
+        pba_init_mode=1 if after_restart else 3,
+        pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=cluster.full_page_unmap
+    )
+
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
@@ -173,7 +164,6 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
 def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     alceml_id = nvme.get_id()
     alceml_name = device_controller.get_alceml_name(alceml_id)
-    logger.info(f"adding {alceml_name}")
     db_controller = DBController()
     nvme_bdev = nvme.nvme_bdev
     test_name = ""
@@ -184,24 +174,14 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
             logger.error(f"Failed to create passtest bdev {test_name}")
             return False
         nvme_bdev = test_name
-    pba_init_mode = 3
-    if after_restart:
-        pba_init_mode = 1
-    alceml_cpu_mask = ""
-    alceml_worker_cpu_mask = ""
-    if snode.alceml_cpu_cores:
-        alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-        snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
-    if snode.alceml_worker_cpu_cores:
-        alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
-            snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
-        snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    ret = rpc_client.bdev_alceml_create(
-        alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode, alceml_cpu_mask=alceml_cpu_mask,
-        alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks,
-        full_page_unmap=cluster.full_page_unmap)
+    ret = snode.create_alceml(
+        alceml_name, nvme_bdev, alceml_id,
+        pba_init_mode=1 if after_restart else 3,
+        pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=cluster.full_page_unmap
+    )
 
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
@@ -273,29 +253,17 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         nvme_bdev = test_name
     alceml_id = nvme.get_id()
     alceml_name = device_controller.get_alceml_name(alceml_id)
-    logger.info(f"adding {alceml_name}")
-    pba_init_mode = 3
-    if after_restart and nvme.status != NVMeDevice.STATUS_NEW:
-        pba_init_mode = 1
-    alceml_cpu_mask = ""
-    alceml_worker_cpu_mask = ""
-
-    if snode.alceml_cpu_cores:
-        alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-        snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
-    if snode.alceml_worker_cpu_cores:
-        alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
-            snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
-        snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    write_protection = False
-    if cluster.distr_ndcs > 1:
-        write_protection = True
-    ret = rpc_client.bdev_alceml_create(alceml_name, nvme_bdev, alceml_id, pba_init_mode=pba_init_mode,
-                                        alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-                                        pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection,
-                                        full_page_unmap=cluster.full_page_unmap)
+
+    ret = snode.create_alceml(
+        alceml_name, nvme_bdev, alceml_id,
+        pba_init_mode=1 if (after_restart and nvme.status != NVMeDevice.STATUS_NEW) else 3,
+        write_protection=cluster.distr_ndcs > 1,
+        pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=cluster.full_page_unmap
+    )
+
     if not ret:
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return None
@@ -564,25 +532,14 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
                 logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
                 return False
             nvme_bdev = jm_device.testing_bdev
-        alceml_cpu_mask = ""
-        alceml_worker_cpu_mask = ""
-        if snode.alceml_cpu_cores:
-            alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-            snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
 
-        if snode.alceml_worker_cpu_cores:
-            alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
-                snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
-            snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
-
-        pba_init_mode = 3
-        if not clear_data:
-            pba_init_mode = 1
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        ret = rpc_client.bdev_alceml_create(
-            jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(), pba_init_mode=pba_init_mode,
-            alceml_cpu_mask=alceml_cpu_mask, alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-            pba_page_size=cluster.page_size_in_blocks, full_page_unmap=cluster.full_page_unmap)
+        ret = snode.create_alceml(
+            jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
+            pba_init_mode=3 if clear_data else 1,
+            pba_page_size=cluster.page_size_in_blocks,
+            full_page_unmap=cluster.full_page_unmap
+        )
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
@@ -1119,7 +1076,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         qpair = cluster.qpair_count
-        ret = rpc_client.transport_create("TCP", qpair)
+        ret = rpc_client.transport_create("TCP", qpair,512*(req_cpu_count+1))
         if not ret:
             logger.error(f"Failed to create transport TCP with qpair: {qpair}")
             return False
@@ -1521,7 +1478,7 @@ def restart_storage_node(
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol,
                                                           snode.max_prov,
-                                                          snode.cpu)
+                                                          len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask)))
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -1545,6 +1502,7 @@ def restart_storage_node(
         logger.error(
             f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
 
+    snode.spdk_mem = spdk_mem
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
         spdk_debug = True
@@ -2592,10 +2550,10 @@ def deploy(ifname, isolate_cores=False):
         logger.info(l.strip())
 
     logger.info("Installing dependencies...")
-    ret = scripts.install_deps()
+    scripts.install_deps()
 
     logger.info(f"Node IP: {dev_ip}")
-    ret = scripts.configure_docker(dev_ip)
+    scripts.configure_docker(dev_ip)
 
     start_storage_node_api_container(dev_ip)
 
@@ -2648,7 +2606,6 @@ def start_storage_node_api_container(node_ip):
 
 def deploy_cleaner():
     scripts.deploy_cleaner()
-    return True
 
 
 def get_host_secret(node_id):
@@ -2987,13 +2944,14 @@ def recreate_lvstore(snode):
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
-            # time.sleep(1)
+            # time.sleep(0.2)
             ### 4- set leadership to false
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(1)
 
     ### 5- examine
+    time.sleep(0.2)
+    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     ret = rpc_client.bdev_examine(snode.raid)
     # time.sleep(1)
 

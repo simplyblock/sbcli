@@ -1,135 +1,129 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Pod
 metadata:
   name: snode-spdk-deployment-{{ HOSTNAME }}
   namespace: {{ NAMESPACE }}
+  labels:
+    app: spdk-app-{{ HOSTNAME }}
+    role: simplyblock-storage-node
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: spdk-app-{{ HOSTNAME }}
-  template:
-    metadata:
-      labels:
-        app: spdk-app-{{ HOSTNAME }}
-    spec:
-      serviceAccountName: simplyblock-storage-node-sa
-      nodeSelector:
-        kubernetes.io/hostname: {{ HOSTNAME }}
-      hostNetwork: true
-      volumes:
-        - name: socket-dir
-          emptyDir:
-            medium: "Memory"
-        - name: host-sys
-          hostPath:
-            path: /sys
-        - name: host-proc
-          hostPath:
-            path: /proc
-        - name: host-rootfs
-          hostPath:
-            path: /
+  restartPolicy: Never
+  serviceAccountName: simplyblock-storage-node-sa
+  nodeSelector:
+    kubernetes.io/hostname: {{ HOSTNAME }}
+  hostNetwork: true
+  tolerations:
+    - effect: NoSchedule
+      key: dedicated
+      operator: Equal
+      value: simplyblock-storage-plane
+  volumes:
+    - name: socket-dir
+      emptyDir:
+        medium: "Memory"
+    - name: host-sys
+      hostPath:
+        path: /sys
+    - name: host-proc
+      hostPath:
+        path: /proc
+    - name: host-rootfs
+      hostPath:
+        path: /
+    - name: foundationdb
+      hostPath:
+        path: /var/foundationdb
+    - name: etc-simplyblock
+      hostPath:
+        path: /var/simplyblock
+    - name: host-modules
+      hostPath:
+        path: /lib/modules
+    - name: dev-vol
+      hostPath:
+        path: /dev
+    - name: hugepage
+      emptyDir:
+        medium: HugePages
+    - name: script-volume
+      emptyDir: {}
+    - name: varlog
+      hostPath:
+        path: /var/log
+    - name: dockercontainerlogdirectory
+      hostPath:
+        path: /var/log/pods
+
+  initContainers:
+    - name: copy-script
+      image: public.ecr.aws/simply-block/busybox
+      command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
+      volumeMounts:
         - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
-        - name: etc-simplyblock
-          hostPath:
-            path: /var/simplyblock
-        - name: host-modules
-          hostPath:
-            path: /lib/modules
-        - name: dev-vol
-          hostPath:
-            path: /dev
-        - name: hugepage
-          emptyDir:
-            medium: HugePages
-        - name: script-volume
-          emptyDir: {}
-        - name: varlog
-          hostPath:
-            path: /var/log
-        - name: dockercontainerlogdirectory
-          hostPath:
-            path: /var/log/pods
-      tolerations:
-        - effect: NoSchedule
-          key: dedicated
-          operator: Equal
-          value: simplyblock-storage-plane
+          mountPath: /etc/foundationdb
 
-      initContainers:
-        - name: copy-script
-          image: public.ecr.aws/simply-block/busybox
-          command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
-          volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+    - name: apply-config-to-node
+      image: alpine:3.19
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "Installing tools..."
+          apk add --no-cache iproute2 curl grep
 
-        - name: apply-config-to-node
-          image: alpine:3.19
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              echo "Installing tools..."
-              apk add --no-cache iproute2 curl grep
+          NODE_IP=$(ip route get 1.1.1.1 | grep -oE 'src [0-9.]+' | awk '{print $2}')
+          echo "Detected node IP: ${NODE_IP}"
 
-              NODE_IP=$(ip route get 1.1.1.1 | grep -oE 'src [0-9.]+' | awk '{print $2}')
-              echo "Detected node IP: ${NODE_IP}"
+          echo "Sending config to ${NODE_IP}..."
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://${NODE_IP}:5000/snode/apply_config \
+            -H "Content-Type: application/json" \
+            -d '{}')
 
-              echo "Sending config to ${NODE_IP}..."
-              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://${NODE_IP}:5000/snode/apply_config \
-                -H "Content-Type: application/json" \
-                -d '{}')
+          echo "Response code: ${RESPONSE}"
+          if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
+            echo "Failed to send config to ${NODE_IP}, exiting."
+            exit 1
+          fi
 
-              echo "Response code: ${RESPONSE}"
-              if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
-                echo "Failed to send config to ${NODE_IP}, exiting."
-                exit 1
-              fi
-
-      containers:
-
-      - name: spdk-container
-        image: {{ SPDK_IMAGE }}
-        imagePullPolicy: "Always"
-        command:
-          - sh
-          - -c
-          - |
-            if [ ! -e /dev/fd ]; then
-              ln -s /proc/self/fd /dev/fd
-            fi
-            /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
-        env:
-          - name: SSD_PCIE
-            value: "{{ SSD_PCIE }}"
-          - name: PCI_ALLOWED
-            value: "{{ PCI_ALLOWED }}"
-          - name: TOTAL_HP
-            value: "{{ TOTAL_HP }}"
-          - name: RPC_PORT
-            value: "{{ RPC_PORT }}"
-          - name: SPDKCSI_SECRET
-            valueFrom:
-              secretKeyRef:
-                name: simplyblock-csi-secret
-                key: secret.json
-          - name: CLUSTER_CONFIG
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-csi-cm
-                key: config.json
-        lifecycle:
-          postStart:
-            exec:
-              command: ["/bin/sh", "-c", "sudo modprobe nbd || echo failed to modprobe nbd"]
-        securityContext:
-          privileged: true
-        volumeMounts:
+  containers:
+    - name: spdk-container
+      image: {{ SPDK_IMAGE }}
+      imagePullPolicy: "Always"
+      command:
+        - sh
+        - -c
+        - |
+          if [ ! -e /dev/fd ]; then
+            ln -s /proc/self/fd /dev/fd
+          fi
+          /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
+      env:
+        - name: SSD_PCIE
+          value: "{{ SSD_PCIE }}"
+        - name: PCI_ALLOWED
+          value: "{{ PCI_ALLOWED }}"
+        - name: TOTAL_HP
+          value: "{{ TOTAL_HP }}"
+        - name: RPC_PORT
+          value: "{{ RPC_PORT }}"
+        - name: SPDKCSI_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: simplyblock-csi-secret
+              key: secret.json
+        - name: CLUSTER_CONFIG
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-csi-cm
+              key: config.json
+      lifecycle:
+        postStart:
+          exec:
+            command: ["/bin/sh", "-c", "sudo modprobe nbd || echo failed to modprobe nbd"]
+      securityContext:
+        privileged: true
+      volumeMounts:
         - name: socket-dir
           mountPath: /var/tmp
         - name: host-sys
@@ -142,21 +136,21 @@ spec:
           mountPath: /script
         - name: etc-simplyblock
           mountPath: /etc/simplyblock
-        resources:
-          limits:
-            hugepages-2Mi: {{ MEM_GEGA }}Gi
-            memory: {{ MEM2_GEGA }}Gi
-          requests:
-            hugepages-2Mi: {{ MEM_GEGA }}Gi
+      resources:
+        limits:
+          hugepages-2Mi: {{ MEM_GEGA }}Gi
+          memory: {{ MEM2_GEGA }}Gi
+        requests:
+          hugepages-2Mi: {{ MEM_GEGA }}Gi
 
-      - name: spdk-proxy-container
-        image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
-        imagePullPolicy: "Always"
-        command: ["python", "simplyblock_core/services/spdk_http_proxy_server.py"]
-        volumeMounts:
+    - name: spdk-proxy-container
+      image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
+      imagePullPolicy: "Always"
+      command: ["python", "simplyblock_core/services/spdk_http_proxy_server.py"]
+      volumeMounts:
         - name: socket-dir
           mountPath: /var/tmp
-        env:
+      env:
         - name: SERVER_IP
           value: "{{ SERVER_IP }}"
         - name: RPC_PORT
@@ -169,37 +163,37 @@ spec:
           value: "True"
         - name: TIMEOUT
           value: "300"
-      - name: fluentd
-        image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
-        imagePullPolicy: "Always"
-        env:
+
+    - name: fluentd
+      image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
+      imagePullPolicy: "Always"
+      env:
         - name: K8S_NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
-        - name:  FLUENT_GRAYLOG_HOST
+        - name: FLUENT_GRAYLOG_HOST
           value: "{{ GRAYLOG_SERVER_IP }}"
-        - name:  FLUENT_GRAYLOG_PORT
+        - name: FLUENT_GRAYLOG_PORT
           value: "12202"
-        - name:  FLUENT_GRAYLOG_PROTOCOL
+        - name: FLUENT_GRAYLOG_PROTOCOL
           value: "tcp"
-        - name:  FLUENTD_SYSTEMD_CONF
+        - name: FLUENTD_SYSTEMD_CONF
           value: "disable"
         - name: FLUENT_CONTAINER_TAIL_EXCLUDE_PATH
           value: /var/log/pods/fluent*
         - name: FLUENT_CONTAINER_TAIL_PARSER_TYPE
           value: /^(?<time>.+) (?<stream>stdout|stderr)( (?<logtag>.))? (?<log>.*)$/
-        resources:
-          requests:
-            cpu: 200m
-            memory: 0.5Gi
-          limits:
-            cpu: 1000m
-            memory: 1Gi
-        volumeMounts:
+      resources:
+        requests:
+          cpu: 200m
+          memory: 0.5Gi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+      volumeMounts:
         - name: varlog
           mountPath: /var/log
         - name: dockercontainerlogdirectory
           mountPath: /var/log/pods
           readOnly: true
-          

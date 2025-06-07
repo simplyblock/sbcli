@@ -1298,6 +1298,11 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Return JSON formatted logs"
+            dest: json
+            type: bool
+            action: store_true
           - name: "--limit"
             help: "show last number of logs, default 50"
             dest: limit

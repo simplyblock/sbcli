@@ -124,7 +124,7 @@ class RPCClient:
             params = {"trtype": trtype}
         return self._request("nvmf_get_transports", params)
 
-    def transport_create(self, trtype, qpair_count=6):
+    def transport_create(self, trtype, qpair_count=6,shared_bufs=24576):
         """
             [{'trtype': 'TCP', 'max_queue_depth': 128,
                'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
@@ -139,16 +139,16 @@ class RPCClient:
         """
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": 128,
-            "max_queue_depth": 64,
+            "max_io_qpairs_per_ctrlr": 64,
+            "max_queue_depth": 128,
             "abort_timeout_sec": 5,
-            "ack_timeout": 2048,
+            "ack_timeout": 1024,
             "zcopy": True,
             "in_capsule_data_size": 8192,
             "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
-            "num_shared_buffers": 24576,
+            "num_shared_buffers": shared_bufs,
             "buf_cache_size": 512,
             "dif_insert_or_strip": False,
             "c2h_success": True,
@@ -572,7 +572,7 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
-            "num_io_queues": 128,
+            "num_io_queues": 64,
             #"ctrlr_loss_timeout_sec": 3,
             "multipath":"disable",
             # "reconnect_delay_sec":1
