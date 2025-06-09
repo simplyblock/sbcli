@@ -274,6 +274,5 @@ class StorageNode(BaseNodeObject):
             name, nvme_bdev, uuid,
             alceml_cpu_mask=alceml_cpu_mask,
             alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-            full_page_unmap=self.full_page_unmap,
             **kwargs,
         )
