@@ -95,7 +95,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             raise e
 
     logger.info("Adding management node object")
-    node_id = add_mgmt_node(DEV_IP, cluster_id)
+    node_id = add_mgmt_node(DEV_IP, mode, cluster_id)
 
     # check if ha setting is required
     nodes = db_controller.get_mgmt_nodes()
@@ -220,7 +220,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
     return node_id
 
 
-def add_mgmt_node(mgmt_ip, cluster_id=None):
+def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     db_controller = DBController()
     hostname = utils.get_hostname()
     node = db_controller.get_mgmt_node_by_hostname(hostname)
@@ -234,6 +234,7 @@ def add_mgmt_node(mgmt_ip, cluster_id=None):
     node.docker_ip_port = f"{mgmt_ip}:2375"
     node.cluster_id = cluster_id
     node.mgmt_ip = mgmt_ip
+    node.mode = mode
     node.status = MgmtNode.STATUS_ONLINE
     node.create_dt = str(datetime.datetime.now())
 
@@ -279,11 +280,15 @@ def remove_mgmt_node(uuid):
 
     logging.info("Removing mgmt node")
     snode.remove(db_controller.kv_store)
+    if snode.mode == "docker":
+        logger.info("Leaving swarm...")
+        node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
+        node_docker.swarm.leave(force=True)
 
-    logger.info("Leaving swarm...")
-    node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
-    node_docker.swarm.leave(force=True)
-
+    elif snode.mode == "kubernetes":
+        config.load_kube_config()
+        v1 = k8s_client.CoreV1Api()
+        
     mgmt_events.mgmt_remove(snode)
     logging.info("done")
 
