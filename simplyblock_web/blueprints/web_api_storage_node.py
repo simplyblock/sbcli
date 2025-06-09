@@ -258,7 +258,6 @@ def storage_node_add():
         "enable_test_device": enable_test_device,
         "namespace": namespace,
         "enable_ha_jm": not disable_ha_jm,
-        "full_page_unmap": full_page_unmap,
     })
 
     return utils.get_response(True)
