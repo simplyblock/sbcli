@@ -203,6 +203,8 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/mgmt_node_monitor.py"]
           env:
+          - name: BACKEND_TYPE
+            value: "k8s"
           - name: SIMPLYBLOCK_LOG_LEVEL
             valueFrom:
               configMapKeyRef:
