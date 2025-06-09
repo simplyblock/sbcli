@@ -16,7 +16,7 @@ spec:
         app: simplyblock-mongodb
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -60,7 +60,7 @@ spec:
         app: simplyblock-opensearch
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -142,7 +142,7 @@ spec:
         app: simplyblock-graylog
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       securityContext:
         fsGroup: 1100
         supplementalGroups:
@@ -252,7 +252,7 @@ spec:
         app: simplyblock-prometheus
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       securityContext:
         fsGroup: 65534
         supplementalGroups:
@@ -298,7 +298,7 @@ spec:
         app: simplyblock-thanos-sidecar
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       containers:
         - name: thanos-sidecar
           image: thanosio/thanos:v0.31.0
@@ -337,7 +337,7 @@ spec:
         app: simplyblock-thanos-store
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       containers:
         - name: thanos-store
           image: thanosio/thanos:v0.31.0
@@ -371,7 +371,7 @@ spec:
         app: simplyblock-thanos-query
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       containers:
         - name: thanos-query
           image: thanosio/thanos:v0.31.0
@@ -412,7 +412,7 @@ spec:
         app: simplyblock-thanos-compactor
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       containers:
         - name: thanos-compactor
           image: thanosio/thanos:v0.31.0
@@ -455,7 +455,7 @@ spec:
         app: simplyblock-node-exporter
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       containers:
         - name: node-exporter
           image: prom/node-exporter:v1.7.0
@@ -524,7 +524,7 @@ spec:
         app: simplyblock-grafana
     spec:
       nodeSelector:
-        type: simplyblock-mgmt-plane
+        simplyblock.io/role: mgmt-plane
       securityContext:
         fsGroup: 472
         supplementalGroups:

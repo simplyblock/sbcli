@@ -32,7 +32,7 @@ elif [[ "$1" == "kubernetes" ]]; then
 
   NODE_NAME=$(hostname)
 
-  /usr/local/bin/kubectl label nodes "$NODE_NAME" type=simplyblock-mgmt-plane --overwrite
+  /usr/local/bin/kubectl label nodes "$NODE_NAME" simplyblock.io/role=mgmt-plane --overwrite
 
   if [ $? -eq 0 ]; then
     echo "Node $NODE_NAME labeled successfully."

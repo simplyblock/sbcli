@@ -85,28 +85,42 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
 
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
-    payload = json.dumps({
-        "title": "spdk log input",
-        "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
-        "configuration": {
-            "bind_address": "0.0.0.0",
-            "port": 12201,
-            "recv_buffer_size": 262144,
-            "number_worker_threads": 2,
-            "override_source": None,
-            "charset_name": "UTF-8",
-            "decompress_size_limit": 8388608
-        },
-        "global": True
-    })
-    headers = {
-        'X-Requested-By': '',
-        'Content-Type': 'application/json',
-    }
-    session = requests.session()
-    session.auth = ("admin", password)
-    response = session.request("POST", url, headers=headers, data=payload)
-    logger.debug(response.text)
+
+    retries = 10
+    reachable=False
+    while retries > 0:
+
+        payload = json.dumps({
+            "title": "spdk log input",
+            "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
+            "configuration": {
+                "bind_address": "0.0.0.0",
+                "port": 12201,
+                "recv_buffer_size": 262144,
+                "number_worker_threads": 2,
+                "override_source": None,
+                "charset_name": "UTF-8",
+                "decompress_size_limit": 8388608
+            },
+            "global": True
+        })
+        headers = {
+            'X-Requested-By': '',
+            'Content-Type': 'application/json',
+        }
+        session = requests.session()
+        session.auth = ("admin", password)
+        response = session.request("POST", url, headers=headers, data=payload)
+        logger.debug(response.text)
+        if response.status_code == 201:
+            logger.info("Graylog input created...")
+            reachable=True
+            break
+
+    if not reachable:
+        logger.error(f"Failed to create graylog input: {response.text}")
+        return False
+
     return response.status_code == 201
 
 def _set_max_result_window(cluster_ip, max_window=100000):
