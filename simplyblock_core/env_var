@@ -1,6 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-unmap
-SIMPLY_BLOCK_VERSION=1.0.1
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=18.0.83
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:unmap
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:main
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:main-latest
