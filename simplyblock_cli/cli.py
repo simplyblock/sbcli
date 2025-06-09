@@ -115,8 +115,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-debug', help='Enable spdk debug logs', dest='spdk_debug', action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--full-page-unmap', help='Enable use_map_whole_page_on_1st_write flaf in bdev_distrib_create and bdev_alceml_create', dest='full_page_unmap', action='store_true')
-        if self.developer_mode:
             argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=int, default=0, dest='small_bufsize')
         if self.developer_mode:
             argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize')
@@ -903,118 +901,117 @@ class CLIWrapper(CLIWrapperBase):
                         args.partition_size = None
                         args.spdk_image = None
                         args.spdk_debug = None
-                        args.full_page_unmap = None
                         args.small_bufsize = 0
-                        args.large_bufsize = 0
-                        args.enable_test_device = None
-                        args.enable_ha_jm = True
-                        args.id_device_by_nqn = False
-                        args.max_snap = 5000
-                    ret = self.storage_node__add_node(sub_command, args)
-                elif sub_command in ['delete']:
-                    ret = self.storage_node__delete(sub_command, args)
-                elif sub_command in ['remove']:
-                    ret = self.storage_node__remove(sub_command, args)
-                elif sub_command in ['list']:
-                    ret = self.storage_node__list(sub_command, args)
-                elif sub_command in ['get']:
-                    ret = self.storage_node__get(sub_command, args)
-                elif sub_command in ['restart']:
-                    if not self.developer_mode:
-                        args.max_snap = 5000
-                        args.max_prov = '0'
-                        args.spdk_image = None
-                        args.reattach_volume = None
-                        args.spdk_debug = None
-                        args.small_bufsize = 0
-                        args.large_bufsize = 0
-                    ret = self.storage_node__restart(sub_command, args)
-                elif sub_command in ['shutdown']:
-                    ret = self.storage_node__shutdown(sub_command, args)
-                elif sub_command in ['suspend']:
-                    ret = self.storage_node__suspend(sub_command, args)
-                elif sub_command in ['resume']:
-                    ret = self.storage_node__resume(sub_command, args)
-                elif sub_command in ['get-io-stats']:
-                    ret = self.storage_node__get_io_stats(sub_command, args)
-                elif sub_command in ['get-capacity']:
-                    ret = self.storage_node__get_capacity(sub_command, args)
-                elif sub_command in ['list-devices']:
-                    ret = self.storage_node__list_devices(sub_command, args)
-                elif sub_command in ['device-testing-mode']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.storage_node__device_testing_mode(sub_command, args)
-                elif sub_command in ['get-device']:
-                    ret = self.storage_node__get_device(sub_command, args)
-                elif sub_command in ['reset-device']:
-                    ret = self.storage_node__reset_device(sub_command, args)
-                elif sub_command in ['restart-device']:
-                    ret = self.storage_node__restart_device(sub_command, args)
-                elif sub_command in ['add-device']:
-                    ret = self.storage_node__add_device(sub_command, args)
-                elif sub_command in ['remove-device']:
-                    ret = self.storage_node__remove_device(sub_command, args)
-                elif sub_command in ['set-failed-device']:
-                    ret = self.storage_node__set_failed_device(sub_command, args)
-                elif sub_command in ['get-capacity-device']:
-                    ret = self.storage_node__get_capacity_device(sub_command, args)
-                elif sub_command in ['get-io-stats-device']:
-                    ret = self.storage_node__get_io_stats_device(sub_command, args)
-                elif sub_command in ['port-list']:
-                    ret = self.storage_node__port_list(sub_command, args)
-                elif sub_command in ['port-io-stats']:
-                    ret = self.storage_node__port_io_stats(sub_command, args)
-                elif sub_command in ['check']:
-                    ret = self.storage_node__check(sub_command, args)
-                elif sub_command in ['check-device']:
-                    ret = self.storage_node__check_device(sub_command, args)
-                elif sub_command in ['info']:
-                    ret = self.storage_node__info(sub_command, args)
-                elif sub_command in ['info-spdk']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.storage_node__info_spdk(sub_command, args)
-                elif sub_command in ['remove-jm-device']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.storage_node__remove_jm_device(sub_command, args)
-                elif sub_command in ['restart-jm-device']:
-                    ret = self.storage_node__restart_jm_device(sub_command, args)
-                elif sub_command in ['send-cluster-map']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.storage_node__send_cluster_map(sub_command, args)
-                elif sub_command in ['get-cluster-map']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.storage_node__get_cluster_map(sub_command, args)
-                elif sub_command in ['make-primary']:
-                    ret = self.storage_node__make_primary(sub_command, args)
-                elif sub_command in ['dump-lvstore']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.storage_node__dump_lvstore(sub_command, args)
-                elif sub_command in ['set']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.storage_node__set(sub_command, args)
+                    args.large_bufsize = 0
+                    args.enable_test_device = None
+                    args.enable_ha_jm = True
+                    args.id_device_by_nqn = False
+                    args.max_snap = 5000
+                ret = self.storage_node__add_node(sub_command, args)
+            elif sub_command in ['delete']:
+                ret = self.storage_node__delete(sub_command, args)
+            elif sub_command in ['remove']:
+                ret = self.storage_node__remove(sub_command, args)
+            elif sub_command in ['list']:
+                ret = self.storage_node__list(sub_command, args)
+            elif sub_command in ['get']:
+                ret = self.storage_node__get(sub_command, args)
+            elif sub_command in ['restart']:
+                if not self.developer_mode:
+                    args.max_snap = 5000
+                    args.max_prov = '0'
+                    args.spdk_image = None
+                    args.reattach_volume = None
+                    args.spdk_debug = None
+                    args.small_bufsize = 0
+                    args.large_bufsize = 0
+                ret = self.storage_node__restart(sub_command, args)
+            elif sub_command in ['shutdown']:
+                ret = self.storage_node__shutdown(sub_command, args)
+            elif sub_command in ['suspend']:
+                ret = self.storage_node__suspend(sub_command, args)
+            elif sub_command in ['resume']:
+                ret = self.storage_node__resume(sub_command, args)
+            elif sub_command in ['get-io-stats']:
+                ret = self.storage_node__get_io_stats(sub_command, args)
+            elif sub_command in ['get-capacity']:
+                ret = self.storage_node__get_capacity(sub_command, args)
+            elif sub_command in ['list-devices']:
+                ret = self.storage_node__list_devices(sub_command, args)
+            elif sub_command in ['device-testing-mode']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
                 else:
-                    self.parser.print_help()
+                    ret = self.storage_node__device_testing_mode(sub_command, args)
+            elif sub_command in ['get-device']:
+                ret = self.storage_node__get_device(sub_command, args)
+            elif sub_command in ['reset-device']:
+                ret = self.storage_node__reset_device(sub_command, args)
+            elif sub_command in ['restart-device']:
+                ret = self.storage_node__restart_device(sub_command, args)
+            elif sub_command in ['add-device']:
+                ret = self.storage_node__add_device(sub_command, args)
+            elif sub_command in ['remove-device']:
+                ret = self.storage_node__remove_device(sub_command, args)
+            elif sub_command in ['set-failed-device']:
+                ret = self.storage_node__set_failed_device(sub_command, args)
+            elif sub_command in ['get-capacity-device']:
+                ret = self.storage_node__get_capacity_device(sub_command, args)
+            elif sub_command in ['get-io-stats-device']:
+                ret = self.storage_node__get_io_stats_device(sub_command, args)
+            elif sub_command in ['port-list']:
+                ret = self.storage_node__port_list(sub_command, args)
+            elif sub_command in ['port-io-stats']:
+                ret = self.storage_node__port_io_stats(sub_command, args)
+            elif sub_command in ['check']:
+                ret = self.storage_node__check(sub_command, args)
+            elif sub_command in ['check-device']:
+                ret = self.storage_node__check_device(sub_command, args)
+            elif sub_command in ['info']:
+                ret = self.storage_node__info(sub_command, args)
+            elif sub_command in ['info-spdk']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.storage_node__info_spdk(sub_command, args)
+            elif sub_command in ['remove-jm-device']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.storage_node__remove_jm_device(sub_command, args)
+            elif sub_command in ['restart-jm-device']:
+                ret = self.storage_node__restart_jm_device(sub_command, args)
+            elif sub_command in ['send-cluster-map']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.storage_node__send_cluster_map(sub_command, args)
+            elif sub_command in ['get-cluster-map']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.storage_node__get_cluster_map(sub_command, args)
+            elif sub_command in ['make-primary']:
+                ret = self.storage_node__make_primary(sub_command, args)
+            elif sub_command in ['dump-lvstore']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.storage_node__dump_lvstore(sub_command, args)
+            elif sub_command in ['set']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    ret = self.storage_node__set(sub_command, args)
+            else:
+                self.parser.print_help()
 
             elif args.command in ['cluster']:
                 sub_command = args_dict['cluster']
