@@ -61,7 +61,7 @@ class Cluster(BaseModel):
     strict_node_anti_affinity: bool = False
     tls: bool = False
     is_re_balancing: bool = False
-    full_page_unmap: bool = True
+    full_page_unmap: bool = False
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
