@@ -293,12 +293,14 @@ while True:
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
 
+                node_data_nic_ping_check = False
                 for data_nic in snode.data_nics:
                     if data_nic.ip4_address:
                         data_ping_check = health_controller._check_node_ping(data_nic.ip4_address)
                         logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
-                        if not data_ping_check:
-                            node_port_check = False
+                        node_data_nic_ping_check |= data_ping_check
+
+                node_port_check &= node_data_nic_ping_check
 
             cluster = db.get_cluster_by_id(cluster.get_id())
 
