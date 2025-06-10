@@ -778,7 +778,7 @@ class SshUtils:
 
     def add_storage_node(self, node, cluster_id, node_ip, ifname="eth0", partitions=0,
                          data_nic="eth1", disable_ha_jm=False, enable_test_device=False, 
-                         spdk_debug=False, spdk_image=None):
+                         spdk_debug=False, spdk_image=None, namespace=None):
         """Add new storage node
 
         Args:
@@ -806,6 +806,8 @@ class SshUtils:
             cmd = f"{cmd} --spdk-image {spdk_image}"
         if spdk_debug:
             cmd = f"{cmd} --spdk-debug"
+        if namespace:
+            cmd = f"{cmd} --namespace {namespace}"
     
         add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname} --data-nics {data_nic}"
         self.exec_command(node=node, command=add_node_cmd)
@@ -1765,7 +1767,7 @@ class RunnerK8sLog:
         - get_running_pods(): Fetches all currently running pods in a namespace.
     """
 
-    def __init__(self, namespace="spdk-csi", log_dir="/var/logs", test_name="test_run"):
+    def __init__(self, namespace="simplyblk", log_dir="/var/logs", test_name="test_run"):
         """
         Initialize the RunnerLog class.
 

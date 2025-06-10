@@ -228,7 +228,7 @@ def upload_k8s_logs():
     os.makedirs(local_k8s_log_dir, exist_ok=True)
 
     # Get all namespaces
-    namespace = "spdk-csi"
+    namespace = "simplyblk"
 
     print(f"[INFO] Processing namespace: {namespace}")
 

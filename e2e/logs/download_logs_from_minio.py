@@ -30,14 +30,17 @@ def download_file(s3_file_key, minio_prefix, local_base_dir):
     if "_iolog" in s3_file_key:
         return f"[{thread_name}] [SKIP] {s3_file_key} (iolog file)"
     
-    start_time = time.time()
-    print(f"[{thread_name}] [START] {s3_file_key}")
-    try:
-        s3_client.download_file(MINIO_BUCKET, s3_file_key, local_file_path)
-        duration = time.time() - start_time
-        return f"[{thread_name}] [DONE]  {s3_file_key} → {local_file_path} ({duration:.2f}s)"
-    except Exception as e:
-        return f"[{thread_name}] [FAIL]  {s3_file_key}: {e}"
+    while True:
+        start_time = time.time()
+        print(f"[{thread_name}] [START] {s3_file_key}")
+        try:
+            s3_client.download_file(MINIO_BUCKET, s3_file_key, local_file_path)
+            duration = time.time() - start_time
+            return f"[{thread_name}] [DONE]  {s3_file_key} → {local_file_path} ({duration:.2f}s)"
+        except Exception as e:
+            print(f"[{thread_name}] [RETRY] Failed to download {s3_file_key}: {e}")
+            time.sleep(2)  # Optional: add small delay to avoid hammering the server
+
 
 # Main recursive download logic
 def download_from_minio(minio_uri, max_workers=5):
