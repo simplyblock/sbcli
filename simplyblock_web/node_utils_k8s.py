@@ -113,6 +113,6 @@ def pod_exec(name, namespace, container, command, k8s_core_v1):
 def get_namespace():
     if os.path.exists(namespace_id_file):
         with open(namespace_id_file, 'r') as f:
-            out = f.read()
+            out = f.read().strip()
             return out
     return default_namespace
