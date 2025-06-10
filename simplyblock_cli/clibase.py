@@ -155,7 +155,6 @@ class CLIWrapperBase:
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
-            full_page_unmap=args.full_page_unmap
         )
 
         return out

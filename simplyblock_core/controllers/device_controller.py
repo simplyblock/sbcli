@@ -150,6 +150,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
             pba_init_mode=2,
             write_protection=cluster.distr_ndcs > 1,
             pba_page_size=cluster.page_size_in_blocks,
+            full_page_unmap=cluster.full_page_unmap
         )
 
         if not ret:
@@ -894,6 +895,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
                 pba_init_mode=1,
                 pba_page_size=cluster.page_size_in_blocks,
+                full_page_unmap=cluster.full_page_unmap
             )
 
             if not ret:
