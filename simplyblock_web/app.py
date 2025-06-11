@@ -2,11 +2,10 @@
 # encoding: utf-8
 
 import logging
-from flask import Flask, redirect
+from flask import Flask, redirect, request
 
 from simplyblock_web import utils
 from simplyblock_web.api import public_api
-from simplyblock_web.auth_middleware import token_required
 from simplyblock_core import constants, utils as core_utils
 
 logger = core_utils.get_logger(__name__)
@@ -25,21 +24,17 @@ app.register_error_handler(Exception, utils.error_handler)
 app.register_blueprint(public_api, url_prefix='/api')
 
 
-@app.before_request
-@token_required
-def before_request():
-    pass
-
-
 @app.route('/', methods=['GET'])
 def status():
     return utils.get_response("Live")
 
 
 # Redirect unqualified URLs to the API
-@app.route('/<path:path>')
-def redirect_v1(path):
-    return redirect('/api/v1/{path}', code=308)
+@app.before_request
+def redirect_v1():
+    if request.path.startswith('/api') or request.path.startswith('/static'):
+        return None
+    return redirect(f'/api/v1{request.path}' + ('?' + request.query_string.decode() if request.query_string else ''), code=308)
 
 
 if __name__ == '__main__':

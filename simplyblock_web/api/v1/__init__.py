@@ -1,5 +1,7 @@
 from flask import Blueprint
 
+from simplyblock_web.auth_middleware import token_required
+
 from . import cluster
 from . import mgmt_node
 from . import device
@@ -25,3 +27,9 @@ api.register_blueprint(caching_node.bp)
 api.register_blueprint(deployer.bp)
 api.register_blueprint(swagger_ui.bp, url_prefix=swagger_ui.SWAGGER_URL)
 api.register_blueprint(metrics.bp)
+
+
+@api.before_request
+@token_required
+def before_request():
+    pass
