@@ -2,10 +2,12 @@
 # encoding: utf-8
 
 import logging
-from flask import Flask, redirect, request
+from flask import redirect, request
+from flask_openapi3 import OpenAPI
 
 from simplyblock_web import utils
 from simplyblock_web.api import public_api
+from simplyblock_web.api.v2.auth import api_token_required_scheme
 from simplyblock_core import constants, utils as core_utils
 
 logger = core_utils.get_logger(__name__)
@@ -14,7 +16,12 @@ logger = core_utils.get_logger(__name__)
 core_utils.init_sentry_sdk()
 
 
-app = Flask(__name__)
+app = OpenAPI(
+        __name__,
+        security_schemes={
+            'token_v2': api_token_required_scheme,
+        },
+)
 app.logger.setLevel(constants.LOG_WEB_LEVEL)
 app.url_map.strict_slashes = False
 app.register_error_handler(Exception, utils.error_handler)
