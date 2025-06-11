@@ -371,6 +371,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         # 1. Get the token from the k3s master node
         token, _ = self.ssh_obj.exec_command(self.k3s_mnode, "sudo cat /var/lib/rancher/k3s/server/node-token")
 
+        token = token.strip()
+
         # 2. Install k3s and join the cluster
         k3s_install_cmd = f"curl -sfL https://get.k3s.io | K3S_URL=https://{self.k3s_mnode}:6443 K3S_TOKEN={token} bash -"
         self.logger.info(f"Installing k3s on {node_ip} and joining cluster")
