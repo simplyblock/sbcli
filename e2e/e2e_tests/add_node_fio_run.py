@@ -324,11 +324,11 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
             self.logger.info(f"Namespace provided as input: {namespace}")
 
         # 2. Check /etc/simplyblock/namespace on an existing node
-        command = "cat /etc/simplyblock/namespace 2>/dev/null"  # Suppress errors if file doesn't exist
+        command = "cat /var/simplyblock/namespace 2>/dev/null"  # Suppress errors if file doesn't exist
         try:
             namespace = self.ssh_obj.exec_command(node_ip, command).strip()
             if namespace:
-                self.logger.info(f"Namespace found in /etc/simplyblock/namespace: {namespace}")
+                self.logger.info(f"Namespace found in /var/simplyblock/namespace: {namespace}")
                 return namespace
         except Exception as e:
             self.logger.debug(f"Error reading namespace from file: {e}")
@@ -401,7 +401,9 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                                         disable_ha_jm= not node_sample["enable_ha_jm"],
                                         enable_test_device=node_sample["enable_test_device"],
                                         spdk_debug=node_sample["spdk_debug"],
-                                        namespace=self.namespace)
+                                        namespace=self.namespace,
+                                        data_nic=None)
+          sleep_n_sec(180)
 
     def run(self):
         self.logger.info("Starting Test: Add Nodes During FIO Run (Kubernetes)")
@@ -527,8 +529,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
             self._add_node_to_cluster(ip)
             sleep_n_sec(30)
             self.logger.info(f"Adding node {ip} to SimplyBlock cluster")
-            self._add_node_sbcli(ip)
-            sleep_n_sec(60)
+            # self._add_node_sbcli(ip)
+            sleep_n_sec(180)
             new_nodes_id = []
             new_nodes_id.append(self.sbcli_utils.get_node_without_lvols())
             self.storage_nodes.append(ip)

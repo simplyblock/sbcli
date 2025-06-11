@@ -809,7 +809,10 @@ class SshUtils:
         if namespace:
             cmd = f"{cmd} --namespace {namespace}"
     
-        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname} --data-nics {data_nic}"
+        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
+
+        if data_nic:
+            cmd  = f"{cmd} --data-nics {data_nic}"
         self.exec_command(node=node, command=add_node_cmd)
 
     def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
