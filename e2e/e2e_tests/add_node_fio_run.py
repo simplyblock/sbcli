@@ -146,7 +146,10 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                                           enable_test_device=node_sample["enable_test_device"],
                                           spdk_debug=node_sample["spdk_debug"])
             sleep_n_sec(60)
-            new_nodes_id.append(self.sbcli_utils.get_node_without_lvols())
+            new_nodes_ids_temp = self.sbcli_utils.get_all_node_without_lvols()
+            for node_id in new_nodes_ids_temp:
+                if node_id not in new_nodes_id:
+                    new_nodes_id.append(node_id)
             self.storage_nodes.append(ip)
             containers = self.ssh_obj.get_running_containers(node_ip=ip)
             self.container_nodes[ip] = containers
@@ -520,8 +523,6 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         timestamp = int(datetime.now().timestamp())
         cluster_details = None
 
-        node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
-
         for ip in self.new_nodes:
             self.logger.info(f"Preparing worker node: {ip}")
             self._prepare_worker_node(ip)
@@ -531,8 +532,10 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
             self.logger.info(f"Adding node {ip} to SimplyBlock cluster")
             # self._add_node_sbcli(ip)
             sleep_n_sec(180)
-            new_nodes_id = []
-            new_nodes_id.append(self.sbcli_utils.get_node_without_lvols())
+            new_nodes_ids_temp = self.sbcli_utils.get_all_node_without_lvols()
+            for node_id in new_nodes_ids_temp:
+                if node_id not in new_nodes_id:
+                    new_nodes_id.append(node_id)
             self.storage_nodes.append(ip)
 
             cluster_details = self.sbcli_utils.wait_for_cluster_status(
@@ -545,6 +548,13 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
 
         # Step 3: Resume cluster
         sleep_n_sec(300)
+        for node in new_nodes_id:
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_id=node,
+                status="online",
+                timeout=300
+            )
+        
         self.logger.info("Expanding the cluster")
         self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 

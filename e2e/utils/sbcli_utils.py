@@ -249,6 +249,18 @@ class SbcliUtils:
                 node_uuid = result['uuid']
                 break
         return node_uuid
+    
+    def get_all_node_without_lvols(self) -> str:
+        """
+        returns all nodeID which doesn't have any lvol attached
+        """
+        # a node which doesn't have any lvols attached
+        node_uuids = []
+        data = self.get_request(api_url="/storagenode")
+        for result in data['results']:
+            if result['lvols'] == 0 and result['is_secondary_node'] is False:
+                node_uuids.append(result['uuid'])
+        return node_uuids
 
     def shutdown_node(self, node_uuid: str, expected_error_code=None):
         """
