@@ -381,12 +381,12 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         self.logger.info(f"Waiting for kubectl to be ready on {node_ip}")
         sleep_n_sec(30)
 
-        node_name_cmd = "sudo kubectl get nodes -o wide | grep -w %s | awk '{print $1}'" % node_ip
+        node_name_cmd = "kubectl get nodes -o wide | grep -w %s | awk '{print $1}'" % node_ip
         self.logger.info(f"Getting node name to label {node_ip}.")
         name, _ = self.ssh_obj.exec_command(self.k3s_mnode, node_name_cmd)
         
         # 3. Add label to the node
-        kubectl_label_cmd = f"sudo kubectl label node {name} type=simplyblock-storage-plane"
+        kubectl_label_cmd = f"kubectl label node {name} type=simplyblock-storage-plane"
         self.logger.info(f"Adding label to node {node_ip}, name: {name}")
         self.ssh_obj.exec_command(self.k3s_mnode, kubectl_label_cmd)
 
