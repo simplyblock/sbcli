@@ -311,7 +311,6 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         self.mount_base = "/mnt/"
         self.log_base = f"{Path.home()}/"
         self.namespace = kwargs.get("namespace", None)
-        self.node_interface = None # Will be fetched dynamically
         self.test_name = "add_nodes_during_fio_k8s"
         self.logger.info(f"New Nodes to Add: {self.new_nodes}")
 
@@ -510,7 +509,6 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         cluster_details = None
 
         node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
-        self.node_interface = node_sample["interface"]
 
         for ip in self.new_nodes:
             self.logger.info(f"Preparing worker node: {ip}")
