@@ -340,6 +340,9 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
     def _prepare_worker_node(self, node_ip):
         """Prepares a worker node by installing necessary packages and configuring kernel parameters."""
         commands = [
+            "sudo rm -f /usr/local/bin/kubectl || true",
+            "sudo rm -f /usr/bin/kubectl || true",
+            "sudo yum remove -y kubectl || true",
             "sudo yum install -y fio nvme-cli bc",
             "sudo modprobe nvme-tcp",
             "sudo modprobe nbd",
@@ -369,11 +372,11 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         token, _ = self.ssh_obj.exec_command(self.k3s_mnode, "sudo cat /var/lib/rancher/k3s/server/node-token")
 
         # 2. Install k3s and join the cluster
-        k3s_install_cmd = f"curl -sfL https://get.k3s.io | K3S_URL=https://{self.k3s_mnode}:6443 K3S_TOKEN={token[0]} bash -"
+        k3s_install_cmd = f"curl -sfL https://get.k3s.io | K3S_URL=https://{self.k3s_mnode}:6443 K3S_TOKEN={token} bash -"
         self.logger.info(f"Installing k3s on {node_ip} and joining cluster")
         self.ssh_obj.exec_command(node_ip, k3s_install_cmd)
 
-        node_name_cmd = "sudo kubectl get nodes -o wide | grep -w %s | awk '{print \$1}'" % node_ip
+        node_name_cmd = "sudo kubectl get nodes -o wide | grep -w %s | awk '{print $1}'" % node_ip
         self.logger.info(f"Getting node name to label {node_ip}.")
         name, _ = self.ssh_obj.exec_command(self.k3s_mnode, node_name_cmd)
         
