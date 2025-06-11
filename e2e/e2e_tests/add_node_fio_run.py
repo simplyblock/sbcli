@@ -544,7 +544,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         self.runner_k8s_log.restart_logging()
 
         # Step 3: Resume cluster
-        sleep_n_sec(60)
+        sleep_n_sec(300)
         self.logger.info("Expanding the cluster")
         self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 
