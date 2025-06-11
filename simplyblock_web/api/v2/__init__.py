@@ -10,14 +10,15 @@ from . import snapshot
 from . import storage_node
 
 
-cluster.instance_api.register_api(caching_node.api, path_prefix='/caching_node')
-cluster.instance_api.register_api(device.api, path_prefix='/device')
-cluster.instance_api.register_api(lvol.api, path_prefix='/volume')
-cluster.instance_api.register_api(management_node.api, path_prefix='/management_node')
-cluster.instance_api.register_api(pool.api, path_prefix='/pool')
-cluster.instance_api.register_api(snapshot.api, path_prefix='/snapshot')
-cluster.instance_api.register_api(storage_node.api, path_prefix='/storage_node')
+storage_node.instance_api.register_api(device.api)
+pool.instance_api.register_api(lvol.api)
+
+cluster.instance_api.register_api(caching_node.api)
+cluster.instance_api.register_api(pool.api)
+cluster.instance_api.register_api(snapshot.api)
+cluster.instance_api.register_api(storage_node.api)
 
 
-api = APIBlueprint('API v2', __name__)
-api.register_api(cluster.api, path_prefix='/cluster')
+api = APIBlueprint('API v2', __name__, url_prefix='v2')
+api.register_api(cluster.api)
+api.register_api(management_node.api)

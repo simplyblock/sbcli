@@ -15,8 +15,7 @@ from . import util as util
 from .cluster import ClusterPath
 
 
-# TODO: how to register below `cluster.instance_api`?
-api = APIBlueprint('storage_node', __name__, url_prefix='/cluster/<cluster_id>/storage_node')
+api = APIBlueprint('storage_node', __name__, url_prefix='/storage_nodes')
 db = DBController()
 
 

@@ -13,7 +13,7 @@ from simplyblock_web import utils as web_utils
 from .cluster import ClusterPath
 
 
-api = APIBlueprint('caching node', __name__, url_prefix='/cluster/<cluster_id>/caching_node')
+api = APIBlueprint('caching node', __name__, url_prefix='/caching_nodes')
 db = DBController()
 
 

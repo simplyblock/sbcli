@@ -10,7 +10,7 @@ from simplyblock_core import utils as core_utils
 
 from .cluster import ClusterPath
 
-api = APIBlueprint('snapshot', __name__, url_prefix='/cluster/<cluster_id>/snapshot')
+api = APIBlueprint('snapshot', __name__, url_prefix='/snapshots')
 db = DBController()
 
 

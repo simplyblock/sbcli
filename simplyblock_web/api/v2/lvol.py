@@ -12,7 +12,7 @@ from .pool import PoolPath
 from . import util
 
 
-api = APIBlueprint('volume', __name__, url_prefix='/cluster/<cluster_id>/pool/<pool_id>/volume')
+api = APIBlueprint('volume', __name__, url_prefix='/volumes')
 db = DBController()
 
 

@@ -11,7 +11,7 @@ from . import util
 from .storage_node import StorageNodePath
 
 
-api = APIBlueprint('device', __name__, url_prefix='/cluster/<cluster_id>/storage_node/<storage_node_id>/device')
+api = APIBlueprint('device', __name__, url_prefix='/devices')
 db = DBController()
 
 

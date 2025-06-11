@@ -14,7 +14,7 @@ from simplyblock_core import cluster_ops, utils as core_utils
 from . import util as util
 
 
-api = APIBlueprint('cluster', __name__, url_prefix='/cluster')
+api = APIBlueprint('cluster', __name__, url_prefix='/clusters')
 db = DBController()
 
 

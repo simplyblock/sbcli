@@ -13,7 +13,7 @@ from . import util as util
 from .cluster import ClusterPath
 
 
-api = APIBlueprint('pool', __name__, url_prefix='/cluster/<cluster_id>/pool')
+api = APIBlueprint('pool', __name__, url_prefix='/pools')
 db = DBController()
 
 

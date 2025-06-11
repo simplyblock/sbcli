@@ -22,7 +22,7 @@ app.register_error_handler(Exception, utils.error_handler)
 
 
 # Add routes
-app.register_blueprint(public_api, path_prefix='/api')
+app.register_blueprint(public_api, url_prefix='/api')
 
 
 @app.before_request

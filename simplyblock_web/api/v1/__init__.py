@@ -13,7 +13,7 @@ from . import swagger_ui
 from . import metrics
 
 
-api = Blueprint('API v1', __name__)
+api = Blueprint('API v1', __name__, url_prefix='v1')
 api.register_blueprint(cluster.bp)
 api.register_blueprint(mgmt_node.bp)
 api.register_blueprint(device.bp)
