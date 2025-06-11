@@ -376,6 +376,9 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         self.logger.info(f"Installing k3s on {node_ip} and joining cluster")
         self.ssh_obj.exec_command(node_ip, k3s_install_cmd)
 
+        self.logger.info(f"Waiting for kubectl to be ready on {node_ip}")
+        sleep_n_sec(30)
+
         node_name_cmd = "sudo kubectl get nodes -o wide | grep -w %s | awk '{print $1}'" % node_ip
         self.logger.info(f"Getting node name to label {node_ip}.")
         name, _ = self.ssh_obj.exec_command(self.k3s_mnode, node_name_cmd)
