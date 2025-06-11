@@ -56,7 +56,7 @@ class _CloneParams(BaseModel):
     new_size: Optional[int]
 
 
-@instance_api.clone('/')
+@instance_api.post('/clone')
 def clone(path: SnapshotPath, body: _CloneParams):
     snapshot = db.get_snapshot_by_id(path.snapshot_id)
     if snapshot is None:

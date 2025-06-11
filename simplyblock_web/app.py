@@ -5,7 +5,7 @@ import logging
 from flask import Flask, redirect
 
 from simplyblock_web import utils
-from simplyblock_web.api import v1
+from simplyblock_web.api import public_api
 from simplyblock_web.auth_middleware import token_required
 from simplyblock_core import constants, utils as core_utils
 
@@ -22,7 +22,7 @@ app.register_error_handler(Exception, utils.error_handler)
 
 
 # Add routes
-app.register_blueprint(v1.api, path_prefix='/api/v1')
+app.register_blueprint(public_api, path_prefix='/api')
 
 
 @app.before_request
@@ -42,7 +42,6 @@ def redirect_v1(path):
     return redirect('/api/v1/{path}', code=308)
 
 
-app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 if __name__ == '__main__':
     logging.getLogger('werkzeug').setLevel(constants.LOG_WEB_LEVEL)
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)

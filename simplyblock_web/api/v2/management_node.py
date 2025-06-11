@@ -4,7 +4,7 @@ from pydantic import Field
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
-from simplyblock_core.models.management_node import ManagementNode
+from simplyblock_core.models.mgmt_node import MgmtNode
 
 from .cluster import ClusterPath
 
@@ -28,7 +28,7 @@ instance_api = APIBlueprint('management node instance', __name__, url_prefix='/<
 class ManagementNodePath(ClusterPath):
     management_node_id: str = Field(core_utils.UUID_PATTERN)
 
-    def management_node(self) -> ManagementNode:
+    def management_node(self) -> MgmtNode:
         management_node = db.get_mgmt_node_by_id(self.storage_node_id)
         if management_node is None:
             abort(404)

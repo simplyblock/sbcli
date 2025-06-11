@@ -124,7 +124,7 @@ def logs(path: ClusterPath, query: _LimitQuery):
     return json.loads(serialized_logs_or_false)
 
 
-@instance_api('/tasks')
+@instance_api.get('/tasks')
 def tasks(path: ClusterPath, query: _LimitQuery):
     serialized_tasks_or_false = tasks_controller.list_tasks(
             path.cluster().get_id(), is_json=True, limit=query.limit)
@@ -134,7 +134,7 @@ def tasks(path: ClusterPath, query: _LimitQuery):
     return json.loads(serialized_tasks_or_false)
 
 
-@instance_api('/start')
+@instance_api.post('/start')
 def start(path: ClusterPath):
     Thread(
         target=cluster_ops.cluster_grace_startup,
@@ -143,7 +143,7 @@ def start(path: ClusterPath):
     return None, 201  # FIXME: Provide URL for checking task status
 
 
-@instance_api('/shutdown')
+@instance_api.post('/shutdown')
 def shutdown(path: ClusterPath):
     Thread(
         target=cluster_ops.cluster_grace_shutdown,
@@ -152,7 +152,7 @@ def shutdown(path: ClusterPath):
     return None, 201  # FIXME: Provide URL for checking task status
 
 
-@instance_api('/activate')
+@instance_api.post('/activate')
 def activate(path: ClusterPath):
     Thread(
         target=cluster_ops.cluster_activate,
@@ -161,7 +161,7 @@ def activate(path: ClusterPath):
     return None, 201  # FIXME: Provide URL for checking task status
 
 
-@instance_api('/update')
+@instance_api.post('/update')
 def update(path: ClusterPath, body: _UpdateParams):
     if not cluster_ops.update_cluster(
         cluster_id=path.cluster().get_id(),
