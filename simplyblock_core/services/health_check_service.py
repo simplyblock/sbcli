@@ -5,7 +5,7 @@ from datetime import datetime
 from simplyblock_core import utils
 logger = utils.get_logger(__name__)
 
-from simplyblock_core.controllers import health_controller, storage_events, device_events, tcp_ports_events
+from simplyblock_core.controllers import health_controller, storage_events, device_events, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -45,8 +45,6 @@ def set_device_health_check(cluster_id, device, health_check_status):
 
 # get DB controller
 db = db_controller.DBController()
-
-nodes_ports_blocked: dict[str, list] = {}
 
 logger.info("Starting health check service")
 while True:
@@ -249,27 +247,10 @@ while True:
                         logger.info(
                             f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
                         if not lvol_port_check:
-                            if snode.get_id() in nodes_ports_blocked:
-                                if port not in nodes_ports_blocked[snode.get_id()]:
-                                    nodes_ports_blocked[snode.get_id()].append(port)
-                            else:
-                                nodes_ports_blocked[snode.get_id()] = [port]
+                            tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
             set_node_health_check(snode, bool(health_check_status))
 
     time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
-
-    for node_id in nodes_ports_blocked:
-        snode = db.get_storage_node_by_id(node_id)
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=3, retry=2)
-        if nodes_ports_blocked[node_id]:
-            for port in nodes_ports_blocked[node_id]:
-                if port:
-                    logger.info(f"Allow port {port} on node {node_id}")
-                    snode_api.firewall_set_port(port, "tcp", "allow", snode.rpc_port)
-                    tcp_ports_events.port_allowed(snode, port)
-
-    nodes_ports_blocked = {}
-    time.sleep(3)
 
