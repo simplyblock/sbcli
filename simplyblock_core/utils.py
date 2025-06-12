@@ -12,6 +12,7 @@ import sys
 import uuid
 import time
 import psutil
+import socket
 from typing import Set, Union
 from kubernetes import client, config
 import docker
@@ -177,6 +178,25 @@ def get_docker_client(cluster_id=None):
             raise e
     return False
 
+def get_k8s_node_ip():
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    nodes = db_controller.get_mgmt_nodes()
+
+    if not nodes:
+        logger.error("No mgmt nodes was found in the cluster!")
+        return False
+
+    mgmt_ips = [node.mgmt_ip for node in nodes]
+
+    for ip in mgmt_ips:
+        try:
+            with socket.create_connection((ip, 10250), timeout=2):
+                return ip
+        except Exception as e:
+            print(e)
+            raise e
+    return False
 
 def dict_agg(data, mean=False, keys=None):
     out = {}
