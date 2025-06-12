@@ -159,7 +159,7 @@ rpc_password = get_env_var("RPC_PASSWORD", is_required=True)
 try:
     rpc_port = int(rpc_port)
 except Exception:
-    rpc_port = 8080
+    rpc_port = 8081
 
 is_threading_enabled = bool(is_threading_enabled)
 run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)
