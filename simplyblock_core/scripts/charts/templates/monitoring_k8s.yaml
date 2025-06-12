@@ -33,6 +33,10 @@ spec:
           volumeMounts:
             - mountPath: /data/db
               name: simplyblock-mongodb-data
+          resources:
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
   volumeClaimTemplates:
     - metadata:
         name: simplyblock-mongodb-data
@@ -90,6 +94,10 @@ spec:
           volumeMounts:
             - mountPath: /usr/share/opensearch/data
               name: simplyblock-os-data
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "2Gi"
   volumeClaimTemplates:
     - metadata:
         name: simplyblock-os-data
@@ -212,6 +220,10 @@ spec:
               name: simplyblock-graylog-data
             - mountPath: /usr/share/graylog/data/journal
               name: simplyblock-graylog-journal
+          resources:
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: simplyblock-graylog-data
           hostPath:
@@ -272,6 +284,10 @@ spec:
               mountPath: /etc/prometheus
             - name: prometheus-data
               mountPath: /prometheus
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "2Gi"
       volumes:
         - name: config-volume
           configMap:
@@ -312,6 +328,10 @@ spec:
               mountPath: /prometheus
             - name: objstore-config
               mountPath: /etc/thanos
+          resources:
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: prometheus-data
           persistentVolumeClaim:
@@ -349,6 +369,10 @@ spec:
           volumeMounts:
             - name: objstore-config
               mountPath: /etc/thanos
+          resources:
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: objstore-config
           configMap:
@@ -380,6 +404,10 @@ spec:
             - --http-address=0.0.0.0:9091
             - --store=simplyblock-thanos-store:10901
             - --store=simplyblock-thanos-sidecar:10901
+          resources:
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
 
 ---
 # apiVersion: v1
@@ -430,6 +458,10 @@ spec:
               mountPath: /etc/thanos
             - name: compactor-data
               mountPath: /data
+          resources:
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: objstore-config
           configMap:
@@ -482,6 +514,10 @@ spec:
               mountPath: /host/root
               mountPropagation: HostToContainer
               readOnly: true
+          resources:
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: proc
           hostPath:
@@ -580,6 +616,10 @@ spec:
               subPath: node-exporter.json
             - name: grafana-data
               mountPath: /var/lib/grafana
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "2Gi"
       volumes:
         - name: datasource-config
           configMap:
