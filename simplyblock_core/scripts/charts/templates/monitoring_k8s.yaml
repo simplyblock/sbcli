@@ -34,6 +34,9 @@ spec:
             - mountPath: /data/db
               name: simplyblock-mongodb-data
           resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
             limits:
               cpu: "250m"
               memory: "1Gi"
@@ -95,6 +98,9 @@ spec:
             - mountPath: /usr/share/opensearch/data
               name: simplyblock-os-data
           resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
             limits:
               cpu: "500m"
               memory: "2Gi"
@@ -221,6 +227,9 @@ spec:
             - mountPath: /usr/share/graylog/data/journal
               name: simplyblock-graylog-journal
           resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
             limits:
               cpu: "250m"
               memory: "1Gi"
@@ -285,9 +294,12 @@ spec:
             - name: prometheus-data
               mountPath: /prometheus
           resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
             limits:
               cpu: "500m"
-              memory: "2Gi"
+              memory: "1Gi"
       volumes:
         - name: config-volume
           configMap:
@@ -329,6 +341,9 @@ spec:
             - name: objstore-config
               mountPath: /etc/thanos
           resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
             limits:
               cpu: "250m"
               memory: "1Gi"
@@ -370,6 +385,9 @@ spec:
             - name: objstore-config
               mountPath: /etc/thanos
           resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
             limits:
               cpu: "250m"
               memory: "1Gi"
@@ -405,6 +423,9 @@ spec:
             - --store=simplyblock-thanos-store:10901
             - --store=simplyblock-thanos-sidecar:10901
           resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
             limits:
               cpu: "250m"
               memory: "1Gi"
@@ -459,6 +480,9 @@ spec:
             - name: compactor-data
               mountPath: /data
           resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
             limits:
               cpu: "250m"
               memory: "1Gi"
@@ -515,6 +539,9 @@ spec:
               mountPropagation: HostToContainer
               readOnly: true
           resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
             limits:
               cpu: "250m"
               memory: "1Gi"
@@ -617,6 +644,9 @@ spec:
             - name: grafana-data
               mountPath: /var/lib/grafana
           resources:
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
             limits:
               cpu: "500m"
               memory: "2Gi"

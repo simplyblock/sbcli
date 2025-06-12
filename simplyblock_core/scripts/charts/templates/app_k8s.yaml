@@ -45,9 +45,12 @@ spec:
           - name: cluster-file
             mountPath: /etc/foundationdb
         resources:
+          requests:
+            cpu: "100m"
+            memory: "512Mi"
           limits:
             cpu: "500m"
-            memory: "4Gi"
+            memory: "2Gi"
       volumes:
       - name: fdb-data
         hostPath:
@@ -96,6 +99,9 @@ spec:
           - name: cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
         resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
           limits:
             cpu: "250m"
             memory: "1Gi"
@@ -143,6 +149,9 @@ spec:
         - name: fdb-config
           mountPath: /etc/foundationdb
         resources:
+          requests:
+            cpu: "100m"
+            memory: "512Mi"
           limits:
             cpu: "500m"
             memory: "1Gi"
@@ -875,8 +884,11 @@ spec:
           mountPath: /usr/local/etc/haproxy/haproxy.cfg
           subPath: haproxy.cfg
         resources:
+          requests:
+            cpu: "100m"
+            memory: "400Mi"
           limits:
-            cpu: "250m"
+            cpu: "350m"
             memory: "1Gi"
       volumes:
       - name: haproxy-config
@@ -923,6 +935,9 @@ spec:
             - name: config
               mountPath: /fluent-bit/etc/
           resources:
+            requests:
+              cpu: "100m"
+              memory: "400Mi"
             limits:
               cpu: "250m"
               memory: "1Gi"
