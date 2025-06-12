@@ -13,9 +13,9 @@ spec:
   hostNetwork: true
   tolerations:
     - effect: NoSchedule
-      key: dedicated
-      operator: Equal
-      value: simplyblock-storage-plane
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
   volumes:
     - name: socket-dir
       emptyDir:
