@@ -17,6 +17,7 @@ export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
 export CONTACT_POINT=${11}
+export K8S_NAMESPACE=${12}
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
@@ -39,7 +40,7 @@ envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 /usr/local/bin/helm dependency build "$DIR"/charts/
 
 /usr/local/bin/helm upgrade --install sbcli "$DIR"/charts/ \
-  --namespace simplyblock \
+  --namespace $K8S_NAMESPACE \
   --create-namespace
 
-/usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace simplyblock --timeout=300s
+/usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace $K8S_NAMESPACE --timeout=300s

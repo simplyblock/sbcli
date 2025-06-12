@@ -330,7 +330,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         ret = scripts.deploy_k8s_stack(cli_pass, DEV_IP, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                                log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint, contact_point)
+                                log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint, contact_point, constants.K8S_NAMESPACE)
         logger.info("Deploying helm stack > Done")
 
         if ret == 0:
@@ -1390,14 +1390,13 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         elif cluster.mode == "kubernetes": 
             k8s_config.load_kube_config()
             apps_v1 = k8s_client.AppsV1Api()
-            namespace = "simplyblock"
             
             image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
             image_parts = "/".join(image_without_tag.split("/")[-2:])
             service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
 
             # Update Deployments
-            deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
+            deployments = apps_v1.list_namespaced_deployment(namespace=constants.K8S_NAMESPACE)
             for deploy in deployments.items:
                 for c in deploy.spec.template.spec.containers:
                     if image_parts in c.image:
@@ -1408,12 +1407,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         deploy.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_deployment(
                             name=deploy.metadata.name,
-                            namespace=namespace,
+                            namespace=constants.K8S_NAMESPACE,
                             body={"spec": {"template": deploy.spec.template}}
                         )
 
             # Update DaemonSets
-            daemonsets = apps_v1.list_namespaced_daemon_set(namespace=namespace)
+            daemonsets = apps_v1.list_namespaced_daemon_set(namespace=constants.K8S_NAMESPACE)
             for ds in daemonsets.items:
                 for c in ds.spec.template.spec.containers:
                     if image_parts in c.image:
@@ -1424,7 +1423,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         ds.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_daemon_set(
                             name=ds.metadata.name,
-                            namespace=namespace,
+                            namespace=constants.K8S_NAMESPACE,
                             body={"spec": {"template": ds.spec.template}}
                         )
 

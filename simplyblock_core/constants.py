@@ -146,6 +146,11 @@ SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
+K8S_NAMESPACE = "simplyblock"
+OS_STATEFULSET_NAME = "simplyblock-opensearch"
+MONGODB_STATEFULSET_NAME = "simplyblock-mongodb"
+GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
+
 os_env_patch = [
     {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},
     {"name": "bootstrap.memory_lock", "value": "false"},

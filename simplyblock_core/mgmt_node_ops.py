@@ -138,31 +138,27 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             config.load_kube_config()
             v1 = k8s_client.CoreV1Api()
             apps_v1 = k8s_client.AppsV1Api()
-            namespace = "simplyblock"
-            os_statefulset_name = "simplyblock-opensearch"
-            mongodb_statefulset_name = "simplyblock-mongodb"
-            graylog_deploy_name = "simplyblock-graylog"
-            
+                        
             response = apps_v1.patch_namespaced_stateful_set(
-                name=os_statefulset_name,
-                namespace=namespace,
+                name=constants.OS_STATEFULSET_NAME,
+                namespace=constants.K8S_NAMESPACE,
                 body=constants.os_patch
             )
 
-            logger.info(f"Patched StatefulSet {os_statefulset_name}: {response.status.replicas} replicas")
+            logger.info(f"Patched StatefulSet {constants.OS_STATEFULSET_NAME}: {response.status.replicas} replicas")
 
             response = apps_v1.patch_namespaced_stateful_set(
-                name=mongodb_statefulset_name,
-                namespace=namespace,
+                name=constants.MONGODB_STATEFULSET_NAME,
+                namespace=constants.K8S_NAMESPACE,
                 body=constants.mongodb_patch
             )
 
-            logger.info(f"Patched StatefulSet {mongodb_statefulset_name}: {response.status.replicas} replicas")
+            logger.info(f"Patched StatefulSet {constants.MONGODB_STATEFULSET_NAME}: {response.status.replicas} replicas")
             max_wait = 120 
             interval = 5
             waited = 0
             while waited < max_wait:
-                if utils.all_pods_ready(v1, mongodb_statefulset_name, namespace, 3):
+                if utils.all_pods_ready(v1, constants.MONGODB_STATEFULSET_NAME, constants.K8S_NAMESPACE, 3):
                     logger.info("All MongoDB pods are ready.")
                     break
                 time.sleep(interval)
@@ -173,8 +169,8 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             utils.initiate_mongodb_rs()
 
             response = apps_v1.patch_namespaced_deployment(
-                name=graylog_deploy_name,
-                namespace=namespace,
+                name=constants.GRAYLOG_STATEFULSET_NAME,
+                namespace=constants.K8S_NAMESPACE,
                 body=constants.graylog_patch
             )
 
@@ -186,7 +182,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             retries = 30
             while retries > 0 and fdb_cont is None:
                 logger.info(f"Looking for FDB pod on node {current_node}...")
-                pods = v1.list_namespaced_pod(namespace=namespace, label_selector="app=simplyblock-fdb-server").items
+                pods = v1.list_namespaced_pod(namespace=constants.K8S_NAMESPACE, label_selector="app=simplyblock-fdb-server").items
                 for pod in pods:
                     if pod.spec.node_name == current_node:
                         fdb_cont = pod
