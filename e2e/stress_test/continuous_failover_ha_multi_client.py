@@ -56,7 +56,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         # self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
         #                      "interface_partial_network_interrupt",
         #                      "partial_nw"]
-        self.outage_types = ["interface_full_network_interrupt"]
+        self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
+                             "interface_partial_network_interrupt"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
