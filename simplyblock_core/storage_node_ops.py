@@ -1552,7 +1552,7 @@ def restart_storage_node(
         cluster_docker = utils.get_docker_client(snode.cluster_id)
         cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
 
-    elif cluster.mode == "docker":
+    else:
         cluster_ip = utils.get_k8s_node_ip()
     
     total_mem = 0
