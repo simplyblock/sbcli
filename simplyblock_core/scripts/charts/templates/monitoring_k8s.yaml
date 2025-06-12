@@ -36,7 +36,7 @@ spec:
           resources:
             requests:
               cpu: "100m"
-              memory: "512Mi"
+              memory: "300Mi"
             limits:
               cpu: "250m"
               memory: "1Gi"
@@ -103,7 +103,7 @@ spec:
               memory: "512Mi"
             limits:
               cpu: "500m"
-              memory: "2Gi"
+              memory: "3Gi"
   volumeClaimTemplates:
     - metadata:
         name: simplyblock-os-data
@@ -348,9 +348,13 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
+        # - name: prometheus-data
+        #   persistentVolumeClaim:
+        #     claimName: simplyblock-prometheus-data
         - name: prometheus-data
-          persistentVolumeClaim:
-            claimName: simplyblock-prometheus-data
+          hostPath:
+            path: /mnt/data/prometheus-data
+            type: DirectoryOrCreate
         - name: objstore-config
           configMap:
             name: simplyblock-objstore-config
