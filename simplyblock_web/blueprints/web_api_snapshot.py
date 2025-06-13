@@ -2,7 +2,6 @@
 # encoding: utf-8
 
 import logging
-import time
 
 from flask import Blueprint
 from flask import request

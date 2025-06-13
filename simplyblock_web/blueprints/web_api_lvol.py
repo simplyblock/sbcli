@@ -53,7 +53,7 @@ def lvol_iostats(uuid, history):
     if pool.secret:
         req_secret = request.headers.get('secret', "")
         if req_secret != pool.secret:
-            return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
+            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
 
     data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
@@ -73,7 +73,7 @@ def lvol_capacity(uuid, history):
     if pool.secret:
         req_secret = request.headers.get('secret', "")
         if req_secret != pool.secret:
-            return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
+            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
 
     data = lvol_controller.get_capacity(uuid, history, parse_sizes=False)
     out = []

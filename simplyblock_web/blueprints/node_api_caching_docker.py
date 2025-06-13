@@ -11,7 +11,7 @@ import docker
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 
-from simplyblock_web import utils, node_utils
+from simplyblock_web import utils
 from simplyblock_core import scripts, constants, utils as core_utils
 from simplyblock_core.utils import pull_docker_image_with_retry
 
@@ -90,7 +90,7 @@ def spdk_process_start(body: SPDKParams):
     )
 
 
-    container2 = node_docker.containers.run(
+    node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_core/services/spdk_http_proxy_server.py",
         name="spdk_proxy",
@@ -183,6 +183,6 @@ def join_db(body: _DBConnectionParams):
             if node.attrs["Name"] == "/spdk_proxy":
                 node_docker.containers.get(node.attrs["Id"]).restart()
                 break
-    except:
+    except Exception:
         pass
     return utils.get_response(True)
