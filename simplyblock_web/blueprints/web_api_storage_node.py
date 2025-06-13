@@ -9,7 +9,7 @@ from flask import Blueprint, request
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller, storage_node_ops, utils as core_utils
+from simplyblock_core import db_controller, storage_node_ops
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def storage_node_shutdown(uuid):
     try:
         args = request.args
         force = bool(args.get('force', True))
-    except:
+    except Exception:
         pass
 
     threading.Thread(

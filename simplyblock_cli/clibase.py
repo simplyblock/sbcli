@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import math
 import re
 import sys
 import time
@@ -12,7 +11,6 @@ import argcomplete
 from simplyblock_core import cluster_ops, utils, db_controller
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
-from simplyblock_core import constants
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
     tasks_controller
 from simplyblock_core.controllers import caching_node_controller, health_controller
