@@ -101,7 +101,7 @@
                                 "names": [
                                     "{__name__=\"snode_size_total\", cluster=\"9baa11f4-0b47-47e1-9dec-20dacdda59d0\", exported_job=\"collector\", instance=\"pushgateway:9091\", job=\"metricsgateway\", snode=\"90499750-6b1e-4452-8ff5-125166f33865\"}"
                                 ],
-                                "prefix": "All except:",
+                                "prefix": "All except Exception:",
                                 "readOnly": true
                             }
                         },
@@ -2111,7 +2111,7 @@
                                 "names": [
                                     "{__name__=\"snode_unmap_io_ps\", cluster=\"c3663938-6610-44d5-9897-d7bfa60a43e1\", exported_job=\"collector\", instance=\"192.168.178.52:9091\", job=\"metricsgateway\"}"
                                 ],
-                                "prefix": "All except:",
+                                "prefix": "All except Exception:",
                                 "readOnly": true
                             }
                         },

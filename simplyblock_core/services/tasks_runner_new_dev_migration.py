@@ -1,7 +1,5 @@
 # coding=utf-8
-import logging
 import time
-import sys
 from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, utils
@@ -124,7 +122,7 @@ def task_runner(task):
             res = rpc_client.distr_migration_status(**mig_info)
             return utils.handle_task_result(task, res, allowed_error_codes=allowed_error_codes)
     except Exception as e:
-        logger.error(f"Failed to get migration task status")
+        logger.error("Failed to get migration task status")
         logger.exception(e)
         task.function_result = "Failed to get migration status"
 

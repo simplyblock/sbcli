@@ -1,7 +1,5 @@
 # coding=utf-8
-import logging
 import time
-import sys
 from datetime import datetime
 
 from simplyblock_core import db_controller, utils
@@ -113,7 +111,7 @@ def task_runner(task):
 
             return out
     except Exception as e:
-        logger.error(f"Failed to get migration task status")
+        logger.error("Failed to get migration task status")
         logger.exception(e)
         task.function_result = "Failed to get migration status"
 

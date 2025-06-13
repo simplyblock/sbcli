@@ -1,7 +1,6 @@
 # coding=utf-8
 import logging as lg
 import json
-import string
 import random
 import sys
 import time
@@ -9,16 +8,13 @@ import uuid
 from datetime import datetime
 from typing import Tuple
 
-from simplyblock_core import utils, constants, distr_controller
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller, \
-    tasks_controller
+from simplyblock_core import utils, constants
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.snode_client import SNodeClient
 
 logger = lg.getLogger()
 
@@ -60,7 +56,7 @@ def ask_for_device_number(devices_list):
 
 
 def ask_for_lvol_vuid():
-    question = f"Enter VUID number: "
+    question = "Enter VUID number: "
     while True:
         sys.stdout.write(question)
         choice = str(input())
@@ -69,7 +65,7 @@ def ask_for_lvol_vuid():
             return ch
         except Exception as e:
             logger.debug(e)
-            sys.stdout.write(f"Please respond with numbers")
+            sys.stdout.write("Please respond with numbers")
 
 
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
@@ -432,7 +428,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     else:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
-            return False, f"No nodes found with enough resources to create the LVol"
+            return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
 
     lvol.hostname = host_node.hostname
@@ -516,7 +512,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not create lvol"
+                    msg = "Secondary node is in down status, can not create lvol"
                     logger.error(msg)
                     lvol.remove(db_controller.kv_store)
                     return False, msg
@@ -544,7 +540,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
         else:
             # both primary and secondary are not online
-            msg = f"Host nodes are not online"
+            msg = "Host nodes are not online"
             logger.error(msg)
             lvol.remove(db_controller.kv_store)
             return False, msg
@@ -817,11 +813,11 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         if len(subsystem[0]["namespaces"]) > 1:
             rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
         else:
-            logger.info(f"Removing subsystem")
+            logger.info("Removing subsystem")
             rpc_client.subsystem_delete(lvol.nqn)
 
     # 2- remove bdevs
-    logger.info(f"Removing bdev stack")
+    logger.info("Removing bdev stack")
     ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
     if not ret:
         return False
@@ -847,7 +843,7 @@ def delete_lvol(id_or_name, force_delete=False):
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     logger.debug(lvol)
@@ -909,7 +905,7 @@ def delete_lvol(id_or_name, force_delete=False):
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not delete lvol"
+                    msg = "Secondary node is in down status, can not delete lvol"
                     logger.error(msg)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
@@ -938,7 +934,7 @@ def delete_lvol(id_or_name, force_delete=False):
 
         else:
             # both primary and secondary are not online
-            msg = f"Host nodes are not online"
+            msg = "Host nodes are not online"
             logger.error(msg)
             return False, msg
 
@@ -984,7 +980,7 @@ def connect_lvol_to_pool(uuid):
         return False
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -1021,10 +1017,10 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
         return False
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
     if pool.has_qos():
-        logger.error(f"Pool already has QOS settings")
+        logger.error("Pool already has QOS settings")
         return False
 
     if name:
@@ -1267,7 +1263,7 @@ def resize_lvol(id, new_size):
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not resize lvol"
+                    msg = "Secondary node is in down status, can not resize lvol"
                     logger.error(msg)
                     return False, msg
 
@@ -1297,7 +1293,7 @@ def resize_lvol(id, new_size):
 
         else:
             # both primary and secondary are not online
-            msg = f"Host nodes are not online"
+            msg = "Host nodes are not online"
             logger.error(msg)
             return False, msg
 
@@ -1346,7 +1342,7 @@ def set_read_only(id):
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     logger.info(f"Setting LVol: {lvol.get_id()} read only")
@@ -1604,7 +1600,7 @@ def inflate_lvol(lvol_id):
         return False
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     logger.info(f"Inflating LVol: {lvol.get_id()}")

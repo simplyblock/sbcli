@@ -194,7 +194,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
         if ret:
             logger.info(f"Checking lvstore: {node.lvstore} ... ok")
             lvs_info = ret[0]
-            logger.info(f"lVol store Info:")
+            logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict[str, Any] = {}
             expected["lvs leadership"] = True
@@ -263,7 +263,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
         if ret:
             logger.info(f"Checking lvstore: {primary_node.lvstore} ... ok")
             lvs_info = ret[0]
-            logger.info(f"lVol store Info:")
+            logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict [str, Any] = {}
             expected["name"] = primary_node.lvstore
@@ -332,7 +332,7 @@ def _check_node_lvstore(
     for distr in distribs_list:
         if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
-            logger.info(f"Checking distr JM names:")
+            logger.info("Checking distr JM names:")
             if distr in node_distribs_list:
                 jm_names = storage_node_ops.get_node_jm_names(node)
             elif stack_src_node:

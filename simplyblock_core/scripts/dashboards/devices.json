@@ -2087,7 +2087,7 @@
                                 "names": [
                                     "{__name__=\"device_unmap_io_ps\", cluster=\"c3663938-6610-44d5-9897-d7bfa60a43e1\", exported_job=\"collector\", instance=\"192.168.178.52:9091\", job=\"metricsgateway\"}"
                                 ],
-                                "prefix": "All except:",
+                                "prefix": "All except Exception:",
                                 "readOnly": true
                             }
                         },
