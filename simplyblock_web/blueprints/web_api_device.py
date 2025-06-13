@@ -18,8 +18,9 @@ db = db_controller.DBController()
 
 @bp.route('/device/list/<string:uuid>', methods=['GET'])
 def list_devices_by_node(uuid):
-    snode = db.get_storage_node_by_id(uuid)
-    if not snode:
+    try:
+        snode = db.get_storage_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"snode not found: {uuid}", 404)
 
     data = []

@@ -83,11 +83,11 @@ class DBController(metaclass=Singleton):
             if node.hostname == hostname
         ]
 
-    def get_storage_node_by_id(self, id) -> Optional[StorageNode]:
+    def get_storage_node_by_id(self, id) -> StorageNode:
         ret = StorageNode().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
-        return None
+        if len(ret) == 0:
+            raise KeyError(f'StorageNode {id} not found')
+        return ret[0]
 
     # todo: change this function for multi cluster
     def get_caching_nodes(self) -> List[CachingNode]:
@@ -321,8 +321,6 @@ class DBController(metaclass=Singleton):
 
     def get_snode_size(self, node_id) -> int:
         snode = self.get_storage_node_by_id(node_id)
-        if snode is None:
-            raise KeyError('Node not found')
         return sum(dev.size for dev in snode.nvme_devices)
 
     def get_jm_device_by_id(self, jm_id) -> Optional[JMDevice]:

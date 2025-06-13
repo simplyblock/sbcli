@@ -15,9 +15,9 @@ from simplyblock_core.rpc_client import RPCClient
 
 
 def task_runner(task):
-
-    snode = db.get_storage_node_by_id(task.node_id)
-    if not snode:
+    try:
+        snode = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
         task.status = JobSchedule.STATUS_DONE
         task.function_result = f"Node not found: {task.node_id}"
         task.write_to_db(db.kv_store)

@@ -233,9 +233,10 @@ def delete(snapshot_uuid, force_delete=False):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
-    snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
-    if not snode:
-        logger.error(f"Storage node not found {snap.lvol.node_id}")
+    try:
+        snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
+    except KeyError:
+        logger.exception(f"Storage node not found {snap.lvol.node_id}")
         return False
 
     clones = []
@@ -367,10 +368,11 @@ def clone(snapshot_id, clone_name, new_size=0):
         logger.error(msg)
         return False, msg
 
-    snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
-    if not snode:
-        msg=f"Storage node not found: {snap.lvol.node_id}"
-        logger.error(msg)
+    try:
+        snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
+    except KeyError:
+        msg = 'Storage node not found'
+        logger.exception(msg)
         return False, msg
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)

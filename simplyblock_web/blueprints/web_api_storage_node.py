@@ -22,10 +22,13 @@ db = db_controller.DBController()
 def list_storage_nodes(uuid):
     cluster_id = utils.get_cluster_id(request)
     if uuid:
-        node = db.get_storage_node_by_id(uuid)
-        if node and node.cluster_id == cluster_id:
-            nodes = [node]
-        else:
+        try:
+            node = db.get_storage_node_by_id(uuid)
+            if node.cluster_id == cluster_id:
+                nodes = [node]
+            else:
+                return utils.get_response_error(f"node not found: {uuid}", 404)
+        except KeyError:
             return utils.get_response_error(f"node not found: {uuid}", 404)
     else:
         nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
@@ -42,8 +45,9 @@ def list_storage_nodes(uuid):
 @bp.route('/storagenode/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/storagenode/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def storage_node_capacity(uuid, history):
-    node = db.get_storage_node_by_id(uuid)
-    if not node:
+    try:
+        db.get_storage_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     data = storage_node_ops.get_node_capacity(uuid, history, parse_sizes=False)
@@ -57,8 +61,9 @@ def storage_node_capacity(uuid, history):
 @bp.route('/storagenode/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/storagenode/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def storagenode_iostats(uuid, history):
-    node = db.get_storage_node_by_id(uuid)
-    if not node:
+    try:
+        node = db.get_storage_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     data = storage_node_ops.get_node_iostats_history(uuid, history, parse_sizes=False, with_sizes=True)
@@ -71,8 +76,9 @@ def storagenode_iostats(uuid, history):
 
 @bp.route('/storagenode/port/<string:uuid>', methods=['GET'])
 def storage_node_ports(uuid):
-    node = db.get_storage_node_by_id(uuid)
-    if not node:
+    try:
+        node = db.get_storage_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     out = []
@@ -111,8 +117,9 @@ def storage_node_port_io_stats(uuid):
 
 @bp.route('/storagenode/suspend/<string:uuid>', methods=['GET'])
 def storage_node_suspend(uuid):
-    node = db.get_storage_node_by_id(uuid)
-    if not node:
+    try:
+        db.get_storage_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     out = storage_node_ops.suspend_storage_node(uuid, True)
@@ -121,8 +128,9 @@ def storage_node_suspend(uuid):
 
 @bp.route('/storagenode/resume/<string:uuid>', methods=['GET'])
 def storage_node_resume(uuid):
-    node = db.get_storage_node_by_id(uuid)
-    if not node:
+    try:
+        db.get_storage_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     out = storage_node_ops.resume_storage_node(uuid)
@@ -131,8 +139,9 @@ def storage_node_resume(uuid):
 
 @bp.route('/storagenode/shutdown/<string:uuid>', methods=['GET'])
 def storage_node_shutdown(uuid):
-    node = db.get_storage_node_by_id(uuid)
-    if not node:
+    try:
+        db.get_storage_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     force = True
@@ -158,8 +167,9 @@ def storage_node_restart():
     reattach_volume = bool(req_data.get("reattach_volume", False))
     force = bool(req_data.get("force", ""))
 
-    node = db.get_storage_node_by_id(uuid)
-    if not node:
+    try:
+        db.get_storage_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     threading.Thread(
@@ -261,8 +271,9 @@ def storage_node_add():
 
 @bp.route('/storagenode/make-sec-new-primary/<string:uuid>', methods=['GET'])
 def make_primary(uuid):
-    node = db.get_storage_node_by_id(uuid)
-    if not node:
+    try:
+        db.get_storage_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"node not found: {uuid}", 404)
 
     out = storage_node_ops.make_sec_new_primary(uuid)
