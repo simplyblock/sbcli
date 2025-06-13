@@ -6,13 +6,11 @@ from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-
-
-logger = utils.get_logger(__name__)
-
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
+
+logger = utils.get_logger(__name__)
 
 
 def task_runner(task):
