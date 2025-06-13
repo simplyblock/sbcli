@@ -179,13 +179,17 @@ def get_active_dev_restart_task(cluster_id, device_id):
     return False
 
 
-def get_active_node_mig_task(cluster_id, node_id):
+def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
                                   JobSchedule.FN_NEW_DEV_MIG] and task.node_id == node_id:
             if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
-                return task.uuid
+                if distr_name:
+                    if "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
+                        return task.uuid
+                else:
+                    return task.uuid
     return False
 
 

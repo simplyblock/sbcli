@@ -6,9 +6,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Automated Deployment Configuration Script")
     parser.add_argument('--max-lvol', help='Max logical volume per storage node', type=str,
-                                       dest='max_lvol', required=True)
+                                       dest='max_lvol', required=False)
     parser.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node',
-                                       type=str, dest='max_prov', required=True)
+                                       type=str, dest='max_prov', required=False)
     parser.add_argument('--nodes-per-socket', help='number of each node to be added per each socket.',
                                        type=str, dest='nodes_per_socket', required=False)
     parser.add_argument('--sockets-to-use',
@@ -26,6 +26,11 @@ if __name__ == "__main__":
     if args.upgrade:
         upgrade_automated_deployment_config()
     else:
+        if not args.max_lvol:
+            parser.error('--max-lvol required.')
+        if not args.max_prov:
+            parser.error('--max-prov required.')
+
         try:
             max_lvol = int(args.max_lvol)
         except ValueError:
@@ -46,6 +51,9 @@ if __name__ == "__main__":
         if args.pci_allowed and args.pci_blocked:
             parser.error("pci-allowed and pci-blocked cannot be both specified")
         max_prov = utils.parse_size(args.max_prov, assume_unit='G')
+        if max_prov == -1:
+            parser.error('--max-prov is not correct.')
+
         pci_allowed = []
         pci_blocked = []
         if args.pci_allowed:

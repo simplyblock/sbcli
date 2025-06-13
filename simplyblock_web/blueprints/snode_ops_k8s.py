@@ -360,12 +360,12 @@ def spdk_process_start(body: SPDKParams):
         }
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
-        k8s_apps_v1 = core_utils.get_k8s_apps_client()
-        resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
-        msg = f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}"
+        k8s_core_v1 = core_utils.get_k8s_core_client()
+        resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
+        msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}"
         logger.info(msg)
     except:
-        return utils.get_response(False, f"Deployment failed:\n{traceback.format_exc()}")
+        return utils.get_response(False, f"Pod failed:\n{traceback.format_exc()}")
 
     return utils.get_response(msg)
 
@@ -376,11 +376,10 @@ def spdk_process_start(body: SPDKParams):
     })}}},
 })
 def spdk_process_kill():
-    k8s_apps_v1 = core_utils.get_k8s_apps_client()
     k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
-        resp = k8s_apps_v1.delete_namespaced_deployment(deployment_name, namespace)
+        resp = k8s_core_v1.delete_namespaced_pod(deployment_name, namespace)
         retries = 10
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
@@ -450,7 +449,7 @@ def get_file_content(path: FilePath):
 
 
 class _FirewallParams(BaseModel):
-    port_id: str
+    port_id: int
     port_type: str
     action: str
 

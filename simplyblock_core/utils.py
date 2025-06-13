@@ -1029,8 +1029,11 @@ def addNvmeDevices(rpc_client, snode, devs):
 
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
-                subnqn = nvme_driver_data['ctrlr_data']['subnqn']
-                serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
+                if "subnqn" in nvme_driver_data['ctrlr_data']:
+                    subnqn = nvme_driver_data['ctrlr_data']['subnqn']
+                    serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
+                else:
+                    logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
 
             devices.append(
                 NVMeDevice({
@@ -1374,13 +1377,14 @@ def regenerate_config(new_config, old_config, force=False):
         if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
             logger.error("The socket is changed, please rerun sbcli configure without upgrade firstly")
             return False
-        if old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or force:
+        number_of_alcemls = len(new_config["nodes"][i]["ssd_pcis"])
+        if (old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or
+                len(old_config["nodes"][i]["ssd_pcis"]) != len(new_config["nodes"][i]["ssd_pcis"]) or force):
             try:
                 isolated_cores = hexa_to_cpu_list(new_config["nodes"][i]["cpu_mask"])
             except ValueError:
                 logger.error(f"The updated cpu mask is incorrect {new_config['nodes'][i]['cpu_mask']}")
                 return False
-            number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
             old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
             old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
             old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])
