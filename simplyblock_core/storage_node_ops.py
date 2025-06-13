@@ -926,7 +926,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
             if not results:
                 logger.error(f"Failed to Join docker swarm: {err}")
                 return False
-
+        else:
+            cluster_ip = utils.get_k8s_node_ip()
+            
         rpc_port = utils.get_next_rpc_port(cluster_id)
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
         mgmt_ip = node_info['network_interface'][iface_name]['ip']
