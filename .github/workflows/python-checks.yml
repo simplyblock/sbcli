@@ -71,4 +71,4 @@ jobs:
       run: pip install ruff
 
     - name: Execute linter
-      run: ruff check simplyblock_core simplyblock_web simplyblock_cli e2e
+      run: ruff check simplyblock_core simplyblock_web simplyblock_cli e2e testing
