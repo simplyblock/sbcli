@@ -301,9 +301,12 @@ def send_cluster_map_add_node(snode, target_node):
         }
 }
 """
-def send_cluster_map_add_device(device: NVMeDevice, target_node):
+def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
     db_controller = DBController()
     dnode = db_controller.get_storage_node_by_id(device.node_id)
+    if not dnode:
+        logger.error(f"Node {device.node_id} not found")
+        return False
     dev_w_gib = utils.convert_size(device.size, 'GiB') or 1
     if target_node.status == StorageNode.STATUS_ONLINE:
         rpc_client = RPCClient(
