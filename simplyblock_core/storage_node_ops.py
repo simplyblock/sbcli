@@ -2507,8 +2507,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
     total_cores = os.cpu_count()
     if total_cores < 6:
-        logger.error("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
-        return False
+        raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
 
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                        pci_allowed, pci_blocked)
