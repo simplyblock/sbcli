@@ -504,8 +504,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 continue
             if snode.secondary_node_id:
                 sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                if sec_node is None:
-                    raise ValueError(f"Failed to activate cluster, secondary node {snode.secondary_node_id} not found")
                 sec_node.lvstore_stack_secondary_1 = snode.get_id()
                 sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
@@ -519,8 +517,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
             sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node is None:
-                raise ValueError(f"Failed to activate cluster, secondary node {snode.secondary_node_id} not found")
             sec_node.lvstore_stack_secondary_1 = snode.get_id()
             sec_node.write_to_db()
             used_nodes_as_sec.append(snode.secondary_node_id)
@@ -621,8 +617,6 @@ def cluster_expand(cl_id) -> None:
             snode.write_to_db()
 
             sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node is None:
-                raise ValueError(f"Failed to expand cluster, secondary node {snode.secondary_node_id} not found")
             sec_node.lvstore_stack_secondary_1 = snode.get_id()
             sec_node.write_to_db()
 
@@ -1195,8 +1189,6 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
         storage_node_ops.restart_storage_node(node.get_id(), clear_data=clear_data, force=True, spdk_image=spdk_image)
         # time.sleep(5)
         get_node = db_controller.get_storage_node_by_id(node.get_id())
-        if get_node is None:
-            raise KeyError(f"Node {node.get_id()} not found after restart")
         if get_node.status != StorageNode.STATUS_ONLINE:
             raise ValueError("failed to restart node")
 

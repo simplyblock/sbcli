@@ -230,9 +230,10 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
 def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None, auto_fix=False):
     db_controller = DBController()
-    primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
-    if primary_node is None:
-        logger.error(f"Primary node with id {node.lvstore_stack_secondary_1} not found")
+    try:
+        primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
+    except KeyError:
+        logger.exception("Primary node not found")
         return False
     logger.info(f"Checking secondary Hublvol: {primary_node.hublvol.bdev_name} on node {node.get_id()}")
 
@@ -420,9 +421,10 @@ def _check_node_lvstore(
 
 def check_node(node_id, with_devices=True):
     db_controller = DBController()
-    snode = db_controller.get_storage_node_by_id(node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
@@ -456,10 +458,12 @@ def check_node(node_id, with_devices=True):
             data_nics_check &= ping_check
 
     if snode.lvstore_stack_secondary_1:
-        n = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-        if n:
+        try:
+            n = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
             lvol_port_check = _check_port_on_node(snode, n.lvol_subsys_port)
             logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
+        except KeyError:
+            pass
     if not snode.is_secondary_node:
         lvol_port_check = _check_port_on_node(snode, snode.lvol_subsys_port)
         logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
@@ -562,9 +566,10 @@ def check_device(device_id):
         logger.error("device not found")
         return False
 
-    snode = db_controller.get_storage_node_by_id(device.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
@@ -621,9 +626,11 @@ def check_remote_device(device_id, target_node=None):
     if not device:
         logger.error("device not found")
         return False
-    snode = db_controller.get_storage_node_by_id(device.node_id)
-    if not snode:
-        logger.error("node not found")
+
+    try:
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     result = True
@@ -668,8 +675,9 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
         logger.error(f"lvol not found: {lvol_id}")
         return False
 
-    snode = db_controller.get_storage_node_by_id(node_id)
-    if not snode:
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
         return False
 
     rpc_client = RPCClient(
@@ -723,7 +731,7 @@ def check_lvol(lvol_id):
         passed = True
         for nodes_id in lvol.nodes:
             node = db_controller.get_storage_node_by_id(nodes_id)
-            if node and node.status == StorageNode.STATUS_ONLINE:
+            if node.status == StorageNode.STATUS_ONLINE:
                 ret = check_lvol_on_node(lvol_id, nodes_id)
                 if not ret:
                     passed = False
