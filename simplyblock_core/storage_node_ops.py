@@ -912,11 +912,13 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                         if ssd in node.ssd_pcie:
                             logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
                             return False
+
+        fdb_connection = cluster.db_connection
+
         if cluster.mode == "docker":
             logger.info("Joining docker swarm...")
             cluster_docker = utils.get_docker_client(cluster_id)
             cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
-            fdb_connection = cluster.db_connection
             results, err = snode_api.join_swarm(
                 cluster_ip=cluster_ip,
                 join_token=cluster_docker.swarm.attrs['JoinTokens']['Worker'],
@@ -927,8 +929,8 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list,
                 logger.error(f"Failed to Join docker swarm: {err}")
                 return False
         else:
-            cluster_ip = utils.get_k8s_node_ip()
-            
+            cluster_ip = utils.get_k8s_node_ip() 
+
         rpc_port = utils.get_next_rpc_port(cluster_id)
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
         mgmt_ip = node_info['network_interface'][iface_name]['ip']
