@@ -35,7 +35,7 @@ class SPDKParams(BaseModel):
     rpc_username: str
     rpc_password: str
     spdk_cpu_mask: Optional[Annotated[str, Field(None, pattern=r'^0x[0-9a-zA-Z]+$')]]
-    spdk_mem: Optional[Annotated[int, Field(core_utils.parse_size('64GiB'))]]
+    spdk_mem: int = Field(core_utils.parse_size('64GiB'))
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     namespace: Optional[Annotated[str, Field(None)]]
     socket: Optional[str] = '0'
@@ -47,7 +47,11 @@ class SPDKParams(BaseModel):
     })}}},
 })
 def spdk_process_start(body: SPDKParams):
-    node_cpu_count = os.cpu_count()
+    node_cpu_count = os.cpu_count() or 0
+    if node_cpu_count == 0:
+        return utils.get_response(
+                False,
+                "Unable to determine the number of CPUs on this system.")
 
     global namespace
     if body.namespace is not None:

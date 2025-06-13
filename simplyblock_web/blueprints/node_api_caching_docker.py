@@ -36,7 +36,7 @@ class SPDKParams(BaseModel):
     rpc_username: str
     rpc_password: str
     spdk_cpu_mask: Optional[Annotated[str, Field(None, pattern=r'^0x[0-9a-zA-Z]+$')]]
-    spdk_mem: Optional[Annotated[int, Field(core_utils.parse_size('64GiB'))]]
+    spdk_mem: int = Field(core_utils.parse_size('64GiB'))
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
 
 
@@ -46,7 +46,11 @@ class SPDKParams(BaseModel):
     })}}},
 })
 def spdk_process_start(body: SPDKParams):
-    node_cpu_count = os.cpu_count()
+    node_cpu_count = os.cpu_count() or 0
+    if node_cpu_count == 0:
+        return utils.get_response(
+            False,
+            "Unable to determine the number of CPUs on this system.")
 
     if body.spdk_cpu_mask is not None:
         spdk_cpu_mask = body.spdk_cpu_mask
@@ -59,6 +63,8 @@ def spdk_process_start(body: SPDKParams):
     else:
         spdk_cpu_mask = hex(int(math.pow(2, node_cpu_count)) - 1)
 
+    if body.spdk_mem is None:
+        body.spdk_mem = core_utils.parse_size('64GiB')
     spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
     node_docker = get_docker_client()
