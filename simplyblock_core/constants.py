@@ -9,8 +9,8 @@ def get_config_var(name, default=None):
     """
     if not name:
         return False
-    if os.env.get(name):
-        return os.env.get(name)
+    if os.getenv(name):
+        return os.getenv(name)
     else:
         with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
             for line in fh.readlines():
