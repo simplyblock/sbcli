@@ -584,7 +584,7 @@ def deploy(ifname):
 
     logger.info("Creating CachingNodeAPI container")
     cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-    container = node_docker.containers.run(
+    node_docker.containers.run(
         cont_image,
         "python simplyblock_web/node_webapp.py caching_kubernetes_node",
         detach=True,

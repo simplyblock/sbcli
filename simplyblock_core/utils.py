@@ -379,7 +379,6 @@ def pair_hyperthreads():
 
 
 def calculate_core_allocations(vcpu_list, alceml_count=2):
-    total = len(vcpu_list)
     is_hyperthreaded = is_hyperthreading_enabled_via_siblings()
     pairs = pair_hyperthreads() if is_hyperthreaded else {}
     remaining = set(vcpu_list)
@@ -821,7 +820,7 @@ cmdline_add=isolcpus={core_list} nohz_full={core_list} rcu_nocbs={core_list}
         f.write(tuned_conf_content)
     content = f"isolated_cores={core_list}\n"
     try:
-        process = subprocess.run(
+        subprocess.run(
             ["sudo", "tee", realtime_variables_file_path],
             input=content.encode("utf-8"),
             stdout=subprocess.DEVNULL,  # Suppress standard output
@@ -916,7 +915,7 @@ def store_config_file(data_config, file_path, create_read_only_file=False):
 
     # Write the dictionary to the JSON file
     try:
-        process = subprocess.run(
+        subprocess.run(
             ["sudo", "tee", file_path],
             input=cores_config_json.encode("utf-8"),
             stdout=subprocess.DEVNULL,  # Suppress standard output

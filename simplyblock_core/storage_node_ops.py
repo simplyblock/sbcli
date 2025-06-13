@@ -268,7 +268,6 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     qos_bdev = ""
     # Add qos bdev device
     if cluster.enable_qos:
-        max_queue_size = cluster.max_queue_size
         inflight_io_threshold = cluster.inflight_io_threshold
         qos_bdev = f"{alceml_name}_qos"
         ret = rpc_client.qos_vbdev_create(qos_bdev, alceml_name, inflight_io_threshold)
@@ -1099,7 +1098,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         else:
             ssds = snode.ssd_pcie
 
-        nvme_devs = addNvmeDevices(rpc_client, snode, snode.ssd_pcie)
+        nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
         if nvme_devs:
 
             for nvme in nvme_devs:
@@ -2179,6 +2178,8 @@ def suspend_storage_node(node_id, force=False):
                 if iface.ip4_address:
                     ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
                         lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
+                    if not ret:
+                        logger.warning(f"Failed to set ana state for lvol {lvol.nqn} on iface {iface.ip4_address}")
         time.sleep(1)
 
     for dev in snode.nvme_devices:
@@ -2291,6 +2292,8 @@ def resume_storage_node(node_id):
                         if iface.ip4_address:
                             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
+                            if not ret:
+                                logger.warning(f"Failed to set ana state for lvol {lvol.nqn} on iface {iface.ip4_address}")
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2551,8 +2554,8 @@ def deploy(ifname, isolate_cores=False):
 
     logger.info("NVMe SSD devices found on node:")
     stream = os.popen(f"lspci -Dnn | grep -i '\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\]'")
-    for l in stream.readlines():
-        logger.info(l.strip())
+    for line in stream.readlines():
+        logger.info(line.strip())
 
     logger.info("Installing dependencies...")
     scripts.install_deps()
@@ -2579,7 +2582,7 @@ def start_storage_node_api_container(node_ip):
     # create the api container
     utils.remove_container(node_docker, '/SNodeAPI')
 
-    container = node_docker.containers.run(
+    node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_web/node_webapp.py storage_node",
         detach=True,
@@ -2676,24 +2679,24 @@ def health_check(node_id):
 
         ret = rpc_client.get_bdevs()
         logger.info(f"SPDK BDevs count: {len(ret)}")
-        for bdev in ret:
-            name = bdev['name']
-            product_name = bdev['product_name']
-            driver = ""
-            for d in bdev['driver_specific']:
-                driver = d
-                break
-            # logger.info(f"name: {name}, product_name: {product_name}, driver: {driver}")
+        # for bdev in ret:
+        #     name = bdev['name']
+        #     product_name = bdev['product_name']
+        #     driver = ""
+        #     for d in bdev['driver_specific']:
+        #         driver = d
+        #         break
+        #     # logger.info(f"name: {name}, product_name: {product_name}, driver: {driver}")
 
         logger.info("getting device bdevs")
-        for dev in snode.nvme_devices:
-            nvme_bdev = rpc_client.get_bdevs(dev.nvme_bdev)
-            if snode.enable_test_device:
-                testing_bdev = rpc_client.get_bdevs(dev.testing_bdev)
-            alceml_bdev = rpc_client.get_bdevs(dev.alceml_bdev)
-            pt_bdev = rpc_client.get_bdevs(dev.pt_bdev)
+        # for dev in snode.nvme_devices:
+        #     nvme_bdev = rpc_client.get_bdevs(dev.nvme_bdev)
+        #     if snode.enable_test_device:
+        #         testing_bdev = rpc_client.get_bdevs(dev.testing_bdev)
+        #     alceml_bdev = rpc_client.get_bdevs(dev.alceml_bdev)
+        #     pt_bdev = rpc_client.get_bdevs(dev.pt_bdev)
 
-            subsystem = rpc_client.subsystem_list(dev.nvmf_nqn)
+        #     subsystem = rpc_client.subsystem_list(dev.nvmf_nqn)
 
             # dev.testing_bdev = test_name
             # dev.alceml_bdev = alceml_name
@@ -2818,9 +2821,6 @@ def recreate_lvstore_on_sec(secondary_node):
     primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(secondary_node.get_id())
 
     for primary_node in primary_nodes:
-        primary_rpc_client = RPCClient(
-            primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
-
         primary_node.lvstore_status = "in_creation"
         primary_node.write_to_db()
 
@@ -2860,6 +2860,8 @@ def recreate_lvstore_on_sec(secondary_node):
 
         ### 6- wait for examine
         ret = secondary_rpc_client.bdev_wait_for_examine()
+        if not ret:
+            logger.warning("Failed to examine bdevs on secondary node")
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             try:
@@ -2876,7 +2878,7 @@ def recreate_lvstore_on_sec(secondary_node):
         ### 7- add lvols to subsystems
         executor = ThreadPoolExecutor(max_workers=50)
         for lvol in lvol_list:
-            a = executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state="non_optimized")
+            executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state="non_optimized")
 
         primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
         primary_node.lvstore_status = "ready"
@@ -2984,10 +2986,9 @@ def recreate_lvstore(snode):
     ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=50)
     for lvol in lvol_list:
-        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+        executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
     if sec_node:
-
         if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
                 sec_node.connect_to_hublvol(snode)
@@ -3483,8 +3484,8 @@ def dump_lvstore(node_id):
     file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
     ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
-    # if not ret:
-    #     logger.error("faild to dump lvstore data")
+    if not ret:
+        logger.warning("faild to dump lvstore data")
     #     return False
 
     logger.info(f"LVS dump file will be here: {file_path}")
