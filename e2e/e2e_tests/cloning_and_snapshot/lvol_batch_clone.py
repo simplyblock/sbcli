@@ -1,4 +1,3 @@
-import time
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
@@ -157,7 +156,7 @@ class TestSnapshotBatchCloneLVOLs(TestClusterBase):
             self.logger.info(f"Run command (before mounting dev formatted in xfs: {cmd}")
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=cmd)
             self.logger.info(f"Mounting clone device: {clone_device} at {mount_point}")
-            cmd = f"sudo mount {clone_device} {clone_mount_point} -o nouuid"
+            cmd = f"sudo mount {clone_device} {mount_point} -o nouuid"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=cmd)
         else:
             self.logger.info(f"Mounting clone {clone_name} at {mount_point}")
