@@ -39,7 +39,7 @@ def get_google_cloud_info():
             "ip": data["networkInterfaces"][0]["ip"],
             "public_ip": data["networkInterfaces"][0]["accessConfigs"][0]["externalIp"],
         }
-    except:
+    except Exception:
         pass
 
 
@@ -62,7 +62,7 @@ def get_equinix_cloud_info():
             "ip": public_ip,
             "public_ip": ip
         }
-    except:
+    except Exception:
         pass
 
 
@@ -80,7 +80,7 @@ def get_amazon_cloud_info():
             "ip": data["privateIp"],
             "public_ip":  "",
         }
-    except:
+    except Exception:
         pass
 
 
@@ -89,7 +89,7 @@ def get_docker_client(timeout=60):
         cl = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=timeout)
         cl.info()
         return cl
-    except:
+    except Exception:
         ip = os.getenv("DOCKER_IP")
         if not ip:
             for ifname in core_utils.get_nics_data():
@@ -100,7 +100,7 @@ def get_docker_client(timeout=60):
         try:
             cl.info()
             return cl
-        except:
+        except Exception:
             pass
 
 
@@ -187,7 +187,7 @@ def spdk_process_start(body: SPDKParams):
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
-    container2 = node_docker.containers.run(
+    node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_core/services/spdk_http_proxy_server.py",
         name=f"spdk_proxy_{body.rpc_port}",
@@ -429,7 +429,7 @@ def leave_swarm():
     try:
         node_docker = get_docker_client()
         node_docker.swarm.leave(force=True)
-    except:
+    except Exception:
         pass
     return utils.get_response(True)
 

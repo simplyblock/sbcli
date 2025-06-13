@@ -6,12 +6,14 @@ import time
 from graypy import GELFTCPHandler
 from simplyblock_core import constants
 
+SBCLI_NAME = constants.SIMPLY_BLOCK_CLI_NAME
+
 cluster_commands = [
-    "sbcli-dev cluster show",
-    "sbcli-dev cluster get-capacity",
-    "sbcli-dev cluster get-io-stats",
-    "sbcli-dev cluster get-logs --limit 0",
-    "sbcli-dev lvol list --cluster-id",
+    f"{SBCLI_NAME} cluster show",
+    f"{SBCLI_NAME} cluster get-capacity",
+    f"{SBCLI_NAME} cluster get-io-stats",
+    f"{SBCLI_NAME} cluster get-logs --limit 0",
+    f"{SBCLI_NAME} lvol list --cluster-id",
 ]
 
 def setup_logger():
@@ -47,7 +49,7 @@ def run_cluster_commands(cluster_id: str):
 def get_storage_node_ids(cluster_id: str):
     """Fetch the JSON output and extract storage node IDs."""
     try:
-        command = "sbcli-dev storage-node list --json --cluster-id " + cluster_id
+        command = f"{SBCLI_NAME} storage-node list --json --cluster-id " + cluster_id
         result = execute_command(command)
         if result.stderr:
             logger.error(f"Error fetching storage node list: {result.stderr}")
@@ -64,7 +66,7 @@ def get_storage_node_ids(cluster_id: str):
 def check_storage_node(node_id):
     """Run the storage-node check command for the given node ID."""
     try:
-        command = f"sbcli-dev storage-node check {node_id}"
+        command = f"{SBCLI_NAME} storage-node check {node_id}"
         logger.info(f"Checking storage node: {node_id}")
         result = execute_command(command)
         if result.stdout:
@@ -77,7 +79,7 @@ def check_storage_node(node_id):
 def list_clusters():
     """List all clusters and return their UUIDs."""
     try:
-        command = "sbcli-dev cluster list --json"
+        command = f"{SBCLI_NAME} cluster list --json"
         result = execute_command(command)
         if result.stderr:
             logger.error(f"Error fetching cluster list: {result.stderr}")

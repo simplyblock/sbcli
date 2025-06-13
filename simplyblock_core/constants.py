@@ -3,13 +3,19 @@ import os
 SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
-def get_from_env_var_file(name, default=None):
+def get_config_var(name, default=None):
+    """
+    OS environment variable is checked first, if not found, check the env_var file.
+    """
     if not name:
         return False
-    with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
-        for line in fh.readlines():
-            if line.startswith(name):
-                return line.split("=", 1)[1].strip()
+    if os.getenv(name):
+        return os.getenv(name)
+    else:
+        with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
+            for line in fh.readlines():
+                if line.startswith(name):
+                    return line.split("=", 1)[1].strip()
     return default
 
 
@@ -70,11 +76,11 @@ TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
-SIMPLY_BLOCK_DOCKER_IMAGE = get_from_env_var_file(
+SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
         "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")
-SIMPLY_BLOCK_CLI_NAME = get_from_env_var_file(
+SIMPLY_BLOCK_CLI_NAME = get_config_var(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_from_env_var_file(
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_config_var(
         "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
 
 GELF_PORT = 12202

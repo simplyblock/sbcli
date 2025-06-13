@@ -100,6 +100,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         alceml_name, nvme_bdev, alceml_id,
         pba_init_mode=1 if after_restart else 3,
         pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=cluster.full_page_unmap
     )
 
     if not ret:
@@ -179,6 +180,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         alceml_name, nvme_bdev, alceml_id,
         pba_init_mode=1 if after_restart else 3,
         pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=cluster.full_page_unmap
     )
 
     if not ret:
@@ -259,6 +261,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         pba_init_mode=1 if (after_restart and nvme.status != NVMeDevice.STATUS_NEW) else 3,
         write_protection=cluster.distr_ndcs > 1,
         pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=cluster.full_page_unmap
     )
 
     if not ret:
@@ -535,6 +538,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
             jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
             pba_init_mode=3 if clear_data else 1,
             pba_page_size=cluster.page_size_in_blocks,
+            full_page_unmap=cluster.full_page_unmap
         )
 
         if not ret:
@@ -736,7 +740,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, full_page_unmap=False):
+             partition_size="", ha_jm_count=3):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1002,7 +1006,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent
         snode.id_device_by_nqn = id_device_by_nqn
-        snode.full_page_unmap = full_page_unmap
 
         if partition_size:
             snode.partition_size = utils.parse_size(partition_size)
@@ -1476,7 +1479,7 @@ def restart_storage_node(
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol,
                                                           snode.max_prov,
-                                                          snode.cpu)
+                                                          len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask)))
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -1500,6 +1503,7 @@ def restart_storage_node(
         logger.error(
             f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
 
+    snode.spdk_mem = spdk_mem
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
         spdk_debug = True
@@ -2503,6 +2507,11 @@ def upgrade_automated_deployment_config():
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
 
+    # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
+    total_cores = os.cpu_count()
+    if total_cores < 6:
+        raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
+
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                        pci_allowed, pci_blocked)
     if not nodes_config or not nodes_config.get("nodes"):
@@ -3290,7 +3299,8 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     created_bdevs = []
     if not lvstore_stack:
         # Restart case
@@ -3323,7 +3333,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 params['distrib_cpu_mask'] = distrib_cpu_mask
                 snode.distrib_cpu_index = (snode.distrib_cpu_index + 1) % len(snode.distrib_cpu_cores)
 
-            params['full_page_unmap'] = snode.full_page_unmap
+            params['full_page_unmap'] = cluster.full_page_unmap
             ret = rpc_client.bdev_distrib_create(**params)
             if ret:
                 ret = distr_controller.send_cluster_map_to_distr(snode, name)
