@@ -2,7 +2,7 @@ import time
 import logging
 
 from simplyblock_core import distr_controller, utils, storage_node_ops
-from simplyblock_core.controllers import device_events, lvol_controller, tasks_controller
+from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode

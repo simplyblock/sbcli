@@ -1,6 +1,5 @@
 # coding=utf-8
 import time
-import os
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import lvol_events

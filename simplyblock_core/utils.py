@@ -1,5 +1,4 @@
 # coding=utf-8
-import glob
 import json
 import logging
 import math
@@ -11,14 +10,11 @@ import subprocess
 import sys
 import uuid
 import time
-import psutil
-from typing import Set, Union
+from typing import Union
 from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
-from graypy import GELFTCPHandler
 from docker.errors import APIError, DockerException, ImageNotFound
-import psutil
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
@@ -268,7 +264,7 @@ def parse_history_param(history_string):
     results = re.search(r'^(\d+[hmd])(\d+[hmd])?$', history_string.lower())
     if not results:
         logger.error(f"Error parsing history string: {history_string}")
-        logger.info(f"History format: xxdyyh , e.g: 1d12h, 1d, 2h, 1m")
+        logger.info("History format: xxdyyh , e.g: 1d12h, 1d, 2h, 1m")
         return False
 
     history_in_seconds = 0
@@ -732,7 +728,7 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes=None):
             return True
 
         elif migration_status == "none":
-            task.function_result = f"mig retry after restart"
+            task.function_result = "mig retry after restart"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
             del task.function_params['migration']
@@ -843,7 +839,7 @@ def run_tuned():
             ["sudo", "tuned-adm", "profile", "realtime"],
             check=True
         )
-        print(f"Successfully run the tuned adm profile")
+        print("Successfully run the tuned adm profile")
     except subprocess.CalledProcessError as e:
         logger.error(f"Error running the tuned adm profile: {e}")
 

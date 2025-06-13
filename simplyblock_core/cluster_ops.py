@@ -15,7 +15,7 @@ import docker
 import requests
 from jinja2 import Environment, FileSystemLoader
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops, shell_utils
+from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
 from simplyblock_core.controllers import cluster_events, device_controller, pool_controller, \
     lvol_controller
 from simplyblock_core.db_controller import DBController

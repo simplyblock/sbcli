@@ -1,6 +1,5 @@
 # coding=utf-8
 import pprint
-import logging
 
 import json
 from inspect import ismethod

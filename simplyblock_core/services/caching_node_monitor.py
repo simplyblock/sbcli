@@ -69,7 +69,7 @@ while True:
             node.rpc_password,
             timeout=3, retry=1)
         try:
-            logger.info(f"Calling rpc get_version...")
+            logger.info("Calling rpc get_version...")
             response = rpc_client.get_version()
             if response:
                 logger.info(f"Node {node.hostname} is online")
