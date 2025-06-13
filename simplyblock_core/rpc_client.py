@@ -443,7 +443,7 @@ class RPCClient:
             ret = self.get_bdevs(name)
             if ret:
                 return ret
-        except:
+        except Exception:
             pass
         params = {
             "name": name,
@@ -494,7 +494,7 @@ class RPCClient:
             ret = self.get_bdevs(name)
             if ret:
                 return ret
-        except:
+        except Exception:
             pass
         params = {
             "name": name,

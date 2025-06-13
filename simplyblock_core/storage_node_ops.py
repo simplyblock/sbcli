@@ -1,10 +1,8 @@
 # coding=utf- 8
 import datetime
 import json
-import math
 import os
 
-import pprint
 import threading
 
 import time
@@ -19,7 +17,6 @@ from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINU
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
-from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -322,7 +319,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
     time.sleep(3)
     if not nbd_device:
-        logger.error(f"Failed to start nbd dev")
+        logger.error("Failed to start nbd dev")
         return False
     snode_api = SNodeClient(snode.api_endpoint)
     partition_percent = 0
@@ -331,7 +328,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
 
     result, error = snode_api.make_gpt_partitions(nbd_device, jm_percent, num_partitions_per_dev, partition_percent)
     if error:
-        logger.error(f"Failed to make partitions")
+        logger.error("Failed to make partitions")
         logger.error(error)
         return False
     time.sleep(3)
@@ -416,7 +413,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
     if jm_devices:
         jm_device = _create_jm_stack_on_raid(rpc_client, jm_devices, snode, after_restart=False)
         if not jm_device:
-            logger.error(f"Failed to create JM device")
+            logger.error("Failed to create JM device")
             return False
 
         snode.jm_device = jm_device
@@ -440,7 +437,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
         if nvme.status == NVMeDevice.STATUS_JM:
             jm_device = _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart=False)
             if not jm_device:
-                logger.error(f"Failed to create JM device")
+                logger.error("Failed to create JM device")
                 return False
             snode.jm_device = jm_device
             continue
@@ -520,7 +517,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         if all_bdevs_found:
             ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
             if not ret:
-                logger.error(f"Failed to create JM device")
+                logger.error("Failed to create JM device")
                 return False
 
 
@@ -846,7 +843,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.info(f"huge_free: {utils.humanbytes(memory_details['huge_free'])}")
             logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
         else:
-            logger.error(f"Cannot get memory info from the instance.. Exiting")
+            logger.error("Cannot get memory info from the instance.. Exiting")
             return False
 
         # Calculate minimum sys memory
@@ -1036,7 +1033,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # 2- set socket implementation options
         ret = rpc_client.sock_impl_set_options()
         if not ret:
-            logger.error(f"Failed to set optimized socket options")
+            logger.error("Failed to set optimized socket options")
             return False
 
         # 3- set nvme config
@@ -1225,7 +1222,7 @@ def delete_storage_node(node_id, force=False):
         return False
 
     if snode.status != StorageNode.STATUS_REMOVED:
-        logger.error(f"Node must be in removed status")
+        logger.error("Node must be in removed status")
         return False
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
@@ -1314,7 +1311,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         for node in cluster_docker.nodes.list():
             if node.attrs["Status"] and snode.mgmt_ip in node.attrs["Status"]["Addr"]:
                 node.remove(force=True)
-    except:
+    except Exception:
         pass
 
     try:
@@ -1489,7 +1486,7 @@ def restart_storage_node(
         logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
         logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
     else:
-        logger.error(f"Cannot get memory info from the instance.. Exiting")
+        logger.error("Cannot get memory info from the instance.. Exiting")
         return False
 
     # Calculate minimum sys memory
@@ -1772,7 +1769,7 @@ def restart_storage_node(
             node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
             node.write_to_db(kv_store)
 
-        logger.info(f"Sending device status event")
+        logger.info("Sending device status event")
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         for db_dev in snode.nvme_devices:
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
@@ -1810,7 +1807,7 @@ def restart_storage_node(
                 node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
                 node.write_to_db(kv_store)
 
-            logger.info(f"Sending device status event")
+            logger.info("Sending device status event")
             snode = db_controller.get_storage_node_by_id(snode.get_id())
             for db_dev in snode.nvme_devices:
                 distr_controller.send_dev_status_event(db_dev, db_dev.status)
@@ -1867,7 +1864,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         if node.online_since and node.status == StorageNode.STATUS_ONLINE:
             try:
                 uptime = utils.strfdelta((now - datetime.datetime.fromisoformat(node.online_since)))
-            except:
+            except Exception:
                 pass
 
         for dev in node.nvme_devices:
@@ -2659,7 +2656,7 @@ def health_check(node_id):
         #         try:
         #             start = datetime.datetime.fromisoformat(state['StartedAt'].split('.')[0])
         #             since = str(datetime.datetime.now() - start).split('.')[0]
-        #         except:
+        #         except Exception:
         #             pass
         #         clean_name = name.split(".")[0].replace("/", "")
         #         logger.info(f"Container: {clean_name}, Status: {state['Status']}, Since: {since}")
@@ -2688,7 +2685,7 @@ def health_check(node_id):
                 break
             # logger.info(f"name: {name}, product_name: {product_name}, driver: {driver}")
 
-        logger.info(f"getting device bdevs")
+        logger.info("getting device bdevs")
         for dev in snode.nvme_devices:
             nvme_bdev = rpc_client.get_bdevs(dev.nvme_bdev)
             if snode.enable_test_device:
@@ -3508,7 +3505,7 @@ def set_value(node_id, attr, value):
             logger.info(f"Setting {attr} to {value}")
             setattr(snode, attr, value)
             snode.write_to_db()
-        except:
+        except Exception:
             pass
 
     return True

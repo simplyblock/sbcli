@@ -173,7 +173,7 @@ def delete_pool(uuid):
         logger.error(f"Pool not found {uuid}")
         return False
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     lvols = db_controller.get_lvols_by_pool_id(uuid)

@@ -1,6 +1,5 @@
 # coding=utf-8
 import pprint
-import logging
 
 import json
 from inspect import ismethod
@@ -72,7 +71,7 @@ class BaseModel(object):
                 if dtype in [int, float, str, bool]:
                     try:
                         value = dtype(value)
-                    except:
+                    except Exception:
                         if type(value) == list and dtype == int:
                             value = len(value)
 
