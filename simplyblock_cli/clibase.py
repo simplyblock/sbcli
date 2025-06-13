@@ -2,9 +2,12 @@
 # PYTHON_ARGCOMPLETE_OK
 
 import argparse
+import json
 import re
 import sys
+import time
 import argcomplete
+
 from simplyblock_core import cluster_ops, utils, db_controller
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
@@ -12,6 +15,7 @@ from simplyblock_core.controllers import pool_controller, lvol_controller, snaps
     tasks_controller
 from simplyblock_core.controllers import caching_node_controller, health_controller
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.cluster import Cluster
 
 
 def range_type(min, max):
@@ -109,11 +113,12 @@ class CLIWrapperBase:
                                                                 args.nodes_per_socket, pci_allowed, pci_blocked)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
-        return storage_ops.deploy_cleaner()
+        storage_ops.deploy_cleaner()
+        return True  # remove once CLI changed to exceptions
 
     def storage_node__add_node(self, sub_command, args):
         cluster_id = args.cluster_id
-        node_ip = args.node_ip
+        node_addr = args.node_addr
         ifname = args.ifname
         data_nics = args.data_nics
         spdk_image = args.spdk_image
@@ -132,7 +137,7 @@ class CLIWrapperBase:
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
-            node_ip=node_ip,
+            node_addr=node_addr,
             iface_name=ifname,
             data_nics_list=data_nics,
             max_snap=max_snap,
@@ -148,7 +153,6 @@ class CLIWrapperBase:
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
-            full_page_unmap=args.full_page_unmap
         )
 
         return out
@@ -319,64 +323,91 @@ class CLIWrapperBase:
         return self.cluster_add(args)
 
     def cluster__activate(self, sub_command, args):
-        cluster_id = args.cluster_id
-        return cluster_ops.cluster_activate(cluster_id, args.force, args.force_lvstore_create)
+        cluster_ops.cluster_activate(args.cluster_id, args.force, args.force_lvstore_create)
+        return True
 
     def cluster__list(self, sub_command, args):
-        return cluster_ops.list(args.json)
+        data = cluster_ops.list()
+
+        if args.json:
+            return json.dumps(data, indent=2)
+        else:
+            return utils.print_table(data)
 
     def cluster__status(self, sub_command, args):
-        cluster_id = args.cluster_id
-        return cluster_ops.get_cluster_status(cluster_id)
+        return utils.print_table(cluster_ops.get_cluster_status(args.cluster_id))
 
     def cluster__show(self, sub_command, args):
-        cluster_id = args.cluster_id
-        return cluster_ops.list_all_info(cluster_id)
+        return cluster_ops.list_all_info(args.cluster_id)
 
     def cluster__get(self, sub_command, args):
-        return cluster_ops.get_cluster(args.cluster_id)
+        return json.dumps(cluster_ops.get_cluster(args.cluster_id), indent=2, sort_keys=True)
 
     def cluster__get_capacity(self, sub_command, args):
-        cluster_id = args.cluster_id
-        history = args.history
         is_json = args.json
-        data = cluster_ops.get_capacity(cluster_id, history, is_json=is_json)
+        data = cluster_ops.get_capacity(args.cluster_id, args.history)
+
         if is_json:
-            return data
+            return json.dumps(data, indent=2)
         else:
-            return utils.print_table(data)
+            return utils.print_table([
+                {
+                    "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
+                    "Absolut": utils.humanbytes(record['size_total']),
+                    "Provisioned": utils.humanbytes(record['size_prov']),
+                    "Used": utils.humanbytes(record['size_used']),
+                    "Free": utils.humanbytes(record['size_free']),
+                    "Util %": f"{record['size_util']}%",
+                    "Prov Util %": f"{record['size_prov_util']}%",
+                }
+                for record in data
+            ])
 
     def cluster__get_io_stats(self, sub_command, args):
-        data = cluster_ops.get_iostats_history(args.cluster_id, args.history, args.records)
-        if data:
-            return utils.print_table(data)
-        else:
-            return False
+        return utils.print_table([
+            {
+                "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
+                "Read speed": utils.humanbytes(record['read_bytes_ps']),
+                "Read IOPS": record["read_io_ps"],
+                "Read lat": record["read_latency_ps"],
+                "Write speed": utils.humanbytes(record["write_bytes_ps"]),
+                "Write IOPS": record["write_io_ps"],
+                "Write lat": record["write_latency_ps"],
+            }
+            for record in cluster_ops.get_iostats_history(args.cluster_id, args.history, args.records)
+        ])
 
     def cluster__get_logs(self, sub_command, args):
-        return cluster_ops.get_logs(**args.__dict__)
+        cluster_logs = cluster_ops.get_logs(**args.__dict__)
+
+        if args.json:
+            return json.dumps(cluster_logs, indent=2)
+        else:
+            return utils.print_table(cluster_logs)
 
     def cluster__get_secret(self, sub_command, args):
         cluster_id = args.cluster_id
         return cluster_ops.get_secret(cluster_id)
 
     def cluster__update_secret(self, sub_command, args):
-        cluster_id = args.cluster_id
-        secret = args.secret
-        return cluster_ops.set_secret(cluster_id, secret)
+        cluster_ops.set_secret(args.cluster_id, args.secret)
+        return True
 
     def cluster__check(self, sub_command, args):
         cluster_id = args.cluster_id
         return health_controller.check_cluster(cluster_id)
 
     def cluster__update(self, sub_command, args):
-        return cluster_ops.update_cluster(**args.__dict__)
+        cluster_ops.update_cluster(**args.__dict__)
+        return True
 
     def cluster__graceful_shutdown(self, sub_command, args):
-        return cluster_ops.cluster_grace_shutdown(args.cluster_id)
+        cluster_ops.cluster_grace_shutdown(args.cluster_id)
+        return True
 
     def cluster__graceful_startup(self, sub_command, args):
-        return cluster_ops.cluster_grace_startup(args.cluster_id, args.clear_data, args.spdk_image)
+        cluster_ops.cluster_grace_startup(args.cluster_id, args.clear_data, args.spdk_image)
+        return True
 
     def cluster__list_tasks(self, sub_command, args):
         return tasks_controller.list_tasks(**args.__dict__)
@@ -385,27 +416,26 @@ class CLIWrapperBase:
         return tasks_controller.cancel_task(args.task_id)
 
     def cluster__delete(self, sub_command, args):
-        return cluster_ops.delete_cluster(args.cluster_id)
+        cluster_ops.delete_cluster(args.cluster_id)
+        return True
 
-    def cluster_suspend(self, sub_command, args):
-        cluster_id = args.cluster_id
-        return cluster_ops.suspend_cluster(cluster_id)
+    def cluster__suspend(self, sub_command, args):
+        return cluster_ops.set_cluster_status(args.cluster_id, Cluster.STATUS_SUSPENDED)
 
     def cluster_unsuspend(self, sub_command, args):
-        cluster_id = args.cluster_id
-        return cluster_ops.unsuspend_cluster(cluster_id)
+        return cluster_ops.set_cluster_status(args.cluster_id, Cluster.STATUS_ACTIVE)
 
     def cluster_get_cli_ssh_pass(self, sub_command, args):
         cluster_id = args.cluster_id
         return cluster_ops.get_ssh_pass(cluster_id)
 
     def cluster__set(self, sub_command, args):
-        cluster_id = args.cluster_id
-        return cluster_ops.set(cluster_id, args.attr_name, args.attr_value)
+        cluster_ops.set(args.cluster_id, args.attr_name, args.attr_value)
+        return True
 
     def cluster__complete_expand(self, sub_command, args):
-        cluster_id = args.cluster_id
-        return cluster_ops.cluster_expand(cluster_id)
+        cluster_ops.cluster_expand(args.cluster_id)
+        return True
 
     def volume__add(self, sub_command, args):
         name = args.name
@@ -749,7 +779,7 @@ class CLIWrapperBase:
         comp = None
         distr_vuid = args.distr_vuid
 
-        return cluster_ops.deploy_cluster(
+        cluster_ops.deploy_cluster(
             storage_nodes, test, ha_type, distr_ndcs, distr_npcs, enable_qos, ifname,
             blk_size, page_size_in_blocks, CLI_PASS, cap_warn, cap_crit, prov_cap_warn,
             prov_cap_crit, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
@@ -762,6 +792,7 @@ class CLIWrapperBase:
             lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
             max_rw_mbytes, max_r_mbytes, max_w_mbytes,
             with_snapshot, max_size, crypto_key1, crypto_key2, lvol_priority_class, id_device_by_nqn, fstype)
+        return True
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size

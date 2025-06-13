@@ -203,16 +203,25 @@ def set_node_online(node):
             if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
                 device_controller.device_set_online(dev.get_id())
 
+        # start migration tasks on node online status change
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                logger.info("Adding task to device data migration")
+                task_id = tasks_controller.add_device_mig_task(dev.get_id())
+                if task_id:
+                    logger.info(f"Task id: {task_id}")
 
-def set_node_offline(node):
+
+def set_node_offline(node, set_devs_offline=False):
     if node.status != StorageNode.STATUS_UNREACHABLE:
         # set node unavailable
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
 
-        # # set devices unavailable
-        # for dev in node.nvme_devices:
-        #     if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-        #         device_controller.device_set_unavailable(dev.get_id())
+        if set_devs_offline:
+            # set devices unavailable
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+                    device_controller.device_set_unavailable(dev.get_id())
 
         # # set jm dev offline
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
@@ -248,8 +257,8 @@ while True:
             ping_check = health_controller._check_node_ping(snode.mgmt_ip)
             logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
             if not ping_check:
-                # time.sleep(1)
-                # ping_check = health_controller._check_node_ping(snode.mgmt_ip)
+                time.sleep(1)
+                ping_check = health_controller._check_node_ping(snode.mgmt_ip)
                 logger.info(f"Check 2: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
             # 2- check node API
@@ -272,7 +281,6 @@ while True:
 
             node_port_check = True
 
-            down_ports = []
             if spdk_process and node_rpc_check and snode.lvstore_status == "ready":
                 ports = [snode.nvmf_port]
                 if snode.lvstore_stack_secondary_1:
@@ -286,8 +294,6 @@ while True:
                     ret = health_controller._check_port_on_node(snode, port)
                     logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                     node_port_check &= ret
-                    if not ret and port == snode.nvmf_port:
-                        down_ports |= True
 
                 for data_nic in snode.data_nics:
                     if data_nic.ip4_address:
@@ -295,8 +301,6 @@ while True:
                         logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
                         if not data_ping_check:
                             node_port_check = False
-                            down_ports |= True
-
 
             cluster = db.get_cluster_by_id(cluster.get_id())
 
@@ -345,7 +349,7 @@ while True:
                     # add node to auto restart
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
                                           Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
-                        set_node_offline(snode)
+                        set_node_offline(snode, set_devs_offline=not spdk_process)
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
@@ -353,7 +357,7 @@ while True:
                         set_node_down(snode)
 
                 else:
-                    set_node_offline(snode)
+                    set_node_offline(snode, set_devs_offline=not spdk_process)
 
             if ping_check and node_api_check and spdk_process and not node_rpc_check:
                 # restart spdk proxy cont

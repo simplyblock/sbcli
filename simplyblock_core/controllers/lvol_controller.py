@@ -1361,6 +1361,8 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
         "size_used",
         "size_free",
         "size_util",
+        "size_prov",
+        "size_prov_util"
     ]
     new_records = utils.process_records(records_list, records_count, keys=cap_stats_keys)
 

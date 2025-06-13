@@ -535,7 +535,7 @@ def deploy(ifname):
         ifname = "eth0"
 
     logger.info("Installing dependencies...")
-    _ = scripts.install_deps()
+    scripts.install_deps()
 
     dev_ip = utils.get_iface_ip(ifname)
     if not dev_ip:
@@ -543,7 +543,7 @@ def deploy(ifname):
         return False
 
     logger.info(f"Node IP: {dev_ip}")
-    _ = scripts.configure_docker(dev_ip)
+    scripts.configure_docker(dev_ip)
 
     node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto", timeout=60 * 5)
     # create the api container

@@ -28,6 +28,7 @@ class TestMajorUpgrade(TestClusterBase):
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
         self.base_version = kwargs.get("base_version")
         self.target_version = kwargs.get("target_version")
         self.snapshot_name = "upgrade_snap"
@@ -121,9 +122,24 @@ class TestMajorUpgrade(TestClusterBase):
         assert original_checksum == final_checksum, "Checksum mismatch between lvol and clone before upgrade!!"
 
         self.logger.info("Step 8: Perform Upgrade")
+
         package_name = f"{self.base_cmd}=={self.target_version}" if self.target_version != "latest" else self.base_cmd
+
         self.ssh_obj.exec_command(self.mgmt_nodes[0], f"pip install {package_name} --upgrade")
-        upgrade_cmd = f"sbcli-dev cluster update {self.cluster_id} --cp-only false --restart true"
+        sleep_n_sec(10)
+
+        cmd = f"{self.base_cmd} cluster graceful-shutdown {self.cluster_id}"
+        self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+        
+        for snode in self.storage_nodes:
+            cmd = f"pip install {package_name} --upgrade"
+            self.ssh_obj.exec_command(snode, cmd)
+            sleep_n_sec(10)
+            cmd = f"{self.base_cmd} sn deploy"
+            self.ssh_obj.exec_command(snode, cmd)
+            sleep_n_sec(10)
+        
+        upgrade_cmd = f"{self.base_cmd} -d cluster update {self.cluster_id} --restart true --spdk-image simplyblock/spdk:main-latest"
         self.ssh_obj.exec_command(self.mgmt_nodes[0], upgrade_cmd)
         sleep_n_sec(180)
 
@@ -226,3 +242,4 @@ class TestMajorUpgrade(TestClusterBase):
                                f"{self.clone_name}_post")
 
         self.logger.info("TEST CASE PASSED !!!")
+        

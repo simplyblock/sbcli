@@ -115,17 +115,20 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         time.sleep(3)
 
-    if "migration" in task.function_params:
-        allowed_error_codes = list(range(1, 8)) if not all_devs_online else [0]
-        mig_info = task.function_params["migration"]
-        res = rpc_client.distr_migration_status(**mig_info)
-        return utils.handle_task_result(task, res, allowed_error_codes=allowed_error_codes)
-    else:
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db(db.kv_store)
-        return False
+    try:
+        if "migration" in task.function_params:
+            allowed_error_codes = list(range(1, 8)) if not all_devs_online else [0]
+            mig_info = task.function_params["migration"]
+            res = rpc_client.distr_migration_status(**mig_info)
+            return utils.handle_task_result(task, res, allowed_error_codes=allowed_error_codes)
+    except Exception as e:
+        logger.error(f"Failed to get migration task status")
+        logger.exception(e)
+        task.function_result = "Failed to get migration status"
 
+    task.retry += 1
+    task.write_to_db(db.kv_store)
+    return False
 
 logger = utils.get_logger(__name__)
 
@@ -144,7 +147,8 @@ while True:
             for task in tasks:
                 if task.function_name == JobSchedule.FN_NEW_DEV_MIG:
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
+                        active_task = tasks_controller.get_active_node_mig_task(
+                            task.cluster_id, task.node_id,  task.function_params["distr_name"])
                         if active_task:
                             logger.info("task found on same node, retry")
                             continue
