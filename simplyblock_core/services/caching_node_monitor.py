@@ -19,7 +19,6 @@ db = db_controller.DBController()
 def set_node_online(node):
     if node.status == CachingNode.STATUS_UNREACHABLE:
         snode = db.get_caching_node_by_id(node.get_id())
-        old_status = snode.status
         snode.status = CachingNode.STATUS_ONLINE
         snode.updated_at = str(datetime.now())
         snode.write_to_db()
@@ -29,7 +28,6 @@ def set_node_online(node):
 def set_node_offline(node):
     if node.status == CachingNode.STATUS_ONLINE:
         snode = db.get_caching_node_by_id(node.get_id())
-        old_status = snode.status
         snode.status = CachingNode.STATUS_UNREACHABLE
         snode.updated_at = str(datetime.now())
         snode.write_to_db()

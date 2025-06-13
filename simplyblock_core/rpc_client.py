@@ -528,22 +528,22 @@ class RPCClient:
         return self._request("bdev_set_qos_limit", params)
 
     def bdev_lvol_add_to_group(self, group_id, lvol_name_list):
-        params = {
-            "bdev_group_id": group_id ,
-            "lvol_vbdev_list": lvol_name_list
-        }
         return True
+        # params = {
+        #     "bdev_group_id": group_id ,
+        #     "lvol_vbdev_list": lvol_name_list
+        # }
         # return self._request("bdev_lvol_add_to_group", params)
 
     def bdev_lvol_set_qos_limit(self, bdev_group_id, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
-        params = {
-            "bdev_group_id": bdev_group_id,
-            "rw_ios_per_sec": rw_ios_per_sec,
-            "rw_mbytes_per_sec": rw_mbytes_per_sec,
-            "r_mbytes_per_sec": r_mbytes_per_sec,
-            "w_mbytes_per_sec": w_mbytes_per_sec
-        }
         return True
+        # params = {
+        #     "bdev_group_id": bdev_group_id,
+        #     "rw_ios_per_sec": rw_ios_per_sec,
+        #     "rw_mbytes_per_sec": rw_mbytes_per_sec,
+        #     "r_mbytes_per_sec": r_mbytes_per_sec,
+        #     "w_mbytes_per_sec": w_mbytes_per_sec
+        # }
         # return self._request("bdev_lvol_set_qos_limit", params)
 
     def distr_send_cluster_map(self, params):

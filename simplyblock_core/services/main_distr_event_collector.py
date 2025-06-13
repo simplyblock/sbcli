@@ -90,7 +90,7 @@ def process_device_event(event):
 def process_lvol_event(event):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
         vuid = event.object_dict['vuid']
-        node_id = event.node_id
+        # node_id = event.node_id
         # storage_node_ops.set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
         # event_node_obj = db.get_storage_node_by_id(node_id)
         # tasks_controller.add_node_to_auto_restart(event_node_obj)

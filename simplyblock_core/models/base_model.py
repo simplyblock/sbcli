@@ -72,11 +72,11 @@ class BaseModel(object):
                     try:
                         value = dtype(value)
                     except Exception:
-                        if type(value) == list and dtype == int:
+                        if type(value) is list and dtype is int:
                             value = len(value)
 
                 elif hasattr(dtype, '__origin__'):
-                    if dtype.__origin__ == list:
+                    if dtype.__origin__ is list:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
                             value = [dtype.__args__[0]().from_dict(item) for item in data[attr]]
                         else:

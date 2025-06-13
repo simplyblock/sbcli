@@ -197,6 +197,8 @@ class StorageNode(BaseNodeObject):
             try:
                 if not rpc_client.get_bdevs(self.hublvol.bdev_name):
                     ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
+                    if not ret:
+                        logger.warning(f'Failed to recreate hublvol on {self.get_id()}')
                 else:
                     logger.info(f'Hublvol already exists {self.hublvol.bdev_name}')
 
