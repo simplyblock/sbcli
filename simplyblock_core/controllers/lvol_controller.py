@@ -461,7 +461,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.bdev_stack = [lvol_dict]
 
     if use_crypto:
-        if crypto_key1 == None or crypto_key2 == None:
+        if crypto_key1 is None or crypto_key2 is None:
             return False, "encryption keys for lvol not provided"
         else:
             success, err = validate_aes_xts_keys(crypto_key1, crypto_key2)
@@ -891,12 +891,6 @@ def delete_lvol(id_or_name, force_delete=False):
 
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
-
-        sec_rpc_client = RPCClient(
-            sec_node.mgmt_ip,
-            sec_node.rpc_port,
-            sec_node.rpc_username,
-            sec_node.rpc_password, timeout=5, retry=1)
 
         primary_node = None
         secondary_node = None

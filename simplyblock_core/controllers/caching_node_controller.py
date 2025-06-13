@@ -1,7 +1,6 @@
 # coding=utf-8
 import json
 import logging as lg
-import math
 import time
 import uuid
 
@@ -164,7 +163,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     ssd_size = ssd_dev.size
     supported_ssd_size = mem * 100 / 2.25
-    split_factor = math.ceil(ssd_size/supported_ssd_size)
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
     logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
@@ -698,6 +696,8 @@ def remove_node(node_id, force=False):
         snode_api = CNodeClient(snode.api_endpoint)
         results, err = snode_api.spdk_process_kill()
         ret = snode_api.delete_dev_gpt_partitions(snode.nvme_devices[0].pcie_address)
+        if not ret:
+            logger.warning("Failed to delete gpt partitions, continuing anyway")
 
     except Exception:
         pass

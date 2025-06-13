@@ -573,6 +573,8 @@ def check_device(device_id):
         if device.status == NVMeDevice.STATUS_ONLINE:
             logger.info("Checking other node's connection to this device...")
             ret = check_remote_device(device_id)
+            if not ret:
+                logger.warning(f"Remote device {device_id} is not accessible from other nodes")
             # passed &= ret
 
     except Exception as e:
