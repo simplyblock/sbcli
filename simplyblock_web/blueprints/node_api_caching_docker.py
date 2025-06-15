@@ -11,7 +11,7 @@ import docker
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 
-from simplyblock_web import utils, node_utils
+from simplyblock_web import utils
 from simplyblock_core import scripts, constants, utils as core_utils
 from simplyblock_core.utils import pull_docker_image_with_retry
 
@@ -62,13 +62,8 @@ def spdk_process_start(body: SPDKParams):
     spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
     node_docker = get_docker_client()
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] in ["/spdk", "/spdk_proxy"]:
-            logger.info(f"{node.attrs['Name']} container found, removing...")
-            node.stop()
-            node.remove(force=True)
-            time.sleep(2)
+    for name in {"/spdk", "/spdk_proxy"}:
+        core_utils.remove_container(node_docker, name)
 
     pull_docker_image_with_retry(node_docker, body.spdk_image)
 
@@ -90,7 +85,7 @@ def spdk_process_start(body: SPDKParams):
     )
 
 
-    container2 = node_docker.containers.run(
+    node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_core/services/spdk_http_proxy_server.py",
         name="spdk_proxy",
@@ -135,12 +130,8 @@ class _SPDKKillQuery(BaseModel):
     })}}},
 })
 def spdk_process_kill(query: _SPDKKillQuery):
-    node_docker = get_docker_client()
-    for cont in node_docker.containers.list(all=True):
-        logger.debug(cont.attrs)
-        if cont.attrs['Name'] == "/spdk" or cont.attrs['Name'] == "/spdk_proxy":
-            cont.stop()
-            cont.remove(force=query.force)
+    for name in {"/spdk", "/spdk_proxy"}:
+        core_utils.remove_container(get_docker_client(), name)
     return utils.get_response(True)
 
 
@@ -183,6 +174,6 @@ def join_db(body: _DBConnectionParams):
             if node.attrs["Name"] == "/spdk_proxy":
                 node_docker.containers.get(node.attrs["Id"]).restart()
                 break
-    except:
+    except Exception:
         pass
     return utils.get_response(True)

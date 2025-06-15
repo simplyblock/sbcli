@@ -189,12 +189,15 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
         passed &= check_subsystem(node.hublvol.nqn, nqns=node_lvols_nqns)
 
         cl = db_controller.get_cluster_by_id(node.cluster_id)
+        if cl is None:
+            logger.error(f"Cluster with id {node.cluster_id} not found")
+            return False
 
         ret = rpc_client.bdev_lvol_get_lvstores(node.lvstore)
         if ret:
             logger.info(f"Checking lvstore: {node.lvstore} ... ok")
             lvs_info = ret[0]
-            logger.info(f"lVol store Info:")
+            logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict[str, Any] = {}
             expected["lvs leadership"] = True
@@ -225,6 +228,9 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None):
     db_controller = DBController()
     primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
+    if primary_node is None:
+        logger.error(f"Primary node with id {node.lvstore_stack_secondary_1} not found")
+        return False
     logger.info(f"Checking secondary Hublvol: {primary_node.hublvol.bdev_name} on node {node.get_id()}")
 
     passed = True
@@ -259,11 +265,14 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
         cl = db_controller.get_cluster_by_id(node.cluster_id)
+        if cl is None:
+            logger.error(f"Cluster with id {node.cluster_id} not found")
+            return False
         ret = rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore)
         if ret:
             logger.info(f"Checking lvstore: {primary_node.lvstore} ... ok")
             lvs_info = ret[0]
-            logger.info(f"lVol store Info:")
+            logger.info("lVol store Info:")
             lvs_info_dict = []
             expected: dict [str, Any] = {}
             expected["name"] = primary_node.lvstore
@@ -332,7 +341,7 @@ def _check_node_lvstore(
     for distr in distribs_list:
         if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
-            logger.info(f"Checking distr JM names:")
+            logger.info("Checking distr JM names:")
             if distr in node_distribs_list:
                 jm_names = storage_node_ops.get_node_jm_names(node)
             elif stack_src_node:
@@ -564,6 +573,8 @@ def check_device(device_id):
         if device.status == NVMeDevice.STATUS_ONLINE:
             logger.info("Checking other node's connection to this device...")
             ret = check_remote_device(device_id)
+            if not ret:
+                logger.warning(f"Remote device {device_id} is not accessible from other nodes")
             # passed &= ret
 
     except Exception as e:

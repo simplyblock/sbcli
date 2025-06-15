@@ -1,6 +1,5 @@
 # coding=utf-8
 import datetime
-import time
 
 from simplyblock_core.models.base_model import BaseModel
 

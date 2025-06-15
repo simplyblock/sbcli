@@ -1,6 +1,5 @@
 # coding=utf-8
 import time
-import os
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import lvol_events
@@ -31,7 +30,7 @@ def sum_stats(stats_list):
                     ret[key] += v_int
                 else:
                     ret[key] = v_int
-            except:
+            except Exception:
                 pass
     return ret
 
