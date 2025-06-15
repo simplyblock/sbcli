@@ -111,7 +111,7 @@ def spdk_process_start(body: SPDKParams):
             retries -= 1
 
     return utils.get_response(
-        False, f"Deployment create max retries reached")
+        False, "Deployment create max retries reached")
 
 
 @api.get('/spdk_process_kill', responses={

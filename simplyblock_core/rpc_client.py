@@ -139,10 +139,10 @@ class RPCClient:
         """
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": 64,
-            "max_queue_depth": 128,
+            "max_io_qpairs_per_ctrlr": 128,
+            "max_queue_depth": 256,
             "abort_timeout_sec": 5,
-            "ack_timeout": 1024,
+            "ack_timeout": 2048,
             "zcopy": True,
             "in_capsule_data_size": 8192,
             "max_io_size": 131072,
@@ -443,7 +443,7 @@ class RPCClient:
             ret = self.get_bdevs(name)
             if ret:
                 return ret
-        except:
+        except Exception:
             pass
         params = {
             "name": name,
@@ -494,7 +494,7 @@ class RPCClient:
             ret = self.get_bdevs(name)
             if ret:
                 return ret
-        except:
+        except Exception:
             pass
         params = {
             "name": name,
@@ -528,22 +528,22 @@ class RPCClient:
         return self._request("bdev_set_qos_limit", params)
 
     def bdev_lvol_add_to_group(self, group_id, lvol_name_list):
-        params = {
-            "bdev_group_id": group_id ,
-            "lvol_vbdev_list": lvol_name_list
-        }
         return True
+        # params = {
+        #     "bdev_group_id": group_id ,
+        #     "lvol_vbdev_list": lvol_name_list
+        # }
         # return self._request("bdev_lvol_add_to_group", params)
 
     def bdev_lvol_set_qos_limit(self, bdev_group_id, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
-        params = {
-            "bdev_group_id": bdev_group_id,
-            "rw_ios_per_sec": rw_ios_per_sec,
-            "rw_mbytes_per_sec": rw_mbytes_per_sec,
-            "r_mbytes_per_sec": r_mbytes_per_sec,
-            "w_mbytes_per_sec": w_mbytes_per_sec
-        }
         return True
+        # params = {
+        #     "bdev_group_id": bdev_group_id,
+        #     "rw_ios_per_sec": rw_ios_per_sec,
+        #     "rw_mbytes_per_sec": rw_mbytes_per_sec,
+        #     "r_mbytes_per_sec": r_mbytes_per_sec,
+        #     "w_mbytes_per_sec": w_mbytes_per_sec
+        # }
         # return self._request("bdev_lvol_set_qos_limit", params)
 
     def distr_send_cluster_map(self, params):
@@ -572,7 +572,7 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
-            "num_io_queues": 64,
+            "num_io_queues": 128,
             #"ctrlr_loss_timeout_sec": 3,
             "multipath":"disable",
             # "reconnect_delay_sec":1

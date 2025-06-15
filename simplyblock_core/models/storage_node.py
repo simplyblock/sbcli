@@ -100,7 +100,6 @@ class StorageNode(BaseNodeObject):
     nvmf_port: int = 4420
     physical_label: int = 0
     hublvol: HubLVol = None
-    full_page_unmap: bool = True
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -198,6 +197,8 @@ class StorageNode(BaseNodeObject):
             try:
                 if not rpc_client.get_bdevs(self.hublvol.bdev_name):
                     ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
+                    if not ret:
+                        logger.warning(f'Failed to recreate hublvol on {self.get_id()}')
                 else:
                     logger.info(f'Hublvol already exists {self.hublvol.bdev_name}')
 
@@ -275,6 +276,5 @@ class StorageNode(BaseNodeObject):
             name, nvme_bdev, uuid,
             alceml_cpu_mask=alceml_cpu_mask,
             alceml_worker_cpu_mask=alceml_worker_cpu_mask,
-            full_page_unmap=self.full_page_unmap,
             **kwargs,
         )

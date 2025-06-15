@@ -35,6 +35,8 @@ def send_node_status_event(node, node_status, target_node=None):
         logger.info(f"Sending to: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
         ret = rpc_client.distr_status_events_update(events)
+        if not ret:
+            logger.warning("Failed to send event update")
 
 
 def send_dev_status_event(device, status, target_node=None):
@@ -301,9 +303,12 @@ def send_cluster_map_add_node(snode, target_node):
         }
 }
 """
-def send_cluster_map_add_device(device: NVMeDevice, target_node):
+def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
     db_controller = DBController()
     dnode = db_controller.get_storage_node_by_id(device.node_id)
+    if not dnode:
+        logger.error(f"Node {device.node_id} not found")
+        return False
     dev_w_gib = utils.convert_size(device.size, 'GiB') or 1
     if target_node.status == StorageNode.STATUS_ONLINE:
         rpc_client = RPCClient(

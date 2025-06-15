@@ -70,7 +70,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
             logger.info("Node is part of another swarm, leaving swarm")
             try:
                 cluster_docker.nodes.get(node_docker.info()["Swarm"]["NodeID"]).remove(force=True)
-            except:
+            except Exception:
                 pass
             node_docker.swarm.leave(force=True)
             time.sleep(5)

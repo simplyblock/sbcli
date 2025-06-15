@@ -176,7 +176,7 @@ def update_cluster_status(cluster_id):
             #     can_activate = False
             #     break
             if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
-                logger.error(f"can not activate cluster: restart tasks found")
+                logger.error("can not activate cluster: restart tasks found")
                 can_activate = False
                 break
 
@@ -208,6 +208,14 @@ def set_node_online(node):
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
                 device_controller.device_set_online(dev.get_id())
+
+        # start migration tasks on node online status change
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                logger.info("Adding task to device data migration")
+                task_id = tasks_controller.add_device_mig_task(dev.get_id())
+                if task_id:
+                    logger.info(f"Task id: {task_id}")
 
 
 def set_node_offline(node, set_devs_offline=False):
@@ -314,7 +322,7 @@ while True:
 
                 if not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-                        logger.error(f"Port check failed")
+                        logger.error("Port check failed")
                         set_node_down(snode)
                         continue
 
@@ -351,7 +359,7 @@ while True:
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-                        logger.error(f"Port check failed")
+                        logger.error("Port check failed")
                         set_node_down(snode)
 
                 else:

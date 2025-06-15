@@ -8,7 +8,6 @@ import traceback
 
 import cpuinfo
 import yaml
-from kubernetes import client, config
 from flask import Blueprint
 from flask import request
 from kubernetes.client import ApiException
@@ -36,7 +35,7 @@ hostname, _, _ = shell_utils.run_command("hostname -s")
 system_id = ""
 try:
     system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
-except:
+except Exception:
     pass
 
 
@@ -52,7 +51,7 @@ def set_namespace(namespace):
     if not os.path.exists(namespace_id_file):
         try:
             os.makedirs(os.path.dirname(namespace_id_file), exist_ok=True)
-        except:
+        except Exception:
             logger.error(traceback.format_exc())
             return False
     with open(namespace_id_file, "w+") as f:
@@ -62,7 +61,7 @@ def set_namespace(namespace):
 
 @bp.route('/scan_devices', methods=['GET'])
 def scan_devices():
-    run_health_check = request.args.get('run_health_check', default=False, type=bool)
+    request.args.get('run_health_check', default=False, type=bool)
     out = {
         "nvme_devices": node_utils.get_nvme_devices(),
         "nvme_pcie_list": node_utils.get_nvme_pcie_list(),
@@ -132,7 +131,7 @@ def spdk_process_start():
         resp = k8s_apps_v1.create_namespaced_deployment(body=dep, namespace=namespace)
         msg = f"Deployment created: '{resp.metadata.name}' in namespace '{namespace}"
         logger.info(msg)
-    except:
+    except Exception:
         return utils.get_response(False, f"Deployment failed:\n{traceback.format_exc()}")
 
     return utils.get_response(msg)
@@ -184,7 +183,7 @@ def spdk_process_is_up():
     if _is_pod_up():
         return utils.get_response(True)
     else:
-        return utils.get_response(False, f"SPDK container is not running")
+        return utils.get_response(False, "SPDK container is not running")
 
 
 @bp.route('/info', methods=['GET'])
@@ -280,7 +279,7 @@ def make_gpt_partitions_for_nbd():
         data = request.get_json()
         nbd_device = data['nbd_device']
         jm_percent = data['jm_percent']
-    except:
+    except Exception:
         pass
 
     cmd_list = [

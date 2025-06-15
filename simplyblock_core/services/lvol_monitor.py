@@ -6,7 +6,7 @@ from datetime import datetime
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.controllers import health_controller, lvol_events, lvol_controller
+from simplyblock_core.controllers import health_controller, lvol_events
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
