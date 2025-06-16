@@ -171,15 +171,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity) -> str:
-
-    logger.info("Installing dependencies...")
-    ret = scripts.install_deps(mode)
  
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
     logger.info("Installing dependencies...")
-    scripts.install_deps()
+    scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
     if not ifname:
