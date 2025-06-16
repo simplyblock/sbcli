@@ -556,8 +556,9 @@ def check_node(node_id, with_devices=True):
 
 def check_device(device_id):
     db_controller = DBController()
-    device = db_controller.get_storage_device_by_id(device_id)
-    if not device:
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+    except KeyError:
         # is jm device ?
         for node in db_controller.get_storage_nodes():
             if node.jm_device and node.jm_device.get_id() == device_id:
@@ -622,8 +623,9 @@ def check_device(device_id):
 
 def check_remote_device(device_id, target_node=None):
     db_controller = DBController()
-    device = db_controller.get_storage_device_by_id(device_id)
-    if not device:
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+    except KeyError:
         logger.error("device not found")
         return False
 

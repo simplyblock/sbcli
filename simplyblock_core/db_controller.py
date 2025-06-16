@@ -122,13 +122,18 @@ class DBController(metaclass=Singleton):
                 return node
         return None
 
-    def get_storage_device_by_id(self, id) -> Optional[NVMeDevice]:
+    def get_storage_device_by_id(self, id) -> NVMeDevice:
         nodes = self.get_storage_nodes()
-        for node in nodes:
-            for dev in node.nvme_devices:
-                if dev.get_id() == id:
-                    return dev
-        return None
+        try:
+            return next(
+                device
+                for node in nodes
+                for device in node.nvme_devices
+                if device.get_id() == id
+            )
+        except StopIteration:
+            raise KeyError(f'Device {id} not found')
+
 
     def get_pools(self, cluster_id=None) -> List[Pool]:
         pools = []
