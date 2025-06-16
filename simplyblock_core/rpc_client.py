@@ -1,5 +1,4 @@
 import json
-import inspect
 
 import requests
 
@@ -1008,7 +1007,7 @@ class RPCClient:
         `lvs` must be either an ID or the lvstore name.
         """
 
-        return self._request(inspect.currentframe().f_code.co_name, {
+        return self._request('bdev_lvol_set_lvs_opts', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
             "subsystem_port": subsystem_port,
@@ -1037,17 +1036,17 @@ class RPCClient:
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
     def bdev_lvol_create_hublvol(self, lvs):
-        return self._request(inspect.currentframe().f_code.co_name, {
+        return self._request('bdev_lvol_create_hublvol', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
         })
 
     def bdev_lvol_delete_hublvol(self, lvs):
-        return self._request(inspect.currentframe().f_code.co_name, {
+        return self._request('bdev_lvol_delete_hublvol', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
         })
 
     def bdev_lvol_connect_hublvol(self, lvs, bdev):
-        return self._request(inspect.currentframe().f_code.co_name, {
+        return self._request('bdev_lvol_connect_hublvol', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "remote_bdev": bdev,
         })
