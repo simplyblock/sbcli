@@ -1998,9 +1998,11 @@ def list_storage_devices(node_id, is_json):
         status = device.status
         if device.remote_bdev:
             name = device.remote_bdev
-            org_dev = db_controller.get_storage_device_by_id(device.get_id())
-            if org_dev:
+            try:
+                org_dev = db_controller.get_storage_device_by_id(device.get_id())
                 status = org_dev.status
+            except KeyError:
+                pass
 
         remote_devices.append({
             "UUID": device.uuid,
