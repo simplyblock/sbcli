@@ -15,87 +15,87 @@ def _check_status_transition(expected_statuses, f, interval=.5):
 
 
 def test_storage_node_get(call, cluster):
-    nodes = call('GET', f'/clusters/{cluster}/storagenodes')
+    nodes = call('GET', f'/clusters/{cluster}/storage_nodes')
 
     for node in nodes:
-        call('GET', f"/clusters/{cluster}/storagenodes/{node['uuid']}")
+        call('GET', f"/clusters/{cluster}/storage_nodes/{node['uuid']}")
 
 
 def test_capacity(call, cluster):
-    node_uuid = call('GET', f'/clusters/{cluster}/storagenodes')[0]['uuid']
-    call('GET', f'/clusters/{cluster}/storagenodes/capacity/{node_uuid}')
-    call('GET', f'/clusters/{cluster}/storagenodes/capacity/{node_uuid}/history/10m')
+    node_uuid = call('GET', f'/clusters/{cluster}/storage_nodes')[0]['uuid']
+    call('GET', f'/clusters/{cluster}/storage_nodes/capacity/{node_uuid}')
+    call('GET', f'/clusters/{cluster}/storage_nodes/capacity/{node_uuid}/history/10m')
 
 
 def test_iostats(call, cluster):
-    node_uuid = call('GET', f'/clusters/{cluster}/storagenodes')[0]['uuid']
-    call('GET', f'/clusters/{cluster}/storagenodes/{node_uuid}/iostats')
-    call('GET', f'/clusters/{cluster}/storagenodes/{node_uuid}/iostats?history=10m')
+    node_uuid = call('GET', f'/clusters/{cluster}/storage_nodes')[0]['uuid']
+    call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}/iostats')
+    call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}/iostats?history=10m')
 
 
 def test_port(call, cluster):
-    node_uuid = call('GET', f'/clusters/{cluster}/storagenodes')[0]['uuid']
-    port_id = call('GET', f'/clusters/{cluster}/storagenodes/{node_uuid}/port')[0]['ID']
-    call('GET', f'/clusters/{cluster}/storagenodes/{port_id}/port-io-stats')
+    node_uuid = call('GET', f'/clusters/{cluster}/storage_nodes')[0]['uuid']
+    port_id = call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}/port')[0]['ID']
+    call('GET', f'/clusters/{cluster}/storage_nodes/{port_id}/port-io-stats')
 
 
 @pytest.mark.timeout(20)
 def test_suspend_resume(call, cluster):
-    node = call('GET', f'/clusters/{cluster}/storagenodes')[0]
+    node = call('GET', f'/clusters/{cluster}/storage_nodes')[0]
     assert node['status'] == 'online'
     node_uuid = node['uuid']
 
-    call('POST', f'/clusters/{cluster}/storagenodes/{node_uuid}/suspend')
-    assert call('GET', '/clusters/{cluster}/storagenodes/{node_uuid}')['status'] == 'suspended'
+    call('POST', f'/clusters/{cluster}/storage_nodes/{node_uuid}/suspend')
+    assert call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}')['status'] == 'suspended'
 
-    call('POST', f'/clusters/{cluster}/storagenodes/{node_uuid}/resume')
-    assert call('GET', '/clusters/{cluster}/storagenodes/{node_uuid}')['status'] == 'online'
+    call('POST', f'/clusters/{cluster}/storage_nodes/{node_uuid}/resume')
+    assert call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}')['status'] == 'online'
 
 
 @pytest.mark.timeout(30)
 def test_restart(call, cluster):
-    node = call('GET', '/clusters/{cluster}/storagenodes')[0]
+    node = call('GET', f'/clusters/{cluster}/storage_nodes')[0]
     assert node['status'] == 'online'
     node_uuid = node['uuid']
 
-    call('POST', f'/clusters/{cluster}/storagenodes/{node_uuid}/restart', data={'force': True})
+    call('POST', f'/clusters/{cluster}/storage_nodes/{node_uuid}/restart', data={'force': True})
     _check_status_transition(
         ['online', 'in_restart', 'online'],
-        lambda: call('GET', f'/clusters/{cluster}/storagenodes/{node_uuid}'),
+        lambda: call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}'),
     )
 
 
 @pytest.mark.xfail
 def test_shutdown_unsuspended(call, cluster):
-    node = call('GET', f'/clusters/{cluster}/storagenodes')[0]
+    node = call('GET', f'/clusters/{cluster}/storage_nodes')[0]
     assert node['status'] == 'online'
     node_uuid = node['uuid']
 
     with pytest.raises(HTTPError):
-        call('POST', f'/clusters/{cluster}/storagenodes/{node_uuid}/shutdown')
+        call('POST', f'/clusters/{cluster}/storage_nodes/{node_uuid}/shutdown')
 
 
 
 @pytest.mark.timeout(40)
 def test_shutdown(call, cluster):
-    node = call('GET', '/clusters/{cluster}/storagenodes')[0]
+    node = call('GET', f'/clusters/{cluster}/storage_nodes')[0]
     assert node['status'] == 'online'
     node_uuid = node['uuid']
 
-    call('POST', f'/clusters/{cluster}/storagenodes/suspend/{node_uuid}')
-    assert call('GET', f'/clusters/{cluster}/storagenodes/{node_uuid}')['status'] == 'suspended'
+    call('POST', f'/clusters/{cluster}/storage_nodes/suspend/{node_uuid}')
+    assert call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}')['status'] == 'suspended'
 
-    call('POST', f'/clusters/{cluster}/storagenodes/{node_uuid}/shutdown')
+    call('POST', f'/clusters/{cluster}/storage_nodes/{node_uuid}/shutdown')
     _check_status_transition(
         ['suspended', 'in_shutdown', 'offline'],
-        lambda: call('GET', f'/clusters/{cluster}/storagenodes/{node_uuid}'),
+        lambda: call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}'),
         interval=.1,
     )
 
-    call('POST', f'/clusters/{cluster}/storagenodes/{node_uuid}/restart/')
+    call('POST', f'/clusters/{cluster}/storage_nodes/{node_uuid}/restart/')
     _check_status_transition(
         ['offline', 'in_restart', 'online'],
-        lambda: call('GET', f'/clusters/{cluster}/storagenodes/{node_uuid}'),
+        lambda: call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}'),
         interval=.1,
     )
 

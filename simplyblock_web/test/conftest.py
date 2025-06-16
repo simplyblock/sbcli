@@ -33,7 +33,6 @@ def call(request):
     return functools.partial(
             util.api_call,
             options.entrypoint,
-            options.cluster,
             options.secret,
             log_func=print,
     )
