@@ -207,14 +207,6 @@ while True:
                                         node_remote_devices_check = False
                                     break
 
-                    # if snode.lvstore_stack_secondary_1:
-                    #     primary_node = db.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-                    #     if primary_node:
-                    #         for jm_id in primary_node.jm_ids:
-                    #             # if jm_id not in connected_jms:
-                    #             #    node_remote_devices_check = False
-                    #                 break
-
                     if not node_remote_devices_check and cluster.status in [
                         Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
                         storage_node_ops._connect_to_remote_jm_devs(snode)

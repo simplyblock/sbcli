@@ -668,13 +668,6 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             if jm_dev and jm_dev not in remote_devices:
                 remote_devices.append(jm_dev)
 
-    # if len(remote_devices) < 2:
-    #     for node in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
-    #         if node.get_id() == this_node.get_id() or node.status != StorageNode.STATUS_ONLINE:
-    #             continue
-    #         if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE:
-    #             remote_devices.append(node.jm_device)
-
     new_devs = []
     for jm_dev in remote_devices:
         if not jm_dev.jm_bdev:
@@ -1710,20 +1703,6 @@ def restart_storage_node(
     logger.info("Connecting to remote devices")
     snode.remote_devices = _connect_to_remote_devs(snode)
     if snode.enable_ha_jm:
-        # if len(snode.remote_jm_devices) < 2:
-        #     devs = get_sorted_ha_jms(snode)
-        #     if devs:
-        #         dev = db_controller.get_jm_device_by_id(devs[0])
-        #         snode.remote_jm_devices.append(dev)
-        # if not snode.jm_ids:
-        #     snode.jm_ids = []
-        #     for rem_jm in snode.remote_jm_devices:
-        #         if rem_jm.get_id():
-        #             snode.jm_ids.append(rem_jm.get_id())
-        #
-        #     snode.jm_ids = snode.jm_ids[:constants.HA_JM_COUNT-1]
-        #     snode.write_to_db(db_controller.kv_store)
-
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.health_check = True
     snode.lvstore_status = ""
