@@ -15,23 +15,17 @@ def api_call(entrypoint, secret, method, path, *, fail=True, data=None, log_func
         json=data,
     )
 
+    log_func(f'{method} {path}' + (f" -> {response.code}" if method == 'POST' else ''))
     if fail:
         response.raise_for_status() 
 
     try:
-        result = response.json()
+        return response.json()
     except requests.exceptions.JSONDecodeError:
         log_func("Failed to decode content as JSON:")
         log_func(response.text)
         if fail:
             raise
-
-    if not result['status']:
-        raise ValueError(result.get('error', 'Request failed'))
-
-    log_func(f'{method} {path}' + (f" -> {result['results']}" if method == 'POST' else ''))
-
-    return result['results']
 
 
 def await_deletion(call, resource, timeout=120):
