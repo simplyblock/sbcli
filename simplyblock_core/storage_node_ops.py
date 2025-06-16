@@ -2931,6 +2931,10 @@ def recreate_lvstore(snode):
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
 
+        if sec_node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN]:
+            logger.info(f"Secondary node is not online, forcing journal replication on node: {snode.get_id()}")
+            rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+
     ### 5- examine
     time.sleep(0.2)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)

@@ -270,3 +270,7 @@ def get_failed_device_mig_task(cluster_id, device_id):
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
     return False
+
+
+def add_port_allow_task(cluster_id, node_id, port_number):
+    return _add_task(JobSchedule.FN_PORT_ALLOW, cluster_id, node_id, "", function_params={"port_number": port_number})
