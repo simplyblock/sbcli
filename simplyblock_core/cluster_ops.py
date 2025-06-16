@@ -458,7 +458,8 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity) -> str:
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, storage_tiering, 
+                s3_endpoint, s3_bucket, s3_access_key, s3_secret_key, s3_workerpool_mask, s3_workerpool_size) -> str:
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -493,6 +494,14 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.enable_qos = enable_qos
+    cluster.storage_tiering = storage_tiering
+    cluster.s3_endpoint = s3_endpoint
+    cluster.s3_bucket = s3_bucket
+    cluster.s3_access_key = s3_access_key
+    cluster.s3_secret_key = s3_secret_key
+    cluster.s3_workerpool_mask = s3_workerpool_mask
+    cluster.s3_workerpool_size = s3_workerpool_size
+
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:

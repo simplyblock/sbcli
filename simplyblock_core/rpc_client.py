@@ -1,9 +1,6 @@
 import json
 import inspect
-
 import requests
-import inspect
-import random
 from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry

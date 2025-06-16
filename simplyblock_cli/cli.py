@@ -1233,6 +1233,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
+                elif sub_command in ['backup']:
+                    ret = self.snapshot__backup(sub_command, args)
                 else:
                     self.parser.print_help()
 
