@@ -142,7 +142,6 @@ class RPCClient:
             "max_io_qpairs_per_ctrlr": 128,
             "max_queue_depth": 256,
             "abort_timeout_sec": 5,
-            "ack_timeout": 2048,
             "zcopy": True,
             "in_capsule_data_size": 8192,
             "max_io_size": 131072,
@@ -639,7 +638,6 @@ class RPCClient:
             "fast_io_fail_timeout_sec" : 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
-            "transport_ack_timeout": 10,
             "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)
