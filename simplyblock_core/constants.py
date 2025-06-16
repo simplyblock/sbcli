@@ -156,6 +156,7 @@ K8S_NAMESPACE = "simplyblock"
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongodb"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
+PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
 
 os_env_patch = [
     {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},
@@ -256,5 +257,11 @@ graylog_patch = {
                 ]
             }
         }
+    }
+}
+
+prometheus_patch = {
+    "spec": {
+        "replicas": 3,
     }
 }

@@ -235,34 +235,18 @@ spec:
               memory: "1Gi"
       volumes:
         - name: simplyblock-graylog-data
-          hostPath:
-            path: /mnt/data/graylog-data
-            type: DirectoryOrCreate
+          emptyDir: {}
         - name: simplyblock-graylog-journal
-          hostPath:
-            path: /mnt/data/graylog-journal
-            type: DirectoryOrCreate
-# ---
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: simplyblock-prometheus-data
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   #storageClassName: openebs-local-hostpath
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 5Gi
+          emptyDir: {}
 
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: simplyblock-prometheus
   namespace: {{ .Release.Namespace }}
 spec:
+  serviceName: simplyblock-prometheus
   replicas: 1
   selector:
     matchLabels:
@@ -274,6 +258,16 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - simplyblock-prometheus
+              topologyKey: "kubernetes.io/hostname"
       securityContext:
         fsGroup: 65534
         supplementalGroups:
@@ -291,7 +285,7 @@ spec:
           volumeMounts:
             - name: config-volume
               mountPath: /etc/prometheus
-            - name: prometheus-data
+            - name: simplyblock-prometheus-data
               mountPath: /prometheus
           resources:
             requests:
@@ -300,43 +294,21 @@ spec:
             limits:
               cpu: "500m"
               memory: "1Gi"
-      volumes:
-        - name: config-volume
-          configMap:
-            name: simplyblock-prometheus-config
-        - name: prometheus-data
-          hostPath:
-            path: /mnt/data/prometheus-data
-            type: DirectoryOrCreate
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-thanos-sidecar
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-thanos-sidecar
-  template:
-    metadata:
-      labels:
-        app: simplyblock-thanos-sidecar
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
-      containers:
         - name: thanos-sidecar
           image: thanosio/thanos:v0.31.0
           args:
             - sidecar
             - --tsdb.path=/prometheus
-            - --prometheus.url=http://simplyblock-prometheus:9090
+            - --prometheus.url=http://localhost:9090
             - --objstore.config-file=/etc/thanos/objstore.yml
+          ports:
+            - containerPort: 10902
+              name: grpc
+            - containerPort: 10903
+              name: http
           volumeMounts:
-            - name: prometheus-data
+            - name: simplyblock-prometheus-data
               mountPath: /prometheus
             - name: objstore-config
               mountPath: /etc/thanos
@@ -347,17 +319,23 @@ spec:
             limits:
               cpu: "250m"
               memory: "1Gi"
+
       volumes:
-        # - name: prometheus-data
-        #   persistentVolumeClaim:
-        #     claimName: simplyblock-prometheus-data
-        - name: prometheus-data
-          hostPath:
-            path: /mnt/data/prometheus-data
-            type: DirectoryOrCreate
+        - name: config-volume
+          configMap:
+            name: simplyblock-prometheus-config
         - name: objstore-config
           configMap:
             name: simplyblock-objstore-config
+  volumeClaimTemplates:
+    - metadata:
+        name: simplyblock-prometheus-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: openebs-local-hostpath
+        resources:
+          requests:
+            storage: 5Gi
 
 ---
 apiVersion: apps/v1
@@ -425,7 +403,7 @@ spec:
             - query
             - --http-address=0.0.0.0:9091
             - --store=simplyblock-thanos-store:10901
-            - --store=simplyblock-thanos-sidecar:10901
+            - --store=simplyblock-prometheus:10901
           resources:
             requests:
               cpu: "100m"
@@ -433,20 +411,6 @@ spec:
             limits:
               cpu: "250m"
               memory: "1Gi"
-
----
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: simplyblock-thanos-compactor-data
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   #storageClassName: openebs-local-hostpath
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 10Gi
 
 ---
 apiVersion: apps/v1
@@ -495,9 +459,7 @@ spec:
           configMap:
             name: simplyblock-objstore-config
         - name: compactor-data
-          hostPath:
-            path: /mnt/data/compactor-data
-            type: DirectoryOrCreate
+          emptyDir: {}
 
 ---
 apiVersion: apps/v1
@@ -560,19 +522,6 @@ spec:
           hostPath:
             path: /
 
-# ---
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: simplyblock-grafana-data
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   #storageClassName: openebs-local-hostpath
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 5Gi
 
 ---
 apiVersion: apps/v1
@@ -683,6 +632,4 @@ spec:
           configMap:
             name: simplyblock-grafana-dashboard-node-exporter
         - name: grafana-data
-          hostPath:
-            path: /mnt/data/grafana-data
-            type: DirectoryOrCreate
+          emptyDir: {}

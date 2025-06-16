@@ -175,6 +175,14 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
 
             logger.info("Patched Graylog MongoDB URI for replicaset support")
 
+            response = apps_v1.patch_namespaced_stateful_set(
+                name=constants.PROMETHEUS_STATEFULSET_NAME,
+                namespace=constants.K8S_NAMESPACE,
+                body=constants.prometheus_patch
+            )
+
+            logger.info(f"Patched StatefulSet {constants.PROMETHEUS_STATEFULSET_NAME}: {response.status.replicas} replicas")
+
             current_node = socket.gethostname()
             logger.info(f"Waiting for FDB pod on this node: {current_node} to be active...")
             fdb_cont = None

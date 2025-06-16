@@ -23,13 +23,6 @@ elif [[ "$1" == "kubernetes" ]]; then
   ./get_helm.sh
   rm -rf ./get_helm.sh
 
-  sudo mkdir -p /mnt/data/grafana-data /mnt/data/prometheus-data /mnt/data/graylog-data /mnt/data/graylog-journal
-
-  sudo chown -R 472:472 /mnt/data/grafana-data
-  sudo chown -R 65534:65534 /mnt/data/prometheus-data
-  sudo chown -R 1100:1100 /mnt/data/graylog-data
-  sudo chown -R 1100:1100 /mnt/data/graylog-journal
-
   NODE_NAME=$(hostname)
 
   /usr/local/bin/kubectl label nodes "$NODE_NAME" simplyblock.io/role=mgmt-plane --overwrite
