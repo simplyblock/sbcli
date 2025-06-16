@@ -53,7 +53,7 @@ def add(path: ClusterPath, body: PoolParams):
 
     if not id_or_false:
         raise ValueError('Failed to create pool')
-    return None, 201, {'Location': url_for('.get', cluster_id=cluster.get_id(), pool_id=id_or_false)}
+    return '', 201, {'Location': url_for('api.v2.cluster.instance.pool.instance.get', cluster_id=cluster.get_id(), pool_id=id_or_false)}
 
 
 instance_api = APIBlueprint('instance', __name__, url_prefix='/<pool_id>')
