@@ -1,5 +1,5 @@
 from threading import Thread
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from flask import abort, url_for
 from flask_openapi3 import APIBlueprint
@@ -33,7 +33,7 @@ def list(path: ClusterPath):
 
 
 class StorageNodeParams(BaseModel):
-    node_address: str = Field(web_utils.IP_PATTERN)
+    node_address: Annotated[str, Field(web_utils.IP_PATTERN)]
     interface_name: str
     max_snapshots: int = Field(500)
     ha_jm: bool = Field(True)
@@ -75,14 +75,15 @@ def add(path: ClusterPath, body: StorageNodeParams):
     if not task_id_or_false:
         raise ValueError('Failed to create add-node task')
 
-    return None, 201, {'Location': url_for('task', cluster_id=cluster.get_id(), task_id=task_id_or_false)}
+    task_url = url_for('api.v2.cluster.task.get', cluster_id=cluster.get_id(), task_id=task_id_or_false)
+    return '', 201, {'Location': task_url}
 
 
-instance_api = APIBlueprint('storage node instance', __name__, url_prefix='/<storage_node_id>')
+instance_api = APIBlueprint('instance', __name__, url_prefix='/<storage_node_id>')
 
 
 class StorageNodePath(ClusterPath):
-    storage_node_id: str = Field(core_utils.UUID_PATTERN)
+    storage_node_id: Annotated[str, Field(core_utils.UUID_PATTERN)]
 
     def storage_node(self) -> StorageNode:
         storage_node = db.get_storage_node_by_id(self.storage_node_id)

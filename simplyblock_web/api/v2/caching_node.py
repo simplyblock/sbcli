@@ -13,7 +13,7 @@ from simplyblock_web import utils as web_utils
 from .cluster import ClusterPath
 
 
-api = APIBlueprint('caching node', __name__, url_prefix='/caching_nodes')
+api = APIBlueprint('caching_node', __name__, url_prefix='/caching_nodes')
 db = DBController()
 
 
@@ -57,7 +57,7 @@ def add(path: ClusterPath, body: CachingNodeParams):
     return None, 201  # FIXME: Provide URL for checking task status
 
 
-instance_api = APIBlueprint('caching node instance', __name__, url_prefix='/<caching_node_id>')
+instance_api = APIBlueprint('instance', __name__, url_prefix='/<caching_node_id>')
 
 
 class CachingNodePath(ClusterPath):

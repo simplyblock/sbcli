@@ -23,7 +23,7 @@ def list(path: StorageNodePath):
         for device in storage_node.nvme_devices
     ]
 
-instance_api = APIBlueprint('device instance', __name__, url_prefix='/<device_id>')
+instance_api = APIBlueprint('instance', __name__, url_prefix='/<device_id>')
 
 
 class DevicePath(StorageNodePath):

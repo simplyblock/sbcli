@@ -10,7 +10,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 
 from .cluster import ClusterPath
 
-api = APIBlueprint('management node', __name__, url_prefix='/management_nodes')
+api = APIBlueprint('management_node', __name__, url_prefix='/management_nodes')
 db = DBController()
 
 
@@ -24,7 +24,7 @@ def list(path: ClusterPath):
     ]
 
 
-instance_api = APIBlueprint('management node instance', __name__, url_prefix='/<management_node_id>')
+instance_api = APIBlueprint('instance', __name__, url_prefix='/<management_node_id>')
 
 
 class ManagementNodePath(ClusterPath):

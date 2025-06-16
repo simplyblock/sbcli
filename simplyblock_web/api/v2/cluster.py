@@ -67,7 +67,7 @@ def add(body: ClusterParams):
 
 
 
-instance_api = APIBlueprint('cluster instance', __name__, url_prefix='/<cluster_id>')
+instance_api = APIBlueprint('instance', __name__, url_prefix='/<cluster_id>')
 
 
 class ClusterPath(BaseModel):

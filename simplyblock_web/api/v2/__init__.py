@@ -8,6 +8,7 @@ from . import management_node
 from . import pool
 from . import snapshot
 from . import storage_node
+from . import task
 from .auth import api_token_required
 
 
@@ -18,10 +19,11 @@ pool.instance_api.register_api(snapshot.api)
 cluster.instance_api.register_api(caching_node.api)
 cluster.instance_api.register_api(pool.api)
 cluster.instance_api.register_api(storage_node.api)
+cluster.instance_api.register_api(task.api)
 
 
 api = APIBlueprint(
-        'API v2',
+        'v2',
         __name__,
         url_prefix='v2',
         abp_security=[{'token_v2': []}],

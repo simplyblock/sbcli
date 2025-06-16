@@ -26,7 +26,7 @@ def list(path: PoolPath):
     ]
 
 
-instance_api = APIBlueprint('snapshot instance', __name__, url_prefix='/<snapshot_id>')
+instance_api = APIBlueprint('instance', __name__, url_prefix='/<snapshot_id>')
 
 
 class SnapshotPath(PoolPath):

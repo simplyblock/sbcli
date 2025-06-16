@@ -70,7 +70,7 @@ def add(path: PoolPath, body: LVolParams):
         raise ValueError(error)
 
 
-instance_api = APIBlueprint('volume instance', __name__, url_prefix='/<volume_id>')
+instance_api = APIBlueprint('instance', __name__, url_prefix='/<volume_id>')
 
 
 class VolumePath(PoolPath):
@@ -187,7 +187,7 @@ def create_snapshot(path: VolumePath, body: _SnapshotParams):
     )
     if err is not None:
         raise ValueError('Failed to create snapshot')
-    return None, 201, {'Location': url_for('snapshot', cluster_id=path.cluster_id, snapshot_id=snapshot_id)}  # TODO
+    return None, 201, {'Location': url_for('api.v2.cluster.pool.snapshot.get', cluster_id=path.cluster_id, snapshot_id=snapshot_id)}  # TODO
 
 
 api.register_api(instance_api)
