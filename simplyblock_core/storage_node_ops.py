@@ -3014,9 +3014,9 @@ def recreate_lvstore(snode):
     if snode.lvstore_stack_secondary_1:
         node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
         if node:
-            ret = recreate_lvstore_on_sec(snode)
+            ret = recreate_lvstore_on_sec(node)
             if not ret:
-                logger.error(f"Failed to recreate secondary on node: {snode.get_id()}")
+                logger.error(f"Failed to recreate for secondary of node {snode.get_id()}")
 
     return True
 
