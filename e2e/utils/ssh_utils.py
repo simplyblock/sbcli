@@ -731,12 +731,24 @@ class SshUtils:
         output, _ = self.exec_command(node=node, command=command)
         data = json.loads(output)
         nvme_dict = {}
-        self.logger.info(f"LVOL DEVICE output: {data}")
+        self.logger.info(f"LVOL DEVICE output: {json.dumps(data, indent=2)}")
+
         for device in data.get('Devices', []):
-            device_path = device.get('DevicePath')
-            model_number = device.get('ModelNumber')
-            if device_path and model_number:
-                nvme_dict[model_number] = device_path
+            for subsystem in device.get('Subsystems', []):
+                subsystem_nqn = subsystem.get('SubsystemNQN', '')
+                if ':lvol:' in subsystem_nqn:
+                    # Extract lvol UUID from NQN
+                    lvol_uuid = subsystem_nqn.split(':lvol:')[-1]
+                    # Get the namespace name (e.g., nvme0n1)
+                    ns_list = subsystem.get('Namespaces', [])
+                    if ns_list:
+                        ns = ns_list[0]  # Should have only one namespace per lvol
+                        namespace = ns.get('NameSpace')
+                        if namespace:
+                            # Compose Linux device path
+                            nvme_device = f"/dev/{namespace}"
+                            nvme_dict[lvol_uuid] = nvme_device
+
         self.logger.info(f"LVOL vs device dict output: {nvme_dict}")
         if lvol_id:
             return nvme_dict.get(lvol_id)
