@@ -40,7 +40,7 @@ def call(request):
 
 @pytest.fixture(scope='module')
 def pool(call, cluster):
-    pool_uuid = call('POST', f'/clusters/{cluster}/pools', data={'name': 'poolX', 'cluster_id': cluster, 'no_secret': True})
+    pool_uuid = call('POST', f'/clusters/{cluster}/pools', data={'name': 'poolX', 'no_secret': True})
     yield pool_uuid
     call('DELETE', f'/clusters/{cluster}/pools/{pool_uuid}')
 
