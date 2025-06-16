@@ -54,7 +54,7 @@ def add(path: ClusterPath, body: CachingNodeParams):
         },
     ).start()
 
-    return None, 201  # FIXME: Provide URL for checking task status
+    return '', 201  # FIXME: Provide URL for checking task status
 
 
 instance_api = APIBlueprint('instance', __name__, url_prefix='/<caching_node_id>')

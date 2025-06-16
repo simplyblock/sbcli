@@ -1,4 +1,3 @@
-import json
 from threading import Thread
 from typing import Literal, Optional
 
@@ -7,7 +6,6 @@ from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core import cluster_ops, utils as core_utils
 
@@ -96,42 +94,32 @@ def delete(path: ClusterPath):
 
 @instance_api.get('/capacity')
 def capacity(path: ClusterPath, query: util.HistoryQuery):
-    serialized_capacity_or_false = cluster_ops.get_capacity(
-            path.cluster().get_id(), query.history, is_json=True)
-    if not serialized_capacity_or_false:
+    capacity_or_false = cluster_ops.get_capacity(
+            path.cluster().get_id(), query.history)
+    if not capacity_or_false:
         raise ValueError('Failed to compute capacity')
 
-    return json.loads(serialized_capacity_or_false)
+    return capacity_or_false
 
 
 @instance_api.get('/iostats')
 def iostats(path: ClusterPath, query: util.HistoryQuery):
-    serialized_iostats_or_false = cluster_ops.get_iostats_history(
-            path.cluster().get_id(), query.history, parse_sizes=False, with_sizes=True)
-    if not serialized_iostats_or_false:
+    iostats_or_false = cluster_ops.get_iostats_history(
+            path.cluster().get_id(), query.history, with_sizes=True)
+    if not iostats_or_false:
         raise ValueError('Failed to compute capacity')
 
-    return json.loads(serialized_iostats_or_false)
+    return iostats_or_false
 
 
 @instance_api.get('/logs')
 def logs(path: ClusterPath, query: _LimitQuery):
-    serialized_logs_or_false = cluster_ops.get_logs(
+    logs_or_false = cluster_ops.get_logs(
             path.cluster().get_id(), is_json=True, limit=query.limit)
-    if not serialized_logs_or_false:
+    if not logs_or_false:
         raise ValueError('Failed to access logs')
 
-    return json.loads(serialized_logs_or_false)
-
-
-@instance_api.get('/tasks')
-def tasks(path: ClusterPath, query: _LimitQuery):
-    serialized_tasks_or_false = tasks_controller.list_tasks(
-            path.cluster().get_id(), is_json=True, limit=query.limit)
-    if not serialized_tasks_or_false:
-        raise ValueError('Failed to access tasks')
-
-    return json.loads(serialized_tasks_or_false)
+    return logs_or_false
 
 
 @instance_api.post('/start')
@@ -140,7 +128,7 @@ def start(path: ClusterPath):
         target=cluster_ops.cluster_grace_startup,
         args=(path.cluster().get_id(),),
     ).start()
-    return None, 201  # FIXME: Provide URL for checking task status
+    return '', 201  # FIXME: Provide URL for checking task status
 
 
 @instance_api.post('/shutdown')
@@ -149,7 +137,7 @@ def shutdown(path: ClusterPath):
         target=cluster_ops.cluster_grace_shutdown,
         args=(path.cluster().get_id(),),
     ).start()
-    return None, 201  # FIXME: Provide URL for checking task status
+    return '', 201  # FIXME: Provide URL for checking task status
 
 
 @instance_api.post('/activate')
@@ -158,20 +146,18 @@ def activate(path: ClusterPath):
         target=cluster_ops.cluster_activate,
         args=(path.cluster().get_id(),),
     ).start()
-    return None, 201  # FIXME: Provide URL for checking task status
+    return '', 201  # FIXME: Provide URL for checking task status
 
 
 @instance_api.post('/update')
 def update(path: ClusterPath, body: _UpdateParams):
-    if not cluster_ops.update_cluster(
+    cluster_ops.update_cluster(
         cluster_id=path.cluster().get_id(),
         mgmt_image=body.management_image,
         mgmt_only=body.spdk_image is None and not body.restart,
         spdk_image=body.spdk_image,
         restart=body.restart
-    ):
-        raise ValueError('Failed to update cluster')
-
+    )
 
 
 api.register_api(instance_api)

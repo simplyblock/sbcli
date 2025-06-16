@@ -20,7 +20,7 @@ def api_call(entrypoint, secret, method, path, *, fail=True, data=None, log_func
         response.raise_for_status() 
 
     try:
-        return response.json()
+        return response.json() if response.text else None
     except requests.exceptions.JSONDecodeError:
         log_func("Failed to decode content as JSON:")
         log_func(response.text)
