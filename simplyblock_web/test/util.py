@@ -1,5 +1,7 @@
-import re
+from pathlib import Path
 import time
+import re
+from urllib.parse import urlparse
 
 import requests
 
@@ -15,9 +17,15 @@ def api_call(entrypoint, secret, method, path, *, fail=True, data=None, log_func
         json=data,
     )
 
-    log_func(f'{method} {path}' + (f" -> {response.status_code}" if method == 'POST' else ''))
+    log_func(f'{method} {path} -> {response.status_code}')
     if fail:
         response.raise_for_status() 
+
+    if response.status_code == 201:
+        location = response.headers.get('Location')
+        path = Path(urlparse(location).path)
+        entity_id = path.parts[-1]
+        return entity_id
 
     try:
         return response.json() if response.text else None
