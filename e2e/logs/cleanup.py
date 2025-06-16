@@ -1,11 +1,10 @@
 import os
 import paramiko
-import argparse
 import time
 
 # SSH Configuration
 BASTION_IP = os.getenv("BASTION_IP")
-KEY_PATH = os.path.expanduser("~/.ssh/simplyblock-us-east-2.pem")
+KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
 USER = os.getenv("USER", "root")
 
 # Node Lists
@@ -78,13 +77,13 @@ def cleanup_remote_logs(ssh, node):
 
     # Cleanup commands
     cleanup_commands = [
-        f"rm -rf {HOME_DIR}/container-logs.tar.gz",  # Remove compressed tar file
-        f"rm -rf {HOME_DIR}/container-logs/*",  # Remove container logs content
-        f"rm -rf {HOME_DIR}/*.txt* {HOME_DIR}/*.log {HOME_DIR}/*.state {HOME_DIR}/*iolog*",  # Remove uploaded logs
-        "rm -rf /etc/simplyblock/[0-9]*",  # Remove dump logs
-        "rm -rf /etc/simplyblock/*core*.zst",  # Remove dump logs
-        "rm -rf /etc/simplyblock/LVS*",  # Remove dump logs
-        f"rm -rf {HOME_DIR}/upload_to_minio.py"  # Remove temporary upload script
+        f"sudo rm -rf {HOME_DIR}/container-logs.tar.gz",  # Remove compressed tar file
+        f"sudo rm -rf {HOME_DIR}/container-logs/*",  # Remove container logs content
+        f"sudo rm -rf {HOME_DIR}/*.txt* {HOME_DIR}/*.log {HOME_DIR}/*.state {HOME_DIR}/*iolog*",  # Remove uploaded logs
+        "sudo rm -rf /etc/simplyblock/[0-9]*",  # Remove dump logs
+        "sudo rm -rf /etc/simplyblock/*core*.zst",  # Remove dump logs
+        "sudo rm -rf /etc/simplyblock/LVS*",  # Remove dump logs
+        f"sudo rm -rf {HOME_DIR}/upload_to_minio.py"  # Remove temporary upload script
     ]
 
     for cmd in cleanup_commands:
@@ -103,14 +102,14 @@ def cleanup_local_logs():
         return
 
     print(f"[INFO] Cleaning up local logs from {logs_dir}...")
-    os.system(f"rm -rf {logs_dir}/*.log")
-    os.system(f"rm -rf {logs_dir}/*.txt")
+    os.system(f"sudo rm -rf {logs_dir}/*.log")
+    os.system(f"sudo rm -rf {logs_dir}/*.txt")
 
     print("[SUCCESS] Local logs cleaned up.")
 
 
     print(f"[INFO] Cleaning up Kubernetes logs directory: {local_k8s_log_dir}...")
-    os.system(f"rm -rf {local_k8s_log_dir}/*")
+    os.system(f"sudo rm -rf {local_k8s_log_dir}/*")
     print("[SUCCESS] Kubernetes logs directory cleaned up.")
 
 

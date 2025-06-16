@@ -18,7 +18,7 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "password")
 
 # SSH and Node Details
 BASTION_IP = os.getenv("BASTION_IP")
-KEY_PATH = os.path.expanduser("~/.ssh/simplyblock-us-east-2.pem")
+KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
 USER = os.getenv("USER", "root")
 
 
@@ -369,7 +369,7 @@ def cleanup_local_logs():
     print(f"[INFO] Cleaning up local logs from {logs_dir}...")
     subprocess.run(f"rm -rf {logs_dir}/*.log", shell=True, check=True)
     subprocess.run(f"rm -rf {logs_dir}/*.txt", shell=True, check=True)
-    print(f"[SUCCESS] Local logs cleaned up.")
+    print("[SUCCESS] Local logs cleaned up.")
 
 
 # **Step 1: Process Management Node (Same for both Docker & Kubernetes mode)**

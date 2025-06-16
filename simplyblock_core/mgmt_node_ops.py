@@ -46,7 +46,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
         return False
 
     logger.info(f"Node IP: {DEV_IP}")
-    ret = scripts.configure_docker(DEV_IP)
+    scripts.configure_docker(DEV_IP)
 
     db_connection = cluster_data['db_connection']
     scripts.set_db_config(db_connection)
@@ -63,7 +63,6 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             return False
 
     if mode == "docker": 
-
         logger.info("Joining docker swarm...")
         try:
             cluster_docker = utils.get_docker_client(cluster_id)
@@ -74,7 +73,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
                 logger.info("Node is part of another swarm, leaving swarm")
                 try:
                     cluster_docker.nodes.get(node_docker.info()["Swarm"]["NodeID"]).remove(force=True)
-                except:
+                except Exception:
                     pass
                 node_docker.swarm.leave(force=True)
                 time.sleep(5)

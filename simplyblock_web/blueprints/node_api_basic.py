@@ -6,7 +6,6 @@ import cpuinfo
 
 from pydantic import BaseModel, Field
 from flask_openapi3 import APIBlueprint
-from flask import request
 
 from simplyblock_core import shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils
@@ -20,7 +19,7 @@ hostname, _, _ = shell_utils.run_command("hostname -s")
 system_id = ""
 try:
     system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
-except:
+except Exception:
     pass
 
 

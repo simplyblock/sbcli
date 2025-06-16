@@ -20,6 +20,7 @@ core_utils.init_sentry_sdk()
 app = Flask(__name__)
 app.logger.setLevel(constants.LOG_WEB_LEVEL)
 app.url_map.strict_slashes = False
+app.register_error_handler(Exception, utils.error_handler)
 
 
 # Add routes

@@ -1,4 +1,3 @@
-import time
 import random
 import threading
 from utils.common_utils import sleep_n_sec

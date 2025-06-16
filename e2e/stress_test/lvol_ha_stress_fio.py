@@ -5,7 +5,6 @@ from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from logger_config import setup_logger
 from datetime import datetime
 from exceptions.custom_exception import LvolNotConnectException
-from requests.exceptions import HTTPError
 from pathlib import Path
 
 

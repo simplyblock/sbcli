@@ -142,7 +142,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             self.ssh_obj.add_storage_node(self.mgmt_nodes[0], self.cluster_id, ip,
                                           spdk_image=node_sample["spdk_image"],
                                           partitions=node_sample["num_partitions_per_dev"],
-                                          disable_ha_jm=node_sample["enable_ha_jm"],
+                                          disable_ha_jm= not node_sample["enable_ha_jm"],
                                           enable_test_device=node_sample["enable_test_device"],
                                           spdk_debug=node_sample["spdk_debug"])
             sleep_n_sec(60)
@@ -166,6 +166,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             )
 
         # Step 4: Resume cluster
+        sleep_n_sec(60)
         self.logger.info("Expanding the cluster")
         self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 

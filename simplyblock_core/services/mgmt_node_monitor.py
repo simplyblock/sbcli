@@ -1,12 +1,11 @@
 # coding=utf-8
-import os
 
 import time
 from datetime import datetime
 
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import mgmt_events
+from simplyblock_core.controllers import mgmt_events, health_controller
 from simplyblock_core.models.mgmt_node import MgmtNode
 
 
@@ -88,17 +87,6 @@ def set_node_offline(node):
         mgmt_events.status_change(snode, snode.status, old_status, caused_by="monitor")
 
 
-def ping_host(ip):
-    logger.info(f"Pinging ip {ip}")
-    response = os.system(f"ping -c 1 {ip}")
-    if response == 0:
-        logger.info(f"{ip} is UP")
-        return True
-    else:
-        logger.info(f"{ip} is DOWN")
-        return False
-
-
 logger.info("Starting Mgmt node monitor")
 
 
@@ -112,8 +100,15 @@ while True:
             logger.info(f"Node status is: {node.status}, skipping")
             continue
 
-        logger.info(f"Checking node {node.hostname}")
-        if not ping_host(node.mgmt_ip):
+        # 1- check node ping
+        ping_check = health_controller._check_node_ping(node.mgmt_ip)
+        logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+        if not ping_check:
+            time.sleep(1)
+            ping_check = health_controller._check_node_ping(node.mgmt_ip)
+            logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+
+        if not ping_check:
             logger.info(f"Node {node.hostname} is offline")
             set_node_offline(node)
             continue

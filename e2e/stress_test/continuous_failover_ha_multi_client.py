@@ -1,5 +1,4 @@
 from utils.common_utils import sleep_n_sec
-from logger_config import setup_logger
 from datetime import datetime
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 from exceptions.custom_exception import LvolNotConnectException
@@ -26,7 +25,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 8
+        self.total_lvols = 30
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
@@ -55,7 +54,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         #                       "lvol_disconnect_primary"]
         # self.outage_types = ["container_stop", "graceful_shutdown", 
         #                      "interface_full_network_interrupt", "interface_partial_network_interrupt"]
-        self.outage_types = ["graceful_shutdown"]
+        self.outage_types = ["graceful_shutdown", "interface_full_network_interrupt", "interface_partial_network_interrupt"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -583,7 +582,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         if not available_lvols:
             self.logger.warning("No available lvols to create snapshots and clones.")
             return
-        for _ in range(2):
+        for _ in range(3):
             random.shuffle(available_lvols)
             lvol = available_lvols[0]
             snapshot_name = f"snap_{generate_random_sequence(15)}"
@@ -738,11 +737,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
 
-            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
-                                         new_size=f"{self.int_lvol_size}G")
-            sleep_n_sec(10)
-            self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
-                                         new_size=f"{self.int_lvol_size}G")
+            # self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
+            #                              new_size=f"{self.int_lvol_size}G")
+            # sleep_n_sec(10)
+            # self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
+            #                              new_size=f"{self.int_lvol_size}G")
             
 
     def delete_random_lvols(self, count):
@@ -845,7 +844,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         outage_type = self.perform_random_outage()
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-            # self.delete_random_lvols(6)
+            self.delete_random_lvols(6)
             if not self.k8s_test:
                 for node in self.storage_nodes:
                     self.ssh_obj.restart_docker_logging(
@@ -1070,7 +1069,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                # self.delete_random_lvols(8)
+                self.delete_random_lvols(8)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
                         self.ssh_obj.restart_docker_logging(
@@ -1089,7 +1088,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node
                     )
-                self.create_lvols_with_fio(3)
+                self.create_lvols_with_fio(6)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
                         self.ssh_obj.restart_docker_logging(

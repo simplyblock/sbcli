@@ -1,6 +1,5 @@
 # coding=utf-8
 import pprint
-import logging
 
 import json
 from inspect import ismethod
@@ -72,12 +71,12 @@ class BaseModel(object):
                 if dtype in [int, float, str, bool]:
                     try:
                         value = dtype(value)
-                    except:
-                        if type(value) == list and dtype == int:
+                    except Exception:
+                        if type(value) is list and dtype is int:
                             value = len(value)
 
                 elif hasattr(dtype, '__origin__'):
-                    if dtype.__origin__ == list:
+                    if dtype.__origin__ is list:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
                             value = [dtype.__args__[0]().from_dict(item) for item in data[attr]]
                         else:

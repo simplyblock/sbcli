@@ -1,5 +1,4 @@
 # coding=utf-8
-import glob
 import json
 import logging
 import math
@@ -17,7 +16,6 @@ from typing import Set, Union
 from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
-from graypy import GELFTCPHandler
 from docker.errors import APIError, DockerException, ImageNotFound
 from kubernetes.stream import stream
 
@@ -290,7 +288,7 @@ def parse_history_param(history_string):
     results = re.search(r'^(\d+[hmd])(\d+[hmd])?$', history_string.lower())
     if not results:
         logger.error(f"Error parsing history string: {history_string}")
-        logger.info(f"History format: xxdyyh , e.g: 1d12h, 1d, 2h, 1m")
+        logger.info("History format: xxdyyh , e.g: 1d12h, 1d, 2h, 1m")
         return False
 
     history_in_seconds = 0
@@ -331,7 +329,7 @@ def process_records(records, records_count, keys=None):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"ping -c 1 -W 3 {ip} > /dev/null")
+    response = os.system(f"ping -c 3 -W 3 {ip} > /dev/null")
     if response == 0:
         logger.debug(f"{ip} is UP")
         return True
@@ -405,7 +403,6 @@ def pair_hyperthreads():
 
 
 def calculate_core_allocations(vcpu_list, alceml_count=2):
-    total = len(vcpu_list)
     is_hyperthreaded = is_hyperthreading_enabled_via_siblings()
     pairs = pair_hyperthreads() if is_hyperthreaded else {}
     remaining = set(vcpu_list)
@@ -754,7 +751,7 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes=None):
             return True
 
         elif migration_status == "none":
-            task.function_result = f"mig retry after restart"
+            task.function_result = "mig retry after restart"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
             del task.function_params['migration']
@@ -847,7 +844,7 @@ cmdline_add=isolcpus={core_list} nohz_full={core_list} rcu_nocbs={core_list}
         f.write(tuned_conf_content)
     content = f"isolated_cores={core_list}\n"
     try:
-        process = subprocess.run(
+        subprocess.run(
             ["sudo", "tee", realtime_variables_file_path],
             input=content.encode("utf-8"),
             stdout=subprocess.DEVNULL,  # Suppress standard output
@@ -865,7 +862,7 @@ def run_tuned():
             ["sudo", "tuned-adm", "profile", "realtime"],
             check=True
         )
-        print(f"Successfully run the tuned adm profile")
+        print("Successfully run the tuned adm profile")
     except subprocess.CalledProcessError as e:
         logger.error(f"Error running the tuned adm profile: {e}")
 
@@ -942,7 +939,7 @@ def store_config_file(data_config, file_path, create_read_only_file=False):
 
     # Write the dictionary to the JSON file
     try:
-        process = subprocess.run(
+        subprocess.run(
             ["sudo", "tee", file_path],
             input=cores_config_json.encode("utf-8"),
             stdout=subprocess.DEVNULL,  # Suppress standard output
@@ -1001,7 +998,7 @@ def get_numa_cores():
             node_id = int(node_id)
             cpu_id = int(cpu_id)
             cores_by_numa.setdefault(node_id, []).append(cpu_id)
-    except:
+    except Exception:
         total_cores = os.cpu_count()
         cores_by_numa[0] = list(range(total_cores))
     return cores_by_numa
@@ -1022,7 +1019,7 @@ def addNvmeDevices(rpc_client, snode, devs):
     try:
         if ret:
             ctr_map = {i["ctrlrs"][0]['trid']['traddr']: i["name"] for i in ret}
-    except:
+    except Exception:
         pass
 
     next_physical_label = snode.physical_label
@@ -1051,8 +1048,11 @@ def addNvmeDevices(rpc_client, snode, devs):
 
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
-                subnqn = nvme_driver_data['ctrlr_data']['subnqn']
-                serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
+                if "subnqn" in nvme_driver_data['ctrlr_data']:
+                    subnqn = nvme_driver_data['ctrlr_data']['subnqn']
+                    serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
+                else:
+                    logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
 
             devices.append(
                 NVMeDevice({
@@ -1149,7 +1149,7 @@ def detect_nics():
         try:
             with open(numa_node_path, "r") as f:
                 numa_node = int(f.read().strip())
-        except:
+        except Exception:
             numa_node = -1
         nics[nic] = numa_node
     return nics
@@ -1396,18 +1396,19 @@ def regenerate_config(new_config, old_config, force=False):
         if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
             logger.error("The socket is changed, please rerun sbcli configure without upgrade firstly")
             return False
-        if old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or force:
+        number_of_alcemls = len(new_config["nodes"][i]["ssd_pcis"])
+        if (old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or
+                len(old_config["nodes"][i]["ssd_pcis"]) != len(new_config["nodes"][i]["ssd_pcis"]) or force):
             try:
                 isolated_cores = hexa_to_cpu_list(new_config["nodes"][i]["cpu_mask"])
             except ValueError:
                 logger.error(f"The updated cpu mask is incorrect {new_config['nodes'][i]['cpu_mask']}")
                 return False
-            number_of_alcemls = len(old_config["nodes"][i]["ssd_pcis"])
             old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
             old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
             old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])
             old_config["nodes"][i]["isolated"] = isolated_cores
-            distribution = calculate_core_allocations(isolated_cores, number_of_alcemls)
+            distribution = calculate_core_allocations(isolated_cores, number_of_alcemls + 1)
             core_to_index = {core: idx for idx, core in enumerate(isolated_cores)}
             old_config["nodes"][i]["distribution"] ={
                 "app_thread_core": get_core_indexes(core_to_index, distribution[0]),
@@ -1830,3 +1831,14 @@ def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
 
     return ready_pods == expected_replicas
 
+
+def remove_container(client: docker.DockerClient, name, timeout=3):
+    try:
+        container = client.containers.get(name)
+        container.stop(timeout=timeout)
+        container.remove()
+    except docker.errors.NotFound:
+        pass
+    except docker.errors.APIError as e:
+        if 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
+            raise

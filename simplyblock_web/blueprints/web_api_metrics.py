@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
-import json
 import logging
-import os
 
 from flask import Blueprint
 from simplyblock_core.models.nvme_device import NVMeDevice

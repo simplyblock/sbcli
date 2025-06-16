@@ -1,7 +1,6 @@
 ### simplyblock e2e tests
 from datetime import datetime
 import os
-import time
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
@@ -185,7 +184,7 @@ class TestSingleNodeOutage(TestClusterBase):
                                      new_size="25G")
         
         node_details = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
-        node_ip = node_details[0]["mgmt_ip"]
+        node_details[0]["mgmt_ip"]
         if not self.k8s_test:
             for node in self.storage_nodes:
                 self.ssh_obj.restart_docker_logging(
@@ -367,7 +366,7 @@ class TestHASingleNodeOutage(TestClusterBase):
 
         for i in range(3):
             lvol_name = f"LVOL_{i}"
-            lvol_id = self.add_lvol_and_run_fio(lvol_name)
+            self.add_lvol_and_run_fio(lvol_name)
 
         # no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvol_id)['results'][0]['node_id']
 
@@ -378,8 +377,8 @@ class TestHASingleNodeOutage(TestClusterBase):
                 break
 
         no_lvol_node_uuid = no_lvol_node['uuid']
-        node_ip = no_lvol_node["mgmt_ip"]
-        instance_id = no_lvol_node["cloud_instance_id"]
+        no_lvol_node["mgmt_ip"]
+        no_lvol_node["cloud_instance_id"]
 
         self.validations(node_uuid=no_lvol_node_uuid,
                          node_status="online",

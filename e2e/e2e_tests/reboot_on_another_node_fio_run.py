@@ -201,7 +201,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
             self.ssh_obj.make_node_primary(self.mgmt_nodes[0], restart_target["node_uuid"])
 
             # Step 9: Wait for fio and node online
-            self.common_utils.manage_fio_threads(self.mgmt_nodes[0], fio_threads, timeout=700)
+            self.common_utils.manage_fio_threads(self.mgmt_nodes[0], fio_threads, timeout=1000)
 
             for lvol_name, lvol_detail in lvol_details.items():
                 self.logger.info(f"Checking fio log for lvol and clone for {lvol_name}")

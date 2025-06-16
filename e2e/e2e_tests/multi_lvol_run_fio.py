@@ -1,5 +1,4 @@
 import time
-import os
 import random
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase

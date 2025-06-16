@@ -434,5 +434,5 @@ class TestLvolFioNpcsCustom(TestLvolFioBase):
         # Cleanup after running FIO
         self.cleanup_lvols(lvol_configs)
 
-        self.logger.info(f"Test Case Passed.")
+        self.logger.info("Test Case Passed.")
 
