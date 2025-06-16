@@ -15,7 +15,7 @@ def api_call(entrypoint, secret, method, path, *, fail=True, data=None, log_func
         json=data,
     )
 
-    log_func(f'{method} {path}' + (f" -> {response.code}" if method == 'POST' else ''))
+    log_func(f'{method} {path}' + (f" -> {response.status_code}" if method == 'POST' else ''))
     if fail:
         response.raise_for_status() 
 
