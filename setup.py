@@ -46,7 +46,7 @@ def get_env_var(name, default=None):
         try:
             k, v = line.split("=")
             data[k.strip()] = v.strip()
-        except:
+        except Exception:
             pass
     return data.get(name, default)
 

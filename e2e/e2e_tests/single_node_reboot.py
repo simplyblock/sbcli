@@ -238,7 +238,7 @@ class TestSingleNodeReboot(TestClusterBase):
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
         
-        end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+        self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
                                                         threads=[fio_thread1],
                                                         timeout=1000)
         
@@ -391,7 +391,7 @@ class TestHASingleNodeReboot(TestClusterBase):
 
         for i in range(3):
             lvol_name = f"LVOL_{i}"
-            lvol_id = self.add_lvol_and_run_fio(lvol_name)
+            self.add_lvol_and_run_fio(lvol_name)
 
         # no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvol_id)['results'][0]['node_id']
 
