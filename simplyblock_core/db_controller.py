@@ -7,7 +7,6 @@ from typing import List, Optional
 from simplyblock_core import constants
 from simplyblock_core.models.caching_node import CachingNode
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.deployer import Deployer
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -298,15 +297,6 @@ class DBController(metaclass=Singleton):
         if not ret:
             raise KeyError(f'Cluster {cluster_id} not found')
         return ret[0]
-
-    def get_deployers(self) -> List[Deployer]:
-        return Deployer().read_from_db(self.kv_store)
-
-    def get_deployer_by_id(self, deployer_id) -> Optional[Deployer]:
-        ret = Deployer().read_from_db(self.kv_store, id=deployer_id)
-        if ret:
-            return ret[0]
-        return None
 
     def get_port_stats(self, node_id, port_id, limit=20) -> List[PortStat]:
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)

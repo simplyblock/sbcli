@@ -10,7 +10,6 @@ from . import snapshot
 from . import storage_node
 from . import pool
 from . import caching_node
-from . import deployer
 from . import swagger_ui
 from . import metrics
 
@@ -24,7 +23,6 @@ api.register_blueprint(snapshot.bp)
 api.register_blueprint(storage_node.bp)
 api.register_blueprint(pool.bp)
 api.register_blueprint(caching_node.bp)
-api.register_blueprint(deployer.bp)
 api.register_blueprint(swagger_ui.bp, url_prefix=swagger_ui.SWAGGER_URL)
 api.register_blueprint(metrics.bp)
 
