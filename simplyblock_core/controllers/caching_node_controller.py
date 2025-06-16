@@ -1,8 +1,6 @@
 # coding=utf-8
-import datetime
 import json
 import logging as lg
-import math
 import time
 import uuid
 
@@ -14,7 +12,6 @@ from simplyblock_core.cnode_client import CNodeClient
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.rpc_client import RPCClient
@@ -117,7 +114,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     while retries > 0:
         resp, _ = cnode_api.spdk_process_is_up()
         if resp:
-            logger.info(f"Pod is up")
+            logger.info("Pod is up")
             break
         else:
             logger.info("Pod is not running, waiting...")
@@ -166,7 +163,6 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
     ssd_size = ssd_dev.size
     supported_ssd_size = mem * 100 / 2.25
-    split_factor = math.ceil(ssd_size/supported_ssd_size)
 
     logger.info(f"Supported SSD size: {utils.humanbytes(supported_ssd_size)}")
     logger.info(f"SSD size: {utils.humanbytes(ssd_size)}")
@@ -185,18 +181,18 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     #     cache_size = ssd_dev.size
 
     if supported_ssd_size < ssd_size:
-        logger.info(f"SSD size is bigger than the supported size, creating partition")
+        logger.info("SSD size is bigger than the supported size, creating partition")
 
         nbd_device = rpc_client.nbd_start_disk(ssd_dev.nvme_bdev)
         time.sleep(3)
         if not nbd_device:
-            logger.error(f"Failed to start nbd dev")
+            logger.error("Failed to start nbd dev")
             return False
 
         jm_percent = int((supported_ssd_size/ssd_size) * 100)
         result, error = cnode_api.make_gpt_partitions(nbd_device, jm_percent)
         if error:
-            logger.error(f"Failed to make partitions")
+            logger.error("Failed to make partitions")
             logger.error(error)
             return False
         time.sleep(3)
@@ -223,7 +219,7 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     snode.cache_size = cache_size
 
     # create tmp ocf
-    logger.info(f"Creating first ocf bdev...")
+    logger.info("Creating first ocf bdev...")
 
     ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int(utils.parse_size('100MiB')/512))
     if not ret:
@@ -268,7 +264,7 @@ def recreate(node_id):
         while retries > 0:
             resp, _ = cnode_api.spdk_process_is_up()
             if resp:
-                logger.info(f"Pod is up")
+                logger.info("Pod is up")
                 break
             else:
                 logger.info("Pod is not running, waiting...")
@@ -306,7 +302,7 @@ def recreate(node_id):
     logger.info(f"Cache size: {utils.humanbytes(snode.cache_size)}")
 
     # create tmp ocf
-    logger.info(f"Creating first ocf bdev...")
+    logger.info("Creating first ocf bdev...")
 
     ret = rpc_client.bdev_malloc_create("malloc_tmp", 512, int(utils.parse_size('100MiB') / 512))
     if not ret:
@@ -345,7 +341,7 @@ def connect(caching_node_id, lvol_id, force=False):
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     cnode = None
@@ -456,7 +452,7 @@ def connect(caching_node_id, lvol_id, force=False):
             break
 
     if not dev_path:
-        logger.error(f"Device path was not found")
+        logger.error("Device path was not found")
         return False
 
     logger.info(f"Device path: {dev_path}")
@@ -519,7 +515,7 @@ def disconnect(caching_node_id, lvol_id):
 
     try:
         ret, _ = cnode_client.disconnect_nqn(subsystem_nqn)
-    except:
+    except Exception:
         pass
     # if not ret:
     #     logger.error("failed to disconnect local connecting")
@@ -582,17 +578,11 @@ def deploy(ifname):
 
     node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto", timeout=60 * 5)
     # create the api container
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] == "/CachingNodeAPI":
-            logger.info("CachingNodeAPI container found, removing...")
-            node.stop()
-            node.remove(force=True)
-            time.sleep(2)
+    utils.remove_container(node_docker, '/CachingNodeAPI')
 
     logger.info("Creating CachingNodeAPI container")
     cont_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
-    container = node_docker.containers.run(
+    node_docker.containers.run(
         cont_image,
         "python simplyblock_web/node_webapp.py caching_kubernetes_node",
         detach=True,
@@ -706,8 +696,10 @@ def remove_node(node_id, force=False):
         snode_api = CNodeClient(snode.api_endpoint)
         results, err = snode_api.spdk_process_kill()
         ret = snode_api.delete_dev_gpt_partitions(snode.nvme_devices[0].pcie_address)
+        if not ret:
+            logger.warning("Failed to delete gpt partitions, continuing anyway")
 
-    except:
+    except Exception:
         pass
 
     snode.remove(db_controller.kv_store)

@@ -6,12 +6,11 @@ import threading
 
 from flask import abort, Blueprint, request
 
-from simplyblock_core.controllers import tasks_controller, device_controller, lvol_controller
+from simplyblock_core.controllers import tasks_controller, device_controller
 from simplyblock_web import utils
 
 from simplyblock_core import db_controller, cluster_ops, storage_node_ops
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core import utils as core_utils
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +135,7 @@ def cluster_get_logs(uuid):
     try:
         args = request.args
         limit = int(args.get('limit', limit))
-    except:
+    except Exception:
         pass
 
     return utils.get_response(cluster_ops.get_logs(uuid, limit=limit))
@@ -154,7 +153,7 @@ def cluster_get_tasks(uuid):
     try:
         args = request.args
         limit = int(args.get('limit', limit))
-    except:
+    except Exception:
         pass
 
     tasks = tasks_controller.list_tasks(uuid, is_json=True, limit=limit)

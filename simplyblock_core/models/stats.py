@@ -3,7 +3,6 @@ import json
 import uuid
 
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.pool import Pool
 
 
 class StatsObject(BaseModel):

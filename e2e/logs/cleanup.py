@@ -1,6 +1,5 @@
 import os
 import paramiko
-import argparse
 import time
 
 # SSH Configuration

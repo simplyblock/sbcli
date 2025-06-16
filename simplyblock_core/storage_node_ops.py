@@ -1,10 +1,8 @@
-# coding=utf-8
+# coding=utf- 8
 import datetime
 import json
-import math
 import os
 
-import pprint
 import threading
 
 import time
@@ -19,7 +17,6 @@ from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINU
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
-from simplyblock_core import shell_utils
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -27,7 +24,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient, RPCException
-from simplyblock_core.snode_client import SNodeClient
+from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
@@ -271,7 +268,6 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     qos_bdev = ""
     # Add qos bdev device
     if cluster.enable_qos:
-        max_queue_size = cluster.max_queue_size
         inflight_io_threshold = cluster.inflight_io_threshold
         qos_bdev = f"{alceml_name}_qos"
         ret = rpc_client.qos_vbdev_create(qos_bdev, alceml_name, inflight_io_threshold)
@@ -322,7 +318,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
     time.sleep(3)
     if not nbd_device:
-        logger.error(f"Failed to start nbd dev")
+        logger.error("Failed to start nbd dev")
         return False
     snode_api = SNodeClient(snode.api_endpoint)
     partition_percent = 0
@@ -331,7 +327,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
 
     result, error = snode_api.make_gpt_partitions(nbd_device, jm_percent, num_partitions_per_dev, partition_percent)
     if error:
-        logger.error(f"Failed to make partitions")
+        logger.error("Failed to make partitions")
         logger.error(error)
         return False
     time.sleep(3)
@@ -416,7 +412,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
     if jm_devices:
         jm_device = _create_jm_stack_on_raid(rpc_client, jm_devices, snode, after_restart=False)
         if not jm_device:
-            logger.error(f"Failed to create JM device")
+            logger.error("Failed to create JM device")
             return False
 
         snode.jm_device = jm_device
@@ -440,7 +436,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
         if nvme.status == NVMeDevice.STATUS_JM:
             jm_device = _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart=False)
             if not jm_device:
-                logger.error(f"Failed to create JM device")
+                logger.error("Failed to create JM device")
                 return False
             snode.jm_device = jm_device
             continue
@@ -520,7 +516,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         if all_bdevs_found:
             ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
             if not ret:
-                logger.error(f"Failed to create JM device")
+                logger.error("Failed to create JM device")
                 return False
 
 
@@ -846,7 +842,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.info(f"huge_free: {utils.humanbytes(memory_details['huge_free'])}")
             logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
         else:
-            logger.error(f"Cannot get memory info from the instance.. Exiting")
+            logger.error("Cannot get memory info from the instance.. Exiting")
             return False
 
         # Calculate minimum sys memory
@@ -1036,7 +1032,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # 2- set socket implementation options
         ret = rpc_client.sock_impl_set_options()
         if not ret:
-            logger.error(f"Failed to set optimized socket options")
+            logger.error("Failed to set optimized socket options")
             return False
 
         # 3- set nvme config
@@ -1102,7 +1098,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         else:
             ssds = snode.ssd_pcie
 
-        nvme_devs = addNvmeDevices(rpc_client, snode, snode.ssd_pcie)
+        nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
         if nvme_devs:
 
             for nvme in nvme_devs:
@@ -1225,7 +1221,7 @@ def delete_storage_node(node_id, force=False):
         return False
 
     if snode.status != StorageNode.STATUS_REMOVED:
-        logger.error(f"Node must be in removed status")
+        logger.error("Node must be in removed status")
         return False
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
@@ -1314,7 +1310,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         for node in cluster_docker.nodes.list():
             if node.attrs["Status"] and snode.mgmt_ip in node.attrs["Status"]["Addr"]:
                 node.remove(force=True)
-    except:
+    except Exception:
         pass
 
     try:
@@ -1331,6 +1327,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                     pci_address.append(dev.pcie_address)
     except Exception as e:
         logger.exception(e)
+        return False
 
     set_node_status(node_id, StorageNode.STATUS_REMOVED)
 
@@ -1488,7 +1485,7 @@ def restart_storage_node(
         logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
         logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
     else:
-        logger.error(f"Cannot get memory info from the instance.. Exiting")
+        logger.error("Cannot get memory info from the instance.. Exiting")
         return False
 
     # Calculate minimum sys memory
@@ -1771,7 +1768,7 @@ def restart_storage_node(
             node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
             node.write_to_db(kv_store)
 
-        logger.info(f"Sending device status event")
+        logger.info("Sending device status event")
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         for db_dev in snode.nvme_devices:
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
@@ -1809,7 +1806,7 @@ def restart_storage_node(
                 node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
                 node.write_to_db(kv_store)
 
-            logger.info(f"Sending device status event")
+            logger.info("Sending device status event")
             snode = db_controller.get_storage_node_by_id(snode.get_id())
             for db_dev in snode.nvme_devices:
                 distr_controller.send_dev_status_event(db_dev, db_dev.status)
@@ -1866,7 +1863,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         if node.online_since and node.status == StorageNode.STATUS_ONLINE:
             try:
                 uptime = utils.strfdelta((now - datetime.datetime.fromisoformat(node.online_since)))
-            except:
+            except Exception:
                 pass
 
         for dev in node.nvme_devices:
@@ -2064,9 +2061,11 @@ def shutdown_storage_node(node_id, force=False):
     #     distr_controller.disconnect_device(dev)
 
     logger.info("Stopping SPDK")
-    if health_controller._check_node_api(snode.mgmt_ip):
-        snode_api = SNodeClient(snode.api_endpoint, timeout=30, retry=1)
-        snode_api.spdk_process_kill(snode.rpc_port)
+    try:
+        SNodeClient(snode.api_endpoint, timeout=30, retry=1).spdk_process_kill(snode.rpc_port)
+    except SNodeClientException:
+        logger.error('Failed to kill SPDK')
+        return False
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
@@ -2119,12 +2118,12 @@ def suspend_storage_node(node_id, force=False):
 
     if cluster.ha_type == "ha":
         if online_nodes < 3 and cluster.status == cluster.STATUS_ACTIVE:
-            logger.warning(f"Cluster mode is HA but online storage nodes are less than 3")
+            logger.warning("Cluster mode is HA but online storage nodes are less than 3")
             if force is False:
                 return False
 
         if cluster.status == cluster.STATUS_DEGRADED and force is False:
-            logger.warning(f"Cluster status is degraded, use --force but this will suspend the cluster")
+            logger.warning("Cluster status is degraded, use --force but this will suspend the cluster")
             return False
 
     logger.info("Suspending node")
@@ -2179,6 +2178,8 @@ def suspend_storage_node(node_id, force=False):
                 if iface.ip4_address:
                     ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
                         lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
+                    if not ret:
+                        logger.warning(f"Failed to set ana state for lvol {lvol.nqn} on iface {iface.ip4_address}")
         time.sleep(1)
 
     for dev in snode.nvme_devices:
@@ -2291,6 +2292,8 @@ def resume_storage_node(node_id):
                         if iface.ip4_address:
                             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
                                 lvol.nqn, iface.ip4_address, lvol.subsys_port, False)
+                            if not ret:
+                                logger.warning(f"Failed to set ana state for lvol {lvol.nqn} on iface {iface.ip4_address}")
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2504,6 +2507,11 @@ def upgrade_automated_deployment_config():
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
 
+    # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
+    total_cores = os.cpu_count()
+    if total_cores < 6:
+        raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
+
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                        pci_allowed, pci_blocked)
     if not nodes_config or not nodes_config.get("nodes"):
@@ -2546,8 +2554,8 @@ def deploy(ifname, isolate_cores=False):
 
     logger.info("NVMe SSD devices found on node:")
     stream = os.popen(f"lspci -Dnn | grep -i '\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\]'")
-    for l in stream.readlines():
-        logger.info(l.strip())
+    for line in stream.readlines():
+        logger.info(line.strip())
 
     logger.info("Installing dependencies...")
     scripts.install_deps()
@@ -2572,13 +2580,9 @@ def start_storage_node_api_container(node_ip):
     logger.info("Recreating SNodeAPI container")
 
     # create the api container
-    nodes = node_docker.containers.list(all=True)
-    for node in nodes:
-        if node.attrs["Name"] == "/SNodeAPI":
-            node.stop(timeout=1)
-            node.remove(force=True)
+    utils.remove_container(node_docker, '/SNodeAPI')
 
-    container = node_docker.containers.run(
+    node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_web/node_webapp.py storage_node",
         detach=True,
@@ -2655,7 +2659,7 @@ def health_check(node_id):
         #         try:
         #             start = datetime.datetime.fromisoformat(state['StartedAt'].split('.')[0])
         #             since = str(datetime.datetime.now() - start).split('.')[0]
-        #         except:
+        #         except Exception:
         #             pass
         #         clean_name = name.split(".")[0].replace("/", "")
         #         logger.info(f"Container: {clean_name}, Status: {state['Status']}, Since: {since}")
@@ -2675,24 +2679,24 @@ def health_check(node_id):
 
         ret = rpc_client.get_bdevs()
         logger.info(f"SPDK BDevs count: {len(ret)}")
-        for bdev in ret:
-            name = bdev['name']
-            product_name = bdev['product_name']
-            driver = ""
-            for d in bdev['driver_specific']:
-                driver = d
-                break
-            # logger.info(f"name: {name}, product_name: {product_name}, driver: {driver}")
+        # for bdev in ret:
+        #     name = bdev['name']
+        #     product_name = bdev['product_name']
+        #     driver = ""
+        #     for d in bdev['driver_specific']:
+        #         driver = d
+        #         break
+        #     # logger.info(f"name: {name}, product_name: {product_name}, driver: {driver}")
 
-        logger.info(f"getting device bdevs")
-        for dev in snode.nvme_devices:
-            nvme_bdev = rpc_client.get_bdevs(dev.nvme_bdev)
-            if snode.enable_test_device:
-                testing_bdev = rpc_client.get_bdevs(dev.testing_bdev)
-            alceml_bdev = rpc_client.get_bdevs(dev.alceml_bdev)
-            pt_bdev = rpc_client.get_bdevs(dev.pt_bdev)
+        logger.info("getting device bdevs")
+        # for dev in snode.nvme_devices:
+        #     nvme_bdev = rpc_client.get_bdevs(dev.nvme_bdev)
+        #     if snode.enable_test_device:
+        #         testing_bdev = rpc_client.get_bdevs(dev.testing_bdev)
+        #     alceml_bdev = rpc_client.get_bdevs(dev.alceml_bdev)
+        #     pt_bdev = rpc_client.get_bdevs(dev.pt_bdev)
 
-            subsystem = rpc_client.subsystem_list(dev.nvmf_nqn)
+        #     subsystem = rpc_client.subsystem_list(dev.nvmf_nqn)
 
             # dev.testing_bdev = test_name
             # dev.alceml_bdev = alceml_name
@@ -2817,9 +2821,6 @@ def recreate_lvstore_on_sec(secondary_node):
     primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(secondary_node.get_id())
 
     for primary_node in primary_nodes:
-        primary_rpc_client = RPCClient(
-            primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
-
         primary_node.lvstore_status = "in_creation"
         primary_node.write_to_db()
 
@@ -2859,6 +2860,8 @@ def recreate_lvstore_on_sec(secondary_node):
 
         ### 6- wait for examine
         ret = secondary_rpc_client.bdev_wait_for_examine()
+        if not ret:
+            logger.warning("Failed to examine bdevs on secondary node")
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             try:
@@ -2875,7 +2878,7 @@ def recreate_lvstore_on_sec(secondary_node):
         ### 7- add lvols to subsystems
         executor = ThreadPoolExecutor(max_workers=50)
         for lvol in lvol_list:
-            a = executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state="non_optimized")
+            executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state="non_optimized")
 
         primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
         primary_node.lvstore_status = "ready"
@@ -2983,10 +2986,9 @@ def recreate_lvstore(snode):
     ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=50)
     for lvol in lvol_list:
-        a = executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+        executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
     if sec_node:
-
         if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
                 sec_node.connect_to_hublvol(snode)
@@ -3482,8 +3484,8 @@ def dump_lvstore(node_id):
     file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
     file_path = f"/etc/simplyblock/{file_name}"
     ret = rpc_client.bdev_lvs_dump(snode.lvstore, file_path)
-    # if not ret:
-    #     logger.error("faild to dump lvstore data")
+    if not ret:
+        logger.warning("faild to dump lvstore data")
     #     return False
 
     logger.info(f"LVS dump file will be here: {file_path}")
@@ -3504,7 +3506,7 @@ def set_value(node_id, attr, value):
             logger.info(f"Setting {attr} to {value}")
             setattr(snode, attr, value)
             snode.write_to_db()
-        except:
+        except Exception:
             pass
 
     return True

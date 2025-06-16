@@ -1,5 +1,4 @@
 from utils.common_utils import sleep_n_sec
-from logger_config import setup_logger
 from datetime import datetime
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 from exceptions.custom_exception import LvolNotConnectException

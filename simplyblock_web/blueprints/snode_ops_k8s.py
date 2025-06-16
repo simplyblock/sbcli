@@ -31,7 +31,7 @@ def set_namespace(namespace):
     if not os.path.exists(namespace_id_file):
         try:
             os.makedirs(os.path.dirname(namespace_id_file), exist_ok=True)
-        except:
+        except Exception:
             return False
     with open(namespace_id_file, "w+") as f:
         f.write(namespace)
@@ -50,7 +50,7 @@ def get_google_cloud_info():
             "ip": data["networkInterfaces"][0]["ip"],
             "public_ip": data["networkInterfaces"][0]["accessConfigs"][0]["externalIp"],
         }
-    except:
+    except Exception:
         pass
 
 
@@ -73,7 +73,7 @@ def get_equinix_cloud_info():
             "ip": public_ip,
             "public_ip": ip
         }
-    except:
+    except Exception:
         pass
 
 
@@ -91,7 +91,7 @@ def get_amazon_cloud_info():
             "ip": data["privateIp"],
             "public_ip":  "",
         }
-    except:
+    except Exception:
         pass
 
 
@@ -364,7 +364,7 @@ def spdk_process_start(body: SPDKParams):
         resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
         msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}"
         logger.info(msg)
-    except:
+    except Exception:
         return utils.get_response(False, f"Pod failed:\n{traceback.format_exc()}")
 
     return utils.get_response(msg)

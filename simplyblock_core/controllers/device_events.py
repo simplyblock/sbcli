@@ -42,4 +42,4 @@ def device_restarted(device, caused_by=ec.CAUSED_BY_CLI):
 
 
 def device_reset(device, caused_by=ec.CAUSED_BY_CLI):
-    _device_event(device, f"Device reset", caused_by, ec.EVENT_STATUS_CHANGE)
+    _device_event(device, "Device reset", caused_by, ec.EVENT_STATUS_CHANGE)

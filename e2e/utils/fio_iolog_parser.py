@@ -2,9 +2,7 @@ import os
 import sys
 import argparse
 import logging
-from typing import List, Tuple, Optional, Dict
-from collections import defaultdict
-from pathlib import Path
+from typing import List, Tuple, Dict
 import re
 
 LOG_DIR = "iolog-debug"
