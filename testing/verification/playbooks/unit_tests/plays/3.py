@@ -1,5 +1,3 @@
-import argparse
-import json
 import sys
 
 sys.path.append('/root/spdk/python/')

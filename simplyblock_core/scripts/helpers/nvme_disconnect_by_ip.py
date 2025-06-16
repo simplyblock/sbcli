@@ -2,7 +2,6 @@
 # encoding: utf-8
 import json
 import logging
-import os
 import subprocess
 import sys
 

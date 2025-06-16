@@ -2,17 +2,15 @@
 import time
 from datetime import datetime, timezone
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-
-
-logger = utils.get_logger(__name__)
-
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
+
+logger = utils.get_logger(__name__)
 
 
 def task_runner(task):
@@ -110,7 +108,7 @@ def task_runner(task):
             res = rpc_client.distr_migration_status(**mig_info)
             return utils.handle_task_result(task, res)
     except Exception as e:
-        logger.error(f"Failed to get migration task status")
+        logger.error("Failed to get migration task status")
         logger.exception(e)
         task.function_result = "Failed to get migration status"
 
@@ -134,7 +132,8 @@ while True:
                 if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE:
                     task = db.get_task_by_id(task.uuid)
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
+                        active_task = tasks_controller.get_active_node_mig_task(
+                            task.cluster_id, task.node_id,  task.function_params["distr_name"])
                         if active_task:
                             logger.info("task found on same node, retry")
                             continue

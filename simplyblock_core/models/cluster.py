@@ -68,6 +68,7 @@ class Cluster(BaseModel):
     s3_bucket: str = "mybucket"
     s3_lcpu_mask: str = "0x00000000"
     s3_thread_pool_size: int = 32
+    full_page_unmap: bool = True
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

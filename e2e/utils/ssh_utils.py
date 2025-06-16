@@ -9,7 +9,9 @@ from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
 import threading
-import random, string, re
+import random
+import string
+import re
 import subprocess
 
 
@@ -1283,7 +1285,7 @@ class SshUtils:
             remote_json_path = "/tmp/stack.json"
 
             # Create JSON file on the storage node
-            create_json_command = f"sudo echo '{rpc_json_str}' > sudo {remote_json_path}"
+            create_json_command = f"sudo echo '{rpc_json_str}' > {remote_json_path}"
             self.exec_command(storage_node_ip, create_json_command)
 
             find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"

@@ -129,7 +129,7 @@ class RPCClient:
             params = {"trtype": trtype}
         return self._request("nvmf_get_transports", params)
 
-    def transport_create(self, trtype, qpair_count=6):
+    def transport_create(self, trtype, qpair_count=6,shared_bufs=24576):
         """
             [{'trtype': 'TCP', 'max_queue_depth': 128,
                'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
@@ -145,15 +145,14 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": 128,
-            "max_queue_depth": 64,
+            "max_queue_depth": 256,
             "abort_timeout_sec": 5,
-            "ack_timeout": 2048,
             "zcopy": True,
             "in_capsule_data_size": 8192,
             "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
-            "num_shared_buffers": 24576,
+            "num_shared_buffers": shared_bufs,
             "buf_cache_size": 512,
             "dif_insert_or_strip": False,
             "c2h_success": True,
@@ -546,7 +545,7 @@ class RPCClient:
             ret = self.get_bdevs(name)
             if ret:
                 return ret
-        except:
+        except Exception:
             pass
         params = {
             "name": name,
@@ -580,22 +579,22 @@ class RPCClient:
         return self._request("bdev_set_qos_limit", params)
 
     def bdev_lvol_add_to_group(self, group_id, lvol_name_list):
-        params = {
-            "bdev_group_id": group_id ,
-            "lvol_vbdev_list": lvol_name_list
-        }
         return True
+        # params = {
+        #     "bdev_group_id": group_id ,
+        #     "lvol_vbdev_list": lvol_name_list
+        # }
         # return self._request("bdev_lvol_add_to_group", params)
 
     def bdev_lvol_set_qos_limit(self, bdev_group_id, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
-        params = {
-            "bdev_group_id": bdev_group_id,
-            "rw_ios_per_sec": rw_ios_per_sec,
-            "rw_mbytes_per_sec": rw_mbytes_per_sec,
-            "r_mbytes_per_sec": r_mbytes_per_sec,
-            "w_mbytes_per_sec": w_mbytes_per_sec
-        }
         return True
+        # params = {
+        #     "bdev_group_id": bdev_group_id,
+        #     "rw_ios_per_sec": rw_ios_per_sec,
+        #     "rw_mbytes_per_sec": rw_mbytes_per_sec,
+        #     "r_mbytes_per_sec": r_mbytes_per_sec,
+        #     "w_mbytes_per_sec": w_mbytes_per_sec
+        # }
         # return self._request("bdev_lvol_set_qos_limit", params)
 
     def distr_send_cluster_map(self, params):
@@ -691,7 +690,6 @@ class RPCClient:
             "fast_io_fail_timeout_sec" : 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
-            "transport_ack_timeout": 10,
             "timeout_us": constants.NVME_TIMEOUT_US
         }
         return self._request("bdev_nvme_set_options", params)

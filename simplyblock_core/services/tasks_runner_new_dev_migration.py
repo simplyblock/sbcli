@@ -1,7 +1,5 @@
 # coding=utf-8
-import logging
 import time
-import sys
 from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, utils
@@ -124,7 +122,7 @@ def task_runner(task):
             res = rpc_client.distr_migration_status(**mig_info)
             return utils.handle_task_result(task, res, allowed_error_codes=allowed_error_codes)
     except Exception as e:
-        logger.error(f"Failed to get migration task status")
+        logger.error("Failed to get migration task status")
         logger.exception(e)
         task.function_result = "Failed to get migration status"
 
@@ -149,7 +147,8 @@ while True:
             for task in tasks:
                 if task.function_name == JobSchedule.FN_NEW_DEV_MIG:
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
+                        active_task = tasks_controller.get_active_node_mig_task(
+                            task.cluster_id, task.node_id,  task.function_params["distr_name"])
                         if active_task:
                             logger.info("task found on same node, retry")
                             continue

@@ -5,12 +5,11 @@ from utils.ssh_utils import SshUtils, RunnerK8sLog
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
-from exceptions.custom_exception import CoreFileFoundException
 import traceback
-import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import string, random
+import string
+import random
 
 
 def generate_random_sequence(length):
@@ -485,11 +484,10 @@ class TestClusterBase:
         """
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node_uuid)
         self.logger.info(f"Storage Node Details: {node_details}")
-        device_details = self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
+        self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
-        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
 
-        offline_device = []
 
         if isinstance(node_status, list):
             assert node_details[0]["status"] in node_status, \

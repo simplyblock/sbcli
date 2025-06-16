@@ -1,7 +1,6 @@
 import argparse
 import subprocess
 import matplotlib.pyplot as plt
-import re
 import time
 import numpy as np
 import threading
@@ -124,7 +123,7 @@ class ManagementStressUtils:
             mem_line = lines[0]
 
             mem_data = [float(value) for value in mem_line.split() if value.replace('.', '', 1).isdigit()]
-            total_memory, used_memory, buffer_memory = mem_data[0], mem_data[2], mem_data[3]
+            _total_memory, used_memory, buffer_memory = mem_data[0], mem_data[2], mem_data[3]
             cmd = "top -bn1 | grep Cpu | awk '{print $2}'"
             cpu_usage = float(ManagementStressUtils.exec_cmd(cmd=cmd))
             used_memory = ManagementStressUtils.convert_to_gb(f"{used_memory} MB")

@@ -1,12 +1,9 @@
 from pathlib import Path
 import threading
-import json
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec, convert_bytes_to_gb_tb
 from logger_config import setup_logger
-from datetime import datetime, timedelta
-import traceback
-from requests.exceptions import HTTPError
+from datetime import datetime
 import random
 
 

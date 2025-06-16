@@ -9,7 +9,7 @@ from flask import Blueprint, request
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_web import utils
 
-from simplyblock_core import db_controller, storage_node_ops, utils as core_utils
+from simplyblock_core import db_controller, storage_node_ops
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def storage_node_shutdown(uuid):
     try:
         args = request.args
         force = bool(args.get('force', True))
-    except:
+    except Exception:
         pass
 
     threading.Thread(
@@ -182,14 +182,14 @@ def storage_node_add():
     if 'cluster_id' not in req_data:
         return utils.get_response_error("missing required param: cluster_id", 400)
 
-    if 'node_ip' not in req_data:
-        return utils.get_response_error("missing required param: node_ip", 400)
+    if 'node_addr' not in req_data:
+        return utils.get_response_error("missing required param: node_addr", 400)
 
     if 'ifname' not in req_data:
         return utils.get_response_error("missing required param: ifname", 400)
 
     cluster_id = req_data['cluster_id']
-    node_ip = req_data['node_ip']
+    node_addr = req_data['node_addr']
     ifname = req_data['ifname']
     max_snap = int(req_data.get('max_snap', 500))
 
@@ -201,9 +201,9 @@ def storage_node_add():
     enable_test_device = False
     param = req_data.get('enable_test_device')
     if param:
-        if type(param) == bool:
+        if isinstance(param, bool):
             enable_test_device = param
-        elif type(param) == str:
+        elif isinstance(param, str):
             enable_test_device = param == "true"
 
     spdk_image = None
@@ -213,10 +213,6 @@ def storage_node_add():
     spdk_debug = None
     if 'spdk_debug' in req_data:
         spdk_debug = req_data['spdk_debug']
-
-    full_page_unmap = None
-    if 'full_page_unmap' in req_data:
-        full_page_unmap = req_data['full_page_unmap']
 
     data_nics = None
     if 'data_nics' in req_data:
@@ -245,7 +241,7 @@ def storage_node_add():
 
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
-        "node_ip": node_ip,
+        "node_addr": node_addr,
         "iface_name": ifname,
         "data_nics_list": data_nics,
         "max_snap": max_snap,
@@ -258,7 +254,6 @@ def storage_node_add():
         "enable_test_device": enable_test_device,
         "namespace": namespace,
         "enable_ha_jm": not disable_ha_jm,
-        "full_page_unmap": full_page_unmap,
     })
 
     return utils.get_response(True)
