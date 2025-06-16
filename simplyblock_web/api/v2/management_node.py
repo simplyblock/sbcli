@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from flask import abort
 from flask_openapi3 import APIBlueprint
 from pydantic import Field
@@ -26,10 +28,10 @@ instance_api = APIBlueprint('management node instance', __name__, url_prefix='/<
 
 
 class ManagementNodePath(ClusterPath):
-    management_node_id: str = Field(core_utils.UUID_PATTERN)
+    management_node_id: Annotated[str, Field(core_utils.UUID_PATTERN)]
 
     def management_node(self) -> MgmtNode:
-        management_node = db.get_mgmt_node_by_id(self.storage_node_id)
+        management_node = db.get_mgmt_node_by_id(self.management_node_id)
         if management_node is None:
             abort(404)
 
@@ -37,7 +39,7 @@ class ManagementNodePath(ClusterPath):
 
 
 @instance_api.get('/')
-def get(path: ClusterPath):
+def get(path: ManagementNodePath):
     return db.get_mgmt_node_by_id(path.management_node().get_id()).get_clean_dict()
 
 

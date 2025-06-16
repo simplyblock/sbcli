@@ -52,10 +52,10 @@ def add(path: PoolPath, body: LVolParams):
         pool_id_or_name=path.pool().get_id(),
         use_crypto=body.crypto_key is not None,
         max_size=0,
-        max_rw_iops=body.rw_iops,
-        max_rw_mbytes=body.rw_mbytes,
-        max_r_mbytes=body.r_mbytes,
-        max_w_mbytes=body.w_mbytes,
+        max_rw_iops=body.max_rw_iops,
+        max_rw_mbytes=body.max_rw_mbytes,
+        max_r_mbytes=body.max_r_mbytes,
+        max_w_mbytes=body.max_w_mbytes,
         host_id_or_name=body.host_id,
         ha_type=body.ha_type if body.ha_type is not None else 'default',
         crypto_key1=body.crypto_key[0] if body.crypto_key is not None else None,
@@ -183,7 +183,7 @@ class _SnapshotParams(BaseModel):
 @instance_api.post('/snapshot')
 def create_snapshot(path: VolumePath, body: _SnapshotParams):
     snapshot_id, err = snapshot_controller.add(
-        path.volume().get_id(), body.snapshot_name
+        path.volume().get_id(), body.name
     )
     if err is not None:
         raise ValueError('Failed to create snapshot')
