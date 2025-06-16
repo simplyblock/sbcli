@@ -17,6 +17,7 @@ class JobSchedule(BaseModel):
     FN_FAILED_DEV_MIG = "failed_device_migration"
     FN_NEW_DEV_MIG = "new_device_migration"
     FN_NODE_ADD = "node_add"
+    FN_PORT_ALLOW = "port_allow"
 
     canceled: bool = False
     cluster_id: str = ""
