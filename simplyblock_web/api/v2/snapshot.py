@@ -6,16 +6,17 @@ from pydantic import BaseModel, Field
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import snapshot_controller
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core import utils as core_utils
 
-from .cluster import ClusterPath
+from .pool import PoolPath
 
 api = APIBlueprint('snapshot', __name__, url_prefix='/snapshots')
 db = DBController()
 
 
 @api.get('/')
-def list(path: ClusterPath):
+def list(path: PoolPath):
     return [
         snapshot.get_clean_dict()
         for storage_node
@@ -28,26 +29,24 @@ def list(path: ClusterPath):
 instance_api = APIBlueprint('snapshot instance', __name__, url_prefix='/<snapshot_id>')
 
 
-class SnapshotPath(ClusterPath):
-    snapshot_id: str = Field(core_utils.UUID_PATTERN)
+class SnapshotPath(PoolPath):
+    snapshot_id: str = Field(pattern=core_utils.UUID_PATTERN)
+
+    def snapshot(self) -> SnapShot:
+        snapshot = db.get_snapshot_by_id(self.snapshot_id)
+        if snapshot is None:
+            abort(404, 'Snapshot does not exist')
+        return snapshot
 
 
 @instance_api.get('/')
 def get(path: SnapshotPath):
-    snapshot = db.get_snapshot_by_id(path.snapshot_id)
-    if snapshot is None:
-        abort(404)
-
-    return snapshot.get_clean_dict()
+    return path.snapshot().get_clean_dict()
 
 
 @instance_api.delete('/')
 def delete(path: SnapshotPath):
-    snapshot = db.get_snapshot_by_id(path.snapshot_id)
-    if snapshot is None:
-        abort(404)
-
-    if not snapshot_controller.delete(path.snapshot_id):
+    if not snapshot_controller.delete(path.snapshot().get_id()):
         raise ValueError('Failed to delete snapshot')
 
 
@@ -58,12 +57,8 @@ class _CloneParams(BaseModel):
 
 @instance_api.post('/clone')
 def clone(path: SnapshotPath, body: _CloneParams):
-    snapshot = db.get_snapshot_by_id(path.snapshot_id)
-    if snapshot is None:
-        abort(404)
-
     clone_id, error = snapshot_controller.clone(
-        path.snapshot_id,
+        path.snapshot().get_id(),
         body.name,
         body.new_size if body.new_size is not None else 0
     )

@@ -13,10 +13,10 @@ from .auth import api_token_required
 
 storage_node.instance_api.register_api(device.api)
 pool.instance_api.register_api(lvol.api)
+pool.instance_api.register_api(snapshot.api)
 
 cluster.instance_api.register_api(caching_node.api)
 cluster.instance_api.register_api(pool.api)
-cluster.instance_api.register_api(snapshot.api)
 cluster.instance_api.register_api(storage_node.api)
 
 
