@@ -6,42 +6,64 @@ import pytest
 
 @pytest.mark.timeout(120)
 def test_snapshot_delete(call, cluster, pool):
-    pool_name = call('GET', f'/pool/{pool}')[0]['pool_name']
-    lvol_uuid = call('POST', '/lvol', data={'name': 'lvolX', 'size': '1G', 'pool': pool_name})
+    lvol_uuid = call(
+            'POST',
+            f'/clusters/{cluster}/pools/{pool}/volume',
+            data={'name': 'lvolX', 'size': '1G'}
+    )
 
-    snapshot_uuid = call('POST', '/snapshot', data={'lvol_id': lvol_uuid, 'snapshot_name': 'snapX'})
+    snapshot_uuid = call(
+           'POST',
+           '/clusters/{cluster}/pools/{pool}/volume/{lvol_uuid}/snapshot',
+           data={'snapshot_name': 'snapX'},
+    )
 
-    call('DELETE', f'/lvol/{lvol_uuid}')
-    util.await_deletion(call, f'/lvol/{lvol_uuid}')
+    call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
+    util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
     assert lvol_uuid not in util.list(call, 'lvol')
 
-    clone_uuid = call('POST', '/snapshot/clone', data={'snapshot_id': snapshot_uuid, 'clone_name': 'cloneX'})
+    clone_uuid = call(
+            'POST',
+            '/clusters/{cluster}/pools/{pool}/snapshots/{snapshot_uuid}/clone',
+            data={'clone_name': 'cloneX'},
+    )
 
-    call('DELETE', f'/lvol/{clone_uuid}')
-    util.await_deletion(call, f'/lvol/{clone_uuid}')
+    call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{clone_uuid}')
+    util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{clone_uuid}')
     assert clone_uuid not in util.list(call, 'lvol')
 
-    call('DELETE', f'/snapshot/{snapshot_uuid}')
+    call('DELETE', f'/clusters/{cluster}/pools/{pool}/snapshots/{snapshot_uuid}')
     assert snapshot_uuid not in util.list(call, 'snapshot')
 
 
 @pytest.mark.timeout(120)
 def test_snapshot_softdelete(call, cluster, pool):
-    pool_name = call('GET', f'/pool/{pool}')[0]['pool_name']
-    lvol_uuid = call('POST', '/lvol', data={'name': 'lvolX', 'size': '1G', 'pool': pool_name})
+    lvol_uuid = call(
+            'POST',
+            '/clusters/{cluster}/pools/{pool}/volumes',
+            data={'name': 'lvolX', 'size': '1G'},
+    )
 
-    snapshot_uuid = call('POST', '/snapshot', data={'lvol_id': lvol_uuid, 'snapshot_name': 'snapX'})
+    snapshot_uuid = call(
+            'POST',
+            '/clusters/{cluster}/pools/{pool}/snapshots',
+            data={'lvol_id': lvol_uuid, 'snapshot_name': 'snapX'},
+    )
 
-    call('DELETE', f'/lvol/{lvol_uuid}')
-    util.await_deletion(call, f'/lvol/{lvol_uuid}')
+    call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
+    util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
     assert lvol_uuid not in util.list(call, 'lvol')
 
-    clone_uuid = call('POST', '/snapshot/clone', data={'snapshot_id': snapshot_uuid, 'clone_name': 'cloneX'})
+    clone_uuid = call(
+            'POST',
+            '/clusters/{cluster}/pools/{pool}/snapshots/clone',
+            data={'snapshot_id': snapshot_uuid, 'clone_name': 'cloneX'},
+    )
 
-    call('DELETE', f'/snapshot/{snapshot_uuid}')
+    call('DELETE', f'/clusters/{cluster}/pools/{pool}/snapshots/{snapshot_uuid}')
     # Snapshot still present due to existing clone
 
-    call('DELETE', f'/lvol/{clone_uuid}')
-    util.await_deletion(call, f'/lvol/{clone_uuid}')
+    call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{clone_uuid}')
+    util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{clone_uuid}')
     assert clone_uuid not in util.list(call, 'lvol')
     assert snapshot_uuid not in util.list(call, 'snapshot')

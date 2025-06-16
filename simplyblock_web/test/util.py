@@ -7,11 +7,11 @@ import requests
 uuid_regex = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 
 
-def api_call(entrypoint, cluster, secret, method, path, *, fail=True, data=None, log_func=lambda msg: None):
+def api_call(entrypoint, secret, method, path, *, fail=True, data=None, log_func=lambda msg: None):
     response = requests.request(
         method,
-        f'{entrypoint}{path}',
-        headers={'Authorization': f'{cluster} {secret}'},
+        f'{entrypoint}/api/v2{path}',
+        headers={'Authorization': f'Bearer {secret}'},
         json=data,
     )
 
