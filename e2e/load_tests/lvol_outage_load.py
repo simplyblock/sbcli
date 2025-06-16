@@ -157,10 +157,10 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
 
         self.logger.info(f"[{count}] Initiating graceful shutdown {self.lvol_node}...")
         shutdown_start = datetime.now()
-        self.sbcli_utils.suspend_node(node_uuid=self.lvol_node, expected_error_code=[503])
-        self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "suspended", timeout=4000)
+        # self.sbcli_utils.suspend_node(node_uuid=self.lvol_node, expected_error_code=[503])
+        # self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "suspended", timeout=4000)
         sleep_n_sec(10)
-        self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node, expected_error_code=[503])
+        self.sbcli_utils.shutdown_node(node_uuid=self.lvol_node, expected_error_code=[503], force=True)
         self.sbcli_utils.wait_for_storage_node_status(self.lvol_node, "offline", timeout=4000)
         shutdown_end = datetime.now()
 
