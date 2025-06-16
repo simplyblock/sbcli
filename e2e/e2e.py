@@ -28,7 +28,9 @@ def main():
     parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
     parser.add_argument('--run_ha', type=bool, help="Run HA tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
-    parser.add_argument('--new-nodes', type=str, help="New nodes to add (space-separated)", default="")
+    parser.add_argument('--new_nodes', type=str, help="New nodes to add (space-separated)", default="")
+    parser.add_argument('--k3s_mnode', type=str, help="K8s master node", default="")
+    parser.add_argument('--namespace', type=str, help="Kubernetes namespace", default="")
     
 
     args = parser.parse_args()
@@ -53,6 +55,14 @@ def main():
                     logger.warning("Skipping TestRestartNodeOnAnotherHost: requires --new-nodes with atleast 1 IP.")
                     skipped_cases += 1
                     continue
+            if cls.__name__ == "TestAddK8sNodesDuringFioRun":
+                if not args.run_k8s:
+                    continue
+                if len(new_nodes) == 0 or len(new_nodes) % 2 != 0:
+                    logger.warning("Skipping TestAddK8sNodesDuringFioRun: requires --new-nodes with IPs in multiples of 2.")
+                    skipped_cases += 1
+                    continue
+
             test_class_run.append(cls)
     else:
         for cls in ALL_TESTS:
@@ -61,6 +71,10 @@ def main():
                     raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
                 if cls.__name__ == "TestRestartNodeOnAnotherHost" and len(new_nodes) == 0:
                     raise ValueError("TestRestartNodeOnAnotherHost requires --new-nodes with atleast 1 new IP.")
+                if cls.__name__ == "TestAddK8sNodesDuringFioRun" and (len(new_nodes) == 0 or len(new_nodes) % 2 != 0):
+                    if not args.run_k8s:
+                        continue
+                    raise ValueError("TestAddK8sNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
                 test_class_run.append(cls)
 
     if not test_class_run:
@@ -78,7 +92,10 @@ def main():
                         bs=args.bs,
                         chunk_bs=args.chunk_bs,
                         k8s_run=args.run_k8s,
-                        new_nodes=new_nodes)
+                        new_nodes=new_nodes,
+                        k3s_mnode=args.k3s_mnode,
+                        namespace=args.namespace
+                        )
         try:
             test_obj.setup()
             if i == 0:

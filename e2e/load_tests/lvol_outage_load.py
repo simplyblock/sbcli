@@ -14,13 +14,15 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
     Graceful shutdown + restart test measuring time at scale from 600 to 1200 lvols
     """
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.logger = setup_logger(__name__)
+        self.read_only = kwargs.get("read_only", False)
+        if not self.read_only:
+            super().__init__(**kwargs)
+            self.logger = setup_logger(__name__)
         self.output_dir = Path("logs")
         self.output_file = self.output_dir / kwargs.get("output_file", "lvol_outage_log.csv")
         self.max_lvols = kwargs.get("max_lvols", 1200)
         self.step = kwargs.get("step", 100)
-        self.read_only = kwargs.get("read_only", False)
+        
         self.continue_from_log = kwargs.get("continue_from_log", False)
         self.start_from = kwargs.get("start_from", 600)
         self.lvol_size = "2G"
@@ -85,7 +87,8 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
                     "nrfiles": 5,
                     "iodepth": 1,
                     "numjobs": 6,
-                    "runtime": 500,
+                    "runtime": 72000,
+                    "time_based": True,
                 },
             )
             fio_thread.start()
@@ -94,18 +97,23 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
     def create_and_shutdown_restart(self, count):
         base_lvol_name = "load_lvol"
         for i in range(count + 1, count + self.step + 1):
+
+            self.logger.info(f"Creating lvol number: {i}")
             fs_type = random.choice(["ext4", "xfs"])
             client_node = random.choice(self.fio_node)
             lvol_name = f"{base_lvol_name}_{i}"
-            self.sbcli_utils.add_lvol(
-                lvol_name=lvol_name,
-                pool_name=self.pool_name,
-                size=self.lvol_size,
-                crypto=False,
-                key1=self.lvol_crypt_keys[0],
-                key2=self.lvol_crypt_keys[1],
-                host_id=self.lvol_node
-            )
+            try:
+                self.sbcli_utils.add_lvol(
+                    lvol_name=lvol_name,
+                    pool_name=self.pool_name,
+                    size=self.lvol_size,
+                    crypto=False,
+                    key1=self.lvol_crypt_keys[0],
+                    key2=self.lvol_crypt_keys[1],
+                    host_id=self.lvol_node
+                )
+            except Exception as _:
+                return 0, 0
             sleep_n_sec(2)
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
@@ -138,17 +146,14 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
                     "nrfiles": 5,
                     "iodepth": 1,
                     "numjobs": 6,
-                    "runtime": 500,
+                    "runtime": 72000,
+                    "time_based": True,
                 },
             )
             fio_thread.start()
             self.fio_threads.append(fio_thread)
         
         count = count + self.step
-
-        self.common_utils.manage_fio_threads(
-            self.fio_node, self.fio_threads, timeout=1000
-        )
 
         self.logger.info(f"[{count}] Initiating graceful shutdown {self.lvol_node}...")
         shutdown_start = datetime.now()
@@ -169,7 +174,10 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         return shutdown_end - shutdown_start, restart_end - restart_start
 
     def write_to_log(self, lvol_count, shutdown_time, restart_time):
-        entry = [lvol_count, shutdown_time.total_seconds() - 10, restart_time.total_seconds()]
+        if isinstance(shutdown_time, int):
+            entry = [lvol_count, shutdown_time, restart_time]
+        else:
+            entry = [lvol_count, shutdown_time.total_seconds() - 10, restart_time.total_seconds()]
         write_header = not self.output_file.exists()
         with open(self.output_file, 'a', newline='') as f:
             writer = csv.writer(f)
@@ -216,16 +224,27 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
             self.generate_graph(results)
             return
 
-        self.setup_environment()
-        start = self.start_from
-        if self.continue_from_log:
-            previous = self.parse_existing_log()
-            if previous:
-                start = max([entry['lvol_count'] for entry in previous])
+        try:
+            self.setup_environment()
+            start = self.start_from
+            if self.continue_from_log:
+                previous = self.parse_existing_log()
+                if previous:
+                    start = max([entry['lvol_count'] for entry in previous])
 
-        for count in range(start, self.max_lvols + 1, self.step):
-            shutdown_time, restart_time = self.create_and_shutdown_restart(count)
-            self.write_to_log(count, shutdown_time, restart_time)
+            for count in range(start, self.max_lvols + 1, self.step):
+                self.logger.info(f"Entering count: {count}")
+                shutdown_time, restart_time = self.create_and_shutdown_restart(count)
+                self.logger.info(f"Writing count: {count}")
+                if shutdown_time == 0:
+                    self.logger.info(f"Lvol create during count {count} failed!")
+                self.write_to_log(count, shutdown_time, restart_time)
+        except Exception as e:
+            raise e
+        finally:
+            results = self.parse_existing_log()
+            self.generate_graph(results)
 
-        results = self.parse_existing_log()
-        self.generate_graph(results)
+            for node in self.fio_node:
+                self.ssh_obj.kill_processes(node=node,
+                                            process_name="fio")

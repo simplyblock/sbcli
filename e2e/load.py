@@ -88,7 +88,7 @@ parser = argparse.ArgumentParser(description="Run simplyBlock's Load Test Framew
 parser.add_argument('--testname', type=str, help="The name of the test to run", required=True)
 parser.add_argument('--output', type=str, help="Path to the log file", default='lvol_outage_log.csv')
 parser.add_argument('--max_lvols', type=int, help="Maximum number of lvols", default=1200)
-parser.add_argument('--start_lvols', type=int, help="Number of lvols to starrt outages", default=600)
+parser.add_argument('--start_lvols', type=int, help="Number of lvols to start outages", default=600)
 parser.add_argument('--step', type=int, help="Step count for lvols", default=100)
 parser.add_argument('--read_log', action='store_true', help="Only read log and generate graph")
 parser.add_argument('--continue_from_log', action='store_true', help="Continue from existing log")
