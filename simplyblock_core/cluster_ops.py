@@ -186,12 +186,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not dev_ip:
         raise ValueError(f"Error getting interface ip: {ifname}")
 
+    db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
+    scripts.set_db_config(db_connection)
+    
     if mode == "docker": 
         logger.info(f"Node IP: {dev_ip}")
         scripts.configure_docker(dev_ip)
-
-        db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
-        scripts.set_db_config(db_connection)
 
         logger.info("Configuring docker swarm...")
         c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
