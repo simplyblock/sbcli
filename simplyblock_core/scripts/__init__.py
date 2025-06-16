@@ -33,7 +33,7 @@ def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
 def deploy_k8s_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
                  log_del_interval, metrics_retention_period, log_level, grafana_endpoint, contact_point, k8s_namespace):
     pass_hash = hashlib.sha256(graylog_password.encode('utf-8')).hexdigest()
-    return __run_script(
+    __run_script(
         ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_k8s_stack.sh'), cli_pass, dev_ip, image_name, pass_hash,
          graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint, contact_point, k8s_namespace])
 

@@ -188,7 +188,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
     scripts.set_db_config(db_connection)
-    
+
     if mode == "docker": 
         logger.info(f"Node IP: {dev_ip}")
         scripts.configure_docker(dev_ip)
@@ -318,14 +318,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     elif mode == "kubernetes": 
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        ret = scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
+        scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
                                 log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint, contact_point, constants.K8S_NAMESPACE)
         logger.info("Deploying helm stack > Done")
-
-        if ret == 0:
-            logger.info("deploying helm stack succeeded")
-        else:
-            logger.error("deploying helm stack failed")
 
     logger.info("Configuring DB...")
     scripts.set_db_config_single()
