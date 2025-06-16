@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Annotated, Optional
 
 from flask import abort, url_for
 from flask_openapi3 import APIBlueprint
@@ -48,7 +48,7 @@ def add(path: ClusterPath, body: PoolParams):
 
     id_or_false =  pool_controller.add_pool(
         body.name, body.pool_max, body.lvol_max, body.max_rw_iops, body.max_rw_mbytes,
-        body.max_r_mbytes_per_sec, body.max_w_mbytes_per_sec, body.secret, cluster.get_id()
+        body.max_r_mbytes, body.max_w_mbytes, body.secret, cluster.get_id()
     )
 
     if not id_or_false:
@@ -60,7 +60,7 @@ instance_api = APIBlueprint('pool instance', __name__, url_prefix='/<pool_id>')
 
 
 class PoolPath(ClusterPath):
-    pool_id: str = Field(core_utils.UUID_PATTERN)
+    pool_id: Annotated[str, Field(core_utils.UUID_PATTERN)]
 
     def pool(self) -> Pool:
         pool = db.get_pool_by_id(self.pool_id)
