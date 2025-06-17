@@ -15,7 +15,7 @@ def test_lvol(call, cluster, pool):
     })
     assert re.match(util.uuid_regex, lvol_uuid)
 
-    assert call('GET', f'/clusters/{cluster}/pools{pool}/volumes/{lvol_uuid}')[0]['uuid'] == lvol_uuid
+    assert call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')[0]['uuid'] == lvol_uuid
     assert lvol_uuid in util.list(call, 'lvol')
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
