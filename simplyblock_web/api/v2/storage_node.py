@@ -43,7 +43,7 @@ class StorageNodeParams(BaseModel):
     full_page_unmap: bool = Field(False)
     data_nics: List[str] = Field([])
     namespace: str = Field('default')
-    jm_percent: int = Field(3, ge=0, le=100)
+    jm_percent: util.Percent = Field(3)
     partitions: int = Field(1)
     iobuf_small_pool_count: int = Field(0)
     iobuf_large_pool_count: int = Field(0)

@@ -27,12 +27,12 @@ def list(path: PoolPath):
 
 class LVolParams(BaseModel):
     name: str
-    size: int
+    size: util.Size
     crypto_key: Optional[Tuple[str, str]] = None
-    max_rw_iops: int = Field(0, ge=0)
-    max_rw_mbytes: int = Field(0, ge=0)
-    max_r_mbytes: int = Field(0, ge=0)
-    max_w_mbytes: int = Field(0, ge=0)
+    max_rw_iops: util.Unsigned = Field(0)
+    max_rw_mbytes: util.Unsigned = Field(0)
+    max_r_mbytes: util.Unsigned = Field(0)
+    max_w_mbytes: util.Unsigned = Field(0)
     ha_type: Optional[Literal['single', 'ha']]
     host_id: Optional[str] = None
     lvol_priority_class: Literal[0, 1] = 0
@@ -85,10 +85,10 @@ class VolumePath(PoolPath):
 
 class UpdatableLVolParams(BaseModel):
     name: Optional[str] = None
-    max_rw_iops: Optional[int] = Field(None, ge=0)
-    max_rw_mbytes: Optional[int] = Field(None, ge=0)
-    max_r_mbytes: Optional[int] = Field(None, ge=0)
-    max_w_mbytes: Optional[int] = Field(None, ge=0)
+    max_rw_iops: Optional[util.Unsigned]
+    max_rw_mbytes: Optional[util.Unsigned]
+    max_r_mbytes: Optional[util.Unsigned]
+    max_w_mbytes: Optional[util.Unsigned]
 
 
 @instance_api.put('/')
@@ -113,7 +113,7 @@ def delete(path: VolumePath):
 
 
 class _ResizeParams(BaseModel):
-    size: int = Field(gt=0)
+    size: util.Size
 
 
 @instance_api.post('/resize')

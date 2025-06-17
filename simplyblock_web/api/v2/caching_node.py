@@ -11,6 +11,7 @@ from simplyblock_core import utils as core_utils
 from simplyblock_web import utils as web_utils
 
 from .cluster import ClusterPath
+from . import util
 
 
 api = APIBlueprint('caching_node', __name__, url_prefix='/caching_nodes')
@@ -30,7 +31,7 @@ class CachingNodeParams(BaseModel):
     node_ip: str = Field(pattern=web_utils.IP_PATTERN)
     interface_name: str
     data_nics: List[str] = Field([])
-    spdk_mem: int = Field(ge=core_utils.parse_size('1GiB'))
+    spdk_mem: util.Size = Field(ge=core_utils.parse_size('1GiB'))
     spdk_cpu_mask: Optional[str]
     spdk_image: Optional[str]
     namespace: Optional[str]
