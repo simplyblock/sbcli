@@ -47,6 +47,8 @@ def delete(path: DevicePath):
     if not device_controller.device_remove(device.get_id()):
         raise ValueError('Failed to remove device')
 
+    return '', 204
+
 
 @instance_api.get('/capacity')
 def capacity(path: DevicePath, query: util.HistoryQuery):
@@ -71,6 +73,8 @@ def reset(path: DevicePath):
     device = path.device()
     if not device_controller.reset_storage_device(device.get_id()):
         raise ValueError('Failed to reset device')
+
+    return '', 204
 
 
 api.register_api(instance_api)

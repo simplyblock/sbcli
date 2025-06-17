@@ -108,6 +108,8 @@ def disconnect(path: CachingNodePath, body: _LVolBody):
     if not caching_node_controller.disconnect(caching_node.get_id(), lvol.get_id()):
         raise ValueError('Failed to disconnect LVol')
 
+    return '', 204
+
 
 @instance_api.get('/lvol')
 def list_lvols(path: CachingNodePath):
@@ -136,6 +138,8 @@ def recreate(path: CachingNodePath):
 
     if not caching_node_controller.recreate(caching_node.get_id()):
         raise ValueError('Failed to recreate caching node')
+
+    return '', 204
 
 
 api.register_api(instance_api)

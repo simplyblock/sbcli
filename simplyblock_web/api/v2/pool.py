@@ -85,6 +85,8 @@ def delete(path: PoolPath):
     if not pool_controller.delete_pool(path.pool().get_id()):
         raise ValueError('Failed to delete pool')
 
+    return '', 204
+
 
 class UpdatablePoolParams(BaseModel):
     name: Optional[str] = None
@@ -107,6 +109,8 @@ def update(path: PoolPath, body: UpdatablePoolParams):
     })
     if err is not None:
         raise ValueError('Failed to update pool')
+
+    return '', 204
 
 
 class _LimitQuery(BaseModel):

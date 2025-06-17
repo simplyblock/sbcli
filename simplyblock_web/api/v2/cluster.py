@@ -128,7 +128,7 @@ def start(path: ClusterPath):
         target=cluster_ops.cluster_grace_startup,
         args=(path.cluster().get_id(),),
     ).start()
-    return '', 201  # FIXME: Provide URL for checking task status
+    return '', 202  # FIXME: Provide URL for checking task status
 
 
 @instance_api.post('/shutdown')
@@ -137,7 +137,7 @@ def shutdown(path: ClusterPath):
         target=cluster_ops.cluster_grace_shutdown,
         args=(path.cluster().get_id(),),
     ).start()
-    return '', 201  # FIXME: Provide URL for checking task status
+    return '', 202  # FIXME: Provide URL for checking task status
 
 
 @instance_api.post('/activate')
@@ -146,7 +146,7 @@ def activate(path: ClusterPath):
         target=cluster_ops.cluster_activate,
         args=(path.cluster().get_id(),),
     ).start()
-    return '', 201  # FIXME: Provide URL for checking task status
+    return '', 202  # FIXME: Provide URL for checking task status
 
 
 @instance_api.post('/update')
@@ -158,6 +158,7 @@ def update(path: ClusterPath, body: _UpdateParams):
         spdk_image=body.spdk_image,
         restart=body.restart
     )
+    return '', 204
 
 
 api.register_api(instance_api)

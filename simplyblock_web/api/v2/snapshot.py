@@ -48,6 +48,7 @@ def get(path: SnapshotPath):
 def delete(path: SnapshotPath):
     if not snapshot_controller.delete(path.snapshot().get_id()):
         raise ValueError('Failed to delete snapshot')
+    return '', 204
 
 
 class _CloneParams(BaseModel):

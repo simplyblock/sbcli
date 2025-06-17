@@ -126,6 +126,8 @@ def delete(path: VolumePath):
     if not lvol_controller.delete_lvol(volume.get_id()):
         raise ValueError('Failed to delete volume')
 
+    return '', 204
+
 
 class _ResizeParams(BaseModel):
     size: util.Size
@@ -146,6 +148,8 @@ def inflate(path: VolumePath):
         abort(400, 'Volume must be cloned')
     if not lvol_controller.inflate_lvol(volume.get_id()):
         raise ValueError('Failed to inflate volume')
+
+    return '', 204
 
 
 @instance_api.get('/connect')
