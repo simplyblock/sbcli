@@ -93,6 +93,11 @@ class VolumePath(PoolPath):
         return volume
 
 
+@instance_api.get('/')
+def get(path: VolumePath):
+    return path.volume().get_clean_dict()
+
+
 class UpdatableLVolParams(BaseModel):
     name: Optional[str] = None
     max_rw_iops: Optional[util.Unsigned] = None
