@@ -45,11 +45,13 @@ def add(path: PoolPath, body: LVolParams):
     if db.get_lvol_by_name(body.name) is not None:
         abort(409, f'Volume {body.name} exists')
 
+    cluster = path.cluster()
+    pool = path.pool()
 
-    ret, error = lvol_controller.add_lvol_ha(
+    volume_id_or_false, error = lvol_controller.add_lvol_ha(
         name=body.name,
         size=body.size,
-        pool_id_or_name=path.pool().get_id(),
+        pool_id_or_name=pool.get_id(),
         use_crypto=body.crypto_key is not None,
         max_size=0,
         max_rw_iops=body.max_rw_iops,
@@ -66,8 +68,16 @@ def add(path: PoolPath, body: LVolParams):
         namespace=body.namespace,
         pvc_name=body.pvc_name,
     )
-    if not ret:
+    if not volume_id_or_false:
         raise ValueError(error)
+
+    entity_url = url_for(
+            'api.v2.cluster.instance.pool.instance.volume.instance.get',
+            cluster_id=cluster.get_id(),
+            pool_id=pool.get_id(),
+            volume_id=volume_id_or_false,
+    )
+    return '', 201, {'Location': entity_url}
 
 
 instance_api = APIBlueprint('instance', __name__, url_prefix='/<volume_id>')
