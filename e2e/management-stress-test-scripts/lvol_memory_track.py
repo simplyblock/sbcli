@@ -109,7 +109,7 @@ class ManagementStressUtils:
                 cpu = float(row['cpu_percent'])
                 mem = float(row['memory_percent'])
                 disk = float(row['disk_percent'])
-                if idx <= total_batches:
+                if idx > 0 and idx <= total_batches:
                     batch_indices.append(idx)
                     cpu_batches.append(cpu)
                     mem_batches.append(mem)
@@ -191,7 +191,7 @@ class ManagementStressUtils:
                 cpu = float(row['cpu_percent'])
                 mem = float(row['memory_percent'])
 
-                if idx <= total_batches:
+                if idx > 0 and idx <= total_batches:
                     data_batches[name]["batch"].append(idx)
                     data_batches[name]["cpu"].append(cpu)
                     data_batches[name]["mem"].append(mem)
@@ -518,14 +518,14 @@ class TestLvolMemory:
                 f"Post-Monitor at {interval} mins",
                 self.log_file,
                 "resource_data.csv",     # SAME system log file
-                interval                 # Use interval as index
+                1000 + interval                 # Use interval as index
             )
 
             ManagementStressUtils.log_all_container_resources(
                 f"Post-Monitor at {interval} mins - All Containers",
                 self.log_file,
                 "all_containers_resource.csv",  # SAME container log file
-                interval                        # Use interval as index
+                1000 + interval                        # Use interval as index
             )
 
             
