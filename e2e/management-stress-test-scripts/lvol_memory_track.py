@@ -1,13 +1,91 @@
 import argparse
 import subprocess
 import matplotlib.pyplot as plt
+import os
 import time
 import numpy as np
 import threading
+import psutil
+import csv
 
 
 class ManagementStressUtils:
     """Utility class for common methods like executing commands and gathering data."""
+
+    @staticmethod
+    def log_system_psutil_resources(label, log_file, csv_log_file, batch_index):
+        cpu = psutil.cpu_percent(interval=1)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+
+        with open(log_file, 'a') as f:
+            f.write(f"\n--- {label} ---\n")
+            f.write(f"CPU usage (%): {cpu}\n")
+            f.write(f"Memory usage (%): {mem.percent}, Available: {mem.available / (1024 ** 3):.2f} GB\n")
+            f.write(f"Disk usage (%): {disk.percent}, Free: {disk.free / (1024 ** 3):.2f} GB\n")
+
+        write_header = not os.path.exists(csv_log_file)
+        with open(csv_log_file, 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            if write_header:
+                writer.writerow(["batch_index", "cpu_percent", "memory_percent", "memory_available_GB", "disk_percent", "disk_free_GB"])
+            writer.writerow([
+                batch_index, cpu, mem.percent, mem.available / (1024 ** 3),
+                disk.percent, disk.free / (1024 ** 3)
+            ])
+
+    @staticmethod
+    def plot_psutil_resource_usage(csv_file):
+        batches = []
+        cpu_vals, mem_vals, disk_vals = [], [], []
+
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                batches.append(int(row['batch_index']))
+                cpu_vals.append(float(row['cpu_percent']))
+                mem_vals.append(float(row['memory_percent']))
+                disk_vals.append(float(row['disk_percent']))
+
+        os.makedirs("logs", exist_ok=True)
+
+        # CPU Graph
+        plt.figure(figsize=(10, 5))
+        plt.plot(batches, cpu_vals, label='CPU %', marker='o', color='tab:red')
+        for i in range(len(batches)):
+            plt.annotate(f"{cpu_vals[i]:.1f}%", (batches[i], cpu_vals[i]), textcoords="offset points", xytext=(0,5), ha='center')
+        plt.xlabel('Batch Index')
+        plt.ylabel('CPU Usage (%)')
+        plt.title('CPU Usage Per Batch')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("logs/cpu_usage_per_batch.png")
+
+        # Memory Graph
+        plt.figure(figsize=(10, 5))
+        plt.plot(batches, mem_vals, label='Memory %', marker='s', color='tab:blue')
+        for i in range(len(batches)):
+            plt.annotate(f"{mem_vals[i]:.1f}%", (batches[i], mem_vals[i]), textcoords="offset points", xytext=(0,5), ha='center')
+        plt.xlabel('Batch Index')
+        plt.ylabel('Memory Usage (%)')
+        plt.title('Memory Usage Per Batch')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("logs/memory_usage_per_batch.png")
+
+        # Disk Graph
+        plt.figure(figsize=(10, 5))
+        plt.plot(batches, disk_vals, label='Disk %', marker='^', color='tab:green')
+        for i in range(len(batches)):
+            plt.annotate(f"{disk_vals[i]:.1f}%", (batches[i], disk_vals[i]), textcoords="offset points", xytext=(0,5), ha='center')
+        plt.xlabel('Batch Index')
+        plt.ylabel('Disk Usage (%)')
+        plt.title('Disk Usage Per Batch')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("logs/disk_usage_per_batch.png")
+
+        plt.show()
 
     @staticmethod
     def exec_cmd(cmd, error_ok=False):
@@ -138,7 +216,8 @@ class TestLvolMemory:
 
     def __init__(self, sbcli_cmd, cluster_id, utils,
                  log_file="test_lvol_memory.log", size_change_log="size_change.log",
-                 timings_log="timings.log", pool_name="pool1", total_batches=100, batch_size=25):
+                 timings_log="timings.log", pool_name="pool1", total_batches=100, batch_size=25,
+                 csv_log_file="resource_log.csv"):
         self.utils = utils
         self.sbcli_cmd = sbcli_cmd
         self.cluster_id = cluster_id
@@ -180,6 +259,7 @@ class TestLvolMemory:
         }
         self.milestones = []
         self.time_durations = []
+        self.csv_log_file = csv_log_file
 
         self.initialize_logs()
 
@@ -673,8 +753,7 @@ class TestLvolMemory:
 
     def run(self):
         stop_event = threading.Event()
-        continuous_thread = threading.Thread(target=self.collect_continuous_data, args=(stop_event,))
-        continuous_thread.start()
+        continuous_thread = None
 
         time.sleep(60)
         self.log("Creating pool...")
@@ -683,10 +762,15 @@ class TestLvolMemory:
 
         for batch in range(1, self.total_batches + 1):
             self.log(f"Starting batch: {batch}")
+            lvol_idx = 0
             for lvol in range(1, self.batch_size + 1):
                 lvol_idx = (batch - 1) * self.batch_size + lvol
                 lvol_name = f"test_lvol_{lvol_idx}"
                 self.create_lvol(lvol_name)
+
+                if not continuous_thread:
+                    continuous_thread = threading.Thread(target=self.collect_continuous_data, args=(stop_event,))
+                    continuous_thread.start()
 
                 # Gather data after each lvol creation
                 fdb_size, prometheus_size, graylog_size = self.gather_data()
@@ -706,6 +790,7 @@ class TestLvolMemory:
                 time.sleep(2)
 
             self.log(f"Completed batch {batch}. Waiting for 120 seconds...\n")
+            ManagementStressUtils.log_system_psutil_resources(f"Batch {batch} (lvols {lvol_idx - self.batch_size}-{lvol_idx - 1})", self.log_file, self.csv_log_file, batch)
             time.sleep(120)
             self.write_data_to_files()
             self.write_continuous_data_to_files()  # Save continuous data incrementally
@@ -716,6 +801,7 @@ class TestLvolMemory:
         self.write_data_to_files()
         stop_event.set()
         continuous_thread.join()
+        ManagementStressUtils.plot_psutil_resource_usage(csv_file=self.csv_log_file)
         self.plot_results()
 
 
@@ -724,6 +810,7 @@ class TestLvolMemory:
         self.read_data_from_files()
         self.read_continuous_data_from_files()
         self.plot_results()
+        ManagementStressUtils.plot_psutil_resource_usage(csv_file=self.csv_log_file)
 
     def plot_results(self):
         """Plot memory usage, CPU usage, and timings versus number of lvols created."""
@@ -1162,24 +1249,50 @@ def main():
     parser = argparse.ArgumentParser(description="Run or plot lvol memory tracking test.")
     parser.add_argument("--sbcli_cmd", default="sbcli-mock", help="Command to execute sbcli (default: sbcli-mock).")
     parser.add_argument("--cluster_id", required=True, help="Cluster ID for the test.")
-    parser.add_argument("--total_lvols", type=int, default=100, help="Total number of LVOLs to create (multiple of 25).")
+    parser.add_argument("--total_lvols", type=int, default=100, help="Total number of LVOLs to create.")
+    parser.add_argument("--batch_size", type=int, default=25, help="Number of lvols to create per batch (default: 25).")
+    parser.add_argument("--continue_from_log", action="store_true", help="Resume test from last recorded lvol count in log file.")
     parser.add_argument("--plot", action="store_true", help="Generate graphs from saved data files without creating LVOLs.")
+    parser.add_argument("--csv_log_file", default="resource_data.csv", help="CSV file to store structured resource data.")
+
     args = parser.parse_args()
 
-    if args.total_lvols < 25:
-        print("Minimum of 25 lvols")
-        total_batches = 1
-    else:
-        total_batches = args.total_lvols // 25
-
     utils = ManagementStressUtils()
-    test = TestLvolMemory(sbcli_cmd=args.sbcli_cmd, cluster_id=args.cluster_id, utils=utils, total_batches=total_batches)
+
+    # Determine how many lvols already exist (for resume support)
+    resume_count = 0
+    if args.continue_from_log and os.path.exists("lvol_counts.txt"):
+        try:
+            lvol_counts = np.loadtxt("lvol_counts.txt", dtype=int)
+            if isinstance(lvol_counts, np.ndarray):
+                resume_count = int(lvol_counts[-1])
+            else:
+                resume_count = int(lvol_counts)
+            print(f"Resuming from lvol index: {resume_count + 1}")
+        except Exception as e:
+            print(f"Could not parse lvol_counts.txt for resume: {e}")
+
+    lvols_to_create = max(0, args.total_lvols - resume_count)
+    total_batches = (lvols_to_create + args.batch_size - 1) // args.batch_size
+
+    test = TestLvolMemory(
+        sbcli_cmd=args.sbcli_cmd,
+        cluster_id=args.cluster_id,
+        utils=utils,
+        total_batches=total_batches,
+        batch_size=args.batch_size,
+        csv_log_file=args.csv_log_file
+    )
+
+    # If resuming, pre-populate lvol_counts to avoid overwrite
+    if resume_count > 0:
+        test.read_data_from_files()
+        test.read_continuous_data_from_files()
 
     if args.plot:
         test.plot_from_files()
     else:
         test.run()
-
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import subprocess
 # Parse arguments
 parser = argparse.ArgumentParser(description="Fetch and upload logs from Docker and/or Kubernetes.")
 parser.add_argument("--k8s", action="store_true", help="Use Kubernetes logs for storage nodes instead of Docker.")
+parser.add_argument("--no_client", action="store_true", help="Do not get client logs.")
 args = parser.parse_args()
 
 # MinIO Configuration
@@ -227,7 +228,7 @@ def upload_k8s_logs():
     os.makedirs(local_k8s_log_dir, exist_ok=True)
 
     # Get all namespaces
-    namespace = "spdk-csi"
+    namespace = "simplyblk"
 
     print(f"[INFO] Processing namespace: {namespace}")
 
@@ -426,18 +427,21 @@ for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
     except Exception as e:
         print(f"[ERROR] Error processing Storage Node {node}: {e}")
 
-for node in CLIENTNODES:
-    try:
-        ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-        print(f"[INFO] Processing Client Node {node}...")
+if not args.no_client:
+    for node in CLIENTNODES:
+        try:
+            ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+            print(f"[INFO] Processing Client Node {node}...")
 
-        upload_from_remote(ssh, node, node_type="client")
+            upload_from_remote(ssh, node, node_type="client")
 
-        ssh.close()
-        print(f"[SUCCESS] Successfully processed Client Node {node}")
+            ssh.close()
+            print(f"[SUCCESS] Successfully processed Client Node {node}")
 
-    except Exception as e:
-        print(f"[ERROR] Error processing Client Node {node}: {e}")
+        except Exception as e:
+            print(f"[ERROR] Error processing Client Node {node}: {e}")
+else:
+    print("!! Skipping Clients as no client flag is set !!")
 
 # **Step 3: Process Kubernetes Nodes (Upload logs directly from runner)**
 if args.k8s:

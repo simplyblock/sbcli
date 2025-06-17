@@ -128,13 +128,20 @@ class TestMajorUpgrade(TestClusterBase):
 
         cmd = f"{self.base_cmd} cluster graceful-shutdown {self.cluster_id}"
         self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+
+        node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
+        max_lvol = node_sample["max_lvol"]
+        max_prov = int(node_sample["max_prov"] / (1024**3))  # Convert bytes to GB
         
         for snode in self.storage_nodes:
             cmd = f"pip install {package_name} --upgrade"
             self.ssh_obj.exec_command(snode, cmd)
             sleep_n_sec(10)
-            cmd = f"{self.base_cmd} sn deploy"
-            self.ssh_obj.exec_command(snode, cmd)
+            self.ssh_obj.deploy_storage_node(
+                node=snode,
+                max_lvol=max_lvol,
+                max_prov_gb=max_prov
+            )
             sleep_n_sec(10)
         
         upgrade_cmd = f"{self.base_cmd} -d cluster update {self.cluster_id} --restart true --spdk-image simplyblock/spdk:main-latest"

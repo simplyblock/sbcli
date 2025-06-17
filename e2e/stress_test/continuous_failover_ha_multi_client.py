@@ -52,9 +52,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         #                       "partial_nw", "partial_nw_single_port",
         #                       "port_network_interrupt", "container_stop", "graceful_shutdown",
         #                       "lvol_disconnect_primary"]
-        # self.outage_types = ["container_stop", "graceful_shutdown", 
-        #                      "interface_full_network_interrupt", "interface_partial_network_interrupt"]
-        self.outage_types = ["graceful_shutdown", "interface_full_network_interrupt", "interface_partial_network_interrupt"]
+        # self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
+        #                      "interface_partial_network_interrupt",
+        #                      "partial_nw"]
+        self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
+                             "interface_partial_network_interrupt"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -409,12 +411,14 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.disconnect_thread.start()
         elif outage_type == "partial_nw":
             lvol_ports = node_details[0]["lvol_subsys_port"]
+            rpc_port = node_details[0]["rpc_port"]
             if self.secondary_outage:
                 lvol_ports = list(range(9090, 9090 + len(self.storage_nodes) - 1))
             if not isinstance(lvol_ports, list):
                 lvol_ports = [lvol_ports]
             ports_to_block = [int(port) for port in lvol_ports]
             ports_to_block.append(4420)
+            ports_to_block.append(rpc_port)
             self.blocked_ports = self.ssh_obj.perform_nw_outage(node_ip=node_ip,
                                                                 block_ports=ports_to_block,
                                                                 block_all_ss_ports=False)

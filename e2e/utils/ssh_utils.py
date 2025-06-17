@@ -331,7 +331,7 @@ class SshUtils:
         log_avg_msec = kwargs.get("log_avg_msec", 1000)
         log_avg_msec_opt = f"--log_avg_msec={log_avg_msec}" if log_avg_msec else ""
 
-        iolog_base = kwargs.get("iolog_file", f"/tmp/{name}_iolog.txt")
+        iolog_base = kwargs.get("iolog_file", None)
         iolog_opt = f"--write_iolog={iolog_base}" if iolog_base else ""
 
         command = (
@@ -733,12 +733,24 @@ class SshUtils:
         output, _ = self.exec_command(node=node, command=command)
         data = json.loads(output)
         nvme_dict = {}
-        self.logger.info(f"LVOL DEVICE output: {data}")
+        self.logger.info(f"LVOL DEVICE output: {json.dumps(data, indent=2)}")
+
         for device in data.get('Devices', []):
-            device_path = device.get('DevicePath')
-            model_number = device.get('ModelNumber')
-            if device_path and model_number:
-                nvme_dict[model_number] = device_path
+            for subsystem in device.get('Subsystems', []):
+                subsystem_nqn = subsystem.get('SubsystemNQN', '')
+                if ':lvol:' in subsystem_nqn:
+                    # Extract lvol UUID from NQN
+                    lvol_uuid = subsystem_nqn.split(':lvol:')[-1]
+                    # Get the namespace name (e.g., nvme0n1)
+                    ns_list = subsystem.get('Namespaces', [])
+                    if ns_list:
+                        ns = ns_list[0]  # Should have only one namespace per lvol
+                        namespace = ns.get('NameSpace')
+                        if namespace:
+                            # Compose Linux device path
+                            nvme_device = f"/dev/{namespace}"
+                            nvme_dict[lvol_uuid] = nvme_device
+
         self.logger.info(f"LVOL vs device dict output: {nvme_dict}")
         if lvol_id:
             return nvme_dict.get(lvol_id)
@@ -780,7 +792,7 @@ class SshUtils:
 
     def add_storage_node(self, node, cluster_id, node_ip, ifname="eth0", partitions=0,
                          data_nic="eth1", disable_ha_jm=False, enable_test_device=False, 
-                         spdk_debug=False, spdk_image=None):
+                         spdk_debug=False, spdk_image=None, namespace=None):
         """Add new storage node
 
         Args:
@@ -808,8 +820,13 @@ class SshUtils:
             cmd = f"{cmd} --spdk-image {spdk_image}"
         if spdk_debug:
             cmd = f"{cmd} --spdk-debug"
+        if namespace:
+            cmd = f"{cmd} --namespace {namespace}"
     
-        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname} --data-nics {data_nic}"
+        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
+
+        if data_nic:
+            cmd  = f"{cmd} --data-nics {data_nic}"
         self.exec_command(node=node, command=add_node_cmd)
 
     def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
@@ -1767,7 +1784,7 @@ class RunnerK8sLog:
         - get_running_pods(): Fetches all currently running pods in a namespace.
     """
 
-    def __init__(self, namespace="spdk-csi", log_dir="/var/logs", test_name="test_run"):
+    def __init__(self, namespace="simplyblk", log_dir="/var/logs", test_name="test_run"):
         """
         Initialize the RunnerLog class.
 
