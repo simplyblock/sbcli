@@ -214,6 +214,7 @@ def restart_device(device_id, force=False):
     dev = db_controller.get_storage_device_by_id(device_id)
     if not dev:
         logger.error("device not found")
+        return False
 
     if dev.status != NVMeDevice.STATUS_REMOVED:
         logger.error("Device must be in removed status")
