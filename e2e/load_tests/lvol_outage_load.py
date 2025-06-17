@@ -22,6 +22,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         self.output_file = self.output_dir / kwargs.get("output_file", "lvol_outage_log.csv")
         self.max_lvols = kwargs.get("max_lvols", 1200)
         self.step = kwargs.get("step", 100)
+        self.test_name = "lvol_graceful_shutdown_load_test"
         
         self.continue_from_log = kwargs.get("continue_from_log", False)
         self.start_from = kwargs.get("start_from", 600)
