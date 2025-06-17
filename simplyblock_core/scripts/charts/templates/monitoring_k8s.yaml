@@ -303,9 +303,9 @@ spec:
             - --prometheus.url=http://localhost:9090
             - --objstore.config-file=/etc/thanos/objstore.yml
           ports:
-            - containerPort: 10902
+            - containerPort: 10901
               name: grpc
-            - containerPort: 10903
+            - containerPort: 10902
               name: http
           volumeMounts:
             - name: simplyblock-prometheus-data
