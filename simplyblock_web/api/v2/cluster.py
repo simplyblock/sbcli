@@ -27,23 +27,23 @@ class _UpdateParams(BaseModel):
 
 
 class ClusterParams(BaseModel):
-    blk_size: Literal[512, 4096] = Field(512)
+    blk_size: Literal[512, 4096] = 512
     page_size_in_blocks: int = Field(2097152, gt=0)
-    cap_warn: util.Percent = Field(0)
-    cap_crit: util.Percent = Field(0)
-    prov_cap_warn: util.Percent = Field(0)
-    prov_cap_crit: util.Percent = Field(0)
-    distr_ndcs: int = Field(1)
-    distr_npcs: int = Field(1)
-    distr_bs: int = Field(4096)
-    distr_chunk_bs: int = Field(4096)
-    ha_type: Literal['single', 'ha'] = Field('single')
-    qpair_count: int = Field(256)
-    max_queue_size: int = Field(128)
-    inflight_io_threshold: int = Field(4)
-    enable_qos: bool = Field(False)
-    enable_node_affinity: bool = Field(False)
-    strict_node_anti_affinity: bool = Field(False)
+    cap_warn: util.Percent = 0
+    cap_crit: util.Percent = 0
+    prov_cap_warn: util.Percent = 0
+    prov_cap_crit: util.Percent = 0
+    distr_ndcs: int = 1
+    distr_npcs: int = 1
+    distr_bs: int = 4096
+    distr_chunk_bs: int = 4096
+    ha_type: Literal['single', 'ha'] = 'single'
+    qpair_count: int = 256
+    max_queue_size: int = 128
+    inflight_io_threshold: int = 4
+    enable_qos: bool = False
+    enable_node_affinity: bool = False
+    strict_node_anti_affinity: bool = False
 
 
 @api.get('/')

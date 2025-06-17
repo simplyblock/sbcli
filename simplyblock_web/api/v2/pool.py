@@ -29,13 +29,13 @@ def list(path: ClusterPath):
 
 class PoolParams(BaseModel):
     name: str
-    pool_max: util.Unsigned = Field(0)
-    lvol_max: util.Unsigned = Field(0)
+    pool_max: util.Unsigned = 0
+    lvol_max: util.Unsigned = 0
     secret: bool = True
-    max_rw_iops: util.Unsigned = Field(0)
-    max_rw_mbytes: util.Unsigned = Field(0)
-    max_r_mbytes: util.Unsigned = Field(0)
-    max_w_mbytes: util.Unsigned = Field(0)
+    max_rw_iops: util.Unsigned = 0
+    max_rw_mbytes: util.Unsigned = 0
+    max_r_mbytes: util.Unsigned = 0
+    max_w_mbytes: util.Unsigned = 0
 
 
 @api.post('/')
@@ -88,12 +88,12 @@ def delete(path: PoolPath):
 
 class UpdatablePoolParams(BaseModel):
     name: Optional[str] = None
-    pool_max: Optional[util.Unsigned]
-    lvol_max: Optional[util.Unsigned]
-    max_rw_iops: Optional[util.Unsigned]
-    max_rw_mbytes: Optional[util.Unsigned]
-    max_r_mbytes: Optional[util.Unsigned]
-    max_w_mbytes: Optional[util.Unsigned]
+    pool_max: Optional[util.Unsigned] = None
+    lvol_max: Optional[util.Unsigned] = None
+    max_rw_iops: Optional[util.Unsigned] = None
+    max_rw_mbytes: Optional[util.Unsigned] = None
+    max_r_mbytes: Optional[util.Unsigned] = None
+    max_w_mbytes: Optional[util.Unsigned] = None
 
 
 @instance_api.put('/')
@@ -110,7 +110,7 @@ def update(path: PoolPath, body: UpdatablePoolParams):
 
 
 class _LimitQuery(BaseModel):
-    limit: int = Field(20)
+    limit: int = 20
 
 
 @instance_api.get('/iostats')

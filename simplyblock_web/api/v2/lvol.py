@@ -29,11 +29,11 @@ class LVolParams(BaseModel):
     name: str
     size: util.Size
     crypto_key: Optional[Tuple[str, str]] = None
-    max_rw_iops: util.Unsigned = Field(0)
-    max_rw_mbytes: util.Unsigned = Field(0)
-    max_r_mbytes: util.Unsigned = Field(0)
-    max_w_mbytes: util.Unsigned = Field(0)
-    ha_type: Optional[Literal['single', 'ha']]
+    max_rw_iops: util.Unsigned = 0
+    max_rw_mbytes: util.Unsigned = 0
+    max_r_mbytes: util.Unsigned = 0
+    max_w_mbytes: util.Unsigned = 0
+    ha_type: Optional[Literal['single', 'ha']] = None
     host_id: Optional[str] = None
     lvol_priority_class: Literal[0, 1] = 0
     namespace: Optional[str] = None
@@ -85,10 +85,10 @@ class VolumePath(PoolPath):
 
 class UpdatableLVolParams(BaseModel):
     name: Optional[str] = None
-    max_rw_iops: Optional[util.Unsigned]
-    max_rw_mbytes: Optional[util.Unsigned]
-    max_r_mbytes: Optional[util.Unsigned]
-    max_w_mbytes: Optional[util.Unsigned]
+    max_rw_iops: Optional[util.Unsigned] = None
+    max_rw_mbytes: Optional[util.Unsigned] = None
+    max_r_mbytes: Optional[util.Unsigned] = None
+    max_w_mbytes: Optional[util.Unsigned] = None
 
 
 @instance_api.put('/')
