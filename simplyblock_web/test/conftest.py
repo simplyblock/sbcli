@@ -47,10 +47,10 @@ def pool(call, cluster):
 
 @pytest.fixture(scope='module')
 def lvol(call, cluster, pool):
-    lvol_uuid = call('POST', f'/clusters/{cluster}/pools/{pool}/lvols', data={
+    lvol_uuid = call('POST', f'/clusters/{cluster}/pools/{pool}/volumes', data={
         'name': 'lvolX',
         'size': '1G',
     })
     yield lvol_uuid
-    call('DELETE', f'/clusters/{cluster}/pools/{pool}/lvol/{lvol_uuid}')
-    util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/lvol/{lvol_uuid}')
+    call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
+    util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')

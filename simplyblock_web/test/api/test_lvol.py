@@ -9,7 +9,7 @@ import util
 
 @pytest.mark.timeout(120)
 def test_lvol(call, cluster, pool):
-    lvol_uuid = call('POST', f'/clusters/{cluster}/pools{pool}/volumes', data={
+    lvol_uuid = call('POST', f'/clusters/{cluster}/pools/{pool}/volumes', data={
         'name': 'lvolX',
         'size': '1G',
     })
