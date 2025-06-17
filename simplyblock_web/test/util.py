@@ -18,6 +18,10 @@ def api_call(entrypoint, secret, method, path, *, fail=True, data=None, log_func
     )
 
     log_func(f'{method} {path} -> {response.status_code}')
+
+    if response.status_code == 422:
+        log_func(response.json())
+
     if fail:
         response.raise_for_status() 
 
