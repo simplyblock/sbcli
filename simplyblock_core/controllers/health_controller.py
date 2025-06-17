@@ -254,8 +254,8 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
 
         ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
-        logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {bool(ret)}")
-        passed = ret
+        passed = bool(ret)
+        logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
 
         if not passed and auto_fix and primary_node.lvstore_status == "ready" \
                 and primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -264,8 +264,8 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
             ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
-            logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {bool(ret)}")
-            passed = ret
+            passed = bool(ret)
+            logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
 
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
         cl = db_controller.get_cluster_by_id(node.cluster_id)
