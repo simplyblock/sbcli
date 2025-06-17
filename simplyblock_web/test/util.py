@@ -53,9 +53,9 @@ def await_deletion(call, resource, timeout=120):
     raise TimeoutError('Failed to await deletion')
 
 
-def list(call, type):
+def list_ids(call, path):
     return [
-        obj['uuid']
-        for obj
-        in call('GET', f'/{type}/')
+        item['id']
+        for item
+        in call('GET', path)
     ]

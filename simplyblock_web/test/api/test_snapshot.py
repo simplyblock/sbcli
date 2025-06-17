@@ -20,7 +20,7 @@ def test_snapshot_delete(call, cluster, pool):
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
     util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
-    assert lvol_uuid not in util.list(call, 'lvol')
+    assert lvol_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/volumes')
 
     clone_uuid = call(
             'POST',
@@ -30,10 +30,10 @@ def test_snapshot_delete(call, cluster, pool):
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{clone_uuid}')
     util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{clone_uuid}')
-    assert clone_uuid not in util.list(call, 'lvol')
+    assert clone_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/volumes')
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/snapshots/{snapshot_uuid}')
-    assert snapshot_uuid not in util.list(call, 'snapshot')
+    assert snapshot_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/snapshots')
 
 
 @pytest.mark.timeout(120)
@@ -46,13 +46,13 @@ def test_snapshot_softdelete(call, cluster, pool):
 
     snapshot_uuid = call(
             'POST',
-            '/clusters/{cluster}/pools/{pool}/snapshots',
-            data={'lvol_id': lvol_uuid, 'snapshot_name': 'snapX'},
+            '/clusters/{cluster}/pools/{pool}/volume/{lvol_id}/snapshots',
+            data={'snapshot_name': 'snapX'},
     )
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
     util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
-    assert lvol_uuid not in util.list(call, 'lvol')
+    assert lvol_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/volume')
 
     clone_uuid = call(
             'POST',
@@ -65,5 +65,5 @@ def test_snapshot_softdelete(call, cluster, pool):
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{clone_uuid}')
     util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{clone_uuid}')
-    assert clone_uuid not in util.list(call, 'lvol')
-    assert snapshot_uuid not in util.list(call, 'snapshot')
+    assert clone_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/volumes')
+    assert snapshot_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/snapshots')

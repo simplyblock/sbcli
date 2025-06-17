@@ -16,13 +16,13 @@ def test_lvol(call, cluster, pool):
     assert re.match(util.uuid_regex, lvol_uuid)
 
     assert call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')['uuid'] == lvol_uuid
-    assert lvol_uuid in util.list(call, 'lvol')
+    assert lvol_uuid in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/volumes')
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
 
     util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
 
-    assert lvol_uuid not in util.list(call, 'lvol')
+    assert lvol_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/volumes')
 
     with pytest.raises(HTTPError):
         call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')

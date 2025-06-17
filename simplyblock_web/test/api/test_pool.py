@@ -11,11 +11,11 @@ def test_pool(call, cluster):
     assert re.match(util.uuid_regex, pool_uuid)
 
     assert call('GET', f'/clusters/{cluster}/pools/{pool_uuid}')[0]['uuid'] == pool_uuid
-    assert pool_uuid in util.list(call, 'pool')
+    assert pool_uuid in util.list_ids(call, f'/clusters/{cluster}/pools')
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool_uuid}')
 
-    assert pool_uuid not in util.list(call, 'pool')
+    assert pool_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools')
 
     with pytest.raises(HTTPError):
         call('GET', f'/clusters/{cluster}/pools/{pool_uuid}')
