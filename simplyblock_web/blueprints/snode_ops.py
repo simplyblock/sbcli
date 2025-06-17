@@ -78,7 +78,7 @@ def get_amazon_cloud_info():
             "type": data["instanceType"],
             "cloud": "amazon",
             "ip": data["privateIp"],
-            "public_ip":  "",
+            "public_ip": "",
         }
     except Exception:
         pass
@@ -154,7 +154,7 @@ def spdk_process_start(body: SPDKParams):
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MiB') if body.total_mem else ''
     spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
-    node_docker = get_docker_client(timeout=60*3)
+    node_docker = get_docker_client(timeout=60 * 3)
     for name in {f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"}:
         core_utils.remove_container(node_docker, name)
 
@@ -255,7 +255,6 @@ def spdk_process_is_up(query: _RPCPortQuery):
     except Exception as e:
         logger.error(e)
     return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
-
 
 
 @api.get('/spdk_proxy_restart', responses={
@@ -462,17 +461,18 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     for i in range(body.num_partitions):
         st = body.jm_percent + (i * perc_per_partition)
         en = st + perc_per_partition
-        cmd_list.append(f"parted -f {body.nbd_device} mkpart part{(i+1)} \"{st}%\" \"{en}%\"")
-        sg_cmd_list.append(f"sgdisk -t {(i+2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}")
+        cmd_list.append(f"parted -f {body.nbd_device} mkpart part{(i + 1)} \"{st}%\" \"{en}%\"")
+        sg_cmd_list.append(f"sgdisk -t {(i + 2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}")
 
-    for cmd in cmd_list+sg_cmd_list:
+    for cmd in cmd_list + sg_cmd_list:
         logger.debug(cmd)
         out, err, ret_code = shell_utils.run_command(cmd)
         logger.debug(out)
         logger.debug(ret_code)
         if ret_code != 0:
             logger.error(err)
-            return utils.get_response(False, f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
+            return utils.get_response(False,
+                                      f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
         time.sleep(1)
 
     return utils.get_response(True)
@@ -482,27 +482,55 @@ class _DeviceParams(BaseModel):
     device_pci: str
 
 
-@api.post('/delete_dev_gpt_partitions')
-def delete_gpt_partitions_for_dev(body: _DeviceParams):
-    cmd_list = [
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
-        f"echo \"nvme\" > /sys/bus/pci/devices/{body.device_pci}/driver_override",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+@api.post('/bind_device_to_nvme')
+def bind_device_to_nvme(body: _DeviceParams):
+    device_path = f"/sys/bus/pci/devices/{body.device_pci}"
+    driver_link = f"{device_path}/driver"
+    cmd_list = []
+    # Add check and unbind from uio_pci_generic if bound
+    cmd_list.append(
+        f'if [ "$(readlink -f {driver_link})" = "/sys/bus/pci/drivers/uio_pci_generic" ]; then '
+        f'echo -n "{body.device_pci}" > /sys/bus/pci/drivers/uio_pci_generic/unbind; fi'
+    )
 
-    ]
+    # Add check and unbind from vfio-pci if bound
+    cmd_list.append(
+        f'if [ "$(readlink -f {driver_link})" = "/sys/bus/pci/drivers/vfio-pci" ]; then '
+        f'echo -n "{body.device_pci}" > /sys/bus/pci/drivers/vfio-pci/unbind; fi'
+    )
+
+    # Set override to nvme
+    cmd_list.append(
+        f'echo "nvme" > {device_path}/driver_override'
+    )
+
+    # Bind to nvme only if not already bound
+    cmd_list.append(
+        f'if [ "$(readlink -f {driver_link})" != "/sys/bus/pci/drivers/nvme" ]; then '
+        f'echo -n "{body.device_pci}" > /sys/bus/pci/drivers/nvme/bind; fi'
+    )
 
     for cmd in cmd_list:
         logger.debug(cmd)
         ret = os.popen(cmd).read().strip()
         logger.debug(ret)
         time.sleep(1)
+    return utils.get_response(True)
 
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{body.device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+
+@api.post('/delete_dev_gpt_partitions')
+def delete_gpt_partitions_for_dev(body: _DeviceParams):
+    bind_device_to_nvme(body)
+
+    device_pci = body.device_pci
+    device_path = f"/sys/bus/pci/devices/{device_pci}"
+    driver_link = os.path.join(device_path, "nvme/nvme*/")
+
+    device_name = os.popen(f"ls {driver_link} | grep nvme").read().strip()
     if device_name:
         cmd_list = [
             f"parted -fs /dev/{device_name} mklabel gpt",
-            f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+            #f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
         ]
 
         for cmd in cmd_list:
@@ -563,10 +591,10 @@ class _FirewallParams(BaseModel):
 })
 def firewall_set_port(body: _FirewallParams):
     ret = node_utils.firewall_port(
-            body.port_id,
-            body.port_type,
-            block=(body.action == "block"),
-            rpc_port=body.rpc_port
+        body.port_id,
+        body.port_type,
+        block=(body.action == "block"),
+        rpc_port=body.rpc_port
     )
     return utils.get_response(ret)
 
