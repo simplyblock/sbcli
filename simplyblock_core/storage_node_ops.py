@@ -888,6 +888,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         results = None
         l_cores = node_config.get("l-cores")
         spdk_cpu_mask = node_config.get("cpu_mask")
+        for ssd in ssd_pcie:
+            snode_api.bind_device_to_spdk(ssd)
         try:
             results, err = snode_api.spdk_process_start(
                 l_cores, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
