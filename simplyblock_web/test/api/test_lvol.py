@@ -44,10 +44,10 @@ def test_lvol_get(call, cluster, pool, lvol):
 def test_lvol_update(call, cluster, pool, lvol):
     call('PUT', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}', data={
         'name': 'lvol2',
-        'max-rw-iops': 1,
-        'max-rw-mbytes': 1,
-        'max-r-mbytes': 1,
-        'max-w-mbytes': 1
+        'max_rw_iops': 1,
+        'max_rw_mbytes': 1,
+        'max_r_mbytes': 1,
+        'max_w_mbytes': 1
     })
     lvol_details = call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}')
     print(lvol_details)
