@@ -11,4 +11,4 @@ Percent = Annotated[int, Field(ge=0, le=100)]
 
 
 class HistoryQuery(BaseModel):
-    history: Optional[str]
+    history: Optional[str] = None
