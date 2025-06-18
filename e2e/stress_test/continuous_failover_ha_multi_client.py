@@ -775,6 +775,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                         log_file=clone_details["Log"])
                     self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=False)
                     fio_pids = self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=True)
+                    self.disconnect_lvol(clone_details['ID'])
+                    sleep_n_sec(10)
                     for pid in fio_pids:
                         self.ssh_obj.kill_processes(clone_details["Client"], pid=pid)
                     attempt = 1
@@ -786,7 +788,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         attempt += 1
                         sleep_n_sec(10)
                     
-                    self.disconnect_lvol(clone_details['ID'])
                     sleep_n_sec(10)
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
@@ -808,6 +809,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.common_utils.validate_fio_test(self.lvol_mount_details[lvol]["Client"],
                                                 log_file=self.lvol_mount_details[lvol]["Log"])
             self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=False)
+            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
+            sleep_n_sec(10)
             fio_pids = self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=True)
             for pid in fio_pids:
                 self.ssh_obj.kill_processes(self.lvol_mount_details[lvol]["Client"], pid=pid)
@@ -820,7 +823,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 attempt += 1
                 sleep_n_sec(10)
 
-            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
