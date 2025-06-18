@@ -115,7 +115,7 @@ class ManagementStressUtils:
                     mem_batches.append(mem)
                     disk_batches.append(disk)
                 else:
-                    time_intervals.append(idx)
+                    time_intervals.append(idx-1000)
                     cpu_time.append(cpu)
                     mem_time.append(mem)
                     disk_time.append(disk)
@@ -196,7 +196,7 @@ class ManagementStressUtils:
                     data_batches[name]["cpu"].append(cpu)
                     data_batches[name]["mem"].append(mem)
                 else:
-                    data_time[name]["time"].append(idx)
+                    data_time[name]["time"].append(idx-1000)
                     data_time[name]["cpu"].append(cpu)
                     data_time[name]["mem"].append(mem)
 
