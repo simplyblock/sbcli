@@ -93,6 +93,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 if self.current_outage_node:
                     skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
                     skip_nodes.append(self.current_outage_node)
+                    skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
                     host_id = [node for node in self.sn_nodes_with_sec if node not in skip_nodes]
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name,
@@ -120,6 +121,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     if self.current_outage_node:
                         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
                         skip_nodes.append(self.current_outage_node)
+                        skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
                         host_id = [node for node in self.sn_nodes_with_sec if node not in skip_nodes]
                         self.logger.info(f"Skipping Nodes: {skip_nodes}")
                         self.logger.info(f"Host Nodes: {host_id}")
@@ -578,6 +580,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.int_lvol_size += 1
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
         skip_nodes.append(self.current_outage_node)
+        skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
         self.logger.info(f"Skipping Nodes: {skip_nodes}")
         available_lvols = [
             lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes for lvol in lvols
@@ -752,6 +755,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         """Delete random lvols during an outage."""
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
         skip_nodes.append(self.current_outage_node)
+        skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
         self.logger.info(f"Skipping Nodes: {skip_nodes}")
         available_lvols = [
             lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes for lvol in lvols

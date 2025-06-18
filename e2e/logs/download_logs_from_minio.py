@@ -53,19 +53,28 @@ def download_from_minio(minio_uri, max_workers=5):
     os.makedirs(local_base_dir, exist_ok=True)
 
     print(f"[INFO] Fetching file list from MinIO: {minio_uri}")
-    objects = s3_client.list_objects_v2(Bucket=MINIO_BUCKET, Prefix=minio_prefix)
 
-    if "Contents" not in objects:
+    # Use paginator!
+    paginator = s3_client.get_paginator('list_objects_v2')
+    pages = paginator.paginate(Bucket=MINIO_BUCKET, Prefix=minio_prefix)
+
+    # Collect all file keys across pages
+    all_files = []
+    for page in pages:
+        if "Contents" in page:
+            all_files.extend(page["Contents"])
+
+    if not all_files:
         print(f"[ERROR] No files found under {minio_uri}")
         return
 
-    total_files = len(objects["Contents"])
+    total_files = len(all_files)
     print(f"[INFO] Found {total_files} files. Starting download with {max_workers} threads...\n")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(download_file, obj["Key"], minio_prefix, local_base_dir)
-            for obj in objects["Contents"]
+            for obj in all_files
         ]
         for i, future in enumerate(as_completed(futures), 1):
             print(f"[{i}/{total_files}] {future.result()}")
