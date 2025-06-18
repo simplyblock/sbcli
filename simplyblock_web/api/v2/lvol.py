@@ -68,7 +68,7 @@ def add(path: PoolPath, body: LVolParams):
         namespace=body.namespace,
         pvc_name=body.pvc_name,
     )
-    if not volume_id_or_false:
+    if volume_id_or_false == False:  # noqa
         raise ValueError(error)
 
     entity_url = url_for(
@@ -153,7 +153,7 @@ def inflate(path: VolumePath):
 def connect(path: VolumePath):
     volume = path.volume()
     details_or_false = lvol_controller.connect_lvol(volume.get_id())
-    if not details_or_false:
+    if details_or_false == False:  # noqa
         raise ValueError('Failed to query connection details')
     return details_or_false
 
@@ -162,7 +162,7 @@ def connect(path: VolumePath):
 def capacity(path: VolumePath, query: util.HistoryQuery):
     volume = path.volume()
     records_or_false = lvol_controller.get_capacity(volume.get_id(), query.history, parse_sizes=False)
-    if not records_or_false:
+    if records_or_false == False:  # noqa
         raise ValueError('Failed to compute capacity')
     return records_or_false
 
@@ -176,7 +176,7 @@ def iostats(path: VolumePath, query: util.HistoryQuery):
         parse_sizes=False,
         with_sizes=True
     )
-    if not records_or_false:
+    if records_or_false == False:  # noqa
         raise ValueError('Failed to compute iostats')
     return records_or_false
 
