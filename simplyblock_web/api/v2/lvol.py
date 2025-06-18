@@ -100,24 +100,33 @@ def get(path: VolumePath):
 
 class UpdatableLVolParams(BaseModel):
     name: Optional[str] = None
-    max_rw_iops: Optional[util.Unsigned] = None
-    max_rw_mbytes: Optional[util.Unsigned] = None
-    max_r_mbytes: Optional[util.Unsigned] = None
-    max_w_mbytes: Optional[util.Unsigned] = None
+    max_rw_iops: util.Unsigned = 0
+    max_rw_mbytes: util.Unsigned = 0
+    max_r_mbytes: util.Unsigned = 0
+    max_w_mbytes: util.Unsigned = 0
+    size: Optional[util.Size] = None
 
 
 @instance_api.put('/')
 def update(path: VolumePath, body: UpdatableLVolParams):
-    if not lvol_controller.set_lvol(
-        uuid=path.volume().get_id(),
-        **{
-            key: value
-            for key, value
-            in body.model_dump().items()
-            if key in body.model_fields_set
-        },
-    ):
+    volume = path.volume()
+
+    updatable_attributes = {'name', 'max_rw_iops', 'max_rw_mbytes', 'max_w_mbytes', 'max_r_mbytes'}
+    if ((body.model_fields_set & updatable_attributes) and
+            not lvol_controller.set_lvol(uuid=volume.get_id(), **{
+        key: value
+        for key, value
+        in body.model_dump().items()
+        if key in updatable_attributes
+    })):
         raise ValueError('Failed to update lvol')
+
+    if 'size' in body.model_fields_set:
+        success, msg = lvol_controller.resize_lvol(volume.get_id(), body.size)
+        if not success:
+            abort(400, msg)
+
+    return '', 204
 
 
 @instance_api.delete('/')
@@ -127,18 +136,6 @@ def delete(path: VolumePath):
         raise ValueError('Failed to delete volume')
 
     return '', 204
-
-
-class _ResizeParams(BaseModel):
-    size: util.Size
-
-
-@instance_api.post('/resize')
-def resize(path: VolumePath, body: _ResizeParams):
-    volume = path.volume()
-    success, msg = lvol_controller.resize_lvol(volume.get_id(), body.size)
-    if not success:
-        raise ValueError(msg)
 
 
 @instance_api.post('/inflate')

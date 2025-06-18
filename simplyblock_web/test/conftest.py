@@ -49,7 +49,7 @@ def pool(call, cluster):
 def lvol(call, cluster, pool):
     lvol_uuid = call('POST', f'/clusters/{cluster}/pools/{pool}/volumes', data={
         'name': 'lvolX',
-        'size': '1G',
+        'size': '2G',
     })
     yield lvol_uuid
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')

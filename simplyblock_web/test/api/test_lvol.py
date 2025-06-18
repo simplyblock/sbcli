@@ -37,7 +37,7 @@ def test_lvol_get(call, cluster, pool, lvol):
     assert lvol_details['uuid'] == lvol
     assert lvol_details['pool_name'] == pool_name
     assert lvol_details['pool_uuid'] == pool
-    assert lvol_details['size'] == 10 ** 9
+    assert lvol_details['size'] == 2 * 10 ** 9
     # TODO assert schema
 
 
@@ -50,6 +50,7 @@ def test_lvol_update(call, cluster, pool, lvol):
         'max-w-mbytes': 1
     })
     lvol_details = call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}')
+    print(lvol_details)
     assert lvol_details['rw_ios_per_sec'] == 1
     assert lvol_details['rw_mbytes_per_sec'] == 1
     assert lvol_details['r_mbytes_per_sec'] == 1
@@ -57,11 +58,11 @@ def test_lvol_update(call, cluster, pool, lvol):
 
 
 def test_resize(call, cluster, pool, lvol):
-    call('PUT', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}/resize', data={'size': '2G'})
-    call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}')['size'] == (2 * 2 ** 30)
+    call('PUT', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}', data={'size': '3G'})
+    call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}')['size'] == (3 * 2 ** 30)
 
-    with pytest.raises(ValueError):
-        call('PUT', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}/resize', data={'size': '1G'})
+    with pytest.raises(HTTPError):
+        call('PUT', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}', data={'size': '1G'})
 
 
 def test_iostats(call, cluster, pool, lvol):
