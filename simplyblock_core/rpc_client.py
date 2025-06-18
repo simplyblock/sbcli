@@ -1,8 +1,6 @@
 import json
 import inspect
-
 import requests
-
 from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
@@ -89,6 +87,10 @@ class RPCClient:
 
     def get_version(self):
         return self._request("spdk_get_version")
+
+    def bdev_get_bdevs(self, name):
+        params = { 'name': name }
+        return self._request("bdev_get_bdevs", params)
 
     def subsystem_list(self, nqn_name=None):
         data = self._request("nvmf_get_subsystems")
@@ -279,10 +281,23 @@ class RPCClient:
             "lvs_name": name,
             "cluster_sz": cluster_sz,
             "clear_method": clear_method,
+            "not_evict_lvstore_md_pages": True,
+            # "disaster_recovery": True, # toggle then when the node needs to be created in disaster recovery mode
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
+    def bdev_lvol_create_lvstore_persistent(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio, not_evict_lvstore_md_pages=True):
+         params = {
+             "bdev_name": bdev_name,
+             "lvs_name": name,
+             "cluster_sz": cluster_sz,
+             "clear_method": clear_method,
+             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
+             "not_evict_lvstore_md_pages": True
+         }
+         return self._request("bdev_lvol_create_lvstore_persistent", params)
+    
     def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0):
         params = {
             "lvol_name": name,
@@ -290,6 +305,7 @@ class RPCClient:
             "lvs_name": lvs_name,
             "thin_provision": True,
             "clear_method": "unmap",
+            "sync_fetch": True,
             "lvol_priority_class": lvol_priority_class,
         }
         return self._request("bdev_lvol_create", params)
@@ -325,13 +341,17 @@ class RPCClient:
     def lvol_create_snapshot(self, lvol_id, snapshot_name):
         params = {
             "lvol_name": lvol_id,
-            "snapshot_name": snapshot_name}
+            "snapshot_name": snapshot_name,
+            "sync_fetch": True,
+            }
         return self._request("bdev_lvol_snapshot", params)
 
     def lvol_clone(self, snapshot_name, clone_name):
         params = {
             "snapshot_name": snapshot_name,
-            "clone_name": clone_name}
+            "clone_name": clone_name,
+            "sync_fetch": True,
+            }
         return self._request("bdev_lvol_clone", params)
 
     def lvol_compress_create(self, base_bdev_name, pm_path):
@@ -426,7 +446,9 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=True):
+                            full_page_unmap=True, storage_tiering_id=0, secondary_io_timeout_us=1 << 30, ghost_capacity=1, fifo_main_capacity=1, fifo_small_capacity=1,
+                            support_storage_tiering=False, secondary_stg_name="", disaster_recovery=False,
+                            ):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -468,8 +490,35 @@ class RPCClient:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
+
+        if support_storage_tiering:
+            # generate a random int
+            # storage_tiering_id = random.randint(0,  2**16 - 2)
+            params['support_storage_tiering'] = support_storage_tiering
+            params['secondary_stg_name'] = secondary_stg_name
+            params['secondary_io_timeout_us'] = secondary_io_timeout_us
+            params['disaster_recovery'] = disaster_recovery
+            params['storage_tiering_id'] = params['vuid']
+            params['ghost_capacity'] = ghost_capacity
+            params['fifo_main_capacity'] = fifo_main_capacity
+            params['fifo_small_capacity'] = fifo_small_capacity
         return self._request("bdev_distrib_create", params)
 
+    def bdev_s3_create(self, name, local_testing, local_endpoint):
+        params = {
+            "name": name,
+            "local_testing": local_testing,
+            "local_endpoint": local_endpoint,
+        }
+        return self._request("bdev_s3_create", params)
+
+    def bdev_s3_delete(self, **params):
+        return self._request("bdev_s3_delete", params)
+
+    def bdev_s3_add_bucket(self, name, bucket_name):
+        params = { 'name': name, 'bucket_name': bucket_name }
+        return self._request("bdev_s3_add_bucket_name", params)
+    
     def bdev_lvol_delete_lvstore(self, name):
         params = {"lvs_name": name}
         return self._request2("bdev_lvol_delete_lvstore", params)
@@ -931,7 +980,6 @@ class RPCClient:
         }
         return self._request("nvmf_subsystem_remove_listener", params)
 
-
     def bdev_distrib_force_to_non_leader(self, jm_vuid=0):
         params = None
         if jm_vuid:
@@ -987,6 +1035,20 @@ class RPCClient:
             "registered_uuid": registered_uuid,
         }
         return self._request("bdev_lvol_clone_register", params)
+
+    def bdev_lvol_backup_snapshot(self, lvol_name, timeout_us, dev_page_size, nmax_retries=4, nmax_flush_jobs=4):
+         params = {
+             'lvol_name': lvol_name,
+             'timeout_us': timeout_us,
+             'dev_page_size': dev_page_size,
+             'nmax_retries': nmax_retries,
+             'nmax_flush_jobs': nmax_flush_jobs
+         }
+         return self._request("bdev_lvol_backup_snapshot", params)
+
+    def bdev_lvol_get_snapshot_backup_status(self, lvol_name):
+        params = { 'lvol_name': lvol_name }
+        return self._request("bdev_lvol_get_snapshot_backup_status", params)
 
     def distr_replace_id_in_map_prob(self, storage_ID_from, storage_ID_to):
         params = {

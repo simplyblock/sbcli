@@ -61,6 +61,13 @@ class Cluster(BaseModel):
     strict_node_anti_affinity: bool = False
     tls: bool = False
     is_re_balancing: bool = False
+    storage_tiering: bool = True
+    s3_access_key: str = "foobar"
+    s3_secret_key: str = "barfoobarfoo"
+    s3_endpoint: str = "http://192.168.10.146:9000"
+    s3_bucket: str = "mybucket"
+    s3_workerpool_mask: str = "0x00000000"
+    s3_workerpool_size: int = 32
     full_page_unmap: bool = True
 
     def get_status_code(self):

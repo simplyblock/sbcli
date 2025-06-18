@@ -440,6 +440,13 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, true by default', type=bool, default=False, dest='enable_qos')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
+        argument = subcommand.add_argument('--support-storage-tiering', help='Enable storage tiering for the cluster', type=bool, default=False, dest='storage_tiering')
+        argument = subcommand.add_argument('--s3-endpoint', help='S3 endpoint for storage tiering', type=str, default='', dest='s3_endpoint')
+        argument = subcommand.add_argument('--s3-bucket', help='S3 bucket for storage tiering', type=str, default='', dest='s3_bucket')
+        argument = subcommand.add_argument('--s3-access-key', help='S3 access key for storage tiering', type=str, default='', dest='s3_access_key')
+        argument = subcommand.add_argument('--s3-secret-key', help='S3 secret key for storage tiering', type=str, default='', dest='s3_secret_key')
+        argument = subcommand.add_argument('--s3-workerpool-mask', help='S3 workerpool mask for storage tiering', type=regex_type(r'^(0x|0X)?[a-fA-F0-9]+$'), dest='s3_workerpool_mask')
+        argument = subcommand.add_argument('--s3-workerpool-size', help='S3 workerpool size for storage tiering', type=int, default=32, dest='s3_workerpool_size')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -465,6 +472,13 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, default: true', type=bool, default=False, dest='enable_qos')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
+        argument = subcommand.add_argument('--support-storage-tiering', help='Enable storage tiering for the cluster', type=bool, default=False, dest='storage_tiering')
+        argument = subcommand.add_argument('--s3-endpoint', help='S3 endpoint for storage tiering', type=str, default='', dest='s3_endpoint')
+        argument = subcommand.add_argument('--s3-bucket', help='S3 bucket for storage tiering', type=str, default='', dest='s3_bucket')
+        argument = subcommand.add_argument('--s3-access-key', help='S3 access key for storage tiering', type=str, default='', dest='s3_access_key')
+        argument = subcommand.add_argument('--s3-secret-key', help='S3 secret key for storage tiering', type=str, default='', dest='s3_secret_key')
+        argument = subcommand.add_argument('--s3-workerpool-mask', help='S3 workerpool mask for storage tiering', type=regex_type(r'^(0x|0X)?[a-fA-F0-9]+$'), dest='s3_workerpool_mask')
+        argument = subcommand.add_argument('--s3-workerpool-size', help='S3 workerpool size for storage tiering', type=int, default=32, dest='s3_workerpool_size')
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')
@@ -785,6 +799,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__list(subparser)
         self.init_snapshot__delete(subparser)
         self.init_snapshot__clone(subparser)
+        self.init_snapshot__backup(subparser)
 
 
     def init_snapshot__add(self, subparser):
@@ -806,6 +821,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
+
+    def init_snapshot__backup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'backup', 'Backs up a snapshot to a s3 storage using storage tiering')
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
 
 
     def init_caching_node(self):
@@ -1214,6 +1233,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
+                elif sub_command in ['backup']:
+                    ret = self.snapshot__backup(sub_command, args)
                 else:
                     self.parser.print_help()
 

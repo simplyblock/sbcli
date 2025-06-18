@@ -628,6 +628,10 @@ class CLIWrapperBase:
         success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
         return details
 
+    def snapshot__backup(self, sub_command, args):
+        snapshot_id = args.snapshot_id
+        return snapshot_controller.backup(snapshot_id)
+
     def caching_node__deploy(self, sub_command, args):
         return caching_node_controller.deploy(args.ifname)
 
@@ -688,18 +692,26 @@ class CLIWrapperBase:
         distr_bs = args.distr_bs
         distr_chunk_bs = args.distr_chunk_bs
         ha_type = args.ha_type
-
         enable_node_affinity = args.enable_node_affinity
         qpair_count = args.qpair_count
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        storage_tiering = args.storage_tiering
+        s3_endpoint = args.s3_endpoint
+        s3_bucket = args.s3_bucket
+        s3_access_key = args.s3_access_key
+        s3_secret_key = args.s3_secret_key
+        s3_workerpool_mask = args.s3_workerpool_mask
+        s3_workerpool_size = args.s3_workerpool_size
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity,
+            storage_tiering, s3_endpoint, s3_bucket, s3_access_key, s3_secret_key, s3_workerpool_mask, 
+            s3_workerpool_size)
 
     def cluster_deploy(self, args):
         grafana_endpoint = ""
@@ -819,6 +831,14 @@ class CLIWrapperBase:
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
 
+        # storage_tiering = args.storage_tiering
+        # s3_endpoint = args.s3_endpoint
+        # s3_bucket = args.s3_bucket
+        # s3_access_key = args.s3_access_key
+        # s3_secret_key = args.s3_secret_key
+        # s3_workerpool_mask = args.s3_workerpool_mask
+        # s3_workerpool_size = args.s3_workerpool_size
+        
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
