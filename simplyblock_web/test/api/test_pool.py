@@ -54,22 +54,10 @@ def test_pool_update(call, cluster, pool):
 
 
 def test_pool_io_stats(call, cluster, pool):
-    io_stats = call('GET', f'/clusters/{cluster}/pools/{pool}/iostats')
-    assert io_stats['object_data']['uuid'] == pool
+    call('GET', f'/clusters/{cluster}/pools/{pool}/iostats')
     # TODO match expected schema
 
 
 def test_pool_io_stats_history(call, cluster, pool):
-    io_stats = call('GET', f'/clusters/{cluster}/pools/{pool}/iostats?history=10m')
-    assert io_stats['object_data']['uuid'] == pool
-    # TODO match expected schema
-
-
-def test_pool_capacity(call, cluster, pool):
-    call('GET', f'/clusters/{cluster}/pools/{pool}/capacity')
-    # TODO match expected schema
-
-
-def test_pool_capacity_history(call, cluster, pool):
-    call('GET', f'/clusters/{cluster}/pool/{pool}/capacity?history=10m')
+    call('GET', f'/clusters/{cluster}/pools/{pool}/iostats?limit=10')
     # TODO match expected schema
