@@ -573,7 +573,7 @@ class RPCClient:
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
             "num_io_queues": 128,
-            "fast_io_fail_timeout_sec": 2,
+            "fast_io_fail_timeout_sec": 6,
             "ctrlr_loss_timeout_sec": 10,
             "reconnect_delay_sec": 5,
         }
