@@ -8,7 +8,7 @@ import pytest
 def test_snapshot_delete(call, cluster, pool):
     lvol_uuid = call(
             'POST',
-            f'/clusters/{cluster}/pools/{pool}/volume',
+            f'/clusters/{cluster}/pools/{pool}/volumes',
             data={'name': 'lvolX', 'size': '1G'}
     )
 
@@ -52,7 +52,7 @@ def test_snapshot_softdelete(call, cluster, pool):
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
     util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
-    assert lvol_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/volume')
+    assert lvol_uuid not in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/volumes')
 
     clone_uuid = call(
             'POST',

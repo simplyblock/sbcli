@@ -181,7 +181,7 @@ def iostats(path: VolumePath, query: util.HistoryQuery):
     return records_or_false
 
 
-@instance_api.get('/snapshot')
+@instance_api.get('/snapshots')
 def snapshot(path: VolumePath):
     volume = path.volume()
     return [
@@ -196,7 +196,7 @@ class _SnapshotParams(BaseModel):
     name: str
 
 
-@instance_api.post('/snapshot')
+@instance_api.post('/snapshots')
 def create_snapshot(path: VolumePath, body: _SnapshotParams):
     snapshot_id, err = snapshot_controller.add(
         path.volume().get_id(), body.name
