@@ -241,10 +241,7 @@ class StorageNode(BaseNodeObject):
                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
                         primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
                         ip, primary_node.hublvol.nvmf_port)
-                if ret:
-                    remote_bdev = ret[0]
-                    break
-                else:
+                if not ret:
                     logger.warning(f'Failed to connect to hublvol on {ip}')
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
