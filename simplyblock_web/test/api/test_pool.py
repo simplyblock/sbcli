@@ -10,7 +10,7 @@ def test_pool(call, cluster):
     pool_uuid = call('POST', f'/clusters/{cluster}/pools', data={'name': 'poolX'})
     assert re.match(util.uuid_regex, pool_uuid)
 
-    assert call('GET', f'/clusters/{cluster}/pools/{pool_uuid}')[0]['uuid'] == pool_uuid
+    assert call('GET', f'/clusters/{cluster}/pools/{pool_uuid}')['uuid'] == pool_uuid
     assert pool_uuid in util.list_ids(call, f'/clusters/{cluster}/pools')
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool_uuid}')
@@ -48,7 +48,7 @@ def test_pool_update(call, cluster, pool):
         in values
     })
 
-    pool = call('GET', f'/clusters/{cluster}/pools/{pool}')[0]
+    pool = call('GET', f'/clusters/{cluster}/pools/{pool}')
     for _, field, value in values:
         assert pool[field] == value
 
