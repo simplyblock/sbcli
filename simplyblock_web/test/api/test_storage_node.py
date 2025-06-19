@@ -23,8 +23,8 @@ def test_storage_node_get(call, cluster):
 
 def test_capacity(call, cluster):
     node_uuid = call('GET', f'/clusters/{cluster}/storage_nodes')[0]['uuid']
-    call('GET', f'/clusters/{cluster}/storage_nodes/capacity/{node_uuid}')
-    call('GET', f'/clusters/{cluster}/storage_nodes/capacity/{node_uuid}/history/10m')
+    call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}/capacity')
+    call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}/capacity?history=10m')
 
 
 def test_iostats(call, cluster):
