@@ -100,13 +100,15 @@ class UpdatablePoolParams(BaseModel):
 
 @instance_api.put('/')
 def update(path: PoolPath, body: UpdatablePoolParams):
-    abort(501)
-    ret, err = pool_controller.set_pool(**{
-        key: value
-        for key, value
-        in body.model_dump()
-        if key in body.model_fields_set
-    })
+    ret, err = pool_controller.set_pool(
+        path.pool().get_id(),
+        **{
+            key: value
+            for key, value
+            in body.model_dump().items()
+            if key in body.model_fields_set
+        },
+    )
     if err is not None:
         raise ValueError('Failed to update pool')
 
