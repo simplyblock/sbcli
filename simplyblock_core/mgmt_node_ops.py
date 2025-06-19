@@ -61,7 +61,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
             return False
 
     utils.render_and_deploy_alerting_configs(cluster_data['contact_point'], cluster_data['grafana_endpoint'],
-                                                  cluster_data['uuid'], cluster_data['secret'])
+                                                                    cluster_data['uuid'], cluster_data['secret'])
 
     logger.info("Joining docker swarm...")
     try:
