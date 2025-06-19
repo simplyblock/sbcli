@@ -16,7 +16,6 @@ import docker
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound
 
-import re
 import tempfile
 from jinja2 import Environment, FileSystemLoader
 
