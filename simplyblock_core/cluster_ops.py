@@ -3,8 +3,6 @@ import datetime
 import json
 import os
 import socket
-import re
-import tempfile
 import subprocess
 import time
 import uuid
@@ -13,7 +11,6 @@ import typing as t
 
 import docker
 import requests
-from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
 from simplyblock_core.controllers import cluster_events, device_controller, pool_controller, \

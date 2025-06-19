@@ -18,7 +18,6 @@ from docker.errors import APIError, DockerException, ImageNotFound
 
 import re
 import tempfile
-import subprocess
 from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import constants
