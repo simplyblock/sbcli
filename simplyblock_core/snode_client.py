@@ -124,11 +124,7 @@ class SNodeClient:
         return self._request("POST", "join_swarm", params)
 
     def spdk_process_kill(self, rpc_port):
-        params = {"rpc_port": rpc_port}
-        try:
-            return self._request("GET", "spdk_process_kill", params)
-        except Exception as e:
-            return False
+        return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port})
 
     def leave_swarm(self):
         return self._request("GET", "leave_swarm")
@@ -145,6 +141,10 @@ class SNodeClient:
     def delete_dev_gpt_partitions(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "delete_dev_gpt_partitions", params)
+
+    def bind_device_to_nvme(self, device_pci):
+        params = {"device_pci": device_pci}
+        return self._request("POST", "bind_device_to_nvme", params)
 
     def bind_device_to_spdk(self, device_pci):
         params = {"device_pci": device_pci}

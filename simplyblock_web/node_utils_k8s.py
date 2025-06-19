@@ -5,8 +5,8 @@ import os
 
 import jc
 from kubernetes.stream import stream
-from kubernetes import client, config
 from simplyblock_core.utils import get_k8s_core_client
+from concurrent.futures import ThreadPoolExecutor
 
 
 node_name = os.environ.get("HOSTNAME")
@@ -35,15 +35,11 @@ def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=Non
     if block:
         cmd_list.extend([
             f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP",
-            f"iptables -A INPUT -p {port_type} --dport {port_id} -j REJECT",
             f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP",
-            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j REJECT",
             "iptables -L -n -v",
         ])
     else:
         cmd_list.extend([
-            # f"iptables -A INPUT -p {port_type} --dport {port_id} -j ACCEPT",
-            # f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j ACCEPT",
             "iptables -L -n -v",
         ])
 
@@ -58,44 +54,57 @@ def firewall_port_k8s(port_id=9090, port_type="tcp", block=True, k8s_core_v1=Non
     return True
 
 
+def execute_on_pod(pod, k8s_core_v1):
+    container = "spdk-container"
+    return pod_exec(pod.metadata.name, get_namespace(), container, "iptables -L -n", k8s_core_v1)
+
 def firewall_get_k8s():
     k8s_core_v1 = get_k8s_core_client()
-    ret = ""
-    resp = k8s_core_v1.list_namespaced_pod(get_namespace())
-    for pod in resp.items:
-        if pod.metadata.name.startswith(pod_name):
-            container = "spdk-container"
-            ret = pod_exec(pod.metadata.name, get_namespace(), container, "iptables -L -n", k8s_core_v1)
-    return ret
+    label_selector = "role=simplyblock-storage-node"
+    resp = k8s_core_v1.list_namespaced_pod(namespace=get_namespace(), label_selector=label_selector)
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        results = list(executor.map(lambda pod: execute_on_pod(pod, k8s_core_v1), resp.items))
+    
+    return results
 
 
 def pod_exec(name, namespace, container, command, k8s_core_v1):
     exec_command = ["/bin/sh", "-c", command]
+    stdout_result, stderr_result = "", ""
 
-    resp = stream(k8s_core_v1.connect_get_namespaced_pod_exec,
-                  name,
-                  namespace,
-                  command=exec_command,
-                  container=container,
-                  stderr=True, stdin=False,
-                  stdout=True, tty=False,
-                  _preload_content=False)
+    try:
+        resp = stream(
+            k8s_core_v1.connect_get_namespaced_pod_exec,
+            name,
+            namespace,
+            command=exec_command,
+            container=container,
+            stderr=True,
+            stdin=False,
+            stdout=True,
+            tty=False,
+            _preload_content=False
+        )
 
-    result = ""
-    while resp.is_open():
-        resp.update(timeout=1)
-        if resp.peek_stdout():
-            result = resp.read_stdout()
-            print(f"STDOUT: \n{result}")
-        if resp.peek_stderr():
-            print(f"STDERR: \n{resp.read_stderr()}")
+        while resp.is_open():
+            resp.update(timeout=5)
+            if resp.peek_stdout():
+                stdout_result += resp.read_stdout()
+            if resp.peek_stderr():
+                stderr_result += resp.read_stderr()
 
-    resp.close()
+    except Exception as e:
+        raise RuntimeError(f"Error executing command in pod '{name}'") from e
+
+    finally:
+        resp.close()
 
     if resp.returncode != 0:
-        raise Exception(resp.readline_stderr())
+        raise RuntimeError(f"Command failed with return code {resp.returncode}:\nSTDERR:\n{stderr_result}")
 
-    return result
+    return stdout_result
+
 
 def get_namespace():
     if os.path.exists(namespace_id_file):

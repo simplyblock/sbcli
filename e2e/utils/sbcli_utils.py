@@ -249,14 +249,27 @@ class SbcliUtils:
                 node_uuid = result['uuid']
                 break
         return node_uuid
+    
+    def get_all_node_without_lvols(self) -> str:
+        """
+        returns all nodeID which doesn't have any lvol attached
+        """
+        # a node which doesn't have any lvols attached
+        node_uuids = []
+        data = self.get_request(api_url="/storagenode")
+        for result in data['results']:
+            if result['lvols'] == 0 and result['is_secondary_node'] is False:
+                node_uuids.append(result['uuid'])
+        return node_uuids
 
-    def shutdown_node(self, node_uuid: str, expected_error_code=None):
+    def shutdown_node(self, node_uuid: str, expected_error_code=None, force=False):
         """
         given a node_UUID, shutdowns the node
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
         self.logger.info(f"Shutting down node with uuid: {node_uuid}")
-        self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}", expected_error_code=expected_error_code)
+        force_str = "?force=true" if force else ""
+        self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}{force_str}", expected_error_code=expected_error_code)
 
 
     def suspend_node(self, node_uuid: str, expected_error_code=None):
@@ -274,7 +287,7 @@ class SbcliUtils:
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
         self.get_request(api_url=f"/storagenode/resume/{node_uuid}")
 
-    def restart_node(self, node_uuid: str, expected_error_code=None):
+    def restart_node(self, node_uuid: str, expected_error_code=None, force=False):
         """
         given a node_UUID, restarts the node
         """
@@ -282,6 +295,9 @@ class SbcliUtils:
         body = {
             "uuid": node_uuid
         }
+
+        if force:
+            body["force"] = True
 
         self.put_request(api_url="/storagenode/restart/", body=body, expected_error_code=expected_error_code)
 

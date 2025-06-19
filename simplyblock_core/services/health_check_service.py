@@ -3,15 +3,14 @@ import time
 from datetime import datetime
 
 from simplyblock_core import utils
-logger = utils.get_logger(__name__)
-
-from simplyblock_core.controllers import health_controller, storage_events, device_events, tcp_ports_events
+from simplyblock_core.controllers import health_controller, storage_events, device_events, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, db_controller, distr_controller, storage_node_ops
-from simplyblock_core.snode_client import SNodeClient
+
+logger = utils.get_logger(__name__)
 
 
 utils.init_sentry_sdk()
@@ -45,8 +44,6 @@ def set_device_health_check(cluster_id, device, health_check_status):
 
 # get DB controller
 db = db_controller.DBController()
-
-nodes_ports_blocked: dict[str, list] = {}
 
 logger.info("Starting health check service")
 while True:
@@ -193,8 +190,11 @@ while True:
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
                     for remote_device in snode.remote_jm_devices:
-                        if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
+                        check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
+                        if check:
                             connected_jms.append(remote_device.get_id())
+                        else:
+                            node_remote_devices_check = False
 
                     for jm_id in snode.jm_ids:
                         if jm_id and jm_id not in connected_jms:
@@ -202,14 +202,6 @@ while True:
                                 if nd.jm_device and nd.jm_device.get_id() == jm_id:
                                     if nd.status == StorageNode.STATUS_ONLINE:
                                         node_remote_devices_check = False
-                                    break
-
-                    if snode.lvstore_stack_secondary_1:
-                        primary_node = db.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-                        if primary_node:
-                            for jm_id in primary_node.jm_ids:
-                                # if jm_id not in connected_jms:
-                                #    node_remote_devices_check = False
                                     break
 
                     if not node_remote_devices_check and cluster.status in [
@@ -249,27 +241,10 @@ while True:
                         logger.info(
                             f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
                         if not lvol_port_check:
-                            if snode.get_id() in nodes_ports_blocked:
-                                if port not in nodes_ports_blocked[snode.get_id()]:
-                                    nodes_ports_blocked[snode.get_id()].append(port)
-                            else:
-                                nodes_ports_blocked[snode.get_id()] = [port]
+                            tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
             set_node_health_check(snode, bool(health_check_status))
 
     time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
-
-    for node_id in nodes_ports_blocked:
-        snode = db.get_storage_node_by_id(node_id)
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=3, retry=2)
-        if nodes_ports_blocked[node_id]:
-            for port in nodes_ports_blocked[node_id]:
-                if port:
-                    logger.info(f"Allow port {port} on node {node_id}")
-                    snode_api.firewall_set_port(port, "tcp", "allow", snode.rpc_port)
-                    tcp_ports_events.port_allowed(snode, port)
-
-    nodes_ports_blocked = {}
-    time.sleep(3)
 

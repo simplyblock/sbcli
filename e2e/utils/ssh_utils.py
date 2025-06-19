@@ -9,7 +9,9 @@ from logger_config import setup_logger
 from pathlib import Path
 from datetime import datetime
 import threading
-import random, string, re
+import random
+import string
+import re
 import subprocess
 
 
@@ -329,7 +331,7 @@ class SshUtils:
         log_avg_msec = kwargs.get("log_avg_msec", 1000)
         log_avg_msec_opt = f"--log_avg_msec={log_avg_msec}" if log_avg_msec else ""
 
-        iolog_base = kwargs.get("iolog_file", f"/tmp/{name}_iolog.txt")
+        iolog_base = kwargs.get("iolog_file", None)
         iolog_opt = f"--write_iolog={iolog_base}" if iolog_base else ""
 
         command = (
@@ -731,12 +733,24 @@ class SshUtils:
         output, _ = self.exec_command(node=node, command=command)
         data = json.loads(output)
         nvme_dict = {}
-        self.logger.info(f"LVOL DEVICE output: {data}")
+        self.logger.info(f"LVOL DEVICE output: {json.dumps(data, indent=2)}")
+
         for device in data.get('Devices', []):
-            device_path = device.get('DevicePath')
-            model_number = device.get('ModelNumber')
-            if device_path and model_number:
-                nvme_dict[model_number] = device_path
+            for subsystem in device.get('Subsystems', []):
+                subsystem_nqn = subsystem.get('SubsystemNQN', '')
+                if ':lvol:' in subsystem_nqn:
+                    # Extract lvol UUID from NQN
+                    lvol_uuid = subsystem_nqn.split(':lvol:')[-1]
+                    # Get the namespace name (e.g., nvme0n1)
+                    ns_list = subsystem.get('Namespaces', [])
+                    if ns_list:
+                        ns = ns_list[0]  # Should have only one namespace per lvol
+                        namespace = ns.get('NameSpace')
+                        if namespace:
+                            # Compose Linux device path
+                            nvme_device = f"/dev/{namespace}"
+                            nvme_dict[lvol_uuid] = nvme_device
+
         self.logger.info(f"LVOL vs device dict output: {nvme_dict}")
         if lvol_id:
             return nvme_dict.get(lvol_id)
@@ -778,7 +792,7 @@ class SshUtils:
 
     def add_storage_node(self, node, cluster_id, node_ip, ifname="eth0", partitions=0,
                          data_nic="eth1", disable_ha_jm=False, enable_test_device=False, 
-                         spdk_debug=False, spdk_image=None):
+                         spdk_debug=False, spdk_image=None, namespace=None):
         """Add new storage node
 
         Args:
@@ -806,8 +820,13 @@ class SshUtils:
             cmd = f"{cmd} --spdk-image {spdk_image}"
         if spdk_debug:
             cmd = f"{cmd} --spdk-debug"
+        if namespace:
+            cmd = f"{cmd} --namespace {namespace}"
     
-        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname} --data-nics {data_nic}"
+        add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
+
+        if data_nic:
+            cmd  = f"{cmd} --data-nics {data_nic}"
         self.exec_command(node=node, command=add_node_cmd)
 
     def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
@@ -1685,37 +1704,46 @@ class SshUtils:
     def start_resource_monitors(self, node_ip, log_dir):
         """
         Starts background resource monitoring for:
-        1. Root partition usage
-        2. Container-wise memory usage
+        1. Root partition usage (df -h /)
+        2. Container-wise memory usage (docker stats)
+        3. System memory usage (free -h)
 
-        Each logs every 10s to a separate file in the log_dir.
+        Each logs every 10 seconds to separate files in log_dir.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         root_log = f"{log_dir}/root_partition_usage_{node_ip}_{timestamp}.txt"
         docker_mem_log = f"{log_dir}/docker_mem_usage_{node_ip}_{timestamp}.txt"
+        system_mem_log = f"{log_dir}/system_memory_usage_{node_ip}_{timestamp}.txt"
 
-        # Ensure log directory exists
+        # Ensure log directory exists and is writable
         self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
 
-        # Root partition utilization monitor (df -h /)
-        df_cmd = f"""sudo tmux new-session -d -s root_usage_monitor \
-        'bash -c "while true; do date >> {root_log}; df -h / >> {root_log}; echo >> {root_log}; sleep 10; done"'"""
+        # 1) Root partition monitor
+        df_cmd = f"""
+        sudo tmux new-session -d -s root_usage_monitor \
+        'bash -c "while true; do date >> {root_log}; df -h / >> {root_log}; echo >> {root_log}; sleep 10; done"'
+        """
 
+        # 2) Docker container memory usage monitor
+        docker_cmd = f"""
+        sudo tmux new-session -d -s docker_mem_monitor \
+        'bash -c "while true; do date >> {docker_mem_log}; \
+        docker stats --no-stream --format \\"table {{.Name}}\\t{{.MemUsage}}\\" >> {docker_mem_log}; \
+        echo >> {docker_mem_log}; sleep 10; done"'
+        """
 
-        # Docker memory usage monitor (docker stats --no-stream)
-        docker_cmd = "sudo tmux new-session -d -s docker_mem_monitor " \
-                     "'while true; do " \
-                     "date >> %s; " \
-                     "docker stats --no-stream --format \"table {{.Name}}\\t{{.MemUsage}}\" >> %s; " \
-                     "echo >> %s; " \
-                     "sleep 10; " \
-                     "done'" % (docker_mem_log, docker_mem_log, docker_mem_log)
-
+        # 3) System memory usage monitor
+        system_cmd = f"""
+        sudo tmux new-session -d -s system_mem_monitor \
+        'bash -c "while true; do date >> {system_mem_log}; free -h >> {system_mem_log}; echo >> {system_mem_log}; sleep 10; done"'
+        """
 
         self.exec_command(node_ip, df_cmd)
         self.exec_command(node_ip, docker_cmd)
+        self.exec_command(node_ip, system_cmd)
 
-        self.logger.info(f"Started root partition and container memory logging on {node_ip}")
+        self.logger.info(f"Started root partition, container memory, and system memory logging on {node_ip}")
+
 
     
     def suspend_cluster(self, node_ip, cluster_id):
@@ -1765,7 +1793,7 @@ class RunnerK8sLog:
         - get_running_pods(): Fetches all currently running pods in a namespace.
     """
 
-    def __init__(self, namespace="spdk-csi", log_dir="/var/logs", test_name="test_run"):
+    def __init__(self, namespace="simplyblk", log_dir="/var/logs", test_name="test_run"):
         """
         Initialize the RunnerLog class.
 

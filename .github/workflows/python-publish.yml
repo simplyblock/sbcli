@@ -3,6 +3,8 @@ name: Python Package Build
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - 'simplyblock_core/env_var'
 

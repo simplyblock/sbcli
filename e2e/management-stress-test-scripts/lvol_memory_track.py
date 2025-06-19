@@ -1,14 +1,269 @@
 import argparse
 import subprocess
 import matplotlib.pyplot as plt
-import re
+import os
 import time
 import numpy as np
 import threading
+import psutil
+import csv
+from collections import defaultdict
 
 
 class ManagementStressUtils:
     """Utility class for common methods like executing commands and gathering data."""
+
+    @staticmethod
+    def log_system_psutil_resources(label, log_file, csv_log_file, batch_index):
+        cpu = psutil.cpu_percent(interval=1)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+
+        with open(log_file, 'a') as f:
+            f.write(f"\n--- {label} ---\n")
+            f.write(f"CPU usage (%): {cpu}\n")
+            f.write(f"Memory usage (%): {mem.percent}, Available: {mem.available / (1024 ** 3):.2f} GB\n")
+            f.write(f"Disk usage (%): {disk.percent}, Free: {disk.free / (1024 ** 3):.2f} GB\n")
+
+        write_header = not os.path.exists(csv_log_file)
+        with open(csv_log_file, 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            if write_header:
+                writer.writerow(["batch_index", "cpu_percent", "memory_percent", "memory_available_GB", "disk_percent", "disk_free_GB"])
+            writer.writerow([
+                batch_index, cpu, mem.percent, mem.available / (1024 ** 3),
+                disk.percent, disk.free / (1024 ** 3)
+            ])
+
+    # @staticmethod
+    # def plot_psutil_resource_usage(csv_file):
+    #     batches = []
+    #     cpu_vals, mem_vals, disk_vals = [], [], []
+
+    #     with open(csv_file, 'r') as f:
+    #         reader = csv.DictReader(f)
+    #         for row in reader:
+    #             batches.append(int(row['batch_index']))
+    #             cpu_vals.append(float(row['cpu_percent']))
+    #             mem_vals.append(float(row['memory_percent']))
+    #             disk_vals.append(float(row['disk_percent']))
+
+    #     os.makedirs("logs", exist_ok=True)
+
+    #     # CPU Graph
+    #     plt.figure(figsize=(10, 5))
+    #     plt.plot(batches, cpu_vals, label='CPU %', marker='o', color='tab:red')
+    #     for i in range(len(batches)):
+    #         plt.annotate(f"{cpu_vals[i]:.1f}%", (batches[i], cpu_vals[i]), textcoords="offset points", xytext=(0,5), ha='center')
+    #     plt.xlabel('Batch Index')
+    #     plt.ylabel('CPU Usage (%)')
+    #     plt.title('CPU Usage Per Batch')
+    #     plt.grid(True)
+    #     plt.tight_layout()
+    #     plt.savefig("logs/cpu_usage_per_batch.png")
+
+    #     # Memory Graph
+    #     plt.figure(figsize=(10, 5))
+    #     plt.plot(batches, mem_vals, label='Memory %', marker='s', color='tab:blue')
+    #     for i in range(len(batches)):
+    #         plt.annotate(f"{mem_vals[i]:.1f}%", (batches[i], mem_vals[i]), textcoords="offset points", xytext=(0,5), ha='center')
+    #     plt.xlabel('Batch Index')
+    #     plt.ylabel('Memory Usage (%)')
+    #     plt.title('Memory Usage Per Batch')
+    #     plt.grid(True)
+    #     plt.tight_layout()
+    #     plt.savefig("logs/memory_usage_per_batch.png")
+
+    #     # Disk Graph
+    #     plt.figure(figsize=(10, 5))
+    #     plt.plot(batches, disk_vals, label='Disk %', marker='^', color='tab:green')
+    #     for i in range(len(batches)):
+    #         plt.annotate(f"{disk_vals[i]:.1f}%", (batches[i], disk_vals[i]), textcoords="offset points", xytext=(0,5), ha='center')
+    #     plt.xlabel('Batch Index')
+    #     plt.ylabel('Disk Usage (%)')
+    #     plt.title('Disk Usage Per Batch')
+    #     plt.grid(True)
+    #     plt.tight_layout()
+    #     plt.savefig("logs/disk_usage_per_batch.png")
+
+    #     plt.show()
+
+    @staticmethod
+    def plot_psutil_resource_usage_both(csv_file, total_batches):
+        """
+        Plot system resource usage:
+        1) LVOL phase (per batch)
+        2) Post phase (over time in minutes)
+        Save both plots in the current working directory.
+        """
+        batch_indices = []
+        time_intervals = []
+        cpu_batches, cpu_time = [], []
+        mem_batches, mem_time = [], []
+        disk_batches, disk_time = [], []
+
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                idx = int(row['batch_index'])
+                cpu = float(row['cpu_percent'])
+                mem = float(row['memory_percent'])
+                disk = float(row['disk_percent'])
+                if idx > 0 and idx <= total_batches:
+                    batch_indices.append(idx)
+                    cpu_batches.append(cpu)
+                    mem_batches.append(mem)
+                    disk_batches.append(disk)
+                else:
+                    time_intervals.append(idx-1000)
+                    cpu_time.append(cpu)
+                    mem_time.append(mem)
+                    disk_time.append(disk)
+
+        # 1️. Plot batch-wise
+        plt.figure(figsize=(12, 6))
+        plt.plot(batch_indices, cpu_batches, marker='o', label='CPU %')
+        plt.plot(batch_indices, mem_batches, marker='s', label='Memory %')
+        plt.plot(batch_indices, disk_batches, marker='^', label='Disk %')
+        plt.title("System Resource Usage Per Batch (LVOL Phase)")
+        plt.xlabel("Batch Index")
+        plt.ylabel("Usage (%)")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("psutil_resource_batch_wise.png")
+        plt.close()
+
+        # 2️. Plot time-wise (post phase)
+        plt.figure(figsize=(12, 6))
+        plt.plot(time_intervals, cpu_time, marker='o', label='CPU %')
+        plt.plot(time_intervals, mem_time, marker='s', label='Memory %')
+        plt.plot(time_intervals, disk_time, marker='^', label='Disk %')
+        plt.title("System Resource Usage Over Time (Post-Monitor Phase)")
+        plt.xlabel("Time (minutes)")
+        plt.ylabel("Usage (%)")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("psutil_resource_time_wise.png")
+        plt.close()
+
+    @staticmethod
+    def log_all_container_resources(label, log_file, csv_log_file, batch_index):
+        """
+        Log CPU and Memory usage for ALL containers on the host.
+        Write both human-readable log and structured CSV for later graphing.
+        """
+        # Get ALL containers and stats in one go
+        cmd = "sudo docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.MemPerc}}'"
+        result = ManagementStressUtils.exec_cmd(cmd)
+
+        write_header = not os.path.exists(csv_log_file)
+        with open(csv_log_file, 'a', newline='') as csvfile, open(log_file, 'a') as logf:
+            writer = csv.writer(csvfile)
+            if write_header:
+                writer.writerow(["batch_index", "container_name", "cpu_percent", "memory_usage", "memory_percent"])
+
+            logf.write(f"\n--- {label} ---\n")
+            for line in result.strip().splitlines():
+                name, cpu_perc, mem_usage, mem_perc = line.split(",")
+                logf.write(f"{name}: CPU={cpu_perc}, Mem={mem_usage} ({mem_perc})\n")
+
+                # Remove % and normalize mem_usage to plain text (e.g., 32.4MiB / 1GiB)
+                writer.writerow([batch_index, name, cpu_perc.strip("%"), mem_usage.strip(), mem_perc.strip("%")])
+
+    @staticmethod
+    def plot_all_container_resources_both(csv_file, total_batches):
+        """
+        Plot all container CPU & Memory usage:
+        1) Per Batch (LVOL phase)
+        2) Over Time (Post-monitor phase)
+        Save all plots in current directory.
+        """
+        data_batches = defaultdict(lambda: {"batch": [], "cpu": [], "mem": []})
+        data_time = defaultdict(lambda: {"time": [], "cpu": [], "mem": []})
+
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                idx = int(row['batch_index'])
+                name = row['container_name']
+                cpu = float(row['cpu_percent'])
+                mem = float(row['memory_percent'])
+
+                if idx > 0 and idx <= total_batches:
+                    data_batches[name]["batch"].append(idx)
+                    data_batches[name]["cpu"].append(cpu)
+                    data_batches[name]["mem"].append(mem)
+                else:
+                    data_time[name]["time"].append(idx-1000)
+                    data_time[name]["cpu"].append(cpu)
+                    data_time[name]["mem"].append(mem)
+
+        # 1️. Plot BATCH-WISE for each container
+        for name, values in data_batches.items():
+            plt.figure(figsize=(10, 5))
+            plt.plot(values["batch"], values["cpu"], marker='o', label='CPU %')
+            plt.plot(values["batch"], values["mem"], marker='s', label='Memory %')
+            plt.title(f"Container: {name} - Resource Usage Per Batch")
+            plt.xlabel("Batch Index")
+            plt.ylabel("Usage (%)")
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            safe_name = name.replace("/", "_").replace(":", "_")
+            plt.savefig(f"{safe_name}_resource_usage_batch_wise.png")
+            plt.close()
+
+        # 2️. Plot TIME-WISE for each container
+        for name, values in data_time.items():
+            plt.figure(figsize=(10, 5))
+            plt.plot(values["time"], values["cpu"], marker='o', label='CPU %')
+            plt.plot(values["time"], values["mem"], marker='s', label='Memory %')
+            plt.title(f"Container: {name} - Resource Usage Over Time")
+            plt.xlabel("Time (minutes)")
+            plt.ylabel("Usage (%)")
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            safe_name = name.replace("/", "_").replace(":", "_")
+            plt.savefig(f"{safe_name}_resource_usage_time_wise.png")
+            plt.close()
+
+    # @staticmethod
+    # def plot_all_container_resources(csv_file):
+    #     """
+    #     Generate separate CPU and Memory usage graphs per container, batch-wise.
+    #     """
+    #     import csv
+    #     from collections import defaultdict
+    #     import os
+
+    #     data = defaultdict(lambda: {"batch": [], "cpu": [], "mem_percent": []})
+
+    #     with open(csv_file, 'r') as f:
+    #         reader = csv.DictReader(f)
+    #         for row in reader:
+    #             name = row['container_name']
+    #             data[name]["batch"].append(int(row['batch_index']))
+    #             data[name]["cpu"].append(float(row['cpu_percent']))
+    #             data[name]["mem_percent"].append(float(row['memory_percent']))
+
+    #     os.makedirs("logs", exist_ok=True)
+
+    #     for name, values in data.items():
+    #         plt.figure(figsize=(10, 5))
+    #         plt.plot(values["batch"], values["cpu"], marker='o', label='CPU %')
+    #         plt.plot(values["batch"], values["mem_percent"], marker='s', label='Memory %')
+    #         plt.title(f"Container: {name} Resource Usage")
+    #         plt.xlabel("Batch Index")
+    #         plt.ylabel("Usage (%)")
+    #         plt.legend()
+    #         plt.grid(True)
+    #         plt.tight_layout()
+    #         safe_name = name.replace("/", "_").replace(":", "_")
+    #         plt.savefig(f"logs/{safe_name}_resource_usage.png")
+    #         plt.close()
 
     @staticmethod
     def exec_cmd(cmd, error_ok=False):
@@ -124,7 +379,7 @@ class ManagementStressUtils:
             mem_line = lines[0]
 
             mem_data = [float(value) for value in mem_line.split() if value.replace('.', '', 1).isdigit()]
-            total_memory, used_memory, buffer_memory = mem_data[0], mem_data[2], mem_data[3]
+            _total_memory, used_memory, buffer_memory = mem_data[0], mem_data[2], mem_data[3]
             cmd = "top -bn1 | grep Cpu | awk '{print $2}'"
             cpu_usage = float(ManagementStressUtils.exec_cmd(cmd=cmd))
             used_memory = ManagementStressUtils.convert_to_gb(f"{used_memory} MB")
@@ -139,7 +394,8 @@ class TestLvolMemory:
 
     def __init__(self, sbcli_cmd, cluster_id, utils,
                  log_file="test_lvol_memory.log", size_change_log="size_change.log",
-                 timings_log="timings.log", pool_name="pool1", total_batches=100, batch_size=25):
+                 timings_log="timings.log", pool_name="pool1", total_batches=100, batch_size=25,
+                 csv_log_file="resource_log.csv"):
         self.utils = utils
         self.sbcli_cmd = sbcli_cmd
         self.cluster_id = cluster_id
@@ -181,6 +437,7 @@ class TestLvolMemory:
         }
         self.milestones = []
         self.time_durations = []
+        self.csv_log_file = csv_log_file
 
         self.initialize_logs()
 
@@ -257,6 +514,21 @@ class TestLvolMemory:
                 time.sleep(600)
             self.intervals.append(interval)
             self.gather_docker_stats_after_script()
+            ManagementStressUtils.log_system_psutil_resources(
+                f"Post-Monitor at {interval} mins",
+                self.log_file,
+                "resource_data.csv",     # SAME system log file
+                1000 + interval                 # Use interval as index
+            )
+
+            ManagementStressUtils.log_all_container_resources(
+                f"Post-Monitor at {interval} mins - All Containers",
+                self.log_file,
+                "all_containers_resource.csv",  # SAME container log file
+                1000 + interval                        # Use interval as index
+            )
+
+            
             self.log(f"Data collected for {interval} minutes.")
 
     def detect_size_change(self, batch_idx, lvol_idx, fdb_size, prometheus_size, graylog_size):
@@ -674,8 +946,7 @@ class TestLvolMemory:
 
     def run(self):
         stop_event = threading.Event()
-        continuous_thread = threading.Thread(target=self.collect_continuous_data, args=(stop_event,))
-        continuous_thread.start()
+        continuous_thread = None
 
         time.sleep(60)
         self.log("Creating pool...")
@@ -684,10 +955,15 @@ class TestLvolMemory:
 
         for batch in range(1, self.total_batches + 1):
             self.log(f"Starting batch: {batch}")
+            lvol_idx = 0
             for lvol in range(1, self.batch_size + 1):
                 lvol_idx = (batch - 1) * self.batch_size + lvol
                 lvol_name = f"test_lvol_{lvol_idx}"
                 self.create_lvol(lvol_name)
+
+                if not continuous_thread:
+                    continuous_thread = threading.Thread(target=self.collect_continuous_data, args=(stop_event,))
+                    continuous_thread.start()
 
                 # Gather data after each lvol creation
                 fdb_size, prometheus_size, graylog_size = self.gather_data()
@@ -707,6 +983,14 @@ class TestLvolMemory:
                 time.sleep(2)
 
             self.log(f"Completed batch {batch}. Waiting for 120 seconds...\n")
+            ManagementStressUtils.log_system_psutil_resources(f"Batch {batch} (lvols {lvol_idx - self.batch_size}-{lvol_idx - 1})", self.log_file, self.csv_log_file, batch)
+            ManagementStressUtils.log_all_container_resources(
+                f"Batch {batch} - All Containers",
+                self.log_file,
+                "all_containers_resource.csv",
+                batch
+            )
+
             time.sleep(120)
             self.write_data_to_files()
             self.write_continuous_data_to_files()  # Save continuous data incrementally
@@ -717,6 +1001,14 @@ class TestLvolMemory:
         self.write_data_to_files()
         stop_event.set()
         continuous_thread.join()
+        ManagementStressUtils.plot_psutil_resource_usage_both(
+            self.csv_log_file,
+            self.total_batches
+        )
+        ManagementStressUtils.plot_all_container_resources_both(
+            "all_containers_resource.csv",
+            self.total_batches
+        )
         self.plot_results()
 
 
@@ -725,6 +1017,8 @@ class TestLvolMemory:
         self.read_data_from_files()
         self.read_continuous_data_from_files()
         self.plot_results()
+        ManagementStressUtils.plot_psutil_resource_usage_both(csv_file=self.csv_log_file, total_batches=self.total_batches)
+        ManagementStressUtils.plot_all_container_resources_both(csv_file="all_containers_resource.csv", total_batches=self.total_batches)
 
     def plot_results(self):
         """Plot memory usage, CPU usage, and timings versus number of lvols created."""
@@ -1163,24 +1457,50 @@ def main():
     parser = argparse.ArgumentParser(description="Run or plot lvol memory tracking test.")
     parser.add_argument("--sbcli_cmd", default="sbcli-mock", help="Command to execute sbcli (default: sbcli-mock).")
     parser.add_argument("--cluster_id", required=True, help="Cluster ID for the test.")
-    parser.add_argument("--total_lvols", type=int, default=100, help="Total number of LVOLs to create (multiple of 25).")
+    parser.add_argument("--total_lvols", type=int, default=100, help="Total number of LVOLs to create.")
+    parser.add_argument("--batch_size", type=int, default=25, help="Number of lvols to create per batch (default: 25).")
+    parser.add_argument("--continue_from_log", action="store_true", help="Resume test from last recorded lvol count in log file.")
     parser.add_argument("--plot", action="store_true", help="Generate graphs from saved data files without creating LVOLs.")
+    parser.add_argument("--csv_log_file", default="resource_data.csv", help="CSV file to store structured resource data.")
+
     args = parser.parse_args()
 
-    if args.total_lvols < 25:
-        print("Minimum of 25 lvols")
-        total_batches = 1
-    else:
-        total_batches = args.total_lvols // 25
-
     utils = ManagementStressUtils()
-    test = TestLvolMemory(sbcli_cmd=args.sbcli_cmd, cluster_id=args.cluster_id, utils=utils, total_batches=total_batches)
+
+    # Determine how many lvols already exist (for resume support)
+    resume_count = 0
+    if args.continue_from_log and os.path.exists("lvol_counts.txt"):
+        try:
+            lvol_counts = np.loadtxt("lvol_counts.txt", dtype=int)
+            if isinstance(lvol_counts, np.ndarray):
+                resume_count = int(lvol_counts[-1])
+            else:
+                resume_count = int(lvol_counts)
+            print(f"Resuming from lvol index: {resume_count + 1}")
+        except Exception as e:
+            print(f"Could not parse lvol_counts.txt for resume: {e}")
+
+    lvols_to_create = max(0, args.total_lvols - resume_count)
+    total_batches = (lvols_to_create + args.batch_size - 1) // args.batch_size
+
+    test = TestLvolMemory(
+        sbcli_cmd=args.sbcli_cmd,
+        cluster_id=args.cluster_id,
+        utils=utils,
+        total_batches=total_batches,
+        batch_size=args.batch_size,
+        csv_log_file=args.csv_log_file
+    )
+
+    # If resuming, pre-populate lvol_counts to avoid overwrite
+    if resume_count > 0:
+        test.read_data_from_files()
+        test.read_continuous_data_from_files()
 
     if args.plot:
         test.plot_from_files()
     else:
         test.run()
-
 
 
 if __name__ == "__main__":

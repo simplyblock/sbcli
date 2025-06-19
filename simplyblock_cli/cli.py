@@ -115,8 +115,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-debug', help='Enable spdk debug logs', dest='spdk_debug', action='store_true')
         if self.developer_mode:
-            argument = subcommand.add_argument('--full-page-unmap', help='Enable use_map_whole_page_on_1st_write flaf in bdev_distrib_create and bdev_alceml_create', dest='full_page_unmap', action='store_true')
-        if self.developer_mode:
             argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=int, default=0, dest='small_bufsize')
         if self.developer_mode:
             argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize')
@@ -903,7 +901,6 @@ class CLIWrapper(CLIWrapperBase):
                         args.partition_size = None
                         args.spdk_image = None
                         args.spdk_debug = None
-                        args.full_page_unmap = None
                         args.small_bufsize = 0
                         args.large_bufsize = 0
                         args.enable_test_device = None

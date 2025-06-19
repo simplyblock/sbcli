@@ -92,7 +92,6 @@ class TestMultiLvolFio(TestClusterBase):
                 self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
             final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-            disk_use = None
             self.logger.info("Initial vs final disk:")
             self.logger.info(f"Initial: {initial_devices}")
             self.logger.info(f"Final: {final_devices}")
@@ -106,7 +105,7 @@ class TestMultiLvolFio(TestClusterBase):
         
         lvol_list = self.sbcli_utils.list_lvols()
 
-        with open(self.checksum_log_file, 'w', encoding='utf-8') as checksum_file:
+        with open(self.checksum_log_file, 'w', encoding='utf-8'):
 
             for fs_type in ["ext4", "xfs"]:
                 self.logger.info(f"Processing filesystem type: {fs_type}")
