@@ -16,6 +16,11 @@ import docker
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound
 
+import re
+import tempfile
+import subprocess
+from jinja2 import Environment, FileSystemLoader
+
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -1760,3 +1765,55 @@ def remove_container(client: docker.DockerClient, name, timeout=3):
     except docker.errors.APIError as e:
         if 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
             raise
+
+def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):
+    TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
+    alert_resources_file = "alert_resources.yaml"
+
+    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
+    template = env.get_template(f'{alert_resources_file}.j2')
+
+    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
+    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+    if slack_pattern.match(contact_point):
+        ALERT_TYPE = "slack"
+    elif email_pattern.match(contact_point):
+        ALERT_TYPE = "email"
+    else:
+        ALERT_TYPE = "slack"
+        contact_point = 'https://hooks.slack.com/services/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'
+
+    values = {
+        'CONTACT_POINT': contact_point,
+        'GRAFANA_ENDPOINT': grafana_endpoint,
+        'ALERT_TYPE': ALERT_TYPE,
+    }
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_file_path = os.path.join(temp_dir, alert_resources_file)
+        with open(temp_file_path, 'w') as file:
+            file.write(template.render(values))
+
+        destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
+        subprocess.check_call(['sudo', '-v'])  # sudo -v checks if the current user has sudo permissions
+        subprocess.check_call(['sudo', 'mv', temp_file_path, destination_file_path])
+        print(f"File moved to {destination_file_path} successfully.")
+
+    scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
+    prometheus_file = "prometheus.yml"
+    env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
+    template = env.get_template(f'{prometheus_file}.j2')
+    values = {
+        'CLUSTER_ID': cluster_uuid,
+        'CLUSTER_SECRET': cluster_secret}
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        file_path = os.path.join(temp_dir, prometheus_file)
+        with open(file_path, 'w') as file:
+            file.write(template.render(values))
+
+        prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
+        subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
+        print(f"File moved to {prometheus_file_path} successfully.")

@@ -30,7 +30,6 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
-TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 db_controller = DBController()
 
@@ -216,56 +215,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
     c.strict_node_anti_affinity = strict_node_anti_affinity
+    c.contact_point = contact_point
 
-    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
-    alert_resources_file = "alert_resources.yaml"
-
-    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{alert_resources_file}.j2')
-
-    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
-    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-
-    if slack_pattern.match(contact_point):
-        ALERT_TYPE = "slack"
-    elif email_pattern.match(contact_point):
-        ALERT_TYPE = "email"
-    else:
-        ALERT_TYPE = "slack"
-        contact_point = 'https://hooks.slack.com/services/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'
-
-    values = {
-        'CONTACT_POINT': contact_point,
-        'GRAFANA_ENDPOINT': c.grafana_endpoint,
-        'ALERT_TYPE': ALERT_TYPE,
-    }
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_file_path = os.path.join(temp_dir, alert_resources_file)
-        with open(temp_file_path, 'w') as file:
-            file.write(template.render(values))
-
-        destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
-        subprocess.check_call(['sudo', '-v'])  # sudo -v checks if the current user has sudo permissions
-        subprocess.check_call(['sudo', 'mv', temp_file_path, destination_file_path])
-        print(f"File moved to {destination_file_path} successfully.")
-
-    scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
-    prometheus_file = "prometheus.yml"
-    env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{prometheus_file}.j2')
-    values = {
-        'CLUSTER_ID': c.uuid,
-        'CLUSTER_SECRET': c.secret}
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        file_path = os.path.join(temp_dir, prometheus_file)
-        with open(file_path, 'w') as file:
-            file.write(template.render(values))
-
-        prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
-        subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
-        print(f"File moved to {prometheus_file_path} successfully.")
+    utils.render_and_deploy_alerting_configs(contact_point, c.grafana_endpoint, c.uuid, c.secret)
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"

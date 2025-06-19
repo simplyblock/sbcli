@@ -60,6 +60,9 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
             logger.error("Node already exists in the cluster")
             return False
 
+    utils.render_and_deploy_alerting_configs(cluster_data['contact_point'], cluster_data['grafana_endpoint'],
+                                                  cluster_data['uuid'], cluster_data['secret'])
+
     logger.info("Joining docker swarm...")
     try:
         cluster_docker = utils.get_docker_client(cluster_id)
