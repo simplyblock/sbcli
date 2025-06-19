@@ -240,7 +240,7 @@ class StorageNode(BaseNodeObject):
             for ip in (iface.ip4_address for iface in primary_node.data_nics):
                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
                         primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                        ip, primary_node.hublvol.nvmf_port)
+                        ip, primary_node.hublvol.nvmf_port, multipath=True)
                 if not ret:
                     logger.warning(f'Failed to connect to hublvol on {ip}')
 
