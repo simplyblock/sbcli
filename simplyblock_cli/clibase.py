@@ -313,9 +313,6 @@ class CLIWrapperBase:
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 
-    def cluster__deploy(self, sub_command, args):
-        return self.cluster_deploy(args)
-
     def cluster__create(self, sub_command, args):
         return self.cluster_create(args)
 
@@ -700,99 +697,6 @@ class CLIWrapperBase:
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
-
-    def cluster_deploy(self, args):
-        grafana_endpoint = ""
-        secondary_nodes = False
-        namespace = None
-        lvol_name = "lvol01"
-        lvol_size = utils.parse_size("10G")
-        pool_max = utils.parse_size("25G")
-        max_size = utils.parse_size("1000G")
-        pool_name = "pool01"
-        with_snapshot = False
-        host_id = None
-        crypto = False
-        crypto_key1 = None
-        crypto_key2 = None
-        max_rw_iops = None
-        max_rw_mbytes = None
-        max_r_mbytes = None
-        max_w_mbytes = None
-        lvol_priority_class = 0
-        id_device_by_nqn = False
-        fstype = "xfs"
-
-        storage_nodes = args.storage_nodes
-        test = args.test
-        ha_type = args.ha_type
-        ha_jm_count = args.ha_jm_count
-        distr_ndcs = args.distr_ndcs
-        distr_npcs = args.distr_npcs
-        enable_qos = args.enable_qos
-        ifname = args.ifname
-        page_size_in_blocks = args.page_size
-        blk_size = args.blk_size
-        CLI_PASS = args.CLI_PASS
-        cap_warn = args.cap_warn
-        cap_crit = args.cap_crit
-        prov_cap_warn = args.prov_cap_warn
-        prov_cap_crit = args.prov_cap_crit
-        distr_bs = args.distr_bs
-        distr_chunk_bs = args.distr_chunk_bs
-        log_del_interval = args.log_del_interval
-        metrics_retention_period = args.metrics_retention_period
-        contact_point = args.contact_point
-        enable_node_affinity = args.enable_node_affinity
-        qpair_count = args.qpair_count
-        max_queue_size = args.max_queue_size
-        inflight_io_threshold = args.inflight_io_threshold
-        strict_node_anti_affinity = args.strict_node_anti_affinity
-
-        data_nics = args.data_nics
-        spdk_image = args.spdk_image
-        spdk_debug = args.spdk_debug
-
-        small_bufsize = args.small_bufsize
-        large_bufsize = args.large_bufsize
-        num_partitions_per_dev = args.partitions
-        partition_size = args.partition_size
-        jm_percent = args.jm_percent
-        spdk_cpu_mask = args.spdk_cpu_mask
-        max_lvol = args.max_lvol
-        max_snap = args.max_snap
-        max_prov = utils.parse_size(args.max_prov, assume_unit='G')
-        number_of_devices = args.number_of_devices
-        enable_test_device = args.enable_test_device
-        enable_ha_jm = args.enable_ha_jm
-        number_of_distribs = args.number_of_distribs
-        namespace = args.namespace
-        secondary_nodes = args.secondary_nodes
-
-        lvol_name = args.lvol_name
-        lvol_size = args.lvol_size
-        max_size = args.max_size
-        lvol_ha_type = args.lvol_ha_type
-        pool_name = args.pool_name
-        pool_max = args.pool_max
-        host_id = args.host_id
-        comp = None
-        distr_vuid = args.distr_vuid
-
-        cluster_ops.deploy_cluster(
-            storage_nodes, test, ha_type, distr_ndcs, distr_npcs, enable_qos, ifname,
-            blk_size, page_size_in_blocks, CLI_PASS, cap_warn, cap_crit, prov_cap_warn,
-            prov_cap_crit, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
-            distr_bs, distr_chunk_bs, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, data_nics,
-            spdk_image, spdk_debug, small_bufsize, large_bufsize, num_partitions_per_dev, jm_percent, spdk_cpu_mask,
-            max_lvol,
-            max_snap, max_prov, number_of_devices, enable_test_device, enable_ha_jm, ha_jm_count, number_of_distribs,
-            namespace, secondary_nodes, partition_size,
-            lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
-            max_rw_mbytes, max_r_mbytes, max_w_mbytes,
-            with_snapshot, max_size, crypto_key1, crypto_key2, lvol_priority_class, id_device_by_nqn, fstype)
-        return True
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size

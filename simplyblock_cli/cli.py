@@ -301,7 +301,6 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster(self):
         subparser = self.add_command('cluster', 'Cluster commands')
-        self.init_cluster__deploy(subparser)
         self.init_cluster__create(subparser)
         self.init_cluster__add(subparser)
         self.init_cluster__activate(subparser)
@@ -329,85 +328,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
 
-
-    def init_cluster__deploy(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'deploy', 'Deploys a storage nodes')
-        argument = subcommand.add_argument('--storage-nodes', help='comma separated ip addresses', type=str, dest='storage_nodes')
-        argument = subcommand.add_argument('--test', help='Test Cluster', dest='test', action='store_true')
-        argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
-        if self.developer_mode:
-            argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count')
-        argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=1, dest='distr_ndcs')
-        argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=1, dest='distr_npcs')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes', type=bool, default=False, dest='enable_qos')
-        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--blk_size', help='The block size in bytes', type=int, default=512, dest='blk_size', choices=['512','4096',])
-        if self.developer_mode:
-            argument = subcommand.add_argument('--page_size', help='The size of a data page in bytes', type=int, default=2097152, dest='page_size')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--CLI_PASS', help='Password for CLI SSH connection', type=str, dest='CLI_PASS')
-        argument = subcommand.add_argument('--cap-warn', help='Capacity warning level in percent, default: 89', type=int, default=89, dest='cap_warn')
-        argument = subcommand.add_argument('--cap-crit', help='Capacity critical level in percent, default: 99', type=int, default=99, dest='cap_crit')
-        argument = subcommand.add_argument('--prov-cap-warn', help='Capacity warning level in percent, default: 250', type=int, default=250, dest='prov_cap_warn')
-        argument = subcommand.add_argument('--prov-cap-crit', help='Capacity critical level in percent, default: 500', type=int, default=500, dest='prov_cap_crit')
-        argument = subcommand.add_argument('--log-del-interval', help='Logging retention period, default: 3d', type=str, default='3d', dest='log_del_interval')
-        argument = subcommand.add_argument('--metrics-retention-period', help='Retention period for I/O statistics (Prometheus), default: 7d', type=str, default='7d', dest='metrics_retention_period')
-        argument = subcommand.add_argument('--contact-point', help='Email or slack webhook url to be used for alerting', type=str, default='', dest='contact_point')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--distr-bs', help='(Dev) distrb bdev block size, default: 4096', type=int, default=4096, dest='distr_bs')
-        argument = subcommand.add_argument('--chunk-size-in-bytes', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs')
-        argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
-        argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(1, 128), default=3, dest='qpair_count')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4, dest='inflight_io_threshold')
-        argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
-        argument = subcommand.add_argument('--journal-partition', help='1: auto-partition nvme devices for journal. 0: use a separate nvme device for journal. The smallest NVMe device available on the host will be chosen as a journal. It should provide about 3%% of the entire node’s NVMe capacity. If set to false, partitions on other devices will be auto-created to store the journal.', type=str, default='True', dest='partitions')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=int, default=3, dest='jm_percent')
-        argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', nargs='+')
-        argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap')
-        argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be provisioned via all storage nodes', type=str, default='', dest='max_prov')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--spdk-debug', help='Enable spdk debug logs', dest='spdk_debug', action='store_true')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--iobuf_small_bufsize', help='bdev_set_options param', type=int, default=0, dest='small_bufsize')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', action='store_true')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', action='store_true')
-        argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace')
-        argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', default=False, dest='id_device_by_nqn', action='store_true')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--lvol-name', help='Logical volume name or id', type=str, default='lvol01', dest='lvol_name')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--lvol-size', help='Logical volume size: 10M, 10G, 10(bytes)', type=size_type(), default='10G', dest='lvol_size')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--pool-name', help='Pool id or name', type=str, default='pool01', dest='pool_name')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G, 0(default)', type=size_type(), default='25G', dest='pool_max')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--snapshot', '-s', help='Make logical volume with snapshot capability, default: false', dest='snapshot', action='store_true')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--max-volume-size', help='Logical volume max size', type=size_type(), default='1000G', dest='max_size')
-        argument = subcommand.add_argument('--host-id', help='Primary storage node id or hostname', type=str, dest='host_id')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume', dest='encrypt', action='store_true')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--lvol-ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='ha', dest='lvol_ha_type', choices=['single','default','ha',])
 
     def init_cluster__create(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create', 'Creates a new cluster')
@@ -1015,36 +935,7 @@ class CLIWrapper(CLIWrapperBase):
 
             elif args.command in ['cluster']:
                 sub_command = args_dict['cluster']
-                if sub_command in ['deploy']:
-                    if not self.developer_mode:
-                        args.ha_jm_count = 3
-                        args.enable_qos = False
-                        args.blk_size = 512
-                        args.page_size = 2097152
-                        args.CLI_PASS = None
-                        args.distr_bs = 4096
-                        args.max_queue_size = 128
-                        args.inflight_io_threshold = 4
-                        args.jm_percent = 3
-                        args.max_snap = 5000
-                        args.partition_size = None
-                        args.spdk_image = None
-                        args.spdk_debug = None
-                        args.small_bufsize = 0
-                        args.large_bufsize = 0
-                        args.enable_test_device = None
-                        args.enable_ha_jm = False
-                        args.lvol_name = 'lvol01'
-                        args.lvol_size = '10G'
-                        args.pool_name = 'pool01'
-                        args.pool_max = '25G'
-                        args.snapshot = False
-                        args.max_size = '1000G'
-                        args.encrypt = None
-                        args.distr_vuid = None
-                        args.lvol_ha_type = 'ha'
-                    ret = self.cluster__deploy(sub_command, args)
-                elif sub_command in ['create']:
+                if sub_command in ['create']:
                     if not self.developer_mode:
                         args.page_size = 2097152
                         args.CLI_PASS = None
