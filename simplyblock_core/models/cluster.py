@@ -47,6 +47,7 @@ class Cluster(BaseModel):
     enable_qos: bool = False
     grafana_endpoint: str = ""
     grafana_secret: str = ""
+    contact_point: str = ""
     ha_type: str = "single"
     inflight_io_threshold: int = 4
     iscsi: str = ""
