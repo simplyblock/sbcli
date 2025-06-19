@@ -151,7 +151,8 @@ class RPCClient:
             "buf_cache_size": 512,
             "dif_insert_or_strip": False,
             "c2h_success": True,
-            "sock_priority": 0
+            "sock_priority": 0,
+            "ack_timeout": 4096,
         }
         return self._request("nvmf_create_transport", params)
 
@@ -571,7 +572,10 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
-            "num_io_queues": 128
+            "num_io_queues": 128,
+            "fast_io_fail_timeout_sec": 2,
+            "ctrlr_loss_timeout_sec": 10,
+            "reconnect_delay_sec": 5,
         }
         if multipath:
             params["multipath"] = "failover"
@@ -639,7 +643,8 @@ class RPCClient:
             "fast_io_fail_timeout_sec" : 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
-            "timeout_us": constants.NVME_TIMEOUT_US
+            "timeout_us": constants.NVME_TIMEOUT_US,
+            "transport_ack_timeout": 13,
         }
         return self._request("bdev_nvme_set_options", params)
 
