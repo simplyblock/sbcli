@@ -52,7 +52,7 @@ def test_suspend_resume(call, cluster):
     assert call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}')['status'] == 'online'
 
 
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(60)
 def test_restart(call, cluster):
     node = call('GET', f'/clusters/{cluster}/storage_nodes')[0]
     assert node['status'] == 'online'

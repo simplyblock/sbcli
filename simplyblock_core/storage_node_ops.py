@@ -2088,7 +2088,7 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Stopping SPDK")
     try:
-        SNodeClient(snode.api_endpoint, timeout=30, retry=1).spdk_process_kill(snode.rpc_port)
+        SNodeClient(snode.api_endpoint, timeout=60, retry=0).spdk_process_kill(snode.rpc_port)
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
