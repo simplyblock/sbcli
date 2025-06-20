@@ -40,7 +40,7 @@ class ManagementNodePath(ClusterPath):
 
 @instance_api.get('/')
 def get(path: ManagementNodePath):
-    return db.get_mgmt_node_by_id(path.management_node().get_id()).get_clean_dict()
+    return path.management_node().get_clean_dict()
 
 
 api.register_api(instance_api)
