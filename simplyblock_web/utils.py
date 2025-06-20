@@ -7,6 +7,7 @@ import traceback
 
 from flask import jsonify
 from pydantic import BaseModel, Field, model_validator
+from werkzeug.exceptions import HTTPException
 
 from simplyblock_core import constants
 
@@ -107,7 +108,10 @@ def get_aws_region():
 
 
 def error_handler(exception: Exception):
-    """Return JSON instead of HTML for any exception."""
+    """Return JSON instead of HTML for any non-HTTP exception."""
+
+    if isinstance(exception, HTTPException):
+        return exception
 
     traceback.print_exception(type(exception), exception, exception.__traceback__)
 
@@ -118,7 +122,7 @@ def error_handler(exception: Exception):
             for frame
             in traceback.extract_tb(exception.__traceback__)
         ]
-    }, getattr(exception, 'code', 500)
+    }, 500
 
 
 class RPCPortParams(BaseModel):
