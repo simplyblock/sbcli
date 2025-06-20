@@ -178,47 +178,47 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     # validate cluster duplicate
     logger.info("Adding new cluster object")
-    c = Cluster()
-    c.uuid = str(uuid.uuid4())
-    c.blk_size = blk_size
-    c.page_size_in_blocks = page_size_in_blocks
-    c.nqn = f"{constants.CLUSTER_NQN}:{c.uuid}"
-    c.cli_pass = cli_pass
-    c.secret = utils.generate_string(20)
-    c.grafana_secret = c.secret
-    c.db_connection = db_connection
+    cluster = Cluster()
+    cluster.uuid = str(uuid.uuid4())
+    cluster.blk_size = blk_size
+    cluster.page_size_in_blocks = page_size_in_blocks
+    cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
+    cluster.cli_pass = cli_pass
+    cluster.secret = utils.generate_string(20)
+    cluster.grafana_secret = cluster.secret
+    cluster.db_connection = db_connection
     if cap_warn and cap_warn > 0:
-        c.cap_warn = cap_warn
+        cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
-        c.cap_crit = cap_crit
+        cluster.cap_crit = cap_crit
     if prov_cap_warn and prov_cap_warn > 0:
-        c.prov_cap_warn = prov_cap_warn
+        cluster.prov_cap_warn = prov_cap_warn
     if prov_cap_crit and prov_cap_crit > 0:
-        c.prov_cap_crit = prov_cap_crit
-    c.distr_ndcs = distr_ndcs
-    c.distr_npcs = distr_npcs
-    c.distr_bs = distr_bs
-    c.distr_chunk_bs = distr_chunk_bs
-    c.ha_type = ha_type
+        cluster.prov_cap_crit = prov_cap_crit
+    cluster.distr_ndcs = distr_ndcs
+    cluster.distr_npcs = distr_npcs
+    cluster.distr_bs = distr_bs
+    cluster.distr_chunk_bs = distr_chunk_bs
+    cluster.ha_type = ha_type
     if grafana_endpoint:
-        c.grafana_endpoint = grafana_endpoint
+        cluster.grafana_endpoint = grafana_endpoint
     else:
-        c.grafana_endpoint = f"http://{dev_ip}/grafana"
-    c.enable_node_affinity = enable_node_affinity
-    c.qpair_count = qpair_count or constants.QPAIR_COUNT
+        cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
+    cluster.enable_node_affinity = enable_node_affinity
+    cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
 
-    c.max_queue_size = max_queue_size
-    c.inflight_io_threshold = inflight_io_threshold
-    c.enable_qos = enable_qos
-    c.strict_node_anti_affinity = strict_node_anti_affinity
-    c.contact_point = contact_point
+    cluster.max_queue_size = max_queue_size
+    cluster.inflight_io_threshold = inflight_io_threshold
+    cluster.enable_qos = enable_qos
+    cluster.strict_node_anti_affinity = strict_node_anti_affinity
+    cluster.contact_point = contact_point
 
-    utils.render_and_deploy_alerting_configs(contact_point, c.grafana_endpoint, c.uuid, c.secret)
+    utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-    scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, c.secret, c.uuid,
-                               log_del_interval, metrics_retention_period, log_level, c.grafana_endpoint)
+    scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
+                               log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint)
     logger.info("Deploying swarm stack > Done")
 
     logger.info("Configuring DB...")
@@ -227,22 +227,22 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     _set_max_result_window(dev_ip)
 
-    _add_graylog_input(dev_ip, c.secret)
+    _add_graylog_input(dev_ip, cluster.secret)
 
-    _create_update_user(c.uuid, c.grafana_endpoint, c.grafana_secret, c.secret)
+    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
-    c.status = Cluster.STATUS_UNREADY
-    c.create_dt = str(datetime.datetime.now())
+    cluster.status = Cluster.STATUS_UNREADY
+    cluster.create_dt = str(datetime.datetime.now())
     db_controller = DBController()
-    c.write_to_db(db_controller.kv_store)
+    cluster.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(c)
 
-    mgmt_node_ops.add_mgmt_node(dev_ip, c.uuid)
+    mgmt_node_ops.add_mgmt_node(dev_ip, cluster.uuid)
 
     logger.info("New Cluster has been created")
-    logger.info(c.uuid)
-    return c.uuid
+    logger.info(cluster.uuid)
+    return cluster.uuid
 
 def parse_nvme_list_output(output, target_model):
     lines = output.splitlines()

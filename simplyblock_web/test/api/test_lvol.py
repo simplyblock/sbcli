@@ -3,7 +3,8 @@ import re
 import pytest
 from requests.exceptions import HTTPError
 
-import util
+from simplyblock_web.test import util
+
 
 
 @pytest.mark.timeout(120)

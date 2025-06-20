@@ -2,7 +2,7 @@ import functools
 
 import pytest
 
-import util
+from simplyblock_web.test import util
 
 
 _OPTIONS = ['entrypoint', 'cluster', 'secret']

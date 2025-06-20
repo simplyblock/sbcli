@@ -1,4 +1,5 @@
-import util
+from simplyblock_web.test import util
+
 
 import pytest
 

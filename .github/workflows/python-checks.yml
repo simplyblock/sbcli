@@ -68,10 +68,10 @@ jobs:
         cache: 'pip'
 
     - name: Install linter
-      run: pip install ruff mypy
+      run: pip install ruff mypy kubernetes-typed types-docker  types-boto3
 
     - name: Execute linter
       run: ruff check
 
     - name: Execute mypy linter
-      run: mypy simplyblock_web simplyblock_cli --ignore-missing-imports
+      run: mypy simplyblock_web simplyblock_cli --install-types --non-interactive
