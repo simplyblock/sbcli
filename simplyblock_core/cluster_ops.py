@@ -298,6 +298,60 @@ def _run_fio(mount_point) -> None:
             logger.info("fio configuration file removed.")
 
 
+def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity) -> str:
+    db_controller = DBController()
+    clusters = db_controller.get_clusters()
+    if not clusters:
+        raise ValueError("No previous clusters found!")
+
+    if distr_ndcs == 0 and distr_npcs == 0:
+        raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+
+    logger.info("Adding new cluster")
+    cluster = Cluster()
+    cluster.uuid = str(uuid.uuid4())
+    cluster.blk_size = blk_size
+    cluster.page_size_in_blocks = page_size_in_blocks
+    cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
+    cluster.secret = utils.generate_string(20)
+    cluster.strict_node_anti_affinity = strict_node_anti_affinity
+
+    default_cluster = clusters[0]
+    cluster.db_connection = default_cluster.db_connection
+    cluster.grafana_secret = default_cluster.grafana_secret
+    cluster.grafana_endpoint = default_cluster.grafana_endpoint
+
+    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+
+    cluster.distr_ndcs = distr_ndcs
+    cluster.distr_npcs = distr_npcs
+    cluster.distr_bs = distr_bs
+    cluster.distr_chunk_bs = distr_chunk_bs
+    cluster.ha_type = ha_type
+    cluster.enable_node_affinity = enable_node_affinity
+    cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
+    cluster.max_queue_size = max_queue_size
+    cluster.inflight_io_threshold = inflight_io_threshold
+    cluster.enable_qos = enable_qos
+    if cap_warn and cap_warn > 0:
+        cluster.cap_warn = cap_warn
+    if cap_crit and cap_crit > 0:
+        cluster.cap_crit = cap_crit
+    if prov_cap_warn and prov_cap_warn > 0:
+        cluster.prov_cap_warn = prov_cap_warn
+    if prov_cap_crit and prov_cap_crit > 0:
+        cluster.prov_cap_crit = prov_cap_crit
+
+    cluster.status = Cluster.STATUS_UNREADY
+    cluster.create_dt = str(datetime.datetime.now())
+    cluster.write_to_db(db_controller.kv_store)
+    cluster_events.cluster_create(cluster)
+
+    return cluster.get_id()
+
+
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
