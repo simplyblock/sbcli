@@ -102,15 +102,13 @@ class CNodeClient:
         return self._request("POST", "cnode/nvme_connect", params)
 
     def disconnect_device(self, dev_path):
-        params = {"dev_path": dev_path}
-        return self._request("POST", "cnode/disconnect_device", params)
+        return self._request("POST", "cnode/disconnect", {"device_path": dev_path})
 
     def disconnect_nqn(self, nqn):
-        params = {"nqn": nqn}
-        return self._request("POST", "cnode/disconnect_nqn", params)
+        return self._request("POST", "cnode/disconnect", {"nqn": nqn})
 
     def disconnect_all(self):
-        return self._request("POST", "cnode/disconnect_all")
+        return self._request("POST", "cnode/disconnect", {"all": True})
 
     def make_gpt_partitions(self, nbd_device, jm_percent):
         params = {
