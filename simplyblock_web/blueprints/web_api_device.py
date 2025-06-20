@@ -34,8 +34,9 @@ def list_devices_by_node(uuid):
 def list_storage_devices(uuid):
     devices = []
     if uuid:
-        dev = db.get_storage_device_by_id(uuid)
-        if not dev:
+        try:
+            dev = db.get_storage_device_by_id(uuid)
+        except KeyError:
             return utils.get_response_error(f"device not found: {uuid}", 404)
         devices = [dev]
     else:
@@ -51,8 +52,9 @@ def list_storage_devices(uuid):
 @bp.route('/device/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/device/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def device_capacity(uuid, history):
-    device = db.get_storage_device_by_id(uuid)
-    if not device:
+    try:
+        db.get_storage_device_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
     records = device_controller.get_device_capacity(uuid, history, parse_sizes=False)
@@ -62,8 +64,9 @@ def device_capacity(uuid, history):
 @bp.route('/device/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/device/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def device_iostats(uuid, history):
-    device = db.get_storage_device_by_id(uuid)
-    if not device:
+    try:
+        device = db.get_storage_device_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"devices not found: {uuid}", 404)
 
     data = device_controller.get_device_iostats(uuid, history, parse_sizes=False)
@@ -76,9 +79,10 @@ def device_iostats(uuid, history):
 
 @bp.route('/device/reset/<string:uuid>', methods=['GET'])
 def device_reset(uuid):
-    devices = db.get_storage_device_by_id(uuid)
-    if not devices:
-        return utils.get_response_error(f"devices not found: {uuid}", 404)
+    try:
+        db.get_storage_device_by_id(uuid)
+    except KeyError:
+        return utils.get_response_error(f"device not found: {uuid}", 404)
 
     data = device_controller.reset_storage_device(uuid)
     return utils.get_response(data)
@@ -86,9 +90,10 @@ def device_reset(uuid):
 
 @bp.route('/device/remove/<string:uuid>', methods=['GET'])
 def device_remove(uuid):
-    devices = db.get_storage_device_by_id(uuid)
-    if not devices:
-        return utils.get_response_error(f"devices not found: {uuid}", 404)
+    try:
+        db.get_storage_device_by_id(uuid)
+    except KeyError:
+        return utils.get_response_error(f"device not found: {uuid}", 404)
 
     data = device_controller.device_remove(uuid)
     return utils.get_response(data)
@@ -96,9 +101,10 @@ def device_remove(uuid):
 
 @bp.route('/device/<string:uuid>', methods=['POST'])
 def device_add(uuid):
-    devices = db.get_storage_device_by_id(uuid)
-    if not devices:
-        return utils.get_response_error(f"devices not found: {uuid}", 404)
+    try:
+        db.get_storage_device_by_id(uuid)
+    except KeyError:
+        return utils.get_response_error(f"device not found: {uuid}", 404)
 
     data = device_controller.add_device(uuid)
     return utils.get_response(data)
