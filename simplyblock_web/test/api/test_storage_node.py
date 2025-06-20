@@ -35,8 +35,8 @@ def test_iostats(call, cluster):
 
 def test_port(call, cluster):
     node_uuid = call('GET', f'/clusters/{cluster}/storage_nodes')[0]['uuid']
-    port_id = call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}/port')[0]['ID']
-    call('GET', f'/clusters/{cluster}/storage_nodes/{port_id}/port-io-stats')
+    port_id = call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}/nics')[0]['ID']
+    call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}/nics/{port_id}/iostats')
 
 
 @pytest.mark.timeout(20)
@@ -82,7 +82,7 @@ def test_shutdown(call, cluster):
     assert node['status'] == 'online'
     node_uuid = node['uuid']
 
-    call('POST', f'/clusters/{cluster}/storage_nodes/suspend/{node_uuid}')
+    call('POST', f'/clusters/{cluster}/storage_nodes/{node_uuid}/suspend')
     assert call('GET', f'/clusters/{cluster}/storage_nodes/{node_uuid}')['status'] == 'suspended'
 
     call('POST', f'/clusters/{cluster}/storage_nodes/{node_uuid}/shutdown')

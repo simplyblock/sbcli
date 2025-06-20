@@ -135,7 +135,7 @@ def iostats(path: StorageNodePath, query: util.HistoryQuery):
     return records_or_false
 
 
-@instance_api.get('/nic')
+@instance_api.get('/nics')
 def nics(path: StorageNodePath):
     storage_node = path.storage_node()
     return [
@@ -154,7 +154,7 @@ class _NICPath(StorageNodePath):
     nic_id: str
 
 
-@instance_api.get('/nic/<nic_id>/iostats')
+@instance_api.get('/nics/<nic_id>/iostats')
 def nic_iostats(path: _NICPath):
     storage_node = path.storage_node()
     nic = next((
