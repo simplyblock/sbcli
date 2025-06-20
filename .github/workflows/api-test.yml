@@ -31,7 +31,6 @@ jobs:
 
     - name: Run tests
       run: |
-        export PYTHONPATH=$(pwd)
         pytest -v simplyblock_web \
           --entrypoint=${{ inputs.cluster_ip }} \
           --cluster=${{ inputs.cluster_id }} \

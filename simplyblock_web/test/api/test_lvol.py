@@ -3,7 +3,7 @@ import re
 import pytest
 from requests.exceptions import HTTPError
 
-from simplyblock_web.test import util
+import util
 
 
 
