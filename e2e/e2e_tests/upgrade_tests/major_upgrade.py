@@ -157,8 +157,9 @@ class TestMajorUpgrade(TestClusterBase):
                 sleep_n_sec(3)
             else:
                 raise RuntimeError(f"Docker failed to become active on {node} after {max_attempts} attempts!")
-
-        cmd = f"{self.base_cmd} cluster graceful-shutdown {self.cluster_id}"
+        
+        sleep_n_sec(30)
+        cmd = f"{self.base_cmd} --dev -d cluster graceful-shutdown {self.cluster_id}"
         self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
         node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
