@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import tasks_events, tcp_ports_events
+from simplyblock_core.controllers import tasks_events, tcp_ports_events, health_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -57,8 +57,14 @@ while True:
                             task.write_to_db(db.kv_store)
                             continue
 
-                        if node.health_check is False:
-                            msg = f"Node health check fail: {node.get_id()}, retry later"
+                        lvstore_check = True
+                        if node.lvstore_status == "ready":
+                            lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
+                            if node.secondary_node_id:
+                                lvstore_check &= health_controller._check_node_hublvol(node)
+
+                        if lvstore_check is False:
+                            msg = f"Node LVolStore check fail, retry later"
                             logger.warning(msg)
                             task.function_result = msg
                             task.status = JobSchedule.STATUS_SUSPENDED
