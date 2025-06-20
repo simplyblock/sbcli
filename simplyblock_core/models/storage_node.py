@@ -236,12 +236,15 @@ class StorageNode(BaseNodeObject):
         remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
 
         if not rpc_client.get_bdevs(remote_bdev):
-
+            ip_lst = []
             for ip in (iface.ip4_address for iface in primary_node.data_nics):
+                ip_lst.append(ip)
+            multipath = bool(len(ip_lst) > 1)
+            for ip in ip_lst:
                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
                         primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                        ip, primary_node.hublvol.nvmf_port, multipath=True)
-                if not ret:
+                        ip, primary_node.hublvol.nvmf_port, multipath=multipath)
+                if not ret and not multipath:
                     logger.warning(f'Failed to connect to hublvol on {ip}')
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
