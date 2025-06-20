@@ -86,10 +86,8 @@ def get(path: ClusterPath):
 
 @instance_api.delete('/')
 def delete(path: ClusterPath):
-    none_or_false = cluster_ops.delete_cluster(path.cluster().get_id())
-    success = none_or_false != False  # noqa
-    if not success:
-        raise ValueError('Failed to delete cluster')
+    cluster_ops.delete_cluster(path.cluster().get_id())
+    return '', 204
 
 
 @instance_api.get('/capacity')
