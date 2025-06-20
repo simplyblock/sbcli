@@ -799,6 +799,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
                     self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
                     self.ssh_obj.delete_files(clone_details["Client"], [f"/mnt/{clone_name}/*"])
+                    self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}*.log"])
             for del_key in to_delete:
                 del self.clone_mount_details[del_key]
             for snapshot in snapshots:
@@ -830,6 +831,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])
+            self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}*.log"])
             if lvol in self.lvols_without_sec_connect:
                 self.lvols_without_sec_connect.remove(lvol)
             del self.lvol_mount_details[lvol]
