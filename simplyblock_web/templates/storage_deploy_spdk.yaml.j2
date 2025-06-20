@@ -86,6 +86,26 @@ spec:
             exit 1
           fi
 
+    - name: restart-kubelet
+      image: ubuntu:22.04
+      securityContext:
+        privileged: true
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          set -e
+          set -x
+
+          # Enter the host's mount namespace to ensure access to host binaries and files
+          nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/bash -c '
+            if command -v systemctl >/dev/null 2>&1; then
+              echo "Restarting kubelet..."
+              systemctl restart kubelet && echo "Kubelet restarted successfully" || echo "Failed to restart kubelet"
+            else
+              echo "Systemctl not found on host. Skipping kubelet restart."
+            fi
+          '    
+
   containers:
     - name: spdk-container
       image: {{ SPDK_IMAGE }}
