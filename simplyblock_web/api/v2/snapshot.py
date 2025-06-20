@@ -53,7 +53,7 @@ def delete(path: SnapshotPath):
 
 class _CloneParams(BaseModel):
     name: str
-    new_size: Optional[int]
+    size: Optional[int] = None
 
 
 @instance_api.post('/clone')
@@ -61,7 +61,7 @@ def clone(path: SnapshotPath, body: _CloneParams):
     clone_id, error = snapshot_controller.clone(
         path.snapshot().get_id(),
         body.name,
-        body.new_size if body.new_size is not None else 0
+        body.size if body.size is not None else 0
     )
     if error:
         raise ValueError('Failed to clone snapshot')

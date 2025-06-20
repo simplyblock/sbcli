@@ -198,12 +198,17 @@ class _SnapshotParams(BaseModel):
 
 @instance_api.post('/snapshots')
 def create_snapshot(path: VolumePath, body: _SnapshotParams):
+    pool = path.pool()
     snapshot_id, err_or_false = snapshot_controller.add(
         path.volume().get_id(), body.name
     )
     if err_or_false:
         raise ValueError(err_or_false)
-    return '', 201, {'Location': url_for('api.v2.cluster.pool.snapshot.get', cluster_id=path.cluster_id, snapshot_id=snapshot_id)}
+    entity_url = url_for(
+            'api.v2.cluster.instance.pool.instance.snapshot.instance.get',
+            cluster_id=path.cluster_id, pool_id=pool.get_id(), snapshot_id=snapshot_id,
+    )
+    return '', 201, {'Location': entity_url}
 
 
 api.register_api(instance_api)
