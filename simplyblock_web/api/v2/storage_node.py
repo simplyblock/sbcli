@@ -201,22 +201,21 @@ def shutdown(path: StorageNodePath, query: _ForceDefaultTrueQuery):
     return '', 202  # FIXME: Provide URL for checking task status
 
 
-class _RestartQuery(BaseModel):
+class _RestartParams(BaseModel):
     force: bool = Field(False)
     reattach_volume: bool = Field(False)
 
 
 @instance_api.post('/start')  # Same as restart for now
 @instance_api.post('/restart')
-def restart(path: StorageNodePath, query: _RestartQuery):
+def restart(path: StorageNodePath, body: _RestartParams):
     storage_node = path.storage_node()
     Thread(
         target=storage_node_ops.restart_storage_node,
         kwargs={
             "node_id": storage_node.get_id(),
-            "node_ip": storage_node.primary_ip,
-            "force": query.force,
-            "reattach_volume": query.reattach_volume,
+            "force": body.force,
+            "reattach_volume": body.reattach_volume,
         }
     ).start()
 
