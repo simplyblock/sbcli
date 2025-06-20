@@ -12,6 +12,7 @@ import typing as t
 import docker
 import requests
 
+from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
 from simplyblock_core.controllers import cluster_events, device_controller
 from simplyblock_core.db_controller import DBController
@@ -20,7 +21,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.stats import StatsObject
+from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, NodeStatObject, DeviceStatObject
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import pull_docker_image_with_retry
@@ -152,7 +153,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         c.swarm.leave(force=True)
         try:
             c.volumes.get("monitoring_grafana_data").remove(force=True)
-        except docker.DockerException:
+        except DockerException:
             pass
         time.sleep(3)
 
@@ -522,17 +523,16 @@ def cluster_set_read_only(cl_id) -> None:
     if cluster.status == Cluster.STATUS_READONLY:
         return
 
-    ret = set_cluster_status(cl_id, Cluster.STATUS_READONLY)
-    if ret:
-        st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-        for node in st:
-            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                continue
-            for dev in node.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    # dev_stat = db_controller.get_device_stats(dev, 1)
-                    # if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
-                    device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
+    set_cluster_status(cl_id, Cluster.STATUS_READONLY)
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    for node in st:
+        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+            continue
+        for dev in node.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                # dev_stat = db_controller.get_device_stats(dev, 1)
+                # if dev_stat and dev_stat[0].size_util >= cluster.cap_crit:
+                device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
 
 
 def cluster_set_active(cl_id) -> None:
@@ -544,18 +544,17 @@ def cluster_set_active(cl_id) -> None:
     if cluster.status == Cluster.STATUS_ACTIVE:
         return
 
-    ret = set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
-    if ret:
-        st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-        for node in st:
-            if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                continue
+    set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    for node in st:
+        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+            continue
 
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
-                    dev_stat = db_controller.get_device_stats(dev, 1)
-                    if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
-                        device_controller.device_set_online(dev.get_id())
+        for dev in node.nvme_devices:
+            if dev.status in [NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
+                dev_stat = db_controller.get_device_stats(dev, 1)
+                if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
+                    device_controller.device_set_online(dev.get_id())
 
 
 def list() -> t.List[dict]:
@@ -616,7 +615,7 @@ def list_all_info(cluster_id) -> str:
     if records:
         rec = records[0]
     else:
-        rec = StatsObject()
+        rec = ClusterStatObject()
 
     task_total = 0
     task_running = 0
@@ -692,11 +691,11 @@ def list_all_info(cluster_id) -> str:
     dev_data = []
 
     for node in st:
-        records = db_controller.get_node_capacity(node, 1)
-        if records:
-            rec = records[0]
+        nodecapacityrecs = db_controller.get_node_capacity(node, 1)
+        if nodecapacityrecs:
+            nodecapacityrec = nodecapacityrecs[0]
         else:
-            rec = StatsObject()
+            nodecapacityrec = NodeStatObject()
 
         lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
         total_devices = len(node.nvme_devices)
@@ -708,18 +707,18 @@ def list_all_info(cluster_id) -> str:
         data.append({
             "Storage node UUID": node.uuid,
 
-            "Size": f"{utils.humanbytes(rec.size_total)}",
-            "Used": f"{utils.humanbytes(rec.size_used)}",
-            "Free": f"{utils.humanbytes(rec.size_free)}",
-            "Util": f"{rec.size_util}%",
+            "Size": f"{utils.humanbytes(nodecapacityrec.size_total)}",
+            "Used": f"{utils.humanbytes(nodecapacityrec.size_used)}",
+            "Free": f"{utils.humanbytes(nodecapacityrec.size_free)}",
+            "Util": f"{nodecapacityrec.size_util}%",
 
-            "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
-            "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
-            "Read IOP/s": f"{rec.read_io_ps}",
-            "Write IOP/s": f"{rec.write_io_ps}",
+            "Read BW/s": f"{utils.humanbytes(nodecapacityrec.read_bytes_ps)}",
+            "Write BW/s": f"{utils.humanbytes(nodecapacityrec.write_bytes_ps)}",
+            "Read IOP/s": f"{nodecapacityrec.read_io_ps}",
+            "Write IOP/s": f"{nodecapacityrec.write_io_ps}",
 
-            "Size prov": f"{utils.humanbytes(rec.size_prov)}",
-            "Util prov": f"{rec.size_prov_util}%",
+            "Size prov": f"{utils.humanbytes(nodecapacityrec.size_prov)}",
+            "Util prov": f"{nodecapacityrec.size_prov_util}%",
 
             "Devices": f"{total_devices}/{online_devices}",
             "LVols": f"{len(lvs)}",
@@ -728,26 +727,25 @@ def list_all_info(cluster_id) -> str:
         })
 
         for dev in node.nvme_devices:
-            records = db_controller.get_device_capacity(dev)
-            if records:
-                rec = records[0]
+            devicecapacityrecs = db_controller.get_device_capacity(dev)
+            if devicecapacityrecs:
+                devicecapacityrec = devicecapacityrecs[0]
             else:
-                rec = StatsObject()
+                devicecapacityrec = DeviceStatObject()
 
             dev_data.append({
                 "Device UUID": dev.uuid,
-                "Size": f"{utils.humanbytes(rec.size_total)}",
-                "Used": f"{utils.humanbytes(rec.size_used)}",
-                "Free": f"{utils.humanbytes(rec.size_free)}",
-                "Util": f"{rec.size_util}%",
-                "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
-                "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
-                "Read IOP/s": f"{rec.read_io_ps}",
-                "Write IOP/s": f"{rec.write_io_ps}",
+                "Size": f"{utils.humanbytes(devicecapacityrec.size_total)}",
+                "Used": f"{utils.humanbytes(devicecapacityrec.size_used)}",
+                "Free": f"{utils.humanbytes(devicecapacityrec.size_free)}",
+                "Util": f"{devicecapacityrec.size_util}%",
+                "Read BW/s": f"{utils.humanbytes(devicecapacityrec.read_bytes_ps)}",
+                "Write BW/s": f"{utils.humanbytes(devicecapacityrec.write_bytes_ps)}",
+                "Read IOP/s": f"{devicecapacityrec.read_io_ps}",
+                "Write IOP/s": f"{devicecapacityrec.write_io_ps}",
                 "StorgeID": dev.cluster_device_order,
                 "Health": dev.health_check,
                 "Status": dev.status,
-
             })
 
     out += "\n"
@@ -762,26 +760,24 @@ def list_all_info(cluster_id) -> str:
 
     lvol_data = []
     for lvol in db_controller.get_lvols(cluster_id):
-        records = db_controller.get_lvol_stats(lvol, 1)
-        if records:
-            rec = records[0]
+        lvolstatsrecs = db_controller.get_lvol_stats(lvol, 1)
+        if lvolstatsrecs:
+            lvolstatsrec = lvolstatsrecs[0]
         else:
-            rec = StatsObject()
+            lvolstatsrec = LVolStatObject()
 
         lvol_data.append({
             "LVol UUID": lvol.uuid,
-            "Size": f"{utils.humanbytes(rec.size_total)}",
-            "Used": f"{utils.humanbytes(rec.size_used)}",
-            "Free": f"{utils.humanbytes(rec.size_free)}",
-            "Util": f"{rec.size_util}%",
-            "Read BW/s": f"{utils.humanbytes(rec.read_bytes_ps)}",
-            "Write BW/s": f"{utils.humanbytes(rec.write_bytes_ps)}",
-            "Read IOP/s": f"{rec.read_io_ps}",
-            "Write IOP/s": f"{rec.write_io_ps}",
-            # "Connections": f"{rec.connected_clients}",
+            "Size": f"{utils.humanbytes(lvolstatsrec.size_total)}",
+            "Used": f"{utils.humanbytes(lvolstatsrec.size_used)}",
+            "Free": f"{utils.humanbytes(lvolstatsrec.size_free)}",
+            "Util": f"{lvolstatsrec.size_util}%",
+            "Read BW/s": f"{utils.humanbytes(lvolstatsrec.read_bytes_ps)}",
+            "Write BW/s": f"{utils.humanbytes(lvolstatsrec.write_bytes_ps)}",
+            "Read IOP/s": f"{lvolstatsrec.read_io_ps}",
+            "Write IOP/s": f"{lvolstatsrec.write_io_ps}",
             "Health": lvol.health_check,
             "Status": lvol.status,
-
         })
 
     out += "\n"
@@ -973,7 +969,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
     image_without_tag = image_without_tag.split("/")
     image_parts = "/".join(image_without_tag[-2:])
-    service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
     if mgmt_image:
         service_image = mgmt_image
         for service in cluster_docker.services.list():
