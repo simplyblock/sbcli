@@ -1,5 +1,6 @@
 # coding=utf-8
 
+from typing import Optional
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.lvol_model import LVol
 
@@ -11,7 +12,7 @@ class SnapShot(BaseModel):
     cluster_id: str = ""
     created_at: int = 0
     health_check: bool = True
-    lvol: LVol = None
+    lvol: Optional[LVol] = None
     mem_diff: dict = {}
     pool_uuid: str = ""
     ref_count: int = 0
