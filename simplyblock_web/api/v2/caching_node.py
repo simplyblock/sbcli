@@ -111,7 +111,7 @@ def disconnect(path: CachingNodePath, body: _LVolBody):
     return '', 204
 
 
-@instance_api.get('/lvol')
+@instance_api.get('/volumes')
 def list_lvols(path: CachingNodePath):
     caching_node = db.get_caching_node_by_id(path.caching_node_id)
     if caching_node is None:
