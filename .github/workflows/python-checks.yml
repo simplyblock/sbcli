@@ -74,4 +74,11 @@ jobs:
       run: ruff check
 
     - name: Execute mypy linter
-      run: mypy simplyblock_web simplyblock_cli --install-types --non-interactive
+      run: |
+        export MYPYPATH=./stubs
+        stubgen -m flask_swagger_ui -o stubs
+        stubgen -m flask_swagger_ui.flask_swagger_ui -o stubs
+        stubgen -m cpuinfo -o stubs
+        stubgen -m cpuinfo.cpuinfo -o stubs
+        stubgen -m fdb -o stubs
+        mypy simplyblock_web simplyblock_cli --install-types --non-interactive
