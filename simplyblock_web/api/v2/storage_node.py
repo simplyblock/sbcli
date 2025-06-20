@@ -214,7 +214,7 @@ def restart(path: StorageNodePath, query: _RestartQuery):
         target=storage_node_ops.restart_storage_node,
         kwargs={
             "node_id": storage_node.get_id(),
-            "node_ip": storage_node.mgmt_ip,
+            "node_ip": storage_node.primary_ip,
             "force": query.force,
             "reattach_volume": query.reattach_volume,
         }
