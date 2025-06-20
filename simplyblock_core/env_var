@@ -1,5 +1,5 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-mig
-SIMPLY_BLOCK_VERSION=1.0.529
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=19.0.2
 
 
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:add_kubelet_restart_initContainer

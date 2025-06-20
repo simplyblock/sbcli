@@ -1752,6 +1752,9 @@ def get_k8s_core_client():
     config.load_incluster_config()
     return client.CoreV1Api()
 
+def get_k8s_batch_client():
+    config.load_incluster_config()
+    return client.BatchV1Api()
 
 def remove_container(client: docker.DockerClient, name, timeout=3):
     try:
