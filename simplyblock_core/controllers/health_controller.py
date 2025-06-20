@@ -166,6 +166,10 @@ def _check_node_ping(ip):
         return False
 
 def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None):
+    if not node.hublvol:
+        logger.error(f"Node {node.get_id()} does not have a hublvol")
+        return False
+
     logger.info(f"Checking Hublvol: {node.hublvol.bdev_name} on node {node.get_id()}")
     db_controller = DBController()
 
@@ -235,6 +239,11 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
     except KeyError:
         logger.exception("Primary node not found")
         return False
+    
+    if not primary_node.hublvol:
+        logger.error(f"Primary node {primary_node.get_id()} does not have a hublvol")
+        return False
+    
     logger.info(f"Checking secondary Hublvol: {primary_node.hublvol.bdev_name} on node {node.get_id()}")
 
     passed = True
