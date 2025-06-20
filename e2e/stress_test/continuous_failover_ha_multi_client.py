@@ -775,7 +775,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                         log_file=clone_details["Log"])
                     self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=False)
                     fio_pids = self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=True)
-                    self.disconnect_lvol(clone_details['ID'])
                     sleep_n_sec(10)
                     for pid in fio_pids:
                         self.ssh_obj.kill_processes(clone_details["Client"], pid=pid)
@@ -791,6 +790,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     sleep_n_sec(10)
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
+                    self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
                     sleep_n_sec(30)
                     if clone_name in self.lvols_without_sec_connect:
@@ -799,7 +799,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
                     self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
                     self.ssh_obj.delete_files(clone_details["Client"], [f"/mnt/{clone_name}/*"])
-                    self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}*.log"])
+                    # self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}*.log"])
             for del_key in to_delete:
                 del self.clone_mount_details[del_key]
             for snapshot in snapshots:
@@ -810,7 +810,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.common_utils.validate_fio_test(self.lvol_mount_details[lvol]["Client"],
                                                 log_file=self.lvol_mount_details[lvol]["Log"])
             self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=False)
-            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             sleep_n_sec(10)
             fio_pids = self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=True)
             for pid in fio_pids:
@@ -827,11 +826,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
+            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol)
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])
-            self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}*.log"])
+            # self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}*.log"])
             if lvol in self.lvols_without_sec_connect:
                 self.lvols_without_sec_connect.remove(lvol)
             del self.lvol_mount_details[lvol]
