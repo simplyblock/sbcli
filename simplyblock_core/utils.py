@@ -14,7 +14,7 @@ from typing import Union
 from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
-from docker.errors import APIError, DockerException, ImageNotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
 import tempfile
 from jinja2 import Environment, FileSystemLoader
@@ -1758,10 +1758,10 @@ def remove_container(client: docker.DockerClient, name, timeout=3):
         container = client.containers.get(name)
         container.stop(timeout=timeout)
         container.remove()
-    except docker.errors.NotFound:
+    except NotFound:
         pass
-    except docker.errors.APIError as e:
-        if 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
+    except APIError as e:
+        if e.response and 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
             raise
 
 def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):

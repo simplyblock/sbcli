@@ -51,7 +51,7 @@ class StorageNode(BaseNodeObject):
     is_secondary_node: bool = False
     jc_singleton_mask: str = ""
     jm_cpu_mask: str = ""
-    jm_device: JMDevice = None
+    jm_device: JMDevice = None # type: ignore[assignment]
     jm_percent: int = 3
     jm_vuid: int = 0
     lvols: int = 0
@@ -99,7 +99,7 @@ class StorageNode(BaseNodeObject):
     lvstore_status: str = ""
     nvmf_port: int = 4420
     physical_label: int = 0
-    hublvol: HubLVol = None
+    hublvol: HubLVol = None  # type: ignore[assignment]
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node

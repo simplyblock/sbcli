@@ -122,9 +122,9 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         reference = yaml.safe_load(stream)
         # validate reference file against schema
         with open("%s/cli-reference-schema.yaml" % base_path) as schema:
-            schema = yaml.safe_load(schema)
-            validator_type = validators.validator_for(schema)
-            validator = validator_type(schema)
+            schema_content = yaml.safe_load(schema)
+            validator_type = validators.validator_for(schema_content)
+            validator = validator_type(schema_content)
             errors = list(validator.iter_errors(reference))
             if errors:
                 print("Generator failed on schema validation. Found the following errors:", file=sys.stderr)

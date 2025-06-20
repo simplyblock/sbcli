@@ -50,7 +50,7 @@ class LVol(BaseModel):
     nqn: str = ""
     ns_id: int = 1
     subsys_port: int = 9090
-    nvme_dev: NVMeDevice = None
+    nvme_dev: NVMeDevice = None  # type: ignore[assignment]
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""

@@ -13,7 +13,7 @@ class CachedLVol(BaseModel):
     device_path: str = ""
     hostname: str = ""
     local_nqn: str = ""
-    lvol: LVol = None
+    lvol: LVol = None # type: ignore[assignment]
     lvol_id: str = ""
     ocf_bdev: str = ""
 
@@ -52,5 +52,5 @@ class CachingNode(BaseNodeObject):
     system_uuid: str = ""
     namespace: str = ""
     spdk_cpu_mask: str = ""
-    spdk_mem: int = ""
+    spdk_mem: int = 0
     spdk_image: str = ""
