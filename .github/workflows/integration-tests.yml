@@ -8,7 +8,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
+  await-python-checks:
+    name: Await Python checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Python checks to be completed
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'Linter'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
+  await-image:
+    name: Await docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for image to be built succeed
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'build'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
   mock-integration:
+    needs: [await-python-checks]
     runs-on: ubuntu-latest
     services:
       docker:
@@ -34,18 +60,6 @@ jobs:
         run: |
           docker compose -f docker-compose-dev.yml logs
           docker compose -f docker-compose-dev.yml down --volumes --remove-orphans
-
-  await-image:
-    name: Await docker image
-    runs-on: ubuntu-latest
-    steps:
-      - name: Wait for image to be built succeed
-        uses: lewagon/wait-on-check-action@v1.3.4
-        with:
-          ref: ${{ github.head_ref || github.ref_name }}
-          check-name: 'build'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 10
 
   integration:
     needs: [await-image, mock-integration]
