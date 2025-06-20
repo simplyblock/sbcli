@@ -19,9 +19,10 @@ def device_set_state(device_id, state):
         logger.error("device not found")
         return False
 
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     device = None
@@ -329,9 +330,10 @@ def device_remove(device_id, force=True):
         logger.error("device not found")
         return False
 
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     for dev in snode.nvme_devices:
@@ -515,9 +517,10 @@ def reset_storage_device(dev_id):
         logger.error(f"Device not found: {dev_id}")
         return False
 
-    snode = db_controller.get_storage_node_by_id(device.node_id)
-    if not snode:
-        logger.error(f"Node not found {device.node_id}")
+    try:
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
@@ -567,9 +570,10 @@ def device_set_retries_exhausted(device_id, retries_exhausted):
         logger.error("device not found")
         return False
 
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     device = None
@@ -595,9 +599,10 @@ def device_set_failed(device_id):
     if not dev:
         logger.error("device not found")
 
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
@@ -629,9 +634,10 @@ def add_device(device_id):
         logger.error("Device must be in new state")
         return False
 
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     device_obj = None

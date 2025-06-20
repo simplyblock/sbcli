@@ -562,7 +562,7 @@ class RPCClient:
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)
 
-    def bdev_nvme_attach_controller_tcp(self, name, nqn, ip, port):
+    def bdev_nvme_attach_controller_tcp(self, name, nqn, ip, port, multipath=False):
         params = {
             "name": name,
             "trtype": "tcp",
@@ -571,11 +571,12 @@ class RPCClient:
             "trsvcid": str(port),
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
-            "num_io_queues": 128,
-            #"ctrlr_loss_timeout_sec": 3,
-            "multipath":"disable",
-            # "reconnect_delay_sec":1
+            "num_io_queues": 128
         }
+        if multipath:
+            params["multipath"] = "failover"
+        else:
+            params["multipath"] = "disable"
         return self._request("bdev_nvme_attach_controller", params)
 
     def bdev_nvme_attach_controller_tcp_caching(self, name, nqn, ip, port):
@@ -632,7 +633,7 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": 0,
+            "bdev_retry_count": 1,
             "transport_retry_count": 3,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec" : 0,
@@ -1071,3 +1072,10 @@ class RPCClient:
         if ana_state:
             params["ana_state"] = ana_state
         return self._request2("nvmf_subsystem_add_listener", params)
+
+    def bdev_nvme_set_multipath_policy(self, name, policy):  # policy: active_active or active_passive
+        params = {
+            "name": name,
+            "policy": policy,
+        }
+        return self._request("bdev_nvme_set_multipath_policy", params)

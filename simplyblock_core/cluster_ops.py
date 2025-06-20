@@ -3,8 +3,6 @@ import datetime
 import json
 import os
 import socket
-import re
-import tempfile
 import subprocess
 import time
 import uuid
@@ -13,11 +11,9 @@ import typing as t
 
 import docker
 import requests
-from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import cluster_events, device_controller, pool_controller, \
-    lvol_controller
+from simplyblock_core.controllers import cluster_events, device_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -30,7 +26,6 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
-TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 db_controller = DBController()
 
@@ -216,56 +211,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.inflight_io_threshold = inflight_io_threshold
     c.enable_qos = enable_qos
     c.strict_node_anti_affinity = strict_node_anti_affinity
+    c.contact_point = contact_point
 
-    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
-    alert_resources_file = "alert_resources.yaml"
-
-    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{alert_resources_file}.j2')
-
-    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
-    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-
-    if slack_pattern.match(contact_point):
-        ALERT_TYPE = "slack"
-    elif email_pattern.match(contact_point):
-        ALERT_TYPE = "email"
-    else:
-        ALERT_TYPE = "slack"
-        contact_point = 'https://hooks.slack.com/services/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'
-
-    values = {
-        'CONTACT_POINT': contact_point,
-        'GRAFANA_ENDPOINT': c.grafana_endpoint,
-        'ALERT_TYPE': ALERT_TYPE,
-    }
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_file_path = os.path.join(temp_dir, alert_resources_file)
-        with open(temp_file_path, 'w') as file:
-            file.write(template.render(values))
-
-        destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
-        subprocess.check_call(['sudo', '-v'])  # sudo -v checks if the current user has sudo permissions
-        subprocess.check_call(['sudo', 'mv', temp_file_path, destination_file_path])
-        print(f"File moved to {destination_file_path} successfully.")
-
-    scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
-    prometheus_file = "prometheus.yml"
-    env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(f'{prometheus_file}.j2')
-    values = {
-        'CLUSTER_ID': c.uuid,
-        'CLUSTER_SECRET': c.secret}
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-        file_path = os.path.join(temp_dir, prometheus_file)
-        with open(file_path, 'w') as file:
-            file.write(template.render(values))
-
-        prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
-        subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
-        print(f"File moved to {prometheus_file_path} successfully.")
+    utils.render_and_deploy_alerting_configs(contact_point, c.grafana_endpoint, c.uuid, c.secret)
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
@@ -350,166 +298,6 @@ def _run_fio(mount_point) -> None:
             logger.info("fio configuration file removed.")
 
 
-def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,ifname,blk_size, page_size_in_blocks, cli_pass,
-                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, log_del_interval, metrics_retention_period,
-                   contact_point, grafana_endpoint, distr_bs, distr_chunk_bs,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity,
-                   data_nics,spdk_image,spdk_debug,small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,
-                   max_snap,number_of_devices,enable_test_device,enable_ha_jm,
-                   ha_jm_count,namespace,partition_size,
-                   lvol_name, lvol_size, lvol_ha_type, pool_name, pool_max, host_id, comp, crypto, distr_vuid, max_rw_iops,
-                   max_rw_mbytes, max_r_mbytes, max_w_mbytes, with_snapshot, max_size, crypto_key1, crypto_key2,
-                   lvol_priority_class, id_device_by_nqn, fstype) -> None:
-    logger.info("run deploy-cleaner")
-
-    storage_node_ops.deploy_cleaner()
-
-    logger.info("creating cluster")
-    cluster_uuid = create_cluster(
-            blk_size, page_size_in_blocks,
-            cli_pass, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
-
-    time.sleep(5)
-
-    storage_nodes_list=storage_nodes.split(",")
-    for node in storage_nodes_list:
-        node_ip = node.strip()
-        dev_ip=f"{node_ip}:5000"
-        add_node_status=storage_node_ops.add_node(cluster_uuid,dev_ip,ifname,data_nics,max_snap,spdk_image,spdk_debug,
-                                  small_bufsize,large_bufsize,num_partitions_per_dev,jm_percent,number_of_devices,
-                                  enable_test_device,namespace,enable_ha_jm,id_device_by_nqn,partition_size,ha_jm_count)
-
-
-        if not add_node_status:
-            raise ValueError("Could not add storage node successfully")
-
-        time.sleep(5)
-
-    cluster_activate(cluster_uuid)
-
-    if not test:
-        return
-
-    pool_id=pool_controller.add_pool(pool_name,pool_max,max_size,
-                        max_rw_iops,max_rw_mbytes,max_r_mbytes,max_w_mbytes,None,cluster_uuid)
-
-    lvol_uuid, msg = lvol_controller.add_lvol_ha(
-                lvol_name, lvol_size, host_id, lvol_ha_type, pool_id, comp, crypto,
-                distr_vuid,
-                max_rw_iops=max_rw_iops,
-                max_rw_mbytes=max_rw_mbytes,
-                max_r_mbytes=max_r_mbytes,
-                max_w_mbytes=max_w_mbytes,
-                with_snapshot=with_snapshot,
-                max_size=max_size,
-                crypto_key1=crypto_key1,
-                crypto_key2=crypto_key2,
-                lvol_priority_class=lvol_priority_class,
-                uid=None, pvc_name=None, namespace=None)
-
-    if not lvol_uuid:
-        raise ValueError(f"lvol creation failed {msg}")
-
-    time.sleep(5)
-
-    subprocess.run("sudo modprobe nvme-tcp", shell=True, check=True)
-
-    connect = lvol_controller.connect_lvol(lvol_uuid)
-
-    if not connect:
-        raise ValueError("connect command generation failed")
-
-    for entry in connect:
-        connect_string = entry.get("connect")
-        subprocess.check_call(connect_string, shell=True)
-
-    nvme_list_command = "sudo nvme list"
-    logger.info(f"Executing NVMe list command: {nvme_list_command}")
-    device_name = parse_nvme_list_output(
-        subprocess.check_output(nvme_list_command, shell=True, text=True),
-        lvol_uuid
-    )
-
-    mkfs_command = f"sudo mkfs.{fstype} {device_name}"
-    subprocess.run(mkfs_command, shell=True, check=True)
-
-
-    mount_point = os.path.join(os.path.expanduser("~"), lvol_uuid)
-    os.makedirs(mount_point, exist_ok=True)
-    mount_command = f"sudo mount {device_name} {mount_point}"
-
-    subprocess.run(mount_command, shell=True, check=True)
-
-    logger.info(f"running fio on mount point {mount_point}")
-
-    _run_fio(mount_point)
-
-    _cleanup_nvme(mount_point, connect[0]['nqn'])
-
-    status=lvol_controller.delete_lvol(lvol_uuid)
-    if not status:
-        raise ValueError('LVol deletion failed')
-
-    pool_controller.delete_pool(pool_id)
-
-
-def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity) -> str:
-    db_controller = DBController()
-    clusters = db_controller.get_clusters()
-    if not clusters:
-        raise ValueError("No previous clusters found!")
-
-    if distr_ndcs == 0 and distr_npcs == 0:
-        raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
-
-    logger.info("Adding new cluster")
-    cluster = Cluster()
-    cluster.uuid = str(uuid.uuid4())
-    cluster.blk_size = blk_size
-    cluster.page_size_in_blocks = page_size_in_blocks
-    cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.secret = utils.generate_string(20)
-    cluster.strict_node_anti_affinity = strict_node_anti_affinity
-
-    default_cluster = clusters[0]
-    cluster.db_connection = default_cluster.db_connection
-    cluster.grafana_secret = default_cluster.grafana_secret
-    cluster.grafana_endpoint = default_cluster.grafana_endpoint
-
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
-
-    cluster.distr_ndcs = distr_ndcs
-    cluster.distr_npcs = distr_npcs
-    cluster.distr_bs = distr_bs
-    cluster.distr_chunk_bs = distr_chunk_bs
-    cluster.ha_type = ha_type
-    cluster.enable_node_affinity = enable_node_affinity
-    cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
-    cluster.max_queue_size = max_queue_size
-    cluster.inflight_io_threshold = inflight_io_threshold
-    cluster.enable_qos = enable_qos
-    if cap_warn and cap_warn > 0:
-        cluster.cap_warn = cap_warn
-    if cap_crit and cap_crit > 0:
-        cluster.cap_crit = cap_crit
-    if prov_cap_warn and prov_cap_warn > 0:
-        cluster.prov_cap_warn = prov_cap_warn
-    if prov_cap_crit and prov_cap_crit > 0:
-        cluster.prov_cap_crit = prov_cap_crit
-
-    cluster.status = Cluster.STATUS_UNREADY
-    cluster.create_dt = str(datetime.datetime.now())
-    cluster.write_to_db(db_controller.kv_store)
-    cluster_events.cluster_create(cluster)
-
-    return cluster.get_id()
-
-
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
@@ -555,8 +343,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 continue
             if snode.secondary_node_id:
                 sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                if sec_node is None:
-                    raise ValueError(f"Failed to activate cluster, secondary node {snode.secondary_node_id} not found")
                 sec_node.lvstore_stack_secondary_1 = snode.get_id()
                 sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
@@ -570,8 +356,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             snode.secondary_node_id = secondary_nodes[0]
             snode.write_to_db()
             sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node is None:
-                raise ValueError(f"Failed to activate cluster, secondary node {snode.secondary_node_id} not found")
             sec_node.lvstore_stack_secondary_1 = snode.get_id()
             sec_node.write_to_db()
             used_nodes_as_sec.append(snode.secondary_node_id)
@@ -672,8 +456,6 @@ def cluster_expand(cl_id) -> None:
             snode.write_to_db()
 
             sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node is None:
-                raise ValueError(f"Failed to expand cluster, secondary node {snode.secondary_node_id} not found")
             sec_node.lvstore_stack_secondary_1 = snode.get_id()
             sec_node.write_to_db()
 
@@ -1246,8 +1028,6 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
         storage_node_ops.restart_storage_node(node.get_id(), clear_data=clear_data, force=True, spdk_image=spdk_image)
         # time.sleep(5)
         get_node = db_controller.get_storage_node_by_id(node.get_id())
-        if get_node is None:
-            raise KeyError(f"Node {node.get_id()} not found after restart")
         if get_node.status != StorageNode.STATUS_ONLINE:
             raise ValueError("failed to restart node")
 
