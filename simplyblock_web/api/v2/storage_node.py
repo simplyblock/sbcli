@@ -202,8 +202,8 @@ def shutdown(path: StorageNodePath, query: _ForceDefaultTrueQuery):
 
 
 class _RestartParams(BaseModel):
-    force: bool = Field(False)
-    reattach_volume: bool = Field(False)
+    force: bool = False
+    reattach_volume: bool = False
 
 
 @instance_api.post('/start')  # Same as restart for now
