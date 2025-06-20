@@ -237,7 +237,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     db_controller = DBController()
     cluster.write_to_db(db_controller.kv_store)
 
-    cluster_events.cluster_create(c)
+    cluster_events.cluster_create(cluster)
 
     mgmt_node_ops.add_mgmt_node(dev_ip, cluster.uuid)
 
