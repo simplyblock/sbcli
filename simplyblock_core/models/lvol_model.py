@@ -1,6 +1,6 @@
 # coding=utf-8
 
-from typing import List, Optional
+from typing import List
 
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -50,7 +50,7 @@ class LVol(BaseModel):
     nqn: str = ""
     ns_id: int = 1
     subsys_port: int = 9090
-    nvme_dev: Optional[NVMeDevice] = None
+    nvme_dev: NVMeDevice = None  # type: ignore[assignment]
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""
