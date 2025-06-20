@@ -1,9 +1,9 @@
 from threading import Thread
-from typing import Annotated, List, Optional
+from typing import Annotated, Any, List, Optional
 
 from flask import abort, url_for
 from flask_openapi3 import APIBlueprint
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import tasks_controller
@@ -204,6 +204,11 @@ def shutdown(path: StorageNodePath, query: _ForceDefaultTrueQuery):
 class _RestartParams(BaseModel):
     force: bool = False
     reattach_volume: bool = False
+
+    @model_validator(mode='before')
+    @classmethod
+    def check_card_number_not_present(cls, data: Any) -> Any:
+        return data if data is not None else {}
 
 
 @instance_api.post('/start')  # Same as restart for now
