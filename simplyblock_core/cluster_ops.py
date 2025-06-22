@@ -1194,11 +1194,11 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
     if mgmt_image:
         service_image = mgmt_image
-        for service in cluster_docker.services.list():
-            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
-            "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
-                logger.info(f"Updating service {service.name}")
-                service.update(image=service_image, force_update=True)
+    for service in cluster_docker.services.list():
+        if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
+        "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+            logger.info(f"Updating service {service.name}")
+            service.update(image=service_image, force_update=True)
     logger.info("Done updating mgmt cluster")
 
     if mgmt_only:
