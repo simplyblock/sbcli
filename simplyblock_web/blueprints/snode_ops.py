@@ -625,7 +625,7 @@ def set_hugepages():
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
     for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // (2048 * 1024)
+        num_pages = huge_page_memory // (2048 * 1024) + 1
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)
