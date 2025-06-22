@@ -100,7 +100,7 @@ def add_node_to_auto_restart(node):
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
     for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-        if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE:
+        if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
             logger.info("Node found that is not online, skip node auto restart")
             return False
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "")
