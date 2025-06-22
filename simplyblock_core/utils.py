@@ -1412,7 +1412,7 @@ def regenerate_config(new_config, old_config, force=False):
                 logger.error(f"The nic {nic} is not a member of system nics {all_nics}")
                 return False
 
-        small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
+        small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls + 1, 2 * number_of_distribs,
                                                                   len(isolated_cores),
                                                                   number_of_poller_cores or len(
                                                                       isolated_cores),)
