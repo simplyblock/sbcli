@@ -1,8 +1,8 @@
-from typing import Literal, Optional, Tuple
+from typing import Annotated, Literal, Optional, Tuple, Union
 
 from flask import abort, url_for
 from flask_openapi3 import APIBlueprint
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
@@ -25,7 +25,7 @@ def list(path: PoolPath):
     ]
 
 
-class LVolParams(BaseModel):
+class _CreateParams(BaseModel):
     name: str
     size: util.Size
     crypto_key: Optional[Tuple[str, str]] = None
@@ -40,34 +40,51 @@ class LVolParams(BaseModel):
     pvc_name: Optional[str] = None
 
 
+class _CloneParams(BaseModel):
+    name: str
+    snapshot_id: Annotated[Optional[str], Field(pattern=core_utils.UUID_PATTERN)]
+    size: util.Size = 0
+
+
 @api.post('/')
-def add(path: PoolPath, body: LVolParams):
-    if db.get_lvol_by_name(body.name) is not None:
-        abort(409, f'Volume {body.name} exists')
+def add(path: PoolPath, body: RootModel[Union[_CreateParams, _CloneParams]]):
+    data = body.root
+    if db.get_lvol_by_name(data.name) is not None:
+        abort(409, f'Volume {data.name} exists')
 
     cluster = path.cluster()
     pool = path.pool()
 
-    volume_id_or_false, error = lvol_controller.add_lvol_ha(
-        name=body.name,
-        size=body.size,
-        pool_id_or_name=pool.get_id(),
-        use_crypto=body.crypto_key is not None,
-        max_size=0,
-        max_rw_iops=body.max_rw_iops,
-        max_rw_mbytes=body.max_rw_mbytes,
-        max_r_mbytes=body.max_r_mbytes,
-        max_w_mbytes=body.max_w_mbytes,
-        host_id_or_name=body.host_id,
-        ha_type=body.ha_type if body.ha_type is not None else 'default',
-        crypto_key1=body.crypto_key[0] if body.crypto_key is not None else None,
-        crypto_key2=body.crypto_key[1] if body.crypto_key is not None else None,
-        use_comp=False,
-        distr_vuid=0,
-        lvol_priority_class=body.lvol_priority_class,
-        namespace=body.namespace,
-        pvc_name=body.pvc_name,
-    )
+    if isinstance(data, _CreateParams):
+        volume_id_or_false, error = lvol_controller.add_lvol_ha(
+            name=data.name,
+            size=data.size,
+            pool_id_or_name=pool.get_id(),
+            use_crypto=data.crypto_key is not None,
+            max_size=0,
+            max_rw_iops=data.max_rw_iops,
+            max_rw_mbytes=data.max_rw_mbytes,
+            max_r_mbytes=data.max_r_mbytes,
+            max_w_mbytes=data.max_w_mbytes,
+            host_id_or_name=data.host_id,
+            ha_type=data.ha_type if data.ha_type is not None else 'default',
+            crypto_key1=data.crypto_key[0] if data.crypto_key is not None else None,
+            crypto_key2=data.crypto_key[1] if data.crypto_key is not None else None,
+            use_comp=False,
+            distr_vuid=0,
+            lvol_priority_class=data.lvol_priority_class,
+            namespace=data.namespace,
+            pvc_name=data.pvc_name,
+        )
+    elif isinstance(data, _CloneParams):
+        volume_id_or_false, error = snapshot_controller.clone(
+            data.snapshot_id,
+            data.name,
+            data.size if data.size is not None else 0,
+        )
+    else:
+        raise AssertionError('unreachable')
+
     if volume_id_or_false == False:  # noqa
         raise ValueError(error)
 

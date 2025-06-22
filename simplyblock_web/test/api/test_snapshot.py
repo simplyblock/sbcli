@@ -24,8 +24,8 @@ def test_snapshot_delete(call, cluster, pool):
 
     clone_uuid = call(
             'POST',
-            f'/clusters/{cluster}/pools/{pool}/snapshots/{snapshot_uuid}/clone',
-            data={'name': 'cloneX'},
+            f'/clusters/{cluster}/pools/{pool}/volumes',
+            data={'name': 'cloneX', 'snapshot_id': snapshot_uuid},
     )
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{clone_uuid}')
@@ -56,8 +56,8 @@ def test_snapshot_softdelete(call, cluster, pool):
 
     clone_uuid = call(
             'POST',
-            f'/clusters/{cluster}/pools/{pool}/snapshots/{snapshot_uuid}/clone',
-            data={'name': 'cloneX'},
+            f'/clusters/{cluster}/pools/{pool}/volumes',
+            data={'name': 'cloneX', 'snapshot_id': snapshot_uuid},
     )
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/snapshots/{snapshot_uuid}')

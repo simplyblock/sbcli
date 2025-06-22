@@ -1,8 +1,6 @@
-from typing import Optional
-
-from flask import abort, jsonify
+from flask import abort
 from flask_openapi3 import APIBlueprint
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import snapshot_controller
@@ -50,22 +48,5 @@ def delete(path: SnapshotPath):
         raise ValueError('Failed to delete snapshot')
     return '', 204
 
-
-class _CloneParams(BaseModel):
-    name: str
-    size: Optional[int] = None
-
-
-@instance_api.post('/clone')
-def clone(path: SnapshotPath, body: _CloneParams):
-    clone_id, error = snapshot_controller.clone(
-        path.snapshot().get_id(),
-        body.name,
-        body.size if body.size is not None else 0
-    )
-    if error:
-        raise ValueError('Failed to clone snapshot')
-
-    return jsonify(clone_id)
 
 api.register_api(instance_api)
