@@ -903,13 +903,15 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
 
             if not ret:
                 logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
-                return False
+                if not force:
+                    return False
 
             jm_bdev = f"jm_{snode.get_id()}"
             ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask)
             if not ret:
                 logger.error(f"Failed to create {jm_bdev}")
-                return False
+                if not force:
+                    return False
 
             if snode.enable_ha_jm:
                 # add pass through
@@ -917,7 +919,8 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
                 if not ret:
                     logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-                    return False
+                    if not force:
+                        return False
 
                 subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
                 logger.info("creating subsystem %s", subsystem_nqn)
@@ -936,7 +939,8 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
                 if not ret:
                     logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
-                    return False
+                    if not force:
+                        return False
 
                 set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
