@@ -749,7 +749,21 @@ class CLIWrapperBase:
         Add a new database entry.
         """
         db = db_controller.DBController()
-        return db.get_managed_databases()
+        databases = db.get_managed_databases()
+        data = []
+        for database in databases:
+            data.append({
+                "DeploymentID": database.deployment_id,
+                "Type": database.type,
+                "Status": database.status,
+                "Version": database.version,
+                "Storage Class": database.storage_class,
+                "Disk Size": database.disk_size,
+                "VCPU Count": database.vcpu_count,
+                "Memory Size": database.memory_size,
+            })
+
+        return utils.print_table(data)
 
     def database__delete(self, sub_command, args):
         """
