@@ -1027,9 +1027,8 @@ def addNvmeDevices(rpc_client, snode, devs):
 
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
-                if "subnqn" in nvme_driver_data['ctrlr_data']:
-                    subnqn = nvme_driver_data['ctrlr_data']['subnqn']
-                    serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
+                if "ns_data" in nvme_driver_data:
+                    serial_number = nvme_driver_data['pci_address'] + nvme_driver_data['ns_data']['id']
                 else:
                     logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
 
