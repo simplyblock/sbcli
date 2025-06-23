@@ -1609,6 +1609,7 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
         logger.error(f"Node {node}: Error occurred: {e}")
 
 def adjust_hugepages(hugepages):
+    """Adjust hugepages to the next multiple of 500 and add a small extra based on leading digits."""
     remainder = hugepages % 500
     hugepages =  hugepages + (500 - remainder)
 
