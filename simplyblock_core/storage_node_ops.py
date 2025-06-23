@@ -1502,14 +1502,8 @@ def restart_storage_node(
     if spdk_image:
         snode.spdk_image = spdk_image
 
-    # Calculate pool count
-
-    number_of_alceml_devices = snode.number_of_alceml_devices
-    small_pool_count, large_pool_count = utils.calculate_pool_count(
-        number_of_alceml_devices, snode.number_of_distribs * 2, snode.cpu, len(snode.poller_cpu_cores) or snode.cpu)
-
     # Calculate minimum huge page memory
-    minimum_hp_memory = utils.calculate_minimum_hp_memory(small_pool_count, large_pool_count, snode.max_lvol,
+    minimum_hp_memory = utils.calculate_minimum_hp_memory(snode.iobuf_small_pool_count, snode.iobuf_large_pool_count, snode.max_lvol,
                                                           snode.max_prov,
                                                           len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask)))
 
@@ -1549,6 +1543,7 @@ def restart_storage_node(
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if n.api_endpoint == snode.api_endpoint:
             total_mem += n.spdk_mem
+    total_mem+= utils.parse_size("500m")
 
     results = None
     try:

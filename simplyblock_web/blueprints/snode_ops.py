@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # encoding: utf-8
 import json
+import math
 import os
 import time
 from typing import List, Optional, Union
@@ -596,8 +597,8 @@ def firewall_set_port(body: _FirewallParams):
         'type': 'string'
     })}}},
 })
-def get_firewall(body: utils.RPCPortParams):
-    ret = node_utils.firewall_get(str(body.rpc_port))
+def get_firewall(query: utils.RPCPortParams):
+    ret = node_utils.firewall_get(str(query.rpc_port))
     return utils.get_response(ret)
 
 
@@ -625,7 +626,7 @@ def set_hugepages():
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
     for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // (2048 * 1024)
+        num_pages = math.ceil(huge_page_memory / (2048 * 1024))
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)

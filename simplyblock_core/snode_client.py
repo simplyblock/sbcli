@@ -167,7 +167,7 @@ class SNodeClient:
         }
         return self._request("POST", "firewall_set_port", params)
 
-    def get_firewall(self,rpc_port=None):
+    def get_firewall(self, rpc_port=None):
         params = {"rpc_port": rpc_port}
         return self._request("GET", "get_firewall", params)
 
