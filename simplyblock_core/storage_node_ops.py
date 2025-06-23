@@ -1502,12 +1502,6 @@ def restart_storage_node(
     if spdk_image:
         snode.spdk_image = spdk_image
 
-    # Calculate pool count
-
-    number_of_alceml_devices = snode.number_of_alceml_devices
-    #small_pool_count, large_pool_count = utils.calculate_pool_count(
-    #    number_of_alceml_devices, snode.number_of_distribs * 2, snode.cpu, len(snode.poller_cpu_cores) or snode.cpu)
-
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(snode.iobuf_small_pool_count, snode.iobuf_large_pool_count, snode.max_lvol,
                                                           snode.max_prov,
