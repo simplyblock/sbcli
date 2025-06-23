@@ -1586,6 +1586,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
 
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     """Set hugepages for a specific NUMA node if current number is less than needed."""
+    page_size_kb = adjust_hugepages(page_size_kb)
     hugepage_path = f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
 
     try:
@@ -1606,6 +1607,12 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
         logger.error(f"Node {node}: Permission denied. Run the script as root.")
     except Exception as e:
         logger.error(f"Node {node}: Error occurred: {e}")
+
+def adjust_hugepages(page_size_kb):
+    remainder = page_size_kb % 500
+    if remainder == 0:
+        return page_size_kb
+    return page_size_kb + (500 - remainder)
 
 
 def validate_node_config(node):
