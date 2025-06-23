@@ -11,7 +11,7 @@ class SnapShot(BaseModel):
     cluster_id: str = ""
     created_at: int = 0
     health_check: bool = True
-    lvol: LVol = None
+    lvol: LVol = None # type: ignore[assignment]
     mem_diff: dict = {}
     pool_uuid: str = ""
     ref_count: int = 0

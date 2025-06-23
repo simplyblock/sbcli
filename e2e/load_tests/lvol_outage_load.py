@@ -113,8 +113,8 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
                     key2=self.lvol_crypt_keys[1],
                     host_id=self.lvol_node
                 )
-            except Exception as _:
-                return 0, 0
+            except Exception as e:
+                return 0, 0, e
             sleep_n_sec(2)
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
@@ -172,7 +172,7 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         self.sbcli_utils.wait_for_health_status(self.lvol_node, True, timeout=4000)
         restart_end = datetime.now()
 
-        return shutdown_end - shutdown_start, restart_end - restart_start
+        return shutdown_end - shutdown_start, restart_end - restart_start, None
 
     def write_to_log(self, lvol_count, shutdown_time, restart_time):
         if isinstance(shutdown_time, int):
@@ -235,10 +235,11 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
 
             for count in range(start, self.max_lvols + 1, self.step):
                 self.logger.info(f"Entering count: {count}")
-                shutdown_time, restart_time = self.create_and_shutdown_restart(count)
+                shutdown_time, restart_time, exception = self.create_and_shutdown_restart(count)
                 self.logger.info(f"Writing count: {count}")
                 if shutdown_time == 0:
                     self.logger.info(f"Lvol create during count {count} failed!")
+                    raise exception
                 self.write_to_log(count, shutdown_time, restart_time)
         except Exception as e:
             raise e

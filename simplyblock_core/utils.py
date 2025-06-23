@@ -14,7 +14,7 @@ from typing import Union
 from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
-from docker.errors import APIError, DockerException, ImageNotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
 import tempfile
 from jinja2 import Environment, FileSystemLoader
@@ -1412,7 +1412,7 @@ def regenerate_config(new_config, old_config, force=False):
                 logger.error(f"The nic {nic} is not a member of system nics {all_nics}")
                 return False
 
-        small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
+        small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls + 1, 2 * number_of_distribs,
                                                                   len(isolated_cores),
                                                                   number_of_poller_cores or len(
                                                                       isolated_cores),)
@@ -1768,10 +1768,10 @@ def remove_container(client: docker.DockerClient, name, timeout=3):
         container = client.containers.get(name)
         container.stop(timeout=timeout)
         container.remove()
-    except docker.errors.NotFound:
+    except NotFound:
         pass
-    except docker.errors.APIError as e:
-        if 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
+    except APIError as e:
+        if e.response and 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
             raise
 
 def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):

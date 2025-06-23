@@ -9,7 +9,7 @@ from typing import Optional
 import cpuinfo
 import docker
 from docker.types import LogConfig
-from flask import APIBlueprint
+from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field, validator
 
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils

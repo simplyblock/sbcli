@@ -211,15 +211,15 @@ def parse_distr_cluster_map(map_string):
                 "Desired Status": "",
                 "Results": "",
             }
-            sd = db_controller.get_storage_device_by_id(device_id)
-            if sd:
+            try:
+                sd = db_controller.get_storage_device_by_id(device_id)
                 data["Desired Status"] = sd.status
                 if sd.status == status:
                     data["Results"] = "ok"
                 else:
                     data["Results"] = "failed"
                     passed = False
-            else:
+            except KeyError:
                 data["Results"] = "not found"
                 passed = False
             results.append(data)

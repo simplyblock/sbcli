@@ -112,10 +112,12 @@ class JSONRPCClient(object):
         self._logger.info("Log level set to %s", lvl)
 
     def close(self):
-        if getattr(self, "sock", None):
-            self.sock.shutdown(socket.SHUT_RDWR)
-            self.sock.close()
-            self.sock = None
+        if self.sock is None:
+            return
+
+        self.sock.shutdown(socket.SHUT_RDWR)
+        self.sock.close()
+        self.sock = None
 
     def add_request(self, method, params):
         self._request_id += 1
@@ -133,6 +135,9 @@ class JSONRPCClient(object):
         return self._request_id
 
     def flush(self):
+        if self.sock is None:
+            raise JSONRPCException('No active connection')
+
         self._logger.debug("Flushing buffer")
         # TODO: We can drop indent parameter
         reqstr = "\n".join(json.dumps(req, indent=2) for req in self._reqs)
@@ -157,6 +162,9 @@ class JSONRPCClient(object):
             return None
 
     def recv(self):
+        if self.sock is None:
+            raise JSONRPCException('No active connection')
+
         start_time = time.process_time()
         response = self.decode_one_response()
         while not response:
@@ -265,7 +273,7 @@ class JSONRPCGoClient(object):
             raise JSONRPCException(rpc_error)
 
         try:
-            json_resp = json.loads(ctypes.c_char_p.from_buffer(resp.response).value)
+            json_resp = json.loads(ctypes.c_char_p.from_buffer(resp.response).value)  # type: ignore
         finally:
             lib.spdk_gorpc_free_response(resp.response)
 

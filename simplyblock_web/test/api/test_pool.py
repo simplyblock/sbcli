@@ -6,6 +6,7 @@ from requests.exceptions import HTTPError
 import util
 
 
+
 def test_api(call):
     assert call('GET', '/') == "Live"
 

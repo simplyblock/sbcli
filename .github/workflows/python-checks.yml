@@ -68,7 +68,19 @@ jobs:
         cache: 'pip'
 
     - name: Install linter
-      run: pip install ruff
+      run: pip install ruff mypy 
 
     - name: Execute linter
       run: ruff check
+
+    - name: Execute mypy linter
+      run: |
+        pip install -r requirements.txt
+        pip install kubernetes-typed types-docker types-boto3 types-urllib3
+        export MYPYPATH=./stubs
+        stubgen -m flask_swagger_ui -o stubs
+        stubgen -m flask_swagger_ui.flask_swagger_ui -o stubs
+        stubgen -m cpuinfo -o stubs
+        stubgen -m cpuinfo.cpuinfo -o stubs
+        stubgen -m fdb -o stubs
+        mypy simplyblock_web simplyblock_cli --install-types --non-interactive --exclude simplyblock_web/test

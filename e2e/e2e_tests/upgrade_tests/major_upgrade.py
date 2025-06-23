@@ -126,6 +126,34 @@ class TestMajorUpgrade(TestClusterBase):
         self.ssh_obj.exec_command(self.mgmt_nodes[0], f"pip install {package_name} --upgrade")
         sleep_n_sec(10)
 
+        self.logger.info("Step: Override Docker config to enable remote API and restart Docker")
+
+        docker_override_cmds = [
+            "sudo mkdir -p /etc/systemd/system/docker.service.d/",
+            "echo -e '[Service]\\nExecStart=\\nExecStart=-/usr/bin/dockerd --containerd=/run/containerd/containerd.sock -H tcp://10.0.43.81:2375 -H unix:///var/run/docker.sock -H fd://' | sudo tee /etc/systemd/system/docker.service.d/override.conf",
+            "sudo systemctl daemon-reload",
+            "sudo systemctl restart docker"
+        ]
+
+        for node in self.mgmt_nodes:
+            for cmd in docker_override_cmds:
+                self.ssh_obj.exec_command(node, cmd)
+        self.logger.info(f"Docker override configuration applied and Docker restarted on {node}")
+
+        self.logger.info(f"Waiting for Docker to become active on {node}...")
+        max_attempts = 10
+        attempt = 0
+        while attempt < max_attempts:
+            output, _ = self.ssh_obj.exec_command(node, "sudo systemctl is-active docker")
+            if output.strip() == "active":
+                self.logger.info(f"Docker is active on {node}")
+                break
+            attempt += 1
+            self.logger.info(f"Docker not active yet on {node}, retrying in 3s (attempt {attempt}/{max_attempts})...")
+            sleep_n_sec(3)
+        else:
+            raise RuntimeError(f"Docker failed to become active on {node} after {max_attempts} attempts!")
+
         cmd = f"{self.base_cmd} cluster graceful-shutdown {self.cluster_id}"
         self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
