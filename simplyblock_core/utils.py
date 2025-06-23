@@ -1610,10 +1610,12 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
 
 def adjust_hugepages(hugepages):
     remainder = hugepages % 500
-    if remainder == 0:
-        return hugepages
-    return hugepages + (500 - remainder)
+    hugepages =  hugepages + (500 - remainder)
 
+    str_val = str(hugepages)
+    decimal_val = float(str_val[0] + '.' + str_val[1])
+    add_val = int(decimal_val * 24)
+    return hugepages + add_val
 
 def validate_node_config(node):
     required_top_fields = [
