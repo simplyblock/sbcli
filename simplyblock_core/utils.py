@@ -1586,7 +1586,6 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
 
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     """Set hugepages for a specific NUMA node if current number is less than needed."""
-    page_size_kb = adjust_hugepages(page_size_kb)
     hugepage_path = f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
 
     try:
@@ -1596,6 +1595,7 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
         if current_hugepages >= hugepages_needed:
             logger.debug(f"Node {node}: already has {current_hugepages} hugepages, no change needed.")
         else:
+            hugepages_needed = adjust_hugepages(hugepages_needed)
             logger.debug(f"Node {node}: has {current_hugepages} hugepages, setting to {hugepages_needed}...")
             cmd = f"echo {hugepages_needed} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
             subprocess.run(cmd, shell=True, check=True)
@@ -1608,11 +1608,11 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     except Exception as e:
         logger.error(f"Node {node}: Error occurred: {e}")
 
-def adjust_hugepages(page_size_kb):
-    remainder = page_size_kb % 500
+def adjust_hugepages(hugepages):
+    remainder = hugepages % 500
     if remainder == 0:
-        return page_size_kb
-    return page_size_kb + (500 - remainder)
+        return hugepages
+    return hugepages + (500 - remainder)
 
 
 def validate_node_config(node):
