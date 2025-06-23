@@ -323,4 +323,4 @@ class DBController(metaclass=Singleton):
         return dbs
 
     def get_managed_databases(self) -> List[ManagedDatabase]:
-        ret = self.get_managed_database()
+        return ManagedDatabase().read_from_db(self.kv_store)

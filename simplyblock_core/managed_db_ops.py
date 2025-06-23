@@ -1,7 +1,9 @@
+import uuid
 from kubernetes import client, config
 from simplyblock_core.models.managed_db import ManagedDatabase
+from simplyblock_core.db_controller import DBController
 
-def create_postgresql_deployment(name, storage_class, disk_size, postgres_version, vcpu_count, memory):
+def create_postgresql_deployment(name, storage_class, disk_size, postgres_version, vcpu_count, memory, namespace="default"):
     # Load Kubernetes config
     config.load_kube_config()
 
@@ -12,12 +14,12 @@ def create_postgresql_deployment(name, storage_class, disk_size, postgres_versio
     }
     resource_limits = {
         "cpu": str(vcpu_count * 4),
-        "memory": str(int(memory.rstrip('Mi')) * 2) + "Mi"
+        "memory": str(int(memory.rstrip('G')) * 2) + "G"
     }
 
     # Define PersistentVolumeClaim
     pvc = client.V1PersistentVolumeClaim(
-        metadata=client.V1ObjectMeta(name="postgres-pvc"),
+        metadata=client.V1ObjectMeta(name=f"{name}-pvc"),
         spec=client.V1PersistentVolumeClaimSpec(
             access_modes=["ReadWriteOnce"],
             resources=client.V1ResourceRequirements(
@@ -54,16 +56,16 @@ def create_postgresql_deployment(name, storage_class, disk_size, postgres_versio
     deployment_spec = client.V1DeploymentSpec(
         replicas=1,
         selector=client.V1LabelSelector(
-            match_labels={"app": "postgres"}
+            match_labels={"app": name}
         ),
         template=client.V1PodTemplateSpec(
-            metadata=client.V1ObjectMeta(labels={"app": "postgres"}),
+            metadata=client.V1ObjectMeta(labels={"app": name}),
             spec=client.V1PodSpec(
                 containers=[container],
                 volumes=[client.V1Volume(
                     name="postgres-data",
                     persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                        claim_name="postgres-pvc"
+                        claim_name=f"{name}-pvc"
                     )
                 )]
             )
@@ -73,26 +75,27 @@ def create_postgresql_deployment(name, storage_class, disk_size, postgres_versio
     deployment = client.V1Deployment(
         api_version="apps/v1",
         kind="Deployment",
-        metadata=client.V1ObjectMeta(name="postgres"),
+        metadata=client.V1ObjectMeta(name=name),
         spec=deployment_spec
     )
 
     # Create the Deployment
     apps_v1 = client.AppsV1Api()
-    apps_v1.create_namespaced_deployment(namespace="default", body=deployment)
+    apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
 
-    db = ManagedDatabase()
-    db.name = name
-    db.deployment_id = name
-    db.pvc_id = f"{name}-pvc"
-    db.type = "postgresql"
-    db.version = postgres_version
-    db.vcpu_count = vcpu_count
-    db.memory_size = int(memory.rstrip('Mi'))
-    db.disk_size = int(disk_size.rstrip('Gi'))
-    db.storage_class = storage_class
-    db.status = "created"
-    db.write_to_db()
+    db_controller = DBController()
+    database = ManagedDatabase()
+    database.uuid = str(uuid.uuid4())
+    database.deployment_id = name
+    database.pvc_id = f"{name}-pvc"
+    database.type = "postgresql"
+    database.version = postgres_version
+    database.vcpu_count = vcpu_count
+    database.memory_size = memory
+    database.disk_size = disk_size
+    database.storage_class = storage_class
+    database.status = "created"
+    database.write_to_db(db_controller.kv_store)
 
 
 def stop_postgresql_deployment():
