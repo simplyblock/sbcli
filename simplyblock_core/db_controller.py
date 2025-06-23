@@ -17,6 +17,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.managed_db import ManagedDatabase
 
 
 
@@ -312,3 +313,14 @@ class DBController(metaclass=Singleton):
             if node.secondary_node_id == node_id and node.lvstore:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
+
+    def get_managed_database(self, uuid_or_name: str) -> ManagedDatabase:
+        ret = self.get_managed_databases()
+        dbs = []
+        for db in ret:
+            if db.uuid == uuid_or_name or db.name == uuid_or_name:
+                dbs.append(db)
+        return dbs
+
+    def get_managed_databases(self) -> List[ManagedDatabase]:
+        ret = self.get_managed_database()

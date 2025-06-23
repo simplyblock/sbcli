@@ -1708,3 +1708,117 @@ commands:
             dest: resize
             type: size
             default: "0"
+  - name: "database"
+    help: "Creates a DB database on Simply block"
+    aliases:
+      - db
+    weight: 700
+    subcommands:
+      - name: add
+        help: "Adds a new database in the cluster"
+        arguments:
+          - name: "name"
+            help: "the name of the database"
+            dest: name
+            type: str
+          - name: "--type"
+            help: "Database type (e.g. mysql, postgresql)"
+            dest: type
+            type: str
+          - name: "--version"
+            help: "the database version"
+            dest: version
+            type: str
+          - name: "--vcpu_count"
+            help: "VCPU count for the database, default: 2"
+            dest: vcpu_count
+            type: int
+          - name: "--memory_size"
+            help: "the amount of RAM for the database, default: 2G"
+            dest: memory_size
+            type: str
+          - name: "--disk_size"
+            help: "the size of the database disk, default: 100G"
+            dest: disk_size
+            type: str
+          - name: "--storage_class"
+            help: "the name of the storage class to use for the database, default: simplyblock-csi-sc"
+            dest: storage_class
+            type: str
+      - name: list
+        help: "Lists all caching nodes"
+      - name: delete
+        help: "delete deletes a database"
+        arguments:
+          - name: "database_id"
+            help: "the UUID of that database that needs to be deleted"
+            dest: database_id
+            type: str
+      - name: stop
+        help: "stops deletes a database"
+        arguments:
+          - name: "database_id"
+            help: "the UUID of that database that needs to be stopped"
+            dest: database_id
+            type: str
+      - name: resize
+        help: "resize a database by increasing the disk size or VCPU or RAM"
+        arguments:
+          - name: "database_id"
+            help: "the UUID of that database that needs to be stopped"
+            dest: database_id
+            type: str
+          - name: "--vcpu"
+            help: "the new VCPU count for the database"
+            dest: vcpu
+            type: int
+          - name: "--ram"
+            help: "the new memory of the database"
+            dest: vcpu
+            type: int 
+          - name: "--disk"
+            help: "the new size of the disk for the database. It can decreased to a maximum of 10% of the current size"
+            dest: vcpu
+            type: int
+      - name: snapshot
+        help: "creates a snapshot of the disk. TODO: need to pause Disk Writes Temporarily"
+        arguments:
+          - name: "name"
+            help: "the name of the snapshot"
+            dest: name
+            type: str
+          - name: "database_id"
+            help: "the UUID of that database"
+            dest: database_id
+            type: str
+      - name: list-snapshots
+        help: "lists all snapshots of a database"
+        arguments:
+          - name: "database_id"
+            help: "the UUID of that database"
+            dest: database_id
+            type: str
+      - name: clone
+        help: "Clones a database from a snapshot"
+        arguments:
+          - name: "snapshot_id"
+            help: "Snapshot id"
+            dest: snapshot_id
+            type: str
+          - name: "clone_name"
+            help: "Clone name"
+            dest: clone_name
+            type: str
+          - name: "--resize"
+            help: "New database size, default is 100G"
+            dest: resize
+            type: str
+            default: "100G"
+          - name: "--vcpu_count"
+            help: "VCPU count for the database, default is 2"
+            dest: vcpu_count
+            type: int
+          - name: "--ram"
+            help: "the amount of RAM for the database, default is 2G"
+            dest: ram
+            type: str

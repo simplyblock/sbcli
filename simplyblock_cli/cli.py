@@ -27,6 +27,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
+        self.init_database()
         super().__init__()
 
     def init_storage_node(self):
@@ -730,6 +731,64 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
 
 
+    def init_database(self):
+        subparser = self.add_command('database', 'Creates a DB database on Simply block', aliases=['db',])
+        self.init_database__add(subparser)
+        self.init_database__list(subparser)
+        self.init_database__delete(subparser)
+        self.init_database__stop(subparser)
+        self.init_database__resize(subparser)
+        self.init_database__snapshot(subparser)
+        self.init_database__list_snapshots(subparser)
+        self.init_database__clone(subparser)
+
+
+    def init_database__add(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add', 'Adds a new database in the cluster')
+        subcommand.add_argument('name', help='the name of the database', type=str)
+        argument = subcommand.add_argument('--type', help='Database type (e.g. mysql, postgresql)', type=str, dest='type')
+        argument = subcommand.add_argument('--version', help='the database version', type=str, dest='version')
+        argument = subcommand.add_argument('--vcpu_count', help='VCPU count for the database, default: 2', type=int, dest='vcpu_count')
+        argument = subcommand.add_argument('--memory_size', help='the amount of RAM for the database, default: 2G', type=str, dest='memory_size')
+        argument = subcommand.add_argument('--disk_size', help='the size of the database disk, default: 100G', type=str, dest='disk_size')
+        argument = subcommand.add_argument('--storage_class', help='the name of the storage class to use for the database, default: simplyblock-csi-sc', type=str, dest='storage_class')
+
+    def init_database__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'Lists all caching nodes')
+
+    def init_database__delete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete', 'delete deletes a database')
+        subcommand.add_argument('database_id', help='the UUID of that database that needs to be deleted', type=str)
+
+    def init_database__stop(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'stop', 'stops deletes a database')
+        subcommand.add_argument('database_id', help='the UUID of that database that needs to be stopped', type=str)
+
+    def init_database__resize(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'resize', 'resize a database by increasing the disk size or VCPU or RAM')
+        subcommand.add_argument('database_id', help='the UUID of that database that needs to be stopped', type=str)
+        argument = subcommand.add_argument('--vcpu', help='the new VCPU count for the database', type=int, dest='vcpu')
+        argument = subcommand.add_argument('--ram', help='the new memory of the database', type=int, dest='vcpu')
+        argument = subcommand.add_argument('--disk', help='the new size of the disk for the database. It can decreased to a maximum of 10%% of the current size', type=int, dest='vcpu')
+
+    def init_database__snapshot(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'snapshot', 'creates a snapshot of the disk. TODO: need to pause Disk Writes Temporarily')
+        subcommand.add_argument('name', help='the name of the snapshot', type=str)
+        subcommand.add_argument('database_id', help='the UUID of that database', type=str)
+
+    def init_database__list_snapshots(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list-snapshots', 'lists all snapshots of a database')
+        subcommand.add_argument('database_id', help='the UUID of that database', type=str)
+
+    def init_database__clone(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clone', 'Clones a database from a snapshot')
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
+        subcommand.add_argument('clone_name', help='Clone name', type=str)
+        argument = subcommand.add_argument('--resize', help='New database size, default is 100G', type=str, default='100G', dest='resize')
+        argument = subcommand.add_argument('--vcpu_count', help='VCPU count for the database, default is 2', type=int, dest='vcpu_count')
+        argument = subcommand.add_argument('--ram', help='the amount of RAM for the database, default is 2G', type=str, dest='ram')
+
+
     def run(self):
         args = self.parser.parse_args()
         if args.debug:
@@ -1042,6 +1101,27 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['database', 'db']:
+                sub_command = args_dict['database']
+                if sub_command in ['add']:
+                    ret = self.database__add(sub_command, args)
+                elif sub_command in ['list']:
+                    ret = self.database__list(sub_command, args)
+                elif sub_command in ['delete']:
+                    ret = self.database__delete(sub_command, args)
+                elif sub_command in ['stop']:
+                    ret = self.database__stop(sub_command, args)
+                elif sub_command in ['resize']:
+                    ret = self.database__resize(sub_command, args)
+                elif sub_command in ['snapshot']:
+                    ret = self.database__snapshot(sub_command, args)
+                elif sub_command in ['list-snapshots']:
+                    ret = self.database__list_snapshots(sub_command, args)
+                elif sub_command in ['clone']:
+                    ret = self.database__clone(sub_command, args)
                 else:
                     self.parser.print_help()
 

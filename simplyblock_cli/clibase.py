@@ -16,7 +16,7 @@ from simplyblock_core.controllers import pool_controller, lvol_controller, snaps
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster
-
+from simplyblock_core import managed_db_ops
 
 def range_type(min, max):
     def f(arg):
@@ -719,3 +719,82 @@ class CLIWrapperBase:
     def _completer_get_sn_list(self, prefix, parsed_args, **kwargs):
         db = db_controller.DBController()
         return (cluster.get_id() for cluster in db.get_storage_nodes() if cluster.get_id().startswith(prefix))
+
+    def database__add(sub_command, args: list[str]):
+        """
+        TODO
+        Add a new database entry.
+        """
+        if args.type == "postgresql":
+            db = db_controller.DBController()
+            db = db.get_managed_database(args.name)
+            if len(db) > 0:
+                raise ValueError(f"Database with name {args.name} already exists.")
+            
+            managed_db_ops.create_postgresql_deployment(
+                storage_class=args.storage_class,
+                disk_size=args.disk_size,
+                postgres_version=args.version,
+                vcpu_count=args.vcpu_count,
+                memory=args.memory_size,
+            )
+        else:
+            raise ValueError(f"Unsupported database type: {type}")        
+
+    def database__list(sub_command, args):
+        """
+        TODO
+        Add a new database entry.
+        """
+        db = db_controller.DBController()
+        return db.get_managed_databases()
+
+    def database__delete(sub_command, args):
+        """
+        TODO
+        Add a new database entry.
+        """
+        db = db_controller.DBController()
+        # remove both the deployment, PVC and database entry
+        return db.add_entry(args.key, args.value)
+
+    def database__stop(sub_command, args):
+        """
+        TODO
+        Add a new database entry.
+        """
+        db = db_controller.DBController()
+        # just remove the deployment and mark the status as stopped
+        return db.add_entry(args.key, args.value)
+
+    def database__snapshot(sub_command, args):
+        """
+        TODO
+        Add a new database entry.
+        """
+        db = db_controller.DBController()
+        return db.add_entry(args.key, args.value)
+
+    def database__list_snapshots(sub_command, args):
+        """
+        TODO
+        Add a new database entry.
+        """
+        db = db_controller.DBController()
+        return db.add_entry(args.key, args.value)
+
+    def database__clone(sub_command, args):
+        """
+        TODO
+        Add a new database entry.
+        """
+        db = db_controller.DBController()
+        return db.add_entry(args.key, args.value)
+
+    def database__resize(sub_command, args):
+        """
+        TODO
+        Add a new database entry.
+        """
+        db = db_controller.DBController()
+        return db.add_entry(args.key, args.value)
