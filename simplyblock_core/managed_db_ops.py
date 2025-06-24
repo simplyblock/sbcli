@@ -111,7 +111,6 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
         elif secondary_storage_node.mgmt_ip in node_ips:
             k8snode_secondary = k8snode.metadata.name
 
-
     pod_affinity = client.V1Affinity(
         node_affinity=client.V1NodeAffinity(
             preferred_during_scheduling_ignored_during_execution=[
@@ -126,21 +125,20 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
                             )
                         ]
                     )
-                )
-            ],
-            required_during_scheduling_ignored_during_execution=client.V1NodeSelector(
-                node_selector_terms=[
-                    client.V1NodeSelectorTerm(
+                ),
+                client.V1PreferredSchedulingTerm(
+                    weight=50,
+                    preference=client.V1NodeSelectorTerm(
                         match_expressions=[
                             client.V1NodeSelectorRequirement(
                                 key="kubernetes.io/hostname",
                                 operator="In",
-                                values=[k8snode_primary, k8snode_secondary]
+                                values=[k8snode_secondary]
                             )
                         ]
                     )
-                ]
-            )
+                ),
+            ],
         )
     )
 
