@@ -7,9 +7,10 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     # Load Kubernetes config
     config.load_kube_config()
 
+    pvc_name = f"{name}-pvc"
     # Define PersistentVolumeClaim
     pvc = client.V1PersistentVolumeClaim(
-        metadata=client.V1ObjectMeta(name=f"{name}-pvc"),
+        metadata=client.V1ObjectMeta(name=pvc_name),
         spec=client.V1PersistentVolumeClaimSpec(
             access_modes=["ReadWriteOnce"],
             resources=client.V1ResourceRequirements(
@@ -22,14 +23,14 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     # Create the PersistentVolumeClaim
     v1 = client.CoreV1Api()
     v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
-    start_postgresql_deployment(name, version, vcpu_count, memory, f"{name}-pvc",namespace)
+    start_postgresql_deployment(name, version, vcpu_count, memory, pvc_name, namespace)
 
     db_controller = DBController()
     database = ManagedDatabase()
     database.uuid = str(uuid.uuid4())
     database.deployment_id = name
     database.namespace = namespace
-    database.pvc_id = f"{name}-pvc"
+    database.pvc_id = pvc_name
     database.type = "postgresql"
     database.version = version
     database.vcpu_count = vcpu_count
@@ -39,7 +40,7 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     database.status = "running"
     database.write_to_db(db_controller.kv_store)
 
-def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default", ):
+def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
     # load Kubernetes config
     config.load_kube_config()
 
@@ -83,7 +84,7 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
                 volumes=[client.V1Volume(
                     name="postgres-data",
                     persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                        claim_name=f"{deployment_name}-pvc"
+                        claim_name=pvc_name
                     )
                 )]
             )

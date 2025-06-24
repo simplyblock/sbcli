@@ -7,6 +7,7 @@ import re
 import sys
 import time
 import argcomplete
+import uuid
 
 from simplyblock_core import cluster_ops, utils, db_controller
 from simplyblock_core import storage_node_ops as storage_ops
@@ -16,6 +17,7 @@ from simplyblock_core.controllers import pool_controller, lvol_controller, snaps
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.managed_db import ManagedDatabase
 from simplyblock_core import managed_db_ops
 
 def range_type(min, max):
@@ -878,6 +880,20 @@ class CLIWrapperBase:
             namespace=database.namespace,
         )
 
+        cloned_db = ManagedDatabase()
+        cloned_db.uuid = str(uuid.uuid4())
+        cloned_db.deployment_id = name
+        cloned_db.namespace = database.namespace
+        cloned_db.pvc_id = args.clone_name
+        cloned_db.type = database.type
+        cloned_db.version = database.version
+        cloned_db.vcpu_count = database.vcpu_count
+        cloned_db.memory_size = database.memory_size
+        cloned_db.disk_size = database.disk_size
+        cloned_db.storage_class = database.storage_class
+        cloned_db.status = "running"
+        cloned_db.write_to_db(db_controller.DBController().kv_store)
+        
         return True
 
     # def database__resize(self, sub_command, args):
