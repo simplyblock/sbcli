@@ -783,7 +783,7 @@ commands:
             help: "Disable monitoring stack, false by default"
             dest: disable_monitoring
             type: bool
-            default: false
+            action: store_true
             private: true
           - name: "--strict-node-anti-affinity"
             help: >
