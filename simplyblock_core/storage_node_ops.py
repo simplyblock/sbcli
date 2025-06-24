@@ -426,6 +426,13 @@ def _prepare_cluster_devices_partitions(snode, devices):
                     device_events.device_create(dev)
                 new_devices.append(dev)
 
+    # Partitions for multi-namespace devices are only present for the last iteration of the above loop.
+    # This ensures, that all partitions are known, but it may be redundant with parts of the previous
+    # process
+    for device in devices:
+        rpc_client.bdev_examine(device.nvme_bdev)
+    rpc_client.bdev_wait_for_examine()
+
     snode.nvme_devices = new_devices
 
     if jm_devices:
