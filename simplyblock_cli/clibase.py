@@ -807,6 +807,7 @@ class CLIWrapperBase:
             version=database.version,
             vcpu_count=database.vcpu_count,
             memory=database.memory_size,
+            pvc_name=f"{database.deployment_id}-pvc",
             namespace=database.namespace
         )
         database.status = "running"
@@ -853,13 +854,31 @@ class CLIWrapperBase:
             })
         return utils.print_table(data)
 
-    # def database__clone(self, sub_command, args):
-    #     """
-    #     TODO
-    #     Add a new database entry.
-    #     """
-    #     db = db_controller.DBController()
-    #     return db.add_entry(args.key, args.value)
+    def database__clone(self, sub_command, args):
+        """
+        Clone an existing managed database's PVC to create a new database instance.
+        """
+        database = db_controller.DBController().get_managed_database(args.database_id)
+        if not database:
+            raise ValueError(f"Database with ID {args.database_id} does not exist.")
+        
+        managed_db_ops.create_pvc_clone(clone_name=args.clone_name,
+                                        source_pvc_name=database.pvc_id,
+                                        storage_class=database.storage_class,
+                                        namespace=database.namespace,
+                                        disk_size=database.disk_size,
+                                        )
+        
+        managed_db_ops.start_postgresql_deployment(
+            deployment_name=args.clone_name,
+            version=database.version,
+            vcpu_count=database.vcpu_count,
+            memory=database.memory_size,
+            pvc_name=args.clone_name,
+            namespace=database.namespace,
+        )
+
+        return True
 
     # def database__resize(self, sub_command, args):
     #     """

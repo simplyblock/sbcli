@@ -22,7 +22,7 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     # Create the PersistentVolumeClaim
     v1 = client.CoreV1Api()
     v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
-    start_postgresql_deployment(name, version, vcpu_count, memory, namespace)
+    start_postgresql_deployment(name, version, vcpu_count, memory, f"{name}-pvc",namespace)
 
     db_controller = DBController()
     database = ManagedDatabase()
@@ -39,7 +39,7 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     database.status = "running"
     database.write_to_db(db_controller.kv_store)
 
-def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: int, memory: str, namespace: str = "default"):
+def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default", ):
     # load Kubernetes config
     config.load_kube_config()
 
@@ -190,3 +190,32 @@ def create_pvc_snapshot(snapshot_name: str, pvc_name: str, namespace: str = "def
                 print("Snapshot is not ready yet.")
     except client.exceptions.ApiException as e:
         print(f"Error retrieving snapshot content: {e}")
+
+def create_pvc_clone(clone_name, source_pvc_name, storage_class, disk_size, namespace="default"):
+    # Load Kubernetes config
+    config.load_kube_config()
+
+    # Define the clone PersistentVolumeClaim
+    clone_pvc = client.V1PersistentVolumeClaim(
+        metadata=client.V1ObjectMeta(name=clone_name),
+        spec=client.V1PersistentVolumeClaimSpec(
+            access_modes=["ReadWriteOnce"],
+            resources=client.V1ResourceRequirements(
+                requests={"storage": disk_size}
+            ),
+            storage_class_name=storage_class,
+            data_source=client.V1TypedLocalObjectReference(
+                api_group="",
+                kind="PersistentVolumeClaim",
+                name=source_pvc_name
+            )
+        )
+    )
+
+    # Create the clone PersistentVolumeClaim
+    v1 = client.CoreV1Api()
+    try:
+        v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=clone_pvc)
+        print("PVC clone created successfully.")
+    except client.exceptions.ApiException as e:
+        print(f"Error creating PVC clone: {e}")
