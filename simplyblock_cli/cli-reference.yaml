@@ -1768,25 +1768,6 @@ commands:
             help: "the UUID of that database that needs to be started"
             dest: database_id
             type: str
-      - name: resize
-        help: "resize a database by increasing the disk size or VCPU or RAM"
-        arguments:
-          - name: "database_id"
-            help: "the UUID of that database that needs to be stopped"
-            dest: database_id
-            type: str
-          - name: "--vcpu"
-            help: "the new VCPU count for the database"
-            dest: vcpu
-            type: int
-          - name: "--ram"
-            help: "the new memory of the database"
-            dest: vcpu
-            type: int 
-          - name: "--disk"
-            help: "the new size of the disk for the database. It can decreased to a maximum of 10% of the current size"
-            dest: vcpu
-            type: int
       - name: snapshot
         help: "creates a snapshot of the disk. TODO: need to pause Disk Writes Temporarily"
         arguments:
@@ -1815,4 +1796,30 @@ commands:
           - name: "clone_name"
             help: "Clone name"
             dest: clone_name
+            type: str
+      - name: resize
+        help: "resize a database by increasing the disk size or VCPU or RAM"
+        arguments:
+          - name: "database_id"
+            help: "the UUID of that database that needs to be stopped"
+            dest: database_id
+            type: str
+          - name: "--vcpu"
+            help: "the new VCPU count for the database"
+            dest: vcpu
+            type: int
+          - name: "--ram"
+            help: "the new memory of the database"
+            dest: vcpu
+            type: int 
+          - name: "--disk"
+            help: "the new size of the disk for the database. It can decreased to a maximum of 10% of the current size"
+            dest: vcpu
+            type: int
+      - name: "list-hierarchy"
+        help: "Lists a hierarchy (nesting) of db clones starting from the base db"
+        arguments:
+          - name: "database_id"
+            help: "the UUID of that database"
+            dest: database_id
             type: str

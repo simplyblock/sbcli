@@ -40,6 +40,17 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     database.status = "running"
     database.write_to_db(db_controller.kv_store)
 
+def get_nodes_with_label(label_selector):
+    # Load kubeconfig
+    config.load_kube_config()
+    
+    # Initialize the API client
+    v1 = client.CoreV1Api()
+    
+    # Retrieve nodes with the specified label
+    return v1.list_node(label_selector=label_selector)
+    
+
 def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
     # load Kubernetes config
     config.load_kube_config()
@@ -72,6 +83,55 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
         )]
     )
 
+    # get all kubernetes nodes with label type=simplyblock-storage-plane
+    k8snodes = get_nodes_with_label("type=simplyblock-storage-plane")
+    lvol = DBController().get_lvol_by_name(pvc_name)
+    nodes_ids = lvol.nodes
+
+    primary_storage_node = DBController().get_storage_node_by_id(nodes_ids[0])
+    secondary_storage_node = DBController().get_storage_node_by_id(nodes_ids[1])
+
+    k8snode_primary = ""
+    k8snode_secondary = ""
+
+    for k8snode in k8snodes:
+        if k8snode.metadata.ip == primary_storage_node.mgmt_ip:
+            k8snode_primary = k8snode.metadata.name
+        elif k8snode.metadata.ip == secondary_storage_node.mgmt_ip:
+            k8snode_secondary = k8snode.metadata.name
+
+    pod_affinity = client.V1Affinity(
+        node_affinity=client.V1NodeAffinity(
+            preferred_during_scheduling_ignored_during_execution=[
+                client.V1PreferredSchedulingTerm(
+                    weight=100,
+                    preference=client.V1NodeSelectorTerm(
+                        match_expressions=[
+                            client.V1NodeSelectorRequirement(
+                                key="kubernetes.io/hostname",
+                                operator="In",
+                                values=[k8snode_primary]
+                            )
+                        ]
+                    )
+                )
+            ],
+            required_during_scheduling_ignored_during_execution=client.V1NodeSelector(
+                node_selector_terms=[
+                    client.V1NodeSelectorTerm(
+                        match_expressions=[
+                            client.V1NodeSelectorRequirement(
+                                key="kubernetes.io/hostname",
+                                operator="In",
+                                values=[k8snode_primary, k8snode_secondary]
+                            )
+                        ]
+                    )
+                ]
+            )
+        )
+    )
+
     deployment_spec = client.V1DeploymentSpec(
         replicas=1,
         selector=client.V1LabelSelector(
@@ -81,6 +141,7 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
             metadata=client.V1ObjectMeta(labels={"app": deployment_name}),
             spec=client.V1PodSpec(
                 containers=[container],
+                affinity=pod_affinity,
                 volumes=[client.V1Volume(
                     name="postgres-data",
                     persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(

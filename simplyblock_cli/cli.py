@@ -738,10 +738,11 @@ class CLIWrapper(CLIWrapperBase):
         self.init_database__delete(subparser)
         self.init_database__stop(subparser)
         self.init_database__start(subparser)
-        self.init_database__resize(subparser)
         self.init_database__snapshot(subparser)
         self.init_database__list_snapshots(subparser)
         self.init_database__clone(subparser)
+        self.init_database__resize(subparser)
+        self.init_database__list_hierarchy(subparser)
 
 
     def init_database__add(self, subparser):
@@ -769,13 +770,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'start', 'starts an existing database')
         subcommand.add_argument('database_id', help='the UUID of that database that needs to be started', type=str)
 
-    def init_database__resize(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'resize', 'resize a database by increasing the disk size or VCPU or RAM')
-        subcommand.add_argument('database_id', help='the UUID of that database that needs to be stopped', type=str)
-        argument = subcommand.add_argument('--vcpu', help='the new VCPU count for the database', type=int, dest='vcpu')
-        argument = subcommand.add_argument('--ram', help='the new memory of the database', type=int, dest='vcpu')
-        argument = subcommand.add_argument('--disk', help='the new size of the disk for the database. It can decreased to a maximum of 10%% of the current size', type=int, dest='vcpu')
-
     def init_database__snapshot(self, subparser):
         subcommand = self.add_sub_command(subparser, 'snapshot', 'creates a snapshot of the disk. TODO: need to pause Disk Writes Temporarily')
         subcommand.add_argument('snapshot_name', help='the name of the snapshot', type=str)
@@ -789,6 +783,17 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'clone', 'Clones a database from a snapshot')
         subcommand.add_argument('database_id', help='Database id', type=str)
         subcommand.add_argument('clone_name', help='Clone name', type=str)
+
+    def init_database__resize(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'resize', 'resize a database by increasing the disk size or VCPU or RAM')
+        subcommand.add_argument('database_id', help='the UUID of that database that needs to be stopped', type=str)
+        argument = subcommand.add_argument('--vcpu', help='the new VCPU count for the database', type=int, dest='vcpu')
+        argument = subcommand.add_argument('--ram', help='the new memory of the database', type=int, dest='vcpu')
+        argument = subcommand.add_argument('--disk', help='the new size of the disk for the database. It can decreased to a maximum of 10%% of the current size', type=int, dest='vcpu')
+
+    def init_database__list_hierarchy(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list-hierarchy', 'Lists a hierarchy (nesting) of db clones starting from the base db')
+        subcommand.add_argument('database_id', help='the UUID of that database', type=str)
 
 
     def run(self):
@@ -1118,14 +1123,16 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.database__stop(sub_command, args)
                 elif sub_command in ['start']:
                     ret = self.database__start(sub_command, args)
-                elif sub_command in ['resize']:
-                    ret = self.database__resize(sub_command, args)
                 elif sub_command in ['snapshot']:
                     ret = self.database__snapshot(sub_command, args)
                 elif sub_command in ['list-snapshots']:
                     ret = self.database__list_snapshots(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.database__clone(sub_command, args)
+                elif sub_command in ['resize']:
+                    ret = self.database__resize(sub_command, args)
+                elif sub_command in ['list-hierarchy']:
+                    ret = self.database__list_hierarchy(sub_command, args)
                 else:
                     self.parser.print_help()
 

@@ -882,7 +882,7 @@ class CLIWrapperBase:
 
         cloned_db = ManagedDatabase()
         cloned_db.uuid = str(uuid.uuid4())
-        cloned_db.deployment_id = name
+        cloned_db.deployment_id = args.clone_name
         cloned_db.namespace = database.namespace
         cloned_db.pvc_id = args.clone_name
         cloned_db.type = database.type
