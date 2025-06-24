@@ -778,7 +778,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_database__snapshot(self, subparser):
         subcommand = self.add_sub_command(subparser, 'snapshot', 'creates a snapshot of the disk. TODO: need to pause Disk Writes Temporarily')
-        subcommand.add_argument('name', help='the name of the snapshot', type=str)
+        subcommand.add_argument('snapshot_name', help='the name of the snapshot', type=str)
         subcommand.add_argument('database_id', help='the UUID of that database', type=str)
 
     def init_database__list_snapshots(self, subparser):
