@@ -33,7 +33,7 @@ fi
 
 docker network create monitoring-net -d overlay --attachable
 
-if [[ $DISABLE_MONITORING == false ]]; then
+if [[ "$DISABLE_MONITORING" == "false" ]]; then
    docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
 fi
 
