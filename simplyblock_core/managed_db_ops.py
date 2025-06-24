@@ -1,4 +1,4 @@
-import uuid
+import uuid, time
 from kubernetes import client, config
 from simplyblock_core.models.managed_db import ManagedDatabase
 from simplyblock_core.db_controller import DBController
@@ -170,3 +170,23 @@ def create_pvc_snapshot(snapshot_name: str, pvc_name: str, namespace: str = "def
         print("Snapshot created successfully.")
     except client.exceptions.ApiException as e:
         print(f"Error creating snapshot: {e}")
+
+    # get SNAPSHOTCONTENT of the above created snapshot
+    time.sleep(5)
+    try:
+        snapshot_content = snapshot_api.get_namespaced_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural="volumesnapshots",
+            name=snapshot_name
+        )
+        print(f"Snapshot content: {snapshot_content}")
+        if 'status' in snapshot_content and 'readyToUse' in snapshot_content['status']:
+            snapshot_content = snapshot_content['status']['boundVolumeSnapshotContentName']
+            if snapshot_content:
+                return snapshot_content
+            else:
+                print("Snapshot is not ready yet.")
+    except client.exceptions.ApiException as e:
+        print(f"Error retrieving snapshot content: {e}")

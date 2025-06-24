@@ -821,16 +821,37 @@ class CLIWrapperBase:
             raise ValueError(f"Database with ID {args.database_id} does not exist.")
 
         snapshot_name = args.snapshot_name or f"{database.deployment_id}-snapshot-{int(time.time())}"
-        managed_db_ops.create_pvc_snapshot(snapshot_name, database.pvc_id, database.namespace)
+        snapshot_id = managed_db_ops.create_pvc_snapshot(snapshot_name, database.pvc_id, database.namespace)
+        if not snapshot_id:
+            raise ValueError(f"Failed to create snapshot for database {database.deployment_id}.")        
+
+        database.snapshots.append({
+            "snapshot_id": snapshot_id,
+            "snapshot_name": snapshot_name,
+            "timestamp": int(time.time())
+        })
+        database.write_to_db()
         return True
 
-    # def database__list_snapshots(self, sub_command, args):
-    #     """
-    #     TODO
-    #     Add a new database entry.
-    #     """
-    #     db = db_controller.DBController()
-    #     return db.add_entry(args.key, args.value)
+    def database__list_snapshots(self, sub_command, args):
+        """
+        List all snapshots of a managed database's PVC.
+        """
+        database = db_controller.DBController().get_managed_database(args.database_id)
+        if not database:
+            raise ValueError(f"Database with ID {args.database_id} does not exist.")
+        
+        if not database.snapshots:
+            return "No snapshots found for this database."
+        
+        data = []
+        for snapshot in database.snapshots:
+            data.append({
+                "Snapshot ID": snapshot["snapshot_id"],
+                "Snapshot Name": snapshot["snapshot_name"],
+                "Timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(snapshot["timestamp"]))
+            })
+        return utils.print_table(data)
 
     # def database__clone(self, sub_command, args):
     #     """
