@@ -107,8 +107,9 @@ def add_node_to_auto_restart(node):
 
 
 def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
-    cluster = db.get_cluster_by_id(cluster_id)
-    if not cluster:
+    try:
+        db.get_cluster_by_id(cluster_id)
+    except KeyError:
         logger.error("Cluster not found: %s", cluster_id)
         return False
 

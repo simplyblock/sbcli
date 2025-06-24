@@ -783,8 +783,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         db_controller = DBController()
         kv_store = db_controller.kv_store
 
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-        if not cluster:
+        try:
+            cluster = db_controller.get_cluster_by_id(cluster_id)
+        except KeyError:
             logger.error("Cluster not found: %s", cluster_id)
             return False
 

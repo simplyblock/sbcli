@@ -26,8 +26,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
+    try:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
         logger.error("Cluster not found: %s", cluster_id)
         return False
 
@@ -244,8 +245,9 @@ def recreate(node_id):
         logger.error(f"Can not find caching node: {node_id}")
         return False
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    if not cluster:
+    try:
+        db_controller.get_cluster_by_id(snode.cluster_id)
+    except KeyError:
         logger.error("Cluster not found: %s", snode.cluster_id)
         return False
 

@@ -285,11 +285,11 @@ class DBController(metaclass=Singleton):
     def get_clusters(self) -> List[Cluster]:
         return Cluster().read_from_db(self.kv_store)
 
-    def get_cluster_by_id(self, cluster_id) -> Optional[Cluster]:
+    def get_cluster_by_id(self, cluster_id) -> Cluster:
         ret = Cluster().read_from_db(self.kv_store, id=cluster_id)
-        if ret:
-            return ret[0]
-        return None
+        if not ret:
+            raise KeyError(f'Cluster {cluster_id} not found')
+        return ret[0]
 
     def get_deployers(self) -> List[Deployer]:
         return Deployer().read_from_db(self.kv_store)
