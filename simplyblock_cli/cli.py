@@ -946,7 +946,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
                         args.enable_qos = False
-                        args.disable_monitoring = None
+                        args.disable_monitoring = False
                     ret = self.cluster__create(sub_command, args)
                 elif sub_command in ['add']:
                     if not self.developer_mode:
