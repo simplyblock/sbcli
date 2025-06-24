@@ -2991,8 +2991,12 @@ def recreate_lvstore(snode):
             time.sleep(3)
 
             ### 3- block secondary port
-            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
+            if not sec_rpc_client.bdev_lvol_block_data_port(snode.lvstore):
+                logger.error(f'Failed to block data port on {sec_node.get_id()}')
+                return False
+
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
+            time.sleep(1.)
 
             # time.sleep(0.2)
             ### 4- set leadership to false
