@@ -107,9 +107,9 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
             continue
 
         if primary_storage_node.mgmt_ip in node_ips:
-            k8snode_primary = primary_storage_node.mgmt_ip
+            k8snode_primary = k8snode.metadata.name
         elif secondary_storage_node.mgmt_ip in node_ips:
-            k8snode_secondary = secondary_storage_node.mgmt_ip
+            k8snode_secondary = k8snode.metadata.name
 
 
     pod_affinity = client.V1Affinity(
