@@ -1083,3 +1083,8 @@ class RPCClient:
             "policy": policy,
         }
         return self._request("bdev_nvme_set_multipath_policy", params)
+
+    def bdev_lvol_block_data_port(self, lvs):
+        return self._request("bdev_lvol_block_data_port", {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+        })
