@@ -316,11 +316,10 @@ class DBController(metaclass=Singleton):
 
     def get_managed_database(self, uuid_or_name: str) -> ManagedDatabase:
         ret = self.get_managed_databases()
-        dbs = []
         for db in ret:
             if db.uuid == uuid_or_name or db.name == uuid_or_name:
-                dbs.append(db)
-        return dbs
+                return db
+        return None
 
     def get_managed_databases(self) -> List[ManagedDatabase]:
         return ManagedDatabase().read_from_db(self.kv_store)

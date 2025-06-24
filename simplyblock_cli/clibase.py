@@ -728,7 +728,7 @@ class CLIWrapperBase:
         if args.type == "postgresql":
             db = db_controller.DBController()
             db = db.get_managed_database(args.name)
-            if len(db) > 0:
+            if db:
                 raise ValueError(f"Database with name {args.name} already exists.")
             
             managed_db_ops.create_postgresql_deployment(
@@ -770,41 +770,38 @@ class CLIWrapperBase:
         """
         Deletes a managed database.
         """
-        db = db_controller.DBController()
-        db = db.get_managed_database(args.database_id)
+        database = db_controller.DBController().get_managed_database(args.database_id)
         managed_db_ops.delete_postgresql_resources(
-            deployment_name=db.deployment_id,
-            pvc_name=db.pvc_id,
+            deployment_name=database.deployment_id,
+            pvc_name=database.pvc_id,
         )
-        return db.remove(db_controller.DBController().kv_store)
+        return database.remove(db_controller.DBController().kv_store)
 
     def database__stop(self, sub_command, args):
         """
         Add a new database entry.
         """
-        db = db_controller.DBController()
-        db = db.get_managed_database(args.database_id)
+        database = db_controller.DBController().get_managed_database(args.database_id)
         managed_db_ops.stop_postgresql_deployment(
-            deployment_name=db.deployment_id
+            deployment_name=database.deployment_id
         )
-        db.status = "stopped"
-        return db.write_to_db()
+        database.status = "stopped"
+        return database.write_to_db()
 
     def database__start(self, sub_command, args):
         """
         Add a new database entry.
         """
-        db = db_controller.DBController()
-        db = db.get_managed_database(args.uuid)
+        database = db_controller.DBController().get_managed_database(args.database_id)
         managed_db_ops.start_postgresql_deployment(
-            deployment_name=db.deployment_id,
-            version=db.version,
-            vcpu_count=db.vcpu_count,
-            memory=db.memory_size,
-            namespace=db.namespace
+            deployment_name=database.deployment_id,
+            version=database.version,
+            vcpu_count=database.vcpu_count,
+            memory=database.memory_size,
+            namespace=database.namespace
         )
-        db.status = "running"
-        return db.write_to_db()
+        database.status = "running"
+        return database.write_to_db()
 
     # def database__snapshot(self, sub_command, args):
     #     """
