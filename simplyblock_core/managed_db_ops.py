@@ -31,7 +31,7 @@ def create_postgresql_deployment(name, storage_class, disk_size, postgres_versio
 
     # Create the PersistentVolumeClaim
     v1 = client.CoreV1Api()
-    v1.create_namespaced_persistent_volume_claim(namespace="default", body=pvc)
+    v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
 
     # Define PostgreSQL Deployment
     container = client.V1Container(
@@ -87,6 +87,7 @@ def create_postgresql_deployment(name, storage_class, disk_size, postgres_versio
     database = ManagedDatabase()
     database.uuid = str(uuid.uuid4())
     database.deployment_id = name
+    database.namespace = namespace
     database.pvc_id = f"{name}-pvc"
     database.type = "postgresql"
     database.version = postgres_version
@@ -98,19 +99,19 @@ def create_postgresql_deployment(name, storage_class, disk_size, postgres_versio
     database.write_to_db(db_controller.kv_store)
 
 
-def stop_postgresql_deployment():
+def stop_postgresql_deployment(deployment_name: str, namespace: str = "default"):
     # Load Kubernetes config
     config.load_kube_config()
 
     # Delete the Deployment
     apps_v1 = client.AppsV1Api()
     try:
-        apps_v1.delete_namespaced_deployment(name="postgres", namespace="default")
+        apps_v1.delete_namespaced_deployment(deployment_name, namespace=namespace)
         print("Deployment stopped.")
     except client.exceptions.ApiException as e:
         print(f"Error stopping deployment: {e}")
 
-def delete_postgresql_resources():
+def delete_postgresql_resources(deployment_name: str, pvc_name: str, namespace: str = "default"):
     # Load Kubernetes config
     config.load_kube_config()
 
@@ -118,19 +119,19 @@ def delete_postgresql_resources():
     apps_v1 = client.AppsV1Api()
     core_v1 = client.CoreV1Api()
     try:
-        apps_v1.delete_namespaced_deployment(name="postgres", namespace="default")
+        apps_v1.delete_namespaced_deployment(deployment_name, namespace=namespace)
         print("Deployment deleted.")
     except client.exceptions.ApiException as e:
         print(f"Error deleting deployment: {e}")
 
     # Delete the PersistentVolumeClaim
     try:
-        core_v1.delete_namespaced_persistent_volume_claim(name="postgres-pvc", namespace="default")
+        core_v1.delete_namespaced_persistent_volume_claim(name=pvc_name, namespace=namespace)
         print("PersistentVolumeClaim deleted.")
     except client.exceptions.ApiException as e:
         print(f"Error deleting PVC: {e}")
 
-def create_pvc_snapshot(snapshot_name):
+def create_pvc_snapshot(snapshot_name: str, pvc_name: str, namespace: str = "default"):
     # Load Kubernetes config
     config.load_kube_config()
 
@@ -138,7 +139,6 @@ def create_pvc_snapshot(snapshot_name):
     snapshot_api = client.CustomObjectsApi()
     group = "snapshot.storage.k8s.io"
     version = "v1"
-    namespace = "default"
     plural = "volumesnapshots"
 
     snapshot_body = {
@@ -149,7 +149,7 @@ def create_pvc_snapshot(snapshot_name):
         },
         "spec": {
             "source": {
-                "persistentVolumeClaimName": "postgres-pvc"
+                "persistentVolumeClaimName": pvc_name
             }
         }
     }
@@ -166,12 +166,5 @@ def create_pvc_snapshot(snapshot_name):
     except client.exceptions.ApiException as e:
         print(f"Error creating snapshot: {e}")
 
-# if __name__ == "__main__":
-#     # Example configuration
-#     storage_class = "simplyblock-csi-sc"
-#     disk_size = "10Gi"
-#     postgres_version = "14"
-#     vcpu_count = 1
-#     memory = "512Mi"
-
-#     create_postgresql_deployment(storage_class, disk_size, postgres_version, vcpus, memory)
+    # save this snapshot in DB
+    

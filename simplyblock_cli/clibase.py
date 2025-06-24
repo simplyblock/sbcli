@@ -753,7 +753,8 @@ class CLIWrapperBase:
         data = []
         for database in databases:
             data.append({
-                "DeploymentID": database.deployment_id,
+                "ID": database.uuid,
+                "DeploymentName": database.deployment_id,
                 "Type": database.type,
                 "Status": database.status,
                 "Version": database.version,
@@ -767,12 +768,15 @@ class CLIWrapperBase:
 
     def database__delete(self, sub_command, args):
         """
-        TODO
-        Add a new database entry.
+        Deletes a managed database.
         """
         db = db_controller.DBController()
-        # remove both the deployment, PVC and database entry
-        return db.add_entry(args.key, args.value)
+        db = db.get_managed_database(args.uuid)
+        managed_db_ops.delete_postgresql_resources(
+            deployment_name=db.deployment_id,
+            pvc_name=db.pvc_id,
+        )
+        return db.remove(db_controller.DBController().kv_store)
 
     def database__stop(self, sub_command, args):
         """
@@ -783,34 +787,35 @@ class CLIWrapperBase:
         # just remove the deployment and mark the status as stopped
         return db.add_entry(args.key, args.value)
 
-    def database__snapshot(self, sub_command, args):
-        """
-        TODO
-        Add a new database entry.
-        """
-        db = db_controller.DBController()
-        return db.add_entry(args.key, args.value)
+    # def database__snapshot(self, sub_command, args):
+    #     """
+    #     TODO
+    #     Add a new database entry.
+    #     """
+    #     db = db_controller.DBController()
+    #     managed_db_ops.create_pvc_snapshot("test-snapshot", db.)
+    #     return db.add_entry(args.key, args.value)
 
-    def database__list_snapshots(self, sub_command, args):
-        """
-        TODO
-        Add a new database entry.
-        """
-        db = db_controller.DBController()
-        return db.add_entry(args.key, args.value)
+    # def database__list_snapshots(self, sub_command, args):
+    #     """
+    #     TODO
+    #     Add a new database entry.
+    #     """
+    #     db = db_controller.DBController()
+    #     return db.add_entry(args.key, args.value)
 
-    def database__clone(self, sub_command, args):
-        """
-        TODO
-        Add a new database entry.
-        """
-        db = db_controller.DBController()
-        return db.add_entry(args.key, args.value)
+    # def database__clone(self, sub_command, args):
+    #     """
+    #     TODO
+    #     Add a new database entry.
+    #     """
+    #     db = db_controller.DBController()
+    #     return db.add_entry(args.key, args.value)
 
-    def database__resize(self, sub_command, args):
-        """
-        TODO
-        Add a new database entry.
-        """
-        db = db_controller.DBController()
-        return db.add_entry(args.key, args.value)
+    # def database__resize(self, sub_command, args):
+    #     """
+    #     TODO
+    #     Add a new database entry.
+    #     """
+    #     db = db_controller.DBController()
+    #     return db.add_entry(args.key, args.value)

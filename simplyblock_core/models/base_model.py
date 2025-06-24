@@ -15,6 +15,7 @@ class BaseModel(object):
     id: str = ""
     uuid: str = ""
     name: str = ""
+    namespace: str = ""
     status: str = ""
     deleted: bool = False
     updated_at: str = ""

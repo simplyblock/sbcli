@@ -16,6 +16,7 @@ class ManagedDatabase(BaseModel):
     memory_size: str = ""
     disk_size: str = ""
     storage_class: str = ""
+    snapshots: List[str] = []
     status: str = ""
 
     def get_clean_dict(self):
