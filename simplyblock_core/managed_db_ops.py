@@ -25,6 +25,7 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
     # wait for the PVC to be created
     print(f"Waiting for PVC {pvc_name} to be created...")
+    time.sleep(10)
     start_postgresql_deployment(name, version, vcpu_count, memory, pvc_name, namespace)
 
     db_controller = DBController()
@@ -100,11 +101,16 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
     k8snode_primary = ""
     k8snode_secondary = ""
 
-    for k8snode in k8snodes:
-        if k8snode.metadata.ip == primary_storage_node.mgmt_ip:
-            k8snode_primary = k8snode.metadata.name
-        elif k8snode.metadata.ip == secondary_storage_node.mgmt_ip:
-            k8snode_secondary = k8snode.metadata.name
+    for k8snode in k8snodes.items:
+        node_ips = [addr.address for addr in k8snode.status.addresses if addr.type == "InternalIP"]
+        if not node_ips:
+            continue
+
+        if primary_storage_node.mgmt_ip in node_ips:
+            k8snode_primary = primary_storage_node.mgmt_ip
+        elif secondary_storage_node.mgmt_ip in node_ips:
+            k8snode_secondary = secondary_storage_node.mgmt_ip
+
 
     pod_affinity = client.V1Affinity(
         node_affinity=client.V1NodeAffinity(
