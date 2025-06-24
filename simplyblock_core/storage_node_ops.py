@@ -1502,12 +1502,6 @@ def restart_storage_node(
     if spdk_image:
         snode.spdk_image = spdk_image
 
-    # Calculate pool count
-
-    number_of_alceml_devices = snode.number_of_alceml_devices
-    #small_pool_count, large_pool_count = utils.calculate_pool_count(
-    #    number_of_alceml_devices, snode.number_of_distribs * 2, snode.cpu, len(snode.poller_cpu_cores) or snode.cpu)
-
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(snode.iobuf_small_pool_count, snode.iobuf_large_pool_count, snode.max_lvol,
                                                           snode.max_prov,
@@ -3108,6 +3102,10 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     lvol_obj.io_error = False
     lvol_obj.health_check = True
     lvol_obj.write_to_db()
+    # set QOS
+    if lvol.rw_ios_per_sec or lvol.rw_mbytes_per_sec or lvol.r_mbytes_per_sec or lvol.w_mbytes_per_sec :
+        lvol_controller.set_lvol(lvol.uuid, lvol.rw_ios_per_sec, lvol.rw_mbytes_per_sec,
+                 lvol.r_mbytes_per_sec , lvol.w_mbytes_per_sec)
     return True, None
 
 

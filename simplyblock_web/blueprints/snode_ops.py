@@ -597,8 +597,8 @@ def firewall_set_port(body: _FirewallParams):
         'type': 'string'
     })}}},
 })
-def get_firewall(body: utils.RPCPortParams):
-    ret = node_utils.firewall_get(str(body.rpc_port))
+def get_firewall(query: utils.RPCPortParams):
+    ret = node_utils.firewall_get(str(query.rpc_port))
     return utils.get_response(ret)
 
 

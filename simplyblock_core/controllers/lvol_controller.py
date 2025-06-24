@@ -936,6 +936,17 @@ def delete_lvol(id_or_name, force_delete=False):
             logger.error(msg)
             return False, msg
 
+        # 1- delete subsystem from secondary
+        if secondary_node:
+            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
+            if secondary_node.status == StorageNode.STATUS_ONLINE:
+                logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
+                secondary_rpc_client = secondary_node.rpc_client()
+                ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
+                if not ret:
+                    logger.warning(f"Failed to delete subsystem from node: {secondary_node.get_id()}")
+
+        # 2- delete subsystem and lvol bdev from primary
         if primary_node:
 
             ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
@@ -944,6 +955,7 @@ def delete_lvol(id_or_name, force_delete=False):
                 if not force_delete:
                     return False
 
+        # 3- delete lvol bdev from secondary
         if secondary_node:
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
