@@ -234,9 +234,10 @@ def delete_lvol(uuid):
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
-    pool = db.get_pool_by_id(lvol.pool_uuid)
-    if not pool:
-        return utils.get_response_error(f"Pool not found: {uuid}", 404)
+    try:
+        pool = db.get_pool_by_id(lvol.pool_uuid)
+    except KeyError:
+        return utils.get_response_error(f"Pool not found: {lvol.pool_uuid}", 404)
 
     if pool.status == pool.STATUS_INACTIVE:
         return utils.get_response_error("Pool is disabled", 400)

@@ -357,8 +357,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.error(msg)
         return False, msg
 
-    pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
-    if not pool:
+    try:
+        pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
+    except KeyError:
         msg=f"Pool not found: {snap.lvol.pool_uuid}"
         logger.error(msg)
         return False, msg

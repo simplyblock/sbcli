@@ -22,10 +22,13 @@ db = db_controller.DBController()
 def list_pools(uuid):
     cluster_id = utils.get_cluster_id(request)
     if uuid:
-        pool = db.get_pool_by_id(uuid)
-        if pool and pool.cluster_id == cluster_id:
-            pools = [pool]
-        else:
+        try:
+            pool = db.get_pool_by_id(uuid)
+            if pool.cluster_id == cluster_id:
+                pools = [pool]
+            else:
+                return utils.get_response_error(f"Pool not found: {uuid}", 404)
+        except KeyError:
             return utils.get_response_error(f"Pool not found: {uuid}", 404)
     else:
         pools = db.get_pools(cluster_id)
@@ -91,8 +94,9 @@ def add_pool():
 
 @bp.route('/pool/<string:uuid>', methods=['DELETE'])
 def delete_pool(uuid):
-    pool = db.get_pool_by_id(uuid)
-    if not pool:
+    try:
+        pool = db.get_pool_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
     if pool.status == Pool.STATUS_INACTIVE:
@@ -115,8 +119,9 @@ def delete_pool(uuid):
 
 @bp.route('/pool/<string:uuid>', methods=['PUT'])
 def update_pool(uuid):
-    pool = db.get_pool_by_id(uuid)
-    if not pool:
+    try:
+        pool = db.get_pool_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
     if pool.status == Pool.STATUS_INACTIVE:
@@ -161,8 +166,9 @@ def update_pool(uuid):
 
 @bp.route('/pool/capacity/<string:uuid>', methods=['GET'])
 def pool_capacity(uuid):
-    pool = db.get_pool_by_id(uuid)
-    if not pool:
+    try:
+        pool = db.get_pool_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
     if pool.secret:
@@ -193,8 +199,9 @@ def pool_capacity(uuid):
 @bp.route('/pool/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/pool/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def pool_iostats(uuid, history):
-    pool = db.get_pool_by_id(uuid)
-    if not pool:
+    try:
+        pool = db.get_pool_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
     if pool.secret:
@@ -224,8 +231,9 @@ def pool_iostats(uuid, history):
 
 @bp.route('/pool/iostats-all-lvols/<string:pool_uuid>', methods=['GET'])
 def lvol_iostats(pool_uuid):
-    pool = db.get_pool_by_id(pool_uuid)
-    if not pool:
+    try:
+        db.get_pool_by_id(pool_uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {pool_uuid}", 404)
 
     ret = []

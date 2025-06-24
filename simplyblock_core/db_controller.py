@@ -145,11 +145,11 @@ class DBController(metaclass=Singleton):
             pools = Pool().read_from_db(self.kv_store)
         return pools
 
-    def get_pool_by_id(self, id) -> Optional[Pool]:
+    def get_pool_by_id(self, id) -> Pool:
         ret = Pool().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
-        return None
+        if not ret:
+            raise KeyError(f'Pool {id} not found')
+        return ret[0]
 
     def get_pool_by_name(self, name) -> Optional[Pool]:
         pools = Pool().read_from_db(self.kv_store)
