@@ -143,14 +143,16 @@ def create_pvc_snapshot(snapshot_name: str, pvc_name: str, namespace: str = "def
     group = "snapshot.storage.k8s.io"
     version = "v1"
     plural = "volumesnapshots"
+    snapshot_class_name = "simplyblock-csi-snapshotclass"
 
     snapshot_body = {
-        "apiVersion": "snapshot.storage.k8s.io/v1",
+        "apiVersion": f"{group}/{version}",
         "kind": "VolumeSnapshot",
         "metadata": {
             "name": snapshot_name
         },
         "spec": {
+            "volumeSnapshotClassName": snapshot_class_name,
             "source": {
                 "persistentVolumeClaimName": pvc_name
             }
@@ -168,5 +170,3 @@ def create_pvc_snapshot(snapshot_name: str, pvc_name: str, namespace: str = "def
         print("Snapshot created successfully.")
     except client.exceptions.ApiException as e:
         print(f"Error creating snapshot: {e}")
-
-    # save this snapshot in DB

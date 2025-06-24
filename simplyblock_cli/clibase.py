@@ -814,14 +814,15 @@ class CLIWrapperBase:
 
     def database__snapshot(self, sub_command, args):
         """
-        TODO
-        Add a new database entry.
+        create a new snapshot of a managed database's PVC.
         """
         database = db_controller.DBController().get_managed_database(args.database_id)
         if not database:
             raise ValueError(f"Database with ID {args.database_id} does not exist.")
 
-        managed_db_ops.create_pvc_snapshot("test-snapshot", database.pvc_id, database.namespace)
+        snapshot_name = args.snapshot_name or f"{database.deployment_id}-snapshot-{int(time.time())}"
+        managed_db_ops.create_pvc_snapshot(snapshot_name, database.pvc_id, database.namespace)
+        return True
 
     # def database__list_snapshots(self, sub_command, args):
     #     """
