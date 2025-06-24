@@ -1808,24 +1808,11 @@ commands:
       - name: clone
         help: "Clones a database from a snapshot"
         arguments:
-          - name: "snapshot_id"
-            help: "Snapshot id"
-            dest: snapshot_id
+          - name: "database_id"
+            help: "Database id"
+            dest: database_id
             type: str
           - name: "clone_name"
             help: "Clone name"
             dest: clone_name
-            type: str
-          - name: "--resize"
-            help: "New database size, default is 100G"
-            dest: resize
-            type: str
-            default: "100G"
-          - name: "--vcpu_count"
-            help: "VCPU count for the database, default is 2"
-            dest: vcpu_count
-            type: int
-          - name: "--ram"
-            help: "the amount of RAM for the database, default is 2G"
-            dest: ram
             type: str
