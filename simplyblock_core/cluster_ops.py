@@ -359,8 +359,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
 
     if cluster.status == Cluster.STATUS_ACTIVE:
         logger.warning("Cluster is ACTIVE")
@@ -471,8 +469,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
-        if cluster is None:
-            raise KeyError(f"Cluster not found {cl_id}")
         cluster.cluster_max_size = max_size
         cluster.cluster_max_devices = dev_count
         cluster.cluster_max_nodes = len(online_nodes)
@@ -484,8 +480,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
 def cluster_expand(cl_id) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
 
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_IN_EXPANSION,
                               Cluster.STATUS_READONLY, Cluster.STATUS_DEGRADED]:
@@ -536,9 +530,7 @@ def cluster_expand(cl_id) -> None:
 
 def get_cluster_status(cl_id) -> t.List[dict]:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
+    db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     return sorted([
         {
@@ -559,8 +551,6 @@ def get_cluster_status(cl_id) -> t.List[dict]:
 def set_cluster_status(cl_id, status) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
 
     if cluster.status == status:
         return
@@ -574,8 +564,6 @@ def set_cluster_status(cl_id, status) -> None:
 def cluster_set_read_only(cl_id) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
 
     if cluster.status == Cluster.STATUS_READONLY:
         return
@@ -595,8 +583,6 @@ def cluster_set_read_only(cl_id) -> None:
 def cluster_set_active(cl_id) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
 
     if cluster.status == Cluster.STATUS_ACTIVE:
         return
@@ -641,8 +627,6 @@ def list() -> t.List[dict]:
 def list_all_info(cluster_id) -> str:
     db_controller = DBController()
     cl = db_controller.get_cluster_by_id(cluster_id)
-    if not cl:
-        raise KeyError(f"Cluster not found {cluster_id}")
 
     mt = db_controller.get_mgmt_nodes()
     mt_online = [m for m in mt if m.status == MgmtNode.STATUS_ONLINE]
@@ -848,8 +832,6 @@ def list_all_info(cluster_id) -> str:
 def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cluster_id}")
 
     if history:
         records_number = utils.parse_history_param(history)
@@ -875,8 +857,6 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
 def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> t.List[dict]:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cluster_id}")
 
     if history_string:
         records_number = utils.parse_history_param(history_string)
@@ -929,28 +909,18 @@ def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes
 
 def get_ssh_pass(cluster_id) -> str:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cluster_id}")
-
-    return cluster.cli_pass
+    return db_controller.get_cluster_by_id(cluster_id).cli_pass
 
 
 def get_secret(cluster_id) -> str:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cluster_id}")
-
-    return cluster.secret
+    return db_controller.get_cluster_by_id(cluster_id).secret
 
 
 def set_secret(cluster_id, secret) -> None:
     db_controller = DBController()
 
     cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cluster_id}")
 
     secret = secret.strip()
     if len(secret) < 20:
@@ -964,9 +934,7 @@ def set_secret(cluster_id, secret) -> None:
 
 def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cluster_id}")
+    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
     out = []
@@ -1001,19 +969,12 @@ def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
 
 
 def get_cluster(cl_id) -> dict:
-    db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
-
-    return cluster.get_clean_dict()
+    return DBController().get_cluster_by_id(cl_id).get_clean_dict()
 
 
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cluster_id}")
+    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
     sbcli=constants.SIMPLY_BLOCK_CLI_NAME
     subprocess.check_call(f"pip install {sbcli} --upgrade".split(' '))
@@ -1071,9 +1032,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
 
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
+    db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
@@ -1087,9 +1046,7 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
 
 def cluster_grace_shutdown(cl_id) -> None:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
+    db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
@@ -1103,8 +1060,6 @@ def cluster_grace_shutdown(cl_id) -> None:
 def delete_cluster(cl_id) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if nodes:
@@ -1125,8 +1080,6 @@ def delete_cluster(cl_id) -> None:
 def set(cl_id, attr, value) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
-    if not cluster:
-        raise KeyError(f"Cluster not found {cl_id}")
 
     if attr not in cluster.get_attrs_map():
         raise KeyError('Attribute not found')

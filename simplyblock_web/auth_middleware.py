@@ -40,8 +40,9 @@ def token_required(f):
             }, 401, headers
         try:
             db_controller = DBController()
-            cluster = db_controller.get_cluster_by_id(cluster_id)
-            if not cluster:
+            try:
+                cluster = db_controller.get_cluster_by_id(cluster_id)
+            except KeyError:
                 return {
                     "message": "Invalid Cluster ID",
                     "data": None,
