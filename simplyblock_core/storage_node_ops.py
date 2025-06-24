@@ -783,8 +783,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         db_controller = DBController()
         kv_store = db_controller.kv_store
 
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-        if not cluster:
+        try:
+            cluster = db_controller.get_cluster_by_id(cluster_id)
+        except KeyError:
             logger.error("Cluster not found: %s", cluster_id)
             return False
 
@@ -3102,6 +3103,10 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     lvol_obj.io_error = False
     lvol_obj.health_check = True
     lvol_obj.write_to_db()
+    # set QOS
+    if lvol.rw_ios_per_sec or lvol.rw_mbytes_per_sec or lvol.r_mbytes_per_sec or lvol.w_mbytes_per_sec :
+        lvol_controller.set_lvol(lvol.uuid, lvol.rw_ios_per_sec, lvol.rw_mbytes_per_sec,
+                 lvol.r_mbytes_per_sec , lvol.w_mbytes_per_sec)
     return True, None
 
 

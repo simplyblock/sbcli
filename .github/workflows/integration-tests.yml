@@ -12,12 +12,36 @@ jobs:
   await-python-checks:
     name: Await Python checks
     runs-on: ubuntu-latest
-    steps:
-      - name: Wait for Python checks to be completed
+    steps:  # `running-workflow-name` not working, await all checks individually
+      - name: Wait for cli.py check
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'Ensure cli.py is up to date'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
+      - name: Wait for unittests
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'Unit tests'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
+      - name: Wait for linter
         uses: lewagon/wait-on-check-action@v1.3.4
         with:
           ref: ${{ github.head_ref || github.ref_name }}
           check-name: 'Linter'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
+      - name: Wait for type checker
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'Type checker'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 10
 
