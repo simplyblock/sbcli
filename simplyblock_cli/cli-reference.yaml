@@ -1092,6 +1092,12 @@ commands:
             type: bool
             default: false
             private: true
+          - name: "--disable-monitoring"
+            help: "Disable monitoring stack, false by default"
+            dest: disable_monitoring
+            type: bool
+            action: store_true
+            private: true
           - name: "--strict-node-anti-affinity"
             help: >
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This

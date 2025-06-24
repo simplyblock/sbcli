@@ -822,6 +822,7 @@ class CLIWrapperBase:
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
+        disable_monitoring = args.disable_monitoring
         strict_node_anti_affinity = args.strict_node_anti_affinity
 
         return cluster_ops.create_cluster(
