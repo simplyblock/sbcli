@@ -771,7 +771,7 @@ class CLIWrapperBase:
         Deletes a managed database.
         """
         db = db_controller.DBController()
-        db = db.get_managed_database(args.uuid)
+        db = db.get_managed_database(args.database_id)
         managed_db_ops.delete_postgresql_resources(
             deployment_name=db.deployment_id,
             pvc_name=db.pvc_id,
@@ -780,12 +780,31 @@ class CLIWrapperBase:
 
     def database__stop(self, sub_command, args):
         """
-        TODO
         Add a new database entry.
         """
         db = db_controller.DBController()
-        # just remove the deployment and mark the status as stopped
-        return db.add_entry(args.key, args.value)
+        db = db.get_managed_database(args.database_id)
+        managed_db_ops.stop_postgresql_deployment(
+            deployment_name=db.deployment_id
+        )
+        db.status = "stopped"
+        return db.write_to_db()
+
+    def database__start(self, sub_command, args):
+        """
+        Add a new database entry.
+        """
+        db = db_controller.DBController()
+        db = db.get_managed_database(args.uuid)
+        managed_db_ops.start_postgresql_deployment(
+            deployment_name=db.deployment_id,
+            version=db.version,
+            vcpu_count=db.vcpu_count,
+            memory=db.memory_size,
+            namespace=db.namespace
+        )
+        db.status = "running"
+        return db.write_to_db()
 
     # def database__snapshot(self, sub_command, args):
     #     """

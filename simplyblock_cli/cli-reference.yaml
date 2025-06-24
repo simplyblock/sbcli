@@ -1761,6 +1761,13 @@ commands:
             help: "the UUID of that database that needs to be stopped"
             dest: database_id
             type: str
+      - name: start
+        help: "starts an existing database"
+        arguments:
+          - name: "database_id"
+            help: "the UUID of that database that needs to be started"
+            dest: database_id
+            type: str
       - name: resize
         help: "resize a database by increasing the disk size or VCPU or RAM"
         arguments:

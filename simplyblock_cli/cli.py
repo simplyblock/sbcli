@@ -737,6 +737,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_database__list(subparser)
         self.init_database__delete(subparser)
         self.init_database__stop(subparser)
+        self.init_database__start(subparser)
         self.init_database__resize(subparser)
         self.init_database__snapshot(subparser)
         self.init_database__list_snapshots(subparser)
@@ -763,6 +764,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_database__stop(self, subparser):
         subcommand = self.add_sub_command(subparser, 'stop', 'stops deletes a database')
         subcommand.add_argument('database_id', help='the UUID of that database that needs to be stopped', type=str)
+
+    def init_database__start(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'start', 'starts an existing database')
+        subcommand.add_argument('database_id', help='the UUID of that database that needs to be started', type=str)
 
     def init_database__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'resize a database by increasing the disk size or VCPU or RAM')
@@ -1114,6 +1119,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.database__delete(sub_command, args)
                 elif sub_command in ['stop']:
                     ret = self.database__stop(sub_command, args)
+                elif sub_command in ['start']:
+                    ret = self.database__start(sub_command, args)
                 elif sub_command in ['resize']:
                     ret = self.database__resize(sub_command, args)
                 elif sub_command in ['snapshot']:
