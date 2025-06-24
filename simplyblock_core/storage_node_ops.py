@@ -2175,6 +2175,7 @@ def suspend_storage_node(node_id, force=False):
                 rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
     # else:
+    sec_node = None
     try:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         if sec_node.status == StorageNode.STATUS_ONLINE:
@@ -2186,8 +2187,6 @@ def suspend_storage_node(node_id, force=False):
                         ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
                             lvol.nqn, iface.ip4_address, lvol.subsys_port, False, ana="inaccessible")
             time.sleep(1)
-            # sec_node_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
-            # sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     except KeyError:
         pass
 
@@ -2196,7 +2195,6 @@ def suspend_storage_node(node_id, force=False):
             if iface.ip4_address:
                 ret = rpc_client.listeners_del(
                     lvol.nqn, iface.get_transport_type(), iface.ip4_address, lvol.subsys_port)
-    # time.sleep(1)
 
     rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
