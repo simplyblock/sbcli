@@ -24,8 +24,6 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     v1 = client.CoreV1Api()
     v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
     # wait for the PVC to be created
-    print(f"Waiting for PVC {pvc_name} to be created...")
-    time.sleep(30)
     start_postgresql_deployment(name, version, vcpu_count, memory, pvc_name, namespace)
 
     db_controller = DBController()
@@ -87,6 +85,8 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
     )
 
     # get all kubernetes nodes with label type=simplyblock-storage-plane
+    print(f"Waiting for PVC {pvc_name} to be created...")
+    time.sleep(30)
     k8snodes = get_nodes_with_label("type=simplyblock-storage-plane")
     lvols = DBController().get_lvols()
     lvol = next((lvol for lvol in lvols if lvol.pvc_name == pvc_name), None)
