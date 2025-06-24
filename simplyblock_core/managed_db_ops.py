@@ -40,6 +40,9 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     database.write_to_db(db_controller.kv_store)
 
 def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: int, memory: str, namespace: str = "default"):
+    # load Kubernetes config
+    config.load_kube_config()
+
     resource_requests = {
         "cpu": str(vcpu_count),
         "memory": memory
@@ -97,7 +100,6 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
     # Create the Deployment
     apps_v1 = client.AppsV1Api()
     apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
-
 
 
 def stop_postgresql_deployment(deployment_name: str, namespace: str = "default"):

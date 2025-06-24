@@ -735,7 +735,7 @@ class CLIWrapperBase:
                 name=args.name,
                 storage_class=args.storage_class,
                 disk_size=args.disk_size,
-                postgres_version=args.version,
+                version=args.version,
                 vcpu_count=args.vcpu_count,
                 memory=args.memory_size,
             )
@@ -771,17 +771,23 @@ class CLIWrapperBase:
         Deletes a managed database.
         """
         database = db_controller.DBController().get_managed_database(args.database_id)
+        if not database:
+            raise ValueError(f"Database with ID {args.database_id} does not exist.")
+        
         managed_db_ops.delete_postgresql_resources(
             deployment_name=database.deployment_id,
             pvc_name=database.pvc_id,
         )
-        return database.remove(db_controller.DBController().kv_store)
+        database.remove(db_controller.DBController().kv_store)
+        return True
 
     def database__stop(self, sub_command, args):
         """
         Add a new database entry.
         """
         database = db_controller.DBController().get_managed_database(args.database_id)
+        if not database:
+            raise ValueError(f"Database with ID {args.database_id} does not exist.")
         managed_db_ops.stop_postgresql_deployment(
             deployment_name=database.deployment_id
         )
@@ -793,6 +799,9 @@ class CLIWrapperBase:
         Add a new database entry.
         """
         database = db_controller.DBController().get_managed_database(args.database_id)
+        if not database:
+            raise ValueError(f"Database with ID {args.database_id} does not exist.")
+
         managed_db_ops.start_postgresql_deployment(
             deployment_name=database.deployment_id,
             version=database.version,
@@ -803,14 +812,16 @@ class CLIWrapperBase:
         database.status = "running"
         return database.write_to_db()
 
-    # def database__snapshot(self, sub_command, args):
-    #     """
-    #     TODO
-    #     Add a new database entry.
-    #     """
-    #     db = db_controller.DBController()
-    #     managed_db_ops.create_pvc_snapshot("test-snapshot", db.)
-    #     return db.add_entry(args.key, args.value)
+    def database__snapshot(self, sub_command, args):
+        """
+        TODO
+        Add a new database entry.
+        """
+        database = db_controller.DBController().get_managed_database(args.database_id)
+        if not database:
+            raise ValueError(f"Database with ID {args.database_id} does not exist.")
+
+        managed_db_ops.create_pvc_snapshot("test-snapshot", database.pvc_id, database.namespace)
 
     # def database__list_snapshots(self, sub_command, args):
     #     """
