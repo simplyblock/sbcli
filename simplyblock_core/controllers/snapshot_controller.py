@@ -350,7 +350,7 @@ def delete(snapshot_uuid, force_delete=False):
     return True
 
 
-def clone(snapshot_id, clone_name, new_size=0):
+def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None):
     snap = db_controller.get_snapshot_by_id(snapshot_id)
     if not snap:
         msg=f"Snapshot not found {snapshot_id}"
@@ -444,6 +444,11 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.vuid = snap.lvol.vuid
     lvol.snapshot_name = snap.snap_bdev
     lvol.subsys_port = snap.lvol.subsys_port
+
+    if pvc_name:
+        lvol.pvc_name = pvc_name
+    if pvc_namespace:
+        lvol.namespace = pvc_namespace
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.bdev_stack = [
