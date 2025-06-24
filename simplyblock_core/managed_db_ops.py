@@ -25,7 +25,7 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
     # wait for the PVC to be created
     print(f"Waiting for PVC {pvc_name} to be created...")
-    time.sleep(10)
+    time.sleep(30)
     start_postgresql_deployment(name, version, vcpu_count, memory, pvc_name, namespace)
 
     db_controller = DBController()
