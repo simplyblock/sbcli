@@ -124,7 +124,7 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity) -> str:
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -213,24 +213,27 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.enable_qos = enable_qos
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.contact_point = contact_point
+    cluster.disable_monitoring = disable_monitoring
 
-    utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
+    if not disable_monitoring:
+        utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
 
     logger.info("Deploying swarm stack ...")
     log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
     scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                               log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint)
+                               log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, disable_monitoring)
     logger.info("Deploying swarm stack > Done")
 
     logger.info("Configuring DB...")
     scripts.set_db_config_single()
     logger.info("Configuring DB > Done")
 
-    _set_max_result_window(dev_ip)
+    if not disable_monitoring:
+        _set_max_result_window(dev_ip)
 
-    _add_graylog_input(dev_ip, cluster.secret)
+        _add_graylog_input(dev_ip, cluster.secret)
 
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
