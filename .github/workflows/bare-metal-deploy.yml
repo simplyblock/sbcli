@@ -18,23 +18,23 @@ on:
         type: string
       ndcs:
         required: false
-        type: number
+        type: string
         default: 1
       npcs:
         required: false
-        type: number
+        type: string
         default: 1
       bs:
         required: false
-        type: number
+        type: string
         default: 4096
       chunk_bs:
         required: false
-        type: number
+        type: string
         default: 4096
       nr_hugepages:
         required: false
-        type: number
+        type: string
         default: 2048
 
     outputs:
@@ -47,6 +47,12 @@ on:
       cluster_secret:
         description: "The cluster secret"
         value: ${{ jobs.deploy.outputs.cluster_secret }}
+      mnodes:
+        description: "The IP of management nodes"
+        value: ${{ jobs.deploy.outputs.mnodes }}
+      storage_private_ips:
+        description: "The private IPs of the storage nodes"
+        value: ${{ jobs.deploy.outputs.storage_private_ips }}
 
 jobs:
   deploy:
@@ -56,6 +62,8 @@ jobs:
       cluster_id: ${{ steps.deployment.outputs.cluster_id }}
       cluster_ip: ${{ steps.deployment.outputs.cluster_ip }}
       cluster_secret: ${{ steps.deployment.outputs.cluster_secret }}
+      mnodes: ${{ steps.deployment.outputs.mnodes }}
+      storage_private_ips: ${{ steps.deployment.outputs.storage_private_ips }}
 
     steps:
     - name: Checkout sbcli
@@ -75,6 +83,8 @@ jobs:
         cd deploy/bare-metal
         eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
         ./bootstrap-cluster.sh --max-lvol 10 --max-snap 10 --max-size 400G --number-of-devices 1 --sbcli-cmd sbcli-dev --spdk-debug
+        echo "mnodes=$MNODES" >> ${GITHUB_OUTPUT:-/dev/stdout}
+        echo "storage_private_ips=${STORAGE_PRIVATE_IPS}" >> ${GITHUB_OUTPUT:-/dev/stdout}
       env:
         NDCS: ${{ inputs.ndcs }}
         NPCS: ${{ inputs.npcs }}

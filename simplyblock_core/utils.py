@@ -506,7 +506,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(4.0 * small_pool_count), int(1.5 * large_pool_count)
+    return int(4.0 * small_pool_count), int(2.5 * large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -520,7 +520,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 12 * lvol_count) * (1024 * 1024) + (
             250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
-    return int(memory_consumption)
+    return int(1.2*memory_consumption)
 
 
 def calculate_minimum_sys_memory(max_prov):
@@ -1480,7 +1480,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     nvme_by_numa = {nid: [] for nid in sockets_to_use}
     nvme_numa_neg1 = []
     for nvme_name, val in nvmes.items():
-        numa = val["numa_node"]
+        numa = int(val["numa_node"])
         if numa in sockets_to_use:
             nvme_by_numa[numa].append(nvme_name)
         elif int(numa) == -1:
@@ -1594,6 +1594,7 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
         if current_hugepages >= hugepages_needed:
             logger.debug(f"Node {node}: already has {current_hugepages} hugepages, no change needed.")
         else:
+            hugepages_needed = adjust_hugepages(hugepages_needed)
             logger.debug(f"Node {node}: has {current_hugepages} hugepages, setting to {hugepages_needed}...")
             cmd = f"echo {hugepages_needed} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
             subprocess.run(cmd, shell=True, check=True)
@@ -1606,6 +1607,15 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     except Exception as e:
         logger.error(f"Node {node}: Error occurred: {e}")
 
+def adjust_hugepages(hugepages: int) -> int:
+    """Adjust hugepages to the next multiple of 500 and add a small extra based on leading digits."""
+    remainder = hugepages % 500
+    hugepages =  hugepages + (500 - remainder)
+
+    str_val = str(hugepages)
+    decimal_val = float(str_val[0] + '.' + str_val[1])
+    add_val = int(decimal_val * 24)
+    return hugepages + add_val
 
 def validate_node_config(node):
     required_top_fields = [
@@ -1751,6 +1761,9 @@ def get_k8s_core_client():
     config.load_incluster_config()
     return client.CoreV1Api()
 
+def get_k8s_batch_client():
+    config.load_incluster_config()
+    return client.BatchV1Api()
 
 def remove_container(client: docker.DockerClient, name, timeout=3):
     try:

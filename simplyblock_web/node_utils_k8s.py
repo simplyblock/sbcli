@@ -2,10 +2,11 @@
 # encoding: utf-8
 import logging
 import os
+import time
 
 import jc
 from kubernetes.stream import stream
-from simplyblock_core.utils import get_k8s_core_client
+from simplyblock_core.utils import get_k8s_core_client, get_k8s_batch_client
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -112,3 +113,14 @@ def get_namespace():
             out = f.read()
             return out
     return default_namespace
+
+def wait_for_job_completion(job_name, namespace, timeout=60):
+    batch_v1 = get_k8s_batch_client()
+    for _ in range(timeout):
+        job = batch_v1.read_namespaced_job(job_name, namespace)
+        if job.status.succeeded and job.status.succeeded >= 1:
+            return True
+        elif job.status.failed and job.status.failed > 0:
+            raise RuntimeError(f"Job '{job_name}' failed")
+        time.sleep(3)
+    raise TimeoutError(f"Timeout waiting for Job '{job_name}' to complete")
