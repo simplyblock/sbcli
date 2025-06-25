@@ -25,7 +25,6 @@ USER = os.getenv("USER", "root")
 
 # Node List
 STORAGE_PRIVATE_IPS = os.getenv("STORAGE_PRIVATE_IPS", "").split()
-SEC_STORAGE_PRIVATE_IPS = os.getenv("SEC_STORAGE_PRIVATE_IPS", "").split()
 MNODES = os.getenv("MNODES", "").split()
 CLIENTNODES = os.getenv("CLIENTNODES", os.getenv("MNODES", "")).split()
 
@@ -401,7 +400,7 @@ for node in MNODES:
         print(f"[ERROR] Error processing Management Node {node}: {e}")
 
 # **Step 2: Process Storage Node**
-for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
+for node in STORAGE_PRIVATE_IPS:
     try:
         ssh = connect_ssh(node, bastion_ip=BASTION_IP)
         print(f"[INFO] Processing Storage Node {node}...")
@@ -418,9 +417,6 @@ for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
 
             log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
             exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
-        if node in SEC_STORAGE_PRIVATE_IPS:
-            upload_from_remote(ssh, node, node_type="sec-storage")
-        else:
             upload_from_remote(ssh, node, node_type="storage")
         ssh.close()
         print(f"[SUCCESS] Successfully processed Storage Node {node}")
@@ -452,17 +448,3 @@ if args.k8s:
     upload_local_logs(k8s=True)
 else:
     upload_local_logs()
-
-# for node in MNODES:
-#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-#     cleanup_remote_logs(ssh, node)
-
-# for node in CLIENTNODES:
-#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-#     cleanup_remote_logs(ssh, node)
-
-# for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
-#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-#     cleanup_remote_logs(ssh, node)
-
-# cleanup_local_logs()

@@ -49,7 +49,7 @@ def send_dev_status_event(device, status, target_node=None):
     else:
         snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
     for node in snodes:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
             continue
 
         dev_status = status

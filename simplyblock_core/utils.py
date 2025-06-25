@@ -506,7 +506,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(4.0 * small_pool_count), int(1.5 * large_pool_count)
+    return int(4.0 * small_pool_count), int(2.5 * large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -520,7 +520,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 12 * lvol_count) * (1024 * 1024) + (
             250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
-    return int(memory_consumption)
+    return int(1.2*memory_consumption)
 
 
 def calculate_minimum_sys_memory(max_prov):
@@ -1480,7 +1480,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     nvme_by_numa = {nid: [] for nid in sockets_to_use}
     nvme_numa_neg1 = []
     for nvme_name, val in nvmes.items():
-        numa = val["numa_node"]
+        numa = int(val["numa_node"])
         if numa in sockets_to_use:
             nvme_by_numa[numa].append(nvme_name)
         elif int(numa) == -1:
