@@ -1,12 +1,12 @@
 name: E2E Test docker on 192.168.10.141
 
 on:
+  push:
+    branches:
+      - main
+
   workflow_dispatch:
     inputs:
-      spdk_csi_branch:
-        description: 'Branch for spdk-csi'
-        required: true
-        default: 'master'
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
@@ -30,22 +30,17 @@ on:
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
-        default: false
+        default: true
         type: boolean
       run_ha_test:
         description: 'Run HA tests or not'
         required: false
         default: true
         type: boolean
-      upload_logs:
-        description: 'Upload logs to AWS'
-        required: false
-        default: false
-        type: boolean
 
-# concurrency:
-#   group: ${{ github.workflow }}
-#   cancel-in-progress: false
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
 
@@ -56,10 +51,10 @@ jobs:
       cluster: c141
       docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
       sbcli_source: ${{ github.head_ref || github.ref_name }}
-      # ndcs: ${{ github.event.inputs.ndcs }}
-      # npcs: ${{ github.event.inputs.npcs }}
-      # bs: ${{ github.event.inputs.bs }}
-      # chunk_bs: ${{ github.event.inputs.chunk_bs }}
+      ndcs: ${{ github.event.inputs.ndcs }}
+      npcs: ${{ github.event.inputs.npcs }}
+      bs: ${{ github.event.inputs.bs }}
+      chunk_bs: ${{ github.event.inputs.chunk_bs }}
 
   e2e:
     runs-on: self-hosted
@@ -123,23 +118,18 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
-      # - name: Upload automation and docker logs to s3
-      #   run: |
-      #     cd $GITHUB_WORKSPACE/e2e/logs
-      #     ./upload_logs.sh
-      #     cd $GITHUB_WORKSPACE/simplyBlockDeploy
-      #     ./upload_docker_logs_to_s3.sh
-      #   if: always() && (github.event_name == 'schedule' || github.event.inputs.upload_logs == 'true')
-      #   env:
-      #     AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      #     AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      #     AWS_REGION: ${{ secrets.AWS_REGION }}
-      #     S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-      #     RUN_ID: ${{ github.run_id }}
-      #     mnodes: ${{ steps.bootstrap_cluster.outputs.mnodes }}
-      #     BASTION_IP: ${{ steps.bootstrap_cluster.outputs.bastion_public_ip }}
-      #     storage_private_ips: ${{ steps.bootstrap_cluster.outputs.storage_private_ips }}
-      #     KEY_NAME: ${{ steps.bootstrap_cluster.outputs.key_name }}
+      - name: Upload automation and docker logs to miniio
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/upload_logs_to_miniio.py
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
+          MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+          MNODES: "${{ needs.deploy.outputs.mnodes }}"
+          STORAGE_PRIVATE_IPS: "${{ needs.deploy.outputs.storage_private_ips }}"
+          USER: "root"
 
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
@@ -226,7 +216,6 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
           RUN_ID: ${{ github.run_id }}
           PASSED_TESTS: ${{ env.PASSED_TESTS }}
           FAILED_TESTS: ${{ env.FAILED_TESTS }}
@@ -247,7 +236,7 @@ jobs:
           BS: ${{ env.BS }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
+          LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}"
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
@@ -256,7 +245,7 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
+          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
