@@ -1,4 +1,4 @@
-name: E2E Test docker on 192.168.10.141
+name: End-to-end test docker
 
 on:
   push:
