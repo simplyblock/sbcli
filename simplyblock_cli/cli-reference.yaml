@@ -76,6 +76,12 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--force"
+            help: "Force using nvme devices and cpu cores from other numa to numa 0"
+            dest: force
+            private: true
+            type: bool
+            action: store_true
       - name: configure-upgrade
         help: "Upgrade the automated configuration file with new changes of cpu mask or storage devices"
         description: >

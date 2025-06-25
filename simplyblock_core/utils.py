@@ -966,8 +966,13 @@ def init_sentry_sdk(name=None):
     return True
 
 
-def get_numa_cores():
+def get_numa_cores(all=False):
     cores_by_numa = {}
+    if all:
+        total_cores = os.cpu_count()
+        cores_by_numa[0] = list(range(total_cores))
+        return cores_by_numa
+
     try:
         output = get_system_cpus()
         for line in output.splitlines():
@@ -1325,7 +1330,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
                 "distribution": calculate_core_allocations(node_cores),
                 "core_to_index": core_to_index
             })
-        else:
+        elif nodes_per_socket == 2:
             # Distribute cores equally between the nodes
             node_0_cores = available_cores[0:q1] + available_cores[2 * q1:3 * q1]
             node_1_cores = available_cores[q1:2 * q1] + available_cores[3 * q1:4 * q1]
@@ -1360,6 +1365,23 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
                 "distribution": calculate_core_allocations(isolated_cores),
                 "core_to_index": core_to_index
             })
+        else:
+            node_cores_list = split_cores(available_cores, nodes_per_socket)
+            min_isolated_cores = min(len(c) for c in node_cores_list)  # Equalize across nodes
+
+            for node_idx, node_cores in enumerate(node_cores_list):
+                isolated = node_cores[:min_isolated_cores]
+                l_cores = ",".join([f"{i}@{core}" for i, core in enumerate(isolated)])
+                core_to_index = {core: i for i, core in enumerate(node_cores)}
+
+                node_distribution[numa_node].append({
+                    "cpu_mask": hex(sum([1 << c for c in isolated])),
+                    "isolated": isolated,
+                    "l-cores": l_cores,
+                    "distribution": calculate_core_allocations(isolated),
+                    "core_to_index": core_to_index
+                })
+
 
     return node_distribution
 
@@ -1444,12 +1466,14 @@ def regenerate_config(new_config, old_config, force=False):
     return old_config
 
 
-def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
+def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked, force=False):
     system_info = {}
     nodes_config = {"nodes": []}
 
-    cores_by_numa = get_numa_cores()
-    validate_sockets(sockets_to_use, cores_by_numa)
+    cores_by_numa = get_numa_cores(force)
+    if not force:
+        validate_sockets(sockets_to_use, cores_by_numa)
+
     logger.debug(f"Cores by numa {cores_by_numa}")
     nics = detect_nics()
     nvmes = detect_nvmes(pci_allowed, pci_blocked)
@@ -1480,7 +1504,9 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     nvme_by_numa = {nid: [] for nid in sockets_to_use}
     nvme_numa_neg1 = []
     for nvme_name, val in nvmes.items():
-
+        if force:
+            nvme_by_numa[0].append(nvme_name)
+            continue
         numa = val["numa_node"]
         if int(numa) in sockets_to_use:
             nvme_by_numa[numa].append(nvme_name)
@@ -1828,3 +1854,19 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
         subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
         print(f"File moved to {prometheus_file_path} successfully.")
+
+def split_cores(available_cores, nodes_per_socket):
+    total_cores = len(available_cores)
+    cores_per_node = total_cores // nodes_per_socket
+    extra_cores = total_cores % nodes_per_socket
+
+    node_core_lists = []
+    start = 0
+    for i in range(nodes_per_socket):
+        end = start + cores_per_node
+        if i < extra_cores:
+            end += 1  # Distribute extra cores one per node
+        node_core_lists.append(available_cores[start:end])
+        start = end
+
+    return node_core_lists

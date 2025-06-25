@@ -90,14 +90,14 @@ class CLIWrapperBase:
         if not args.max_prov:
             self.parser.error(f"Mandatory argument '--max-size' not provided for {sub_command}")
         sockets_to_use = [0]
-        if args.sockets_to_use:
+        if args.sockets_to_use and not args.force:
             try:
                 sockets_to_use = [int(x) for x in args.sockets_to_use.split(',')]
             except ValueError:
                 self.parser.error(
                         f"Invalid value for sockets_to_use {args.sockets_to_use}. It must be a comma-separated list of integers.")
 
-        if args.nodes_per_socket not in [1, 2]:
+        if args.nodes_per_socket not in [1, 2] and not args.force:
             self.parser.error(f"nodes_per_socket {args.nodes_per_socket}must be either 1 or 2")
         if args.pci_allowed and args.pci_blocked:
             self.parser.error("pci-allowed and pci-blocked cannot be both specified")
@@ -110,7 +110,7 @@ class CLIWrapperBase:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
 
         return storage_ops.generate_automated_deployment_config(args.max_lvol, max_prov, sockets_to_use,
-                                                                args.nodes_per_socket, pci_allowed, pci_blocked)
+                                                                args.nodes_per_socket, pci_allowed, pci_blocked, args.force)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()

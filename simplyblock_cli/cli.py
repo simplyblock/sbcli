@@ -92,6 +92,9 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes', type=str, default='0', dest='sockets_to_use')
         argument = subcommand.add_argument('--pci-allowed', help='Comma separated list of PCI addresses of Nvme devices to use for storage devices.', type=str, default='', dest='pci_allowed', required=False)
         argument = subcommand.add_argument('--pci-blocked', help='Comma separated list of PCI addresses of Nvme devices to not use for storage devices', type=str, default='', dest='pci_blocked', required=False)
+        if self.developer_mode:
+            argument = subcommand.add_argument('--force',
+                                               help='Force using nvme devices and cpu cores from other numa to numa 0', dest='force', action='store_true')
 
     def init_storage_node__configure_upgrade(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure-upgrade', 'Upgrade the automated configuration file with new changes of cpu mask or storage devices')
@@ -812,6 +815,8 @@ class CLIWrapper(CLIWrapperBase):
                 if sub_command in ['deploy']:
                     ret = self.storage_node__deploy(sub_command, args)
                 elif sub_command in ['configure']:
+                    if not self.developer_mode:
+                        args.force = None
                     ret = self.storage_node__configure(sub_command, args)
                 elif sub_command in ['configure-upgrade']:
                     ret = self.storage_node__configure_upgrade(sub_command, args)
