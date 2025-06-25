@@ -7,6 +7,11 @@ on:
 
   workflow_dispatch:
     inputs:
+      cluster:
+        default: c141
+        description: "Cluster to deploy on"
+        required: true
+        type: string
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
@@ -15,18 +20,22 @@ on:
         description: 'Value for NDCS'
         required: false
         default: 1
+        type: number
       npcs:
         description: 'Value for NPCS'
         required: false
         default: 1
+        type: number
       bs:
         description: 'Value for Block size'
         required: false
         default: 4096
+        type: number
       chunk_bs:
         description: 'Value for Chunk block size'
         required: false
         default: 4096
+        type: number
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
@@ -52,7 +61,7 @@ jobs:
     uses: ./.github/workflows/bare-metal-deploy.yml
     with:
       runs_on: self-hosted
-      cluster: c141
+      cluster: ${{ github.event.inputs.cluster || 'c141' }}
       docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
       sbcli_source: ${{ github.head_ref || github.ref_name }}
       ndcs: ${{ github.event.inputs.ndcs }}

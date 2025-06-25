@@ -18,23 +18,23 @@ on:
         type: string
       ndcs:
         required: false
-        type: string
+        type: number
         default: 1
       npcs:
         required: false
-        type: string
+        type: number
         default: 1
       bs:
         required: false
-        type: string
+        type: number
         default: 4096
       chunk_bs:
         required: false
-        type: string
+        type: number
         default: 4096
       nr_hugepages:
         required: false
-        type: string
+        type: number
         default: 2048
 
     outputs:
@@ -48,7 +48,7 @@ on:
         description: "The cluster secret"
         value: ${{ jobs.deploy.outputs.cluster_secret }}
       mnodes:
-        description: "The number of management nodes"
+        description: "The IP of management nodes"
         value: ${{ jobs.deploy.outputs.mnodes }}
       storage_private_ips:
         description: "The private IPs of the storage nodes"
