@@ -2,7 +2,7 @@
 import time
 
 
-from simplyblock_core import db_controller, utils
+from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
 from simplyblock_core.controllers import tasks_events, tcp_ports_events, health_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
@@ -56,6 +56,15 @@ while True:
                             task.status = JobSchedule.STATUS_SUSPENDED
                             task.write_to_db(db.kv_store)
                             continue
+
+                        logger.info("connecting remote devices")
+                        node.remote_devices = storage_node_ops._connect_to_remote_devs(
+                            node, force_conect_restarting_nodes=True)
+                        node.write_to_db()
+
+                        logger.info("Sending device status event")
+                        for db_dev in node.nvme_devices:
+                            distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
                         lvstore_check = True
                         if node.lvstore_status == "ready":
