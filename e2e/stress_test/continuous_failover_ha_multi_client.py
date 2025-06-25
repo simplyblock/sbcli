@@ -55,8 +55,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         # self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
         #                      "interface_partial_network_interrupt",
         #                      "partial_nw"]
-        self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
-                             "interface_partial_network_interrupt"]
+        # self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
+        #                      "interface_partial_network_interrupt"]
+        self.outage_types = ["partial_nw"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -412,12 +413,15 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             )
             self.disconnect_thread.start()
         elif outage_type == "partial_nw":
-            lvol_ports = node_details[0]["lvol_subsys_port"]
-            rpc_port = node_details[0]["rpc_port"]
-            if self.secondary_outage:
-                lvol_ports = list(range(9090, 9090 + len(self.storage_nodes) - 1))
+            lvol_port = int(node_details[0]["lvol_subsys_port"])
+            rpc_port = int(node_details[0]["rpc_port"])
+            lvol_ports = list(range(9100, 9100 + len(self.storage_nodes)))
+            hub_ports = list(range(9030, 9030 + len(self.storage_nodes)))
             if not isinstance(lvol_ports, list):
                 lvol_ports = [lvol_ports]
+            if lvol_port not in lvol_ports:
+                lvol_ports.append(lvol_port)
+            lvol_ports.extend(hub_ports)
             ports_to_block = [int(port) for port in lvol_ports]
             ports_to_block.append(4420)
             ports_to_block.append(rpc_port)

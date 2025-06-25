@@ -1112,10 +1112,10 @@ class SshUtils:
                 # )
 
                 block_command = f"""
-                    sudo iptables -A INPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-                    sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} -j DROP;
-                    sudo iptables -A OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-                    sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                    sudo iptables -A INPUT -p tcp -m multiport --dports {ports_str} -j REJECT;
+                    sudo iptables -A INPUT -p tcp -m multiport --sports {ports_str} -j REJECT;
+                    sudo iptables -A OUTPUT -p tcp -m multiport --dports {ports_str} -j REJECT;
+                    sudo iptables -A OUTPUT -p tcp -m multiport --sports {ports_str} -j REJECT;
                 """
 
                 # for port in block_ports:
@@ -1153,10 +1153,10 @@ class SshUtils:
                 blocked_ports = sorted(blocked_ports)
                 ports_str = ",".join(blocked_ports)
                 unblock_command = f"""
-                    sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j DROP;
-                    sudo iptables -D OUTPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-                    sudo iptables -D INPUT -p tcp -m multiport --dports {ports_str} -j DROP;
-                    sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} -j DROP;
+                    sudo iptables -D OUTPUT -p tcp -m multiport --sports {ports_str} -j REJECT;
+                    sudo iptables -D OUTPUT -p tcp -m multiport --dports {ports_str} -j REJECT;
+                    sudo iptables -D INPUT -p tcp -m multiport --dports {ports_str} -j REJECT;
+                    sudo iptables -D INPUT -p tcp -m multiport --sports {ports_str} -j REJECT;
                 """
 
                 # for port in blocked_ports:
