@@ -56,10 +56,6 @@ jobs:
       cluster: c141
       docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
       sbcli_source: ${{ github.head_ref || github.ref_name }}
-      ndcs: ${{ github.event.inputs.ndcs }}
-      npcs: ${{ github.event.inputs.npcs }}
-      bs: ${{ github.event.inputs.bs }}
-      chunk_bs: ${{ github.event.inputs.chunk_bs }}
 
 #   e2e:
 #     runs-on: self-hosted
