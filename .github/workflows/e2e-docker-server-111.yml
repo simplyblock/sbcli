@@ -92,8 +92,7 @@ jobs:
           export CLUSTER_SECRET=${{ needs.deploy.outputs.cluster_secret }}
           export CLUSTER_IP=${{ needs.deploy.outputs.cluster_ip }}
           export API_BASE_URL=${{ needs.deploy.outputs.cluster_ip }}
-          export BASTION_SERVER=${{ needs.deploy.outputs.bastion_public_ip }}
-          export KEY_NAME=${{ needs.deploy.outputs.key_name }} 
+          export KEY_NAME="simplyblock-us-east-2.pem" 
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
