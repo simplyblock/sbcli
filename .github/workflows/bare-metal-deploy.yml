@@ -18,23 +18,23 @@ on:
         type: string
       ndcs:
         required: false
-        type: number
+        type: string
         default: 1
       npcs:
         required: false
-        type: number
+        type: string
         default: 1
       bs:
         required: false
-        type: number
+        type: string
         default: 4096
       chunk_bs:
         required: false
-        type: number
+        type: string
         default: 4096
       nr_hugepages:
         required: false
-        type: number
+        type: string
         default: 2048
 
     outputs:

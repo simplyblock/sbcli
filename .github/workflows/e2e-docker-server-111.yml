@@ -20,22 +20,18 @@ on:
         description: 'Value for NDCS'
         required: false
         default: 1
-        type: number
       npcs:
         description: 'Value for NPCS'
         required: false
         default: 1
-        type: number
       bs:
         description: 'Value for Block size'
         required: false
         default: 4096
-        type: number
       chunk_bs:
         description: 'Value for Chunk block size'
         required: false
         default: 4096
-        type: number
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
