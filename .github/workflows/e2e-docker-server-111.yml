@@ -37,6 +37,10 @@ on:
         required: false
         default: true
         type: boolean
+      test_cases_to_run:
+        description: 'Specific test cases to run (leave empty to run all)'
+        required: false
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}
@@ -94,6 +98,12 @@ jobs:
           export SBCLI_CMD=sbcli-dev
           export SSH_USER=root
           TESTNAME=""
+          if [ -n "${{ github.event.inputs.test_cases_to_run }}" ]; then
+            TESTNAME="${{ github.event.inputs.test_cases_to_run }}"
+            echo "Running specific test cases: $TESTNAME"
+          else
+            echo "Running all test cases"
+          fi
           python3 e2e.py $TESTNAME \
                   --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
         env:
