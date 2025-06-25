@@ -333,12 +333,18 @@ def spdk_process_start(body: SPDKParams):
         logger.info("SPDK deployment found, removing...")
         spdk_process_kill()
 
-    node_name = os.environ.get("HOSTNAME")
-    logger.debug(f"deploying caching node spdk on worker: {node_name}")
+    node_prepration_job_name = "snode-spdk-job-"
+    node_name = os.environ.get("HOSTNAME", "")
+
+    # limit the job name length to 63 characters
+    k8s_job_name_length = len(node_prepration_job_name+node_name)
+    if k8s_job_name_length > 63:
+        node_prepration_job_name += node_name[k8s_job_name_length-63:]
+
+    logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
     try:
         env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
-
         values = {
             'SPDK_IMAGE': body.spdk_image,
             "L_CORES": body.l_cores,
@@ -350,6 +356,7 @@ def spdk_process_start(body: SPDKParams):
             'RPC_USERNAME': body.rpc_username,
             'RPC_PASSWORD': body.rpc_password,
             'HOSTNAME': node_name,
+            'JOBNAME': node_prepration_job_name,
             'NAMESPACE': namespace,
             'FDB_CONNECTION': body.fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
