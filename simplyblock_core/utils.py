@@ -1594,6 +1594,7 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
         if current_hugepages >= hugepages_needed:
             logger.debug(f"Node {node}: already has {current_hugepages} hugepages, no change needed.")
         else:
+            hugepages_needed = adjust_hugepages(hugepages_needed)
             logger.debug(f"Node {node}: has {current_hugepages} hugepages, setting to {hugepages_needed}...")
             cmd = f"echo {hugepages_needed} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
             subprocess.run(cmd, shell=True, check=True)
@@ -1606,6 +1607,15 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     except Exception as e:
         logger.error(f"Node {node}: Error occurred: {e}")
 
+def adjust_hugepages(hugepages: int) -> int:
+    """Adjust hugepages to the next multiple of 500 and add a small extra based on leading digits."""
+    remainder = hugepages % 500
+    hugepages =  hugepages + (500 - remainder)
+
+    str_val = str(hugepages)
+    decimal_val = float(str_val[0] + '.' + str_val[1])
+    add_val = int(decimal_val * 24)
+    return hugepages + add_val
 
 def validate_node_config(node):
     required_top_fields = [
@@ -1751,6 +1761,9 @@ def get_k8s_core_client():
     config.load_incluster_config()
     return client.CoreV1Api()
 
+def get_k8s_batch_client():
+    config.load_incluster_config()
+    return client.BatchV1Api()
 
 def remove_container(client: docker.DockerClient, name, timeout=3):
     try:
