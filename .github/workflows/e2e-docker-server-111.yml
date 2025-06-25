@@ -240,10 +240,10 @@ jobs:
           TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
           TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
           TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
-          BS: ${{ env.BS }}
+          NDCS: ${{ github.event.inputs.ndcs || 1 }}
+          NPCS: ${{ github.event.inputs.npcs || 1 }}
+          BS: ${{ github.event.inputs.bs || 4096 }}
+          CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
