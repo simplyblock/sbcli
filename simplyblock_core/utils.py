@@ -1481,7 +1481,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     nvme_by_numa = {nid: [] for nid in sockets_to_use}
     nvme_numa_neg1 = []
     for nvme_name, val in nvmes.items():
-        numa = val["numa_node"]
+        numa = int(val["numa_node"])
         if numa in sockets_to_use:
             nvme_by_numa[numa].append(nvme_name)
         elif int(numa) == -1:
