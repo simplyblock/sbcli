@@ -1,17 +1,17 @@
 name: E2E Test docker on 192.168.10.141
 
 on:
+  push:
+    branches:
+      - main
 
   workflow_dispatch:
     inputs:
-      simplyBlockDeploy_branch:
-        description: 'Branch for simplyBlockDeploy'
+      cluster:
+        default: c141
+        description: "Cluster to deploy on"
         required: true
-        default: 'run-on-server1'
-      spdk_csi_branch:
-        description: 'Branch for spdk-csi'
-        required: true
-        default: 'master'
+        type: string
       sbcli_cmd:
         description: 'Command for sbcli execution'
         required: true
@@ -35,25 +35,39 @@ on:
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
-        default: false
+        default: true
         type: boolean
       run_ha_test:
         description: 'Run HA tests or not'
         required: false
         default: true
         type: boolean
-      upload_logs:
-        description: 'Upload logs to AWS'
+      test_case_to_run:
+        description: 'Specific test case to run (leave empty to run all)'
         required: false
-        default: false
-        type: boolean
+        default: 'TestSingleNodeFailure'
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
+
+  deploy:
+    uses: ./.github/workflows/bare-metal-deploy.yml
+    with:
+      runs_on: self-hosted
+      cluster: ${{ github.event.inputs.cluster || 'c141' }}
+      docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
+      sbcli_source: ${{ github.head_ref || github.ref_name }}
+      ndcs: ${{ github.event.inputs.ndcs }}
+      npcs: ${{ github.event.inputs.npcs }}
+      bs: ${{ github.event.inputs.bs }}
+      chunk_bs: ${{ github.event.inputs.chunk_bs }}
+
   e2e:
     runs-on: self-hosted
-    concurrency:
-      group: ${{ github.workflow }}
-      cancel-in-progress: false
+    needs: deploy
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -65,85 +79,6 @@ jobs:
       - name: Set send_slack_notification for manual workflow_dispatch
         if: github.event_name == 'workflow_dispatch'
         run: echo "send_slack_notification=${{ github.event.inputs.send_slack_notification }}" >> $GITHUB_ENV
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-      - run: go version
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-      - uses: actions/checkout@master
-        name: Checkout code simplyBlockDeploy
-        with:
-          repository: simplyblock-io/simplyBlockDeploy
-          ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
-          path: 'simplyBlockDeploy'
-          token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
-
-#      - name: Select or Create Workspace
-#        run: |
-#          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-#          terraform workspace select -or-create ghiaction-sbclie2e
-#
-
-
-      - name: Set parameters based on branch and input
-        run: |
-          if [[ "${GITHUB_REF##*/}" == *"pre-release"* ]]; then
-            echo "Branch is pre-release. Setting SBCLI_CMD to sbcli-pre."
-            echo "SBCLI_CMD=sbcli-pre" >> $GITHUB_ENV
-          elif [[ "${GITHUB_REF##*/}" == "sbcli" ]]; then
-            echo "Branch is sbcli. Setting SBCLI_CMD to sbcli."
-            echo "SBCLI_CMD=sbcli" >> $GITHUB_ENV
-          else
-            echo "Setting SBCLI_CMD to input or default to sbcli-dev."
-            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
-          fi
-          echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
-          echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
-          echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
-          echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
-        shell: bash
-
-
-
-      - name: Bootstrap Cluster
-        run: |
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./bootstrap-cluster.sh --sbcli-cmd "$SBCLI_CMD" \
-            --max-lvol 10 --max-snap 10 --max-prov 700g --number-of-devices 3 \
-            --distr-ndcs $NDCS \
-            --distr-npcs $NPCS \
-            --distr-bs $BS \
-            --distr-chunk-bs $CHUNK_BS --ha-type ha \
-            --partitions 0 --data-nic eth1
-          
-          echo "::set-output name=bastion_public_ip::$BASTION_IP"
-          echo "::set-output name=key_name::$KEY_NAME"
-          echo "::set-output name=mnodes::$mnodes"
-          echo "::set-output name=storage_private_ips::$storage_private_ips"
-
-        id: bootstrap_cluster
-        env:
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          BS: ${{ env.BS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
-          NODE_MGMT_IFNAME: "eth0"
-          KEY_NAME: "simplyblock-us-east-2.pem"
-          SECRET_VALUE: ${{ secrets.simplyblock_us_east_2_pem }}
-          BASTION_IP: "192.168.10.141"
-          GRAFANA_ENDPOINT: "http://192.168.10.141/grafana"
-          mnodes: "192.168.10.141"
-          storage_private_ips: "192.168.10.142 192.168.10.143 192.168.10.144"
-          sec_storage_private_ips: "192.168.10.145"
-          API_INVOKE_URL: "http://192.168.10.141/"
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -157,26 +92,30 @@ jobs:
           source myenv/bin/activate
           python3 -m pip install -r requirements.txt
           echo "Running tests in namespace default"
-          export CLUSTER_ID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
-          export CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
-          export CLUSTER_IP=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
-          export API_BASE_URL=${{ steps.bootstrap_cluster.outputs.cluster_ip }}
-          export BASTION_SERVER=${{ steps.bootstrap_cluster.outputs.bastion_public_ip }}
-          export KEY_NAME=${{ steps.bootstrap_cluster.outputs.key_name }} 
+          export CLUSTER_ID=${{ needs.deploy.outputs.cluster_id }}
+          export CLUSTER_SECRET=${{ needs.deploy.outputs.cluster_secret }}
+          export CLUSTER_IP=${{ needs.deploy.outputs.cluster_ip }}
+          export API_BASE_URL=${{ needs.deploy.outputs.cluster_ip }}
+          export KEY_NAME="simplyblock-us-east-2.pem" 
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
-          export SBCLI_CMD=${SBCLI_CMD}
           export SSH_USER=root
           TESTNAME=""
+          if [ -n "${{ github.event.inputs.test_case_to_run }}" ]; then
+            TESTNAME=" --testname ${{ github.event.inputs.test_case_to_run }}"
+            echo "Running specific test cases: $TESTNAME"
+          else
+            echo "Running all test cases"
+          fi
           python3 e2e.py $TESTNAME \
                   --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test }}
         env:
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          BS: ${{ env.BS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
+          NDCS: ${{ github.event.inputs.ndcs || 1 }}
+          NPCS: ${{ github.event.inputs.npcs || 1 }}
+          BS: ${{ github.event.inputs.bs || 4096 }}
+          CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
+          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
       - name: Record Test End Time
         if: always()
@@ -194,23 +133,18 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
-      - name: Upload automation and docker logs to s3
+      - name: Upload automation and docker logs to miniio
         run: |
-          cd $GITHUB_WORKSPACE/e2e/logs
-          ./upload_logs.sh
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./upload_docker_logs_to_s3.sh
-        if: always() && (github.event_name == 'schedule' || github.event.inputs.upload_logs == 'true')
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/upload_logs_to_miniio.py
+        if: always()
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-          RUN_ID: ${{ github.run_id }}
-          mnodes: ${{ steps.bootstrap_cluster.outputs.mnodes }}
-          BASTION_IP: ${{ steps.bootstrap_cluster.outputs.bastion_public_ip }}
-          storage_private_ips: ${{ steps.bootstrap_cluster.outputs.storage_private_ips }}
-          KEY_NAME: ${{ steps.bootstrap_cluster.outputs.key_name }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
+          MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+          MNODES: "${{ needs.deploy.outputs.mnodes }}"
+          STORAGE_PRIVATE_IPS: "${{ needs.deploy.outputs.storage_private_ips }}"
+          USER: "root"
 
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
@@ -297,7 +231,6 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
           RUN_ID: ${{ github.run_id }}
           PASSED_TESTS: ${{ env.PASSED_TESTS }}
           FAILED_TESTS: ${{ env.FAILED_TESTS }}
@@ -312,13 +245,13 @@ jobs:
           TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
           TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
           TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
-          BS: ${{ env.BS }}
+          NDCS: ${{ github.event.inputs.ndcs || 1 }}
+          NPCS: ${{ github.event.inputs.npcs || 1 }}
+          BS: ${{ github.event.inputs.bs || 4096 }}
+          CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
+          LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
@@ -327,17 +260,9 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
+          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
-
-#      - name: Destroy Cluster
-#        if: always()
-#        run: |
-#          ${SBCLI_CMD} sn deploy-cleaner
-#          pip uninstall ${SBCLI_CMD} -y
-#          rm -rf /etc/foundationdb/* || true
-
 
       - name: 'Cleanup build folder'
         run: |
