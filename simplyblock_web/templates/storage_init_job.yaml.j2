@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: snode-spdk-job-{{ HOSTNAME }}
+  name: {{ JOBNAME }}
   namespace: {{ NAMESPACE }}
 spec:
   template:
