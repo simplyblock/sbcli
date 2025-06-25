@@ -37,8 +37,8 @@ on:
         required: false
         default: true
         type: boolean
-      test_cases_to_run:
-        description: 'Specific test cases to run (leave empty to run all)'
+      test_case_to_run:
+        description: 'Specific test case to run (leave empty to run all)'
         required: false
         default: ''
 
@@ -95,11 +95,10 @@ jobs:
           export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
-          export SBCLI_CMD=sbcli-dev
           export SSH_USER=root
           TESTNAME=""
-          if [ -n "${{ github.event.inputs.test_cases_to_run }}" ]; then
-            TESTNAME="${{ github.event.inputs.test_cases_to_run }}"
+          if [ -n "${{ github.event.inputs.test_case_to_run }}" ]; then
+            TESTNAME=" --testname ${{ github.event.inputs.test_case_to_run }}"
             echo "Running specific test cases: $TESTNAME"
           else
             echo "Running all test cases"
@@ -111,6 +110,7 @@ jobs:
           NPCS: ${{ github.event.inputs.npcs || 1 }}
           BS: ${{ github.event.inputs.bs || 4096 }}
           CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
+          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
       - name: Record Test End Time
         if: always()
