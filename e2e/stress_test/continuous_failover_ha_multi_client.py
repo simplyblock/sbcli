@@ -194,7 +194,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     nqn = lvol_details[0]["nqn"]
                     self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
                     self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
-                    self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
+                    self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
                     sleep_n_sec(30)
                     del self.lvol_mount_details[lvol_name]
                     self.node_vs_lvol[lvol_node_id].remove(lvol_name)
@@ -282,8 +282,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.lvol_node = random.choice(list(self.node_vs_lvol.keys()))
             self.secondary_outage = True
 
-
-        self.outage_start_time = int(datetime.now().timestamp())
         node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
         node_ip = node_details[0]["mgmt_ip"]
         node_rpc_port = node_details[0]["rpc_port"]
@@ -300,7 +298,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node
             )
-
+        self.outage_start_time = int(datetime.now().timestamp())
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
         if outage_type == "graceful_shutdown":
@@ -672,7 +670,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     nqn = lvol_details[0]["nqn"]
                     self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
                     self.logger.info(f"Connecting clone {clone_name} has error: {error}. Disconnect all connections for that clone!!")
-                    self.sbcli_utils.delete_lvol(lvol_name=clone_name)
+                    self.sbcli_utils.delete_lvol(lvol_name=clone_name, skip_error=True)
                     sleep_n_sec(30)
                     del self.clone_mount_details[clone_name]
                     continue
@@ -795,7 +793,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
                     self.disconnect_lvol(clone_details['ID'])
-                    self.sbcli_utils.delete_lvol(clone_name)
+                    self.sbcli_utils.delete_lvol(clone_name, skip_error=True)
                     sleep_n_sec(30)
                     if clone_name in self.lvols_without_sec_connect:
                         self.lvols_without_sec_connect.remove(clone_name)
@@ -831,7 +829,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
-            self.sbcli_utils.delete_lvol(lvol)
+            self.sbcli_utils.delete_lvol(lvol, skip_error=True)
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])
