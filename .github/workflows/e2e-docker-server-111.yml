@@ -40,7 +40,7 @@ on:
       test_case_to_run:
         description: 'Specific test case to run (leave empty to run all)'
         required: false
-        default: ''
+        default: 'TestSingleNodeFailure'
 
 concurrency:
   group: ${{ github.workflow }}
@@ -246,7 +246,7 @@ jobs:
           BS: ${{ env.BS }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}"
+          LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
