@@ -339,7 +339,7 @@ def spdk_process_start(body: SPDKParams):
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
     if k8s_job_name_length > 63:
-        node_prepration_job_name = node_name[k8s_job_name_length-63:]
+        node_prepration_job_name += node_name[k8s_job_name_length-63:]
 
     logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
