@@ -72,7 +72,7 @@ def test_shutdown_unsuspended(call):
     node_uuid = node['uuid']
 
     with pytest.raises(HTTPError):
-        call('GET', f'/storagenode/shutdown/{node_uuid}')
+        call('GET', f'/storagenode/shutdown/{node_uuid}?force=')
 
 
 
