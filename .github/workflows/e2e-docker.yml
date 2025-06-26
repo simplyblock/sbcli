@@ -225,44 +225,44 @@ jobs:
           echo "${SKIPPED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Send Slack Notification
-        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GITHUB_SERVER_URL: ${{ github.server_url }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          PASSED_TESTS: ${{ env.PASSED_TESTS }}
-          FAILED_TESTS: ${{ env.FAILED_TESTS }}
-          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
-          PASSED_CASES: ${{ env.PASSED_CASES }}
-          FAILED_CASES: ${{ env.FAILED_CASES }}
-          SKIPPED_CASES: ${{ env.SKIPPED_CASES }}
-          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
-          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-          SKIPPED_CASES_BULLETS: ${{ env.SKIPPED_CASES_BULLETS }}
-          BRANCH_NAME: ${{ github.ref_name }}
-          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
-          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
-          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
-          NDCS: ${{ github.event.inputs.ndcs || 1 }}
-          NPCS: ${{ github.event.inputs.npcs || 1 }}
-          BS: ${{ github.event.inputs.bs || 4096 }}
-          CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
-        run: |
-          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
-          if [[ ${{ job.status }} == 'success' ]]; then
-            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
-          else
-            OVERALL_STATUS=":x: Overall Status: FAILURE"
-          fi
+      # - name: Send Slack Notification
+      #   if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #     GITHUB_SERVER_URL: ${{ github.server_url }}
+      #     GITHUB_REPOSITORY: ${{ github.repository }}
+      #     RUN_ID: ${{ github.run_id }}
+      #     PASSED_TESTS: ${{ env.PASSED_TESTS }}
+      #     FAILED_TESTS: ${{ env.FAILED_TESTS }}
+      #     TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
+      #     PASSED_CASES: ${{ env.PASSED_CASES }}
+      #     FAILED_CASES: ${{ env.FAILED_CASES }}
+      #     SKIPPED_CASES: ${{ env.SKIPPED_CASES }}
+      #     PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
+      #     FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
+      #     SKIPPED_CASES_BULLETS: ${{ env.SKIPPED_CASES_BULLETS }}
+      #     BRANCH_NAME: ${{ github.ref_name }}
+      #     TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
+      #     TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
+      #     TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+      #     NDCS: ${{ github.event.inputs.ndcs || 1 }}
+      #     NPCS: ${{ github.event.inputs.npcs || 1 }}
+      #     BS: ${{ github.event.inputs.bs || 4096 }}
+      #     CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
+      #   run: |
+      #     GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+      #     LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
+      #     if [[ ${{ job.status }} == 'success' ]]; then
+      #       OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
+      #     else
+      #       OVERALL_STATUS=":x: Overall Status: FAILURE"
+      #     fi
 
-          TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+      #     TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
+      #     MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
 
-          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+      #     curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
       - name: 'Cleanup build folder'
         run: |
