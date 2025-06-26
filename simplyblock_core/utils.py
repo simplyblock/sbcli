@@ -10,7 +10,6 @@ import subprocess
 import sys
 import uuid
 import time
-import psutil
 import socket
 from typing import Set, Union
 from kubernetes import client, config
