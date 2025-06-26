@@ -1750,11 +1750,12 @@ def get_k8s_core_client():
     return client.CoreV1Api()
 
 
-def remove_container(client: docker.DockerClient, name, timeout=3):
+def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
     try:
         container = client.containers.get(name)
-        container.stop(timeout=timeout)
-        container.remove()
+        if graceful_timeout:
+            container.stop(timeout=graceful_timeout)
+        container.remove(force=(not graceful_timeout))
     except docker.errors.NotFound:
         pass
     except docker.errors.APIError as e:
