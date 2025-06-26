@@ -53,21 +53,21 @@ concurrency:
 
 jobs:
 
-  deploy:
-    uses: ./.github/workflows/bare-metal-deploy.yml
-    with:
-      runs_on: self-hosted
-      cluster: ${{ github.event.inputs.cluster || 'c141' }}
-      docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
-      sbcli_source: ${{ github.head_ref || github.ref_name }}
-      ndcs: ${{ github.event.inputs.ndcs }}
-      npcs: ${{ github.event.inputs.npcs }}
-      bs: ${{ github.event.inputs.bs }}
-      chunk_bs: ${{ github.event.inputs.chunk_bs }}
+  # deploy:
+  #   uses: ./.github/workflows/bare-metal-deploy.yml
+  #   with:
+  #     runs_on: self-hosted
+  #     cluster: ${{ github.event.inputs.cluster || 'c141' }}
+  #     docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
+  #     sbcli_source: ${{ github.head_ref || github.ref_name }}
+  #     ndcs: ${{ github.event.inputs.ndcs }}
+  #     npcs: ${{ github.event.inputs.npcs }}
+  #     bs: ${{ github.event.inputs.bs }}
+  #     chunk_bs: ${{ github.event.inputs.chunk_bs }}
 
   e2e:
     runs-on: self-hosted
-    needs: deploy
+    # needs: deploy
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -83,39 +83,39 @@ jobs:
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
-      - name: Setup Tests & Run Tests
-        timeout-minutes: 120
-        run: |
-          cd $GITHUB_WORKSPACE/e2e
-          pip install virtualenv
-          python3 -m venv myenv
-          source myenv/bin/activate
-          python3 -m pip install -r requirements.txt
-          echo "Running tests in namespace default"
-          export CLUSTER_ID=${{ needs.deploy.outputs.cluster_id }}
-          export CLUSTER_SECRET=${{ needs.deploy.outputs.cluster_secret }}
-          export CLUSTER_IP=${{ needs.deploy.outputs.cluster_ip }}
-          export API_BASE_URL=${{ needs.deploy.outputs.cluster_ip }}
-          export KEY_NAME="simplyblock-us-east-2.pem" 
-          export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
-          export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          export AWS_REGION=${{ secrets.AWS_REGION }}
-          export SSH_USER=root
-          TESTNAME=""
-          if [ -n "${{ github.event.inputs.test_case_to_run }}" ]; then
-            TESTNAME=" --testname ${{ github.event.inputs.test_case_to_run }}"
-            echo "Running specific test cases: $TESTNAME"
-          else
-            echo "Running all test cases"
-          fi
-          python3 e2e.py $TESTNAME \
-                  --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test || true }}
-        env:
-          NDCS: ${{ github.event.inputs.ndcs || 1 }}
-          NPCS: ${{ github.event.inputs.npcs || 1 }}
-          BS: ${{ github.event.inputs.bs || 4096 }}
-          CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
-          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+      # - name: Setup Tests & Run Tests
+      #   timeout-minutes: 120
+      #   run: |
+      #     cd $GITHUB_WORKSPACE/e2e
+      #     pip install virtualenv
+      #     python3 -m venv myenv
+      #     source myenv/bin/activate
+      #     python3 -m pip install -r requirements.txt
+      #     echo "Running tests in namespace default"
+      #     export CLUSTER_ID=${{ needs.deploy.outputs.cluster_id }}
+      #     export CLUSTER_SECRET=${{ needs.deploy.outputs.cluster_secret }}
+      #     export CLUSTER_IP=${{ needs.deploy.outputs.cluster_ip }}
+      #     export API_BASE_URL=${{ needs.deploy.outputs.cluster_ip }}
+      #     export KEY_NAME="simplyblock-us-east-2.pem" 
+      #     export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     export AWS_REGION=${{ secrets.AWS_REGION }}
+      #     export SSH_USER=root
+      #     TESTNAME=""
+      #     if [ -n "${{ github.event.inputs.test_case_to_run }}" ]; then
+      #       TESTNAME=" --testname ${{ github.event.inputs.test_case_to_run }}"
+      #       echo "Running specific test cases: $TESTNAME"
+      #     else
+      #       echo "Running all test cases"
+      #     fi
+      #     python3 e2e.py $TESTNAME \
+      #             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test || true }}
+      #   env:
+      #     NDCS: ${{ github.event.inputs.ndcs || 1 }}
+      #     NPCS: ${{ github.event.inputs.npcs || 1 }}
+      #     BS: ${{ github.event.inputs.bs || 4096 }}
+      #     CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
+      #     SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
 
       - name: Record Test End Time
         if: always()
@@ -133,18 +133,18 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
-      - name: Upload automation and docker logs to miniio
-        run: |
-          cd $GITHUB_WORKSPACE/e2e/
-          python3 logs/upload_logs_to_miniio.py
-        if: always()
-        env:
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
-          MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
-          MNODES: "${{ needs.deploy.outputs.mnodes }}"
-          STORAGE_PRIVATE_IPS: "${{ needs.deploy.outputs.storage_private_ips }}"
-          USER: "root"
+      # - name: Upload automation and docker logs to miniio
+      #   run: |
+      #     cd $GITHUB_WORKSPACE/e2e/
+      #     python3 logs/upload_logs_to_miniio.py
+      #   if: always()
+      #   env:
+      #     GITHUB_RUN_ID: ${{ github.run_id }}
+      #     MINIO_ACCESS_KEY: "KxtpwblgG3AFDYJkyg8i"
+      #     MINIO_SECRET_KEY: "Yae4q5wJU9ZBzJhdsUGzu9wWqON8o0ERU7nGbJER"
+      #     MNODES: "${{ needs.deploy.outputs.mnodes }}"
+      #     STORAGE_PRIVATE_IPS: "${{ needs.deploy.outputs.storage_private_ips }}"
+      #     USER: "root"
 
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
@@ -225,44 +225,46 @@ jobs:
           echo "${SKIPPED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      # - name: Send Slack Notification
-      #   if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
-      #   env:
-      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      #     GITHUB_SERVER_URL: ${{ github.server_url }}
-      #     GITHUB_REPOSITORY: ${{ github.repository }}
-      #     RUN_ID: ${{ github.run_id }}
-      #     PASSED_TESTS: ${{ env.PASSED_TESTS }}
-      #     FAILED_TESTS: ${{ env.FAILED_TESTS }}
-      #     TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
-      #     PASSED_CASES: ${{ env.PASSED_CASES }}
-      #     FAILED_CASES: ${{ env.FAILED_CASES }}
-      #     SKIPPED_CASES: ${{ env.SKIPPED_CASES }}
-      #     PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
-      #     FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-      #     SKIPPED_CASES_BULLETS: ${{ env.SKIPPED_CASES_BULLETS }}
-      #     BRANCH_NAME: ${{ github.ref_name }}
-      #     TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
-      #     TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
-      #     TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
-      #     NDCS: ${{ github.event.inputs.ndcs || 1 }}
-      #     NPCS: ${{ github.event.inputs.npcs || 1 }}
-      #     BS: ${{ github.event.inputs.bs || 4096 }}
-      #     CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
-      #   run: |
-      #     GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-      #     LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
-      #     if [[ ${{ job.status }} == 'success' ]]; then
-      #       OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
-      #     else
-      #       OVERALL_STATUS=":x: Overall Status: FAILURE"
-      #     fi
+      - name: Send Slack Notification
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          PASSED_TESTS: ${{ env.PASSED_TESTS }}
+          FAILED_TESTS: ${{ env.FAILED_TESTS }}
+          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
+          PASSED_CASES: ${{ env.PASSED_CASES }}
+          FAILED_CASES: ${{ env.FAILED_CASES }}
+          SKIPPED_CASES: ${{ env.SKIPPED_CASES }}
+          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
+          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
+          SKIPPED_CASES_BULLETS: ${{ env.SKIPPED_CASES_BULLETS }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
+          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
+          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+          NDCS: ${{ github.event.inputs.ndcs || 1 }}
+          NPCS: ${{ github.event.inputs.npcs || 1 }}
+          BS: ${{ github.event.inputs.bs || 4096 }}
+          CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
+          COMMIT_AUTHOR: ${{ github.event.head_commit.author.name }}
+          SHORT_COMMIT_ID: ${{ github.sha }}
+        run: |
+          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
+          if [[ ${{ job.status }} == 'success' ]]; then
+            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
+          else
+            OVERALL_STATUS=":x: Overall Status: FAILURE"
+          fi
 
-      #     TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+          TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-      #     MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
+          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}* at ${SHORT_COMMIT_ID::7} by ${COMMIT_AUTHOR}. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
 
-      #     curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
       - name: 'Cleanup build folder'
         run: |
