@@ -73,7 +73,7 @@ def spdk_process_start(body: _SPDKParams):
     node_docker = get_docker_client()
 
     for name in {f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"}:
-        core_utils.remove_container(node_docker, name)
+        core_utils.remove_container(node_docker, name, graceful_timeout=0)
 
     spdk_image = constants.SIMPLY_BLOCK_SPDK_CORE_IMAGE
 

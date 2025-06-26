@@ -518,7 +518,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     return: minimum_hp_memory in bytes
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 12 * lvol_count) * (1024 * 1024) + (
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 20 * lvol_count) * (1024 * 1024) + (
             250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(1.2*memory_consumption)
 
@@ -1765,15 +1765,16 @@ def get_k8s_batch_client():
     config.load_incluster_config()
     return client.BatchV1Api()
 
-def remove_container(client: docker.DockerClient, name, timeout=3):
+def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
     try:
         container = client.containers.get(name)
-        container.stop(timeout=timeout)
-        container.remove()
+        if graceful_timeout:
+            container.stop(timeout=graceful_timeout)
+        container.remove(force=(not graceful_timeout))
     except NotFound:
         pass
     except APIError as e:
-        if e.response and 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
+        if e.status_code != 409:
             raise
 
 def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):

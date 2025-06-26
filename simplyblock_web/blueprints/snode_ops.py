@@ -153,7 +153,7 @@ def spdk_process_start(body: SPDKParams):
 
     node_docker = get_docker_client(timeout=60 * 3)
     for name in {f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"}:
-        core_utils.remove_container(node_docker, name)
+        core_utils.remove_container(node_docker, name, graceful_timeout=0)
 
     if body.cluster_ip is not None:
         log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{body.cluster_ip}:12202"})
@@ -228,7 +228,7 @@ def spdk_process_start(body: SPDKParams):
 })
 def spdk_process_kill(query: utils.RPCPortParams):
     for name in {f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"}:
-        core_utils.remove_container(get_docker_client(), name)
+        core_utils.remove_container(get_docker_client(), name, graceful_timeout=0)
     return utils.get_response(True)
 
 
