@@ -139,6 +139,9 @@ prometheus:
       enabled: true
       size: 5Gi
       storageClass: openebs-local-hostpath
+    extraArgs:
+      storage.tsdb.min-block-duration: 2h
+      storage.tsdb.max-block-duration: 2h
     sidecarContainers:
       thanos-sidecar:
         image: thanosio/thanos:v0.31.0
