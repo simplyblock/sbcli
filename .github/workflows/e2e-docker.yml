@@ -45,7 +45,7 @@ on:
       test_case_to_run:
         description: 'Specific test case to run (leave empty to run all)'
         required: false
-        default: 'TestSingleNodeFailure'
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}
