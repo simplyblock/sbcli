@@ -1773,7 +1773,7 @@ def remove_container(client: docker.DockerClient, name, timeout=3):
     except NotFound:
         pass
     except APIError as e:
-        if e.response and 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
+        if e.status_code != 409:
             raise
 
 def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):
