@@ -72,3 +72,32 @@ jobs:
 
     - name: Execute linter
       run: ruff check
+
+
+  types:
+    name: Type checker
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+        cache: 'pip'
+
+    - name: Install type checker
+      run: pip install mypy 
+
+    - name: Execute type checker
+      run: |
+        pip install -r requirements.txt
+        pip install kubernetes-typed types-docker types-boto3 types-urllib3
+        export MYPYPATH=./stubs
+        stubgen -m flask_swagger_ui -o stubs
+        stubgen -m flask_swagger_ui.flask_swagger_ui -o stubs
+        stubgen -m cpuinfo -o stubs
+        stubgen -m cpuinfo.cpuinfo -o stubs
+        stubgen -m fdb -o stubs
+        mypy simplyblock_web simplyblock_cli --install-types --non-interactive --exclude simplyblock_web/test

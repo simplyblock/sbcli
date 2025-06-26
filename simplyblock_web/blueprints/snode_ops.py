@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # encoding: utf-8
 import json
+import math
 import os
 import time
 from typing import List, Optional, Union
@@ -20,10 +21,6 @@ logger = core_utils.get_logger(__name__)
 api = APIBlueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
-
-
-class _RPCPortQuery(BaseModel):
-    rpc_port: Optional[int] = Field(constants.RPC_HTTP_PROXY_PORT)
 
 
 def get_google_cloud_info():
@@ -78,7 +75,7 @@ def get_amazon_cloud_info():
             "type": data["instanceType"],
             "cloud": "amazon",
             "ip": data["privateIp"],
-            "public_ip":  "",
+            "public_ip": "",
         }
     except Exception:
         pass
@@ -154,7 +151,7 @@ def spdk_process_start(body: SPDKParams):
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MiB') if body.total_mem else ''
     spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
-    node_docker = get_docker_client(timeout=60*3)
+    node_docker = get_docker_client(timeout=60 * 3)
     for name in {f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"}:
         core_utils.remove_container(node_docker, name)
 
@@ -229,7 +226,7 @@ def spdk_process_start(body: SPDKParams):
         'type': 'boolean'
     })}}},
 })
-def spdk_process_kill(query: _RPCPortQuery):
+def spdk_process_kill(query: utils.RPCPortParams):
     for name in {f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"}:
         core_utils.remove_container(get_docker_client(), name)
     return utils.get_response(True)
@@ -240,7 +237,7 @@ def spdk_process_kill(query: _RPCPortQuery):
         'type': 'boolean'
     })}}},
 })
-def spdk_process_is_up(query: _RPCPortQuery):
+def spdk_process_is_up(query: utils.RPCPortParams):
     try:
         node_docker = get_docker_client()
         for cont in node_docker.containers.list(all=True):
@@ -257,13 +254,12 @@ def spdk_process_is_up(query: _RPCPortQuery):
     return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
 
 
-
 @api.get('/spdk_proxy_restart', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
     })}}},
 })
-def spdk_proxy_restart(query: _RPCPortQuery):
+def spdk_proxy_restart(query: utils.RPCPortParams):
     try:
         node_docker = get_docker_client()
         for cont in node_docker.containers.list(all=True):
@@ -462,47 +458,72 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     for i in range(body.num_partitions):
         st = body.jm_percent + (i * perc_per_partition)
         en = st + perc_per_partition
-        cmd_list.append(f"parted -f {body.nbd_device} mkpart part{(i+1)} \"{st}%\" \"{en}%\"")
-        sg_cmd_list.append(f"sgdisk -t {(i+2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}")
+        cmd_list.append(f"parted -f {body.nbd_device} mkpart part{(i + 1)} \"{st}%\" \"{en}%\"")
+        sg_cmd_list.append(f"sgdisk -t {(i + 2)}:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}")
 
-    for cmd in cmd_list+sg_cmd_list:
+    for cmd in cmd_list + sg_cmd_list:
         logger.debug(cmd)
         out, err, ret_code = shell_utils.run_command(cmd)
         logger.debug(out)
         logger.debug(ret_code)
         if ret_code != 0:
             logger.error(err)
-            return utils.get_response(False, f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
+            return utils.get_response(False,
+                                      f"Error running cmd: {cmd}, returncode: {ret_code}, output: {out}, err: {err}")
         time.sleep(1)
 
     return utils.get_response(True)
 
 
-class _DeviceParams(BaseModel):
-    device_pci: str
+@api.post('/bind_device_to_nvme')
+def bind_device_to_nvme(body: utils.DeviceParams):
+    device_path = f"/sys/bus/pci/devices/{body.device_pci}"
+    driver_link = f"{device_path}/driver"
+    cmd_list = []
+    # Add check and unbind from uio_pci_generic if bound
+    cmd_list.append(
+        f'if [ "$(readlink -f {driver_link})" = "/sys/bus/pci/drivers/uio_pci_generic" ]; then '
+        f'echo -n "{body.device_pci}" > /sys/bus/pci/drivers/uio_pci_generic/unbind; fi'
+    )
 
+    # Add check and unbind from vfio-pci if bound
+    cmd_list.append(
+        f'if [ "$(readlink -f {driver_link})" = "/sys/bus/pci/drivers/vfio-pci" ]; then '
+        f'echo -n "{body.device_pci}" > /sys/bus/pci/drivers/vfio-pci/unbind; fi'
+    )
 
-@api.post('/delete_dev_gpt_partitions')
-def delete_gpt_partitions_for_dev(body: _DeviceParams):
-    cmd_list = [
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
-        f"echo \"nvme\" > /sys/bus/pci/devices/{body.device_pci}/driver_override",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
+    # Set override to nvme
+    cmd_list.append(
+        f'echo "nvme" > {device_path}/driver_override'
+    )
 
-    ]
+    # Bind to nvme only if not already bound
+    cmd_list.append(
+        f'if [ "$(readlink -f {driver_link})" != "/sys/bus/pci/drivers/nvme" ]; then '
+        f'echo -n "{body.device_pci}" > /sys/bus/pci/drivers/nvme/bind; fi'
+    )
 
     for cmd in cmd_list:
         logger.debug(cmd)
         ret = os.popen(cmd).read().strip()
         logger.debug(ret)
         time.sleep(1)
+    return utils.get_response(True)
 
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{body.device_pci}/nvme/nvme*/ | grep nvme").read().strip()
+
+@api.post('/delete_dev_gpt_partitions')
+def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
+    bind_device_to_nvme(body)
+
+    device_pci = body.device_pci
+    device_path = f"/sys/bus/pci/devices/{device_pci}"
+    driver_link = os.path.join(device_path, "nvme/nvme*/")
+
+    device_name = os.popen(f"ls {driver_link} | grep nvme").read().strip()
     if device_name:
         cmd_list = [
             f"parted -fs /dev/{device_name} mklabel gpt",
-            f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
+            #f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
         ]
 
         for cmd in cmd_list:
@@ -531,7 +552,7 @@ if not os.environ.get("WITHOUT_CLOUD_INFO"):
 
 
 @api.post('/bind_device_to_spdk')
-def bind_device_to_spdk(body: _DeviceParams):
+def bind_device_to_spdk(body: utils.DeviceParams):
     cmd_list = [
         f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
         f"echo \"\" > /sys/bus/pci/devices/{body.device_pci}/driver_override",
@@ -563,10 +584,10 @@ class _FirewallParams(BaseModel):
 })
 def firewall_set_port(body: _FirewallParams):
     ret = node_utils.firewall_port(
-            body.port_id,
-            body.port_type,
-            block=(body.action == "block"),
-            rpc_port=body.rpc_port
+        body.port_id,
+        body.port_type,
+        block=(body.action == "block"),
+        rpc_port=body.rpc_port
     )
     return utils.get_response(ret)
 
@@ -576,7 +597,7 @@ def firewall_set_port(body: _FirewallParams):
         'type': 'string'
     })}}},
 })
-def get_firewall(query: _RPCPortQuery):
+def get_firewall(query: utils.RPCPortParams):
     ret = node_utils.firewall_get(str(query.rpc_port))
     return utils.get_response(ret)
 
@@ -605,7 +626,7 @@ def set_hugepages():
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
     for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // (2048 * 1024)
+        num_pages = math.ceil(huge_page_memory / (2048 * 1024))
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)

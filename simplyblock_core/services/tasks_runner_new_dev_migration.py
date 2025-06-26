@@ -15,9 +15,9 @@ from simplyblock_core.rpc_client import RPCClient
 
 
 def task_runner(task):
-
-    snode = db.get_storage_node_by_id(task.node_id)
-    if not snode:
+    try:
+        snode = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
         task.status = JobSchedule.STATUS_DONE
         task.function_result = f"Node not found: {task.node_id}"
         task.write_to_db(db.kv_store)
@@ -88,14 +88,15 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
-        device = db.get_storage_device_by_id(task.device_id)
-        distr_name = task.function_params["distr_name"]
-
-        if not device:
+        try:
+            device = db.get_storage_device_by_id(task.device_id)
+        except KeyError:
             task.status = JobSchedule.STATUS_DONE
             task.function_result = "Device not found"
             task.write_to_db(db.kv_store)
             return True
+
+        distr_name = task.function_params["distr_name"]
 
         qos_high_priority = False
         if db.get_cluster_by_id(snode.cluster_id).enable_qos:

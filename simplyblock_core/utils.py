@@ -16,10 +16,11 @@ from typing import Set, Union
 from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
-from docker.errors import APIError, DockerException, ImageNotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from kubernetes.stream import stream
 
-import psutil
+import tempfile
+from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
@@ -527,7 +528,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(4.0 * small_pool_count), int(1.5 * large_pool_count)
+    return int(4.0 * small_pool_count), int(2.5 * large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -541,7 +542,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 12 * lvol_count) * (1024 * 1024) + (
             250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
-    return int(memory_consumption)
+    return int(1.2*memory_consumption)
 
 
 def calculate_minimum_sys_memory(max_prov):
@@ -1048,9 +1049,8 @@ def addNvmeDevices(rpc_client, snode, devs):
 
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
-                if "subnqn" in nvme_driver_data['ctrlr_data']:
-                    subnqn = nvme_driver_data['ctrlr_data']['subnqn']
-                    serial_number = subnqn.split(":")[-1] + f"_{nvme_driver_data['ctrlr_data']['cntlid']}"
+                if "ns_data" in nvme_driver_data:
+                    serial_number = nvme_driver_data['pci_address'] + nvme_driver_data['ns_data']['id']
                 else:
                     logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
 
@@ -1433,7 +1433,7 @@ def regenerate_config(new_config, old_config, force=False):
                 logger.error(f"The nic {nic} is not a member of system nics {all_nics}")
                 return False
 
-        small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
+        small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls + 1, 2 * number_of_distribs,
                                                                   len(isolated_cores),
                                                                   number_of_poller_cores or len(
                                                                       isolated_cores),)
@@ -1502,7 +1502,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     nvme_by_numa = {nid: [] for nid in sockets_to_use}
     nvme_numa_neg1 = []
     for nvme_name, val in nvmes.items():
-        numa = val["numa_node"]
+        numa = int(val["numa_node"])
         if numa in sockets_to_use:
             nvme_by_numa[numa].append(nvme_name)
         elif int(numa) == -1:
@@ -1616,6 +1616,7 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
         if current_hugepages >= hugepages_needed:
             logger.debug(f"Node {node}: already has {current_hugepages} hugepages, no change needed.")
         else:
+            hugepages_needed = adjust_hugepages(hugepages_needed)
             logger.debug(f"Node {node}: has {current_hugepages} hugepages, setting to {hugepages_needed}...")
             cmd = f"echo {hugepages_needed} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
             subprocess.run(cmd, shell=True, check=True)
@@ -1628,6 +1629,15 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     except Exception as e:
         logger.error(f"Node {node}: Error occurred: {e}")
 
+def adjust_hugepages(hugepages: int) -> int:
+    """Adjust hugepages to the next multiple of 500 and add a small extra based on leading digits."""
+    remainder = hugepages % 500
+    hugepages =  hugepages + (500 - remainder)
+
+    str_val = str(hugepages)
+    decimal_val = float(str_val[0] + '.' + str_val[1])
+    add_val = int(decimal_val * 24)
+    return hugepages + add_val
 
 def validate_node_config(node):
     required_top_fields = [
@@ -1831,14 +1841,69 @@ def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
 
     return ready_pods == expected_replicas
 
+def get_k8s_batch_client():
+    config.load_incluster_config()
+    return client.BatchV1Api()
 
 def remove_container(client: docker.DockerClient, name, timeout=3):
     try:
         container = client.containers.get(name)
         container.stop(timeout=timeout)
         container.remove()
-    except docker.errors.NotFound:
+    except NotFound:
         pass
-    except docker.errors.APIError as e:
-        if 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
+    except APIError as e:
+        if e.response and 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
             raise
+
+def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):
+    TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
+    alert_resources_file = "alert_resources.yaml"
+
+    env = Environment(loader=FileSystemLoader(alerts_template_folder), trim_blocks=True, lstrip_blocks=True)
+    template = env.get_template(f'{alert_resources_file}.j2')
+
+    slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
+    email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+    if slack_pattern.match(contact_point):
+        ALERT_TYPE = "slack"
+    elif email_pattern.match(contact_point):
+        ALERT_TYPE = "email"
+    else:
+        ALERT_TYPE = "slack"
+        contact_point = 'https://hooks.slack.com/services/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'
+
+    values = {
+        'CONTACT_POINT': contact_point,
+        'GRAFANA_ENDPOINT': grafana_endpoint,
+        'ALERT_TYPE': ALERT_TYPE,
+    }
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_file_path = os.path.join(temp_dir, alert_resources_file)
+        with open(temp_file_path, 'w') as file:
+            file.write(template.render(values))
+
+        destination_file_path = os.path.join(alerts_template_folder, alert_resources_file)
+        subprocess.check_call(['sudo', '-v'])  # sudo -v checks if the current user has sudo permissions
+        subprocess.check_call(['sudo', 'mv', temp_file_path, destination_file_path])
+        print(f"File moved to {destination_file_path} successfully.")
+
+    scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
+    prometheus_file = "prometheus.yml"
+    env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
+    template = env.get_template(f'{prometheus_file}.j2')
+    values = {
+        'CLUSTER_ID': cluster_uuid,
+        'CLUSTER_SECRET': cluster_secret}
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        file_path = os.path.join(temp_dir, prometheus_file)
+        with open(file_path, 'w') as file:
+            file.write(template.render(values))
+
+        prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
+        subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
+        print(f"File moved to {prometheus_file_path} successfully.")

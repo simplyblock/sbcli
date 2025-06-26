@@ -46,6 +46,7 @@ class NVMeDevice(BaseModel):
     nvmf_ip: str = ""
     nvmf_nqn: str = ""
     nvmf_port: int = 0
+    nvmf_multipath: bool = False
     overload_percentage: int = 0  # Unused
     partition_jm_bdev: str = ""  # Unused
     partition_jm_size: int = 0  # Unused

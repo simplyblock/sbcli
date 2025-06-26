@@ -93,6 +93,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 if self.current_outage_node:
                     skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
                     skip_nodes.append(self.current_outage_node)
+                    skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
                     host_id = [node for node in self.sn_nodes_with_sec if node not in skip_nodes]
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name,
@@ -120,6 +121,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     if self.current_outage_node:
                         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
                         skip_nodes.append(self.current_outage_node)
+                        skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
                         host_id = [node for node in self.sn_nodes_with_sec if node not in skip_nodes]
                         self.logger.info(f"Skipping Nodes: {skip_nodes}")
                         self.logger.info(f"Host Nodes: {host_id}")
@@ -578,6 +580,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.int_lvol_size += 1
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
         skip_nodes.append(self.current_outage_node)
+        skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
         self.logger.info(f"Skipping Nodes: {skip_nodes}")
         available_lvols = [
             lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes for lvol in lvols
@@ -752,6 +755,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         """Delete random lvols during an outage."""
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
         skip_nodes.append(self.current_outage_node)
+        skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
         self.logger.info(f"Skipping Nodes: {skip_nodes}")
         available_lvols = [
             lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes for lvol in lvols
@@ -771,6 +775,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                         log_file=clone_details["Log"])
                     self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=False)
                     fio_pids = self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=True)
+                    self.disconnect_lvol(clone_details['ID'])
+                    sleep_n_sec(10)
                     for pid in fio_pids:
                         self.ssh_obj.kill_processes(clone_details["Client"], pid=pid)
                     attempt = 1
@@ -782,7 +788,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         attempt += 1
                         sleep_n_sec(10)
                     
-                    self.disconnect_lvol(clone_details['ID'])
                     sleep_n_sec(10)
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
@@ -794,6 +799,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
                     self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
                     self.ssh_obj.delete_files(clone_details["Client"], [f"/mnt/{clone_name}/*"])
+                    self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}*.log"])
             for del_key in to_delete:
                 del self.clone_mount_details[del_key]
             for snapshot in snapshots:
@@ -804,6 +810,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.common_utils.validate_fio_test(self.lvol_mount_details[lvol]["Client"],
                                                 log_file=self.lvol_mount_details[lvol]["Log"])
             self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=False)
+            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
+            sleep_n_sec(10)
             fio_pids = self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=True)
             for pid in fio_pids:
                 self.ssh_obj.kill_processes(self.lvol_mount_details[lvol]["Client"], pid=pid)
@@ -816,7 +824,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 attempt += 1
                 sleep_n_sec(10)
 
-            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
@@ -824,6 +831,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])
+            self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}*.log"])
             if lvol in self.lvols_without_sec_connect:
                 self.lvols_without_sec_connect.remove(lvol)
             del self.lvol_mount_details[lvol]

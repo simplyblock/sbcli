@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ JOBNAME }}
+  namespace: {{ NAMESPACE }}
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
+      hostNetwork: true
+      hostPID: true
+      serviceAccountName: simplyblock-storage-node-sa
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      containers:
+        - name: init-setup
+          image: ubuntu:22.04
+          securityContext:
+            privileged: true
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "--- Installing curl & networking tools ---"
+              apt-get update && apt-get install -y iproute2 curl grep
+
+              NODE_IP=$(ip route get 1.1.1.1 | grep -oE 'src [0-9.]+' | awk '{print $2}')
+              echo "Detected node IP: $NODE_IP"
+
+              echo "--- Sending config to $NODE_IP ---"
+              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://$NODE_IP:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
+              echo "HTTP status: $RESPONSE"
+              if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
+                echo "Failed to apply config"
+                exit 1
+              fi
+
+              echo "--- Restarting kubelet ---"
+              nsenter --target 1 --mount --uts --ipc --net --pid -- bash -c '
+                if command -v systemctl >/dev/null 2>&1; then
+                  echo "Restarting kubelet..."
+                  systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
+                else
+                  echo "systemctl not found; skipping kubelet restart"
+                fi
+              '
+
+              echo "--- Init setup complete ---"

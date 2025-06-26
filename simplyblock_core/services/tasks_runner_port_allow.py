@@ -2,8 +2,8 @@
 import time
 
 
-from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import tasks_events, tcp_ports_events
+from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
+from simplyblock_core.controllers import tasks_events, tcp_ports_events, health_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -57,8 +57,23 @@ while True:
                             task.write_to_db(db.kv_store)
                             continue
 
-                        if node.health_check is False:
-                            msg = f"Node health check fail: {node.get_id()}, retry later"
+                        logger.info("connecting remote devices")
+                        node.remote_devices = storage_node_ops._connect_to_remote_devs(
+                            node, force_conect_restarting_nodes=True)
+                        node.write_to_db()
+
+                        logger.info("Sending device status event")
+                        for db_dev in node.nvme_devices:
+                            distr_controller.send_dev_status_event(db_dev, db_dev.status)
+
+                        lvstore_check = True
+                        if node.lvstore_status == "ready":
+                            lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
+                            if node.secondary_node_id:
+                                lvstore_check &= health_controller._check_node_hublvol(node)
+
+                        if lvstore_check is False:
+                            msg = "Node LVolStore check fail, retry later"
                             logger.warning(msg)
                             task.function_result = msg
                             task.status = JobSchedule.STATUS_SUSPENDED

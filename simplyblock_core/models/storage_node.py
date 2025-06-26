@@ -51,7 +51,7 @@ class StorageNode(BaseNodeObject):
     is_secondary_node: bool = False
     jc_singleton_mask: str = ""
     jm_cpu_mask: str = ""
-    jm_device: JMDevice = None
+    jm_device: JMDevice = None # type: ignore[assignment]
     jm_percent: int = 3
     jm_vuid: int = 0
     lvols: int = 0
@@ -99,7 +99,7 @@ class StorageNode(BaseNodeObject):
     lvstore_status: str = ""
     nvmf_port: int = 4420
     physical_label: int = 0
-    hublvol: HubLVol = None
+    hublvol: HubLVol = None  # type: ignore[assignment]
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -236,15 +236,15 @@ class StorageNode(BaseNodeObject):
         remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
 
         if not rpc_client.get_bdevs(remote_bdev):
-
+            ip_lst = []
             for ip in (iface.ip4_address for iface in primary_node.data_nics):
+                ip_lst.append(ip)
+            multipath = bool(len(ip_lst) > 1)
+            for ip in ip_lst:
                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
                         primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                        ip, primary_node.hublvol.nvmf_port)
-                if ret:
-                    remote_bdev = ret[0]
-                    break
-                else:
+                        ip, primary_node.hublvol.nvmf_port, multipath=multipath)
+                if not ret and not multipath:
                     logger.warning(f'Failed to connect to hublvol on {ip}')
 
         if not rpc_client.bdev_lvol_set_lvs_opts(

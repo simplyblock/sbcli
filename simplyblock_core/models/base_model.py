@@ -63,7 +63,7 @@ class BaseModel(object):
             return "%s/%s/%s" % (self.object_type, self.name, self.get_id())
 
     def from_dict(self, data):
-        for attr , value_dict in self.get_attrs_map().items():
+        for attr, value_dict in self.get_attrs_map().items():
             value = value_dict['default']
             if data is not None and attr in data:
                 dtype = value_dict['type']

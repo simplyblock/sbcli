@@ -64,5 +64,10 @@ def clone_snapshot():
         new_size = core_utils.parse_size(cl_data['new_size'])
 
     clone_id, error = snapshot_controller.clone(
-        cl_data['snapshot_id'], cl_data['clone_name'], new_size)
+        cl_data['snapshot_id'],
+        cl_data['clone_name'],
+        new_size,
+        cl_data.get('pvc_name', None),
+        cl_data.get('pvc_namespace', None)
+    )
     return utils.get_response(clone_id, error, http_code=400)

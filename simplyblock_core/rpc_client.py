@@ -1,5 +1,4 @@
 import json
-import inspect
 
 import requests
 
@@ -151,7 +150,8 @@ class RPCClient:
             "buf_cache_size": 512,
             "dif_insert_or_strip": False,
             "c2h_success": True,
-            "sock_priority": 0
+            "sock_priority": 0,
+            "ack_timeout": 4096,
         }
         return self._request("nvmf_create_transport", params)
 
@@ -562,7 +562,7 @@ class RPCClient:
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)
 
-    def bdev_nvme_attach_controller_tcp(self, name, nqn, ip, port):
+    def bdev_nvme_attach_controller_tcp(self, name, nqn, ip, port, multipath=False):
         params = {
             "name": name,
             "trtype": "tcp",
@@ -572,10 +572,11 @@ class RPCClient:
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000,
             "num_io_queues": 128,
-            #"ctrlr_loss_timeout_sec": 3,
-            "multipath":"disable",
-            # "reconnect_delay_sec":1
         }
+        if multipath:
+            params["multipath"] = "failover"
+        else:
+            params["multipath"] = "disable"
         return self._request("bdev_nvme_attach_controller", params)
 
     def bdev_nvme_attach_controller_tcp_caching(self, name, nqn, ip, port):
@@ -632,13 +633,14 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": 0,
+            "bdev_retry_count": 1,
             "transport_retry_count": 3,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec" : 0,
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 10000,
-            "timeout_us": constants.NVME_TIMEOUT_US
+            "timeout_us": constants.NVME_TIMEOUT_US,
+            "transport_ack_timeout": 13,
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -1007,7 +1009,7 @@ class RPCClient:
         `lvs` must be either an ID or the lvstore name.
         """
 
-        return self._request(inspect.currentframe().f_code.co_name, {
+        return self._request('bdev_lvol_set_lvs_opts', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
             "subsystem_port": subsystem_port,
@@ -1036,17 +1038,17 @@ class RPCClient:
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
     def bdev_lvol_create_hublvol(self, lvs):
-        return self._request(inspect.currentframe().f_code.co_name, {
+        return self._request('bdev_lvol_create_hublvol', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
         })
 
     def bdev_lvol_delete_hublvol(self, lvs):
-        return self._request(inspect.currentframe().f_code.co_name, {
+        return self._request('bdev_lvol_delete_hublvol', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
         })
 
     def bdev_lvol_connect_hublvol(self, lvs, bdev):
-        return self._request(inspect.currentframe().f_code.co_name, {
+        return self._request('bdev_lvol_connect_hublvol', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "remote_bdev": bdev,
         })
@@ -1071,3 +1073,10 @@ class RPCClient:
         if ana_state:
             params["ana_state"] = ana_state
         return self._request2("nvmf_subsystem_add_listener", params)
+
+    def bdev_nvme_set_multipath_policy(self, name, policy):  # policy: active_active or active_passive
+        params = {
+            "name": name,
+            "policy": policy,
+        }
+        return self._request("bdev_nvme_set_multipath_policy", params)

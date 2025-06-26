@@ -1,6 +1,8 @@
 name: Docker Base Image Build
 
 on:
+  schedule:
+    - cron: '0 5 * * SUN'  # Sundays at 5am
   workflow_dispatch:
 
 jobs:

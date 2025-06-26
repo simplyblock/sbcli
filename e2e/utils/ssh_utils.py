@@ -1704,37 +1704,46 @@ class SshUtils:
     def start_resource_monitors(self, node_ip, log_dir):
         """
         Starts background resource monitoring for:
-        1. Root partition usage
-        2. Container-wise memory usage
+        1. Root partition usage (df -h /)
+        2. Container-wise memory usage (docker stats)
+        3. System memory usage (free -h)
 
-        Each logs every 10s to a separate file in the log_dir.
+        Each logs every 10 seconds to separate files in log_dir.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         root_log = f"{log_dir}/root_partition_usage_{node_ip}_{timestamp}.txt"
         docker_mem_log = f"{log_dir}/docker_mem_usage_{node_ip}_{timestamp}.txt"
+        system_mem_log = f"{log_dir}/system_memory_usage_{node_ip}_{timestamp}.txt"
 
-        # Ensure log directory exists
+        # Ensure log directory exists and is writable
         self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
 
-        # Root partition utilization monitor (df -h /)
-        df_cmd = f"""sudo tmux new-session -d -s root_usage_monitor \
-        'bash -c "while true; do date >> {root_log}; df -h / >> {root_log}; echo >> {root_log}; sleep 10; done"'"""
+        # 1) Root partition monitor
+        df_cmd = f"""
+        sudo tmux new-session -d -s root_usage_monitor \
+        'bash -c "while true; do date >> {root_log}; df -h / >> {root_log}; echo >> {root_log}; sleep 10; done"'
+        """
 
+        # 2) Docker container memory usage monitor
+        docker_cmd = f"""
+        sudo tmux new-session -d -s docker_mem_monitor \
+        'bash -c "while true; do date >> {docker_mem_log}; \
+        docker stats --no-stream --format \\"table {{.Name}}\\t{{.MemUsage}}\\" >> {docker_mem_log}; \
+        echo >> {docker_mem_log}; sleep 10; done"'
+        """
 
-        # Docker memory usage monitor (docker stats --no-stream)
-        docker_cmd = "sudo tmux new-session -d -s docker_mem_monitor " \
-                     "'while true; do " \
-                     "date >> %s; " \
-                     "docker stats --no-stream --format \"table {{.Name}}\\t{{.MemUsage}}\" >> %s; " \
-                     "echo >> %s; " \
-                     "sleep 10; " \
-                     "done'" % (docker_mem_log, docker_mem_log, docker_mem_log)
-
+        # 3) System memory usage monitor
+        system_cmd = f"""
+        sudo tmux new-session -d -s system_mem_monitor \
+        'bash -c "while true; do date >> {system_mem_log}; free -h >> {system_mem_log}; echo >> {system_mem_log}; sleep 10; done"'
+        """
 
         self.exec_command(node_ip, df_cmd)
         self.exec_command(node_ip, docker_cmd)
+        self.exec_command(node_ip, system_cmd)
 
-        self.logger.info(f"Started root partition and container memory logging on {node_ip}")
+        self.logger.info(f"Started root partition, container memory, and system memory logging on {node_ip}")
+
 
     
     def suspend_cluster(self, node_ip, cluster_id):

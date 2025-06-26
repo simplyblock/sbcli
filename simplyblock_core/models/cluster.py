@@ -48,6 +48,7 @@ class Cluster(BaseModel):
     grafana_endpoint: str = ""
     mode: str = ""
     grafana_secret: str = ""
+    contact_point: str = ""
     ha_type: str = "single"
     inflight_io_threshold: int = 4
     iscsi: str = ""
@@ -59,6 +60,7 @@ class Cluster(BaseModel):
     prov_cap_warn: int = 180
     qpair_count: int = 32
     secret: str = ""
+    disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
     tls: bool = False
     is_re_balancing: bool = False

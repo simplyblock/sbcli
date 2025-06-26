@@ -142,6 +142,10 @@ class SNodeClient:
         params = {"device_pci": device_pci}
         return self._request("POST", "delete_dev_gpt_partitions", params)
 
+    def bind_device_to_nvme(self, device_pci):
+        params = {"device_pci": device_pci}
+        return self._request("POST", "bind_device_to_nvme", params)
+
     def bind_device_to_spdk(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_spdk", params)
@@ -163,7 +167,7 @@ class SNodeClient:
         }
         return self._request("POST", "firewall_set_port", params)
 
-    def get_firewall(self,rpc_port=None):
+    def get_firewall(self, rpc_port=None):
         params = {"rpc_port": rpc_port}
         return self._request("GET", "get_firewall", params)
 
