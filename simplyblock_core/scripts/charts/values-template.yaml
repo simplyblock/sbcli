@@ -30,6 +30,8 @@ openebs:
 
 mongodb:
   architecture: standalone
+  fullnameOverride: "simplyblock-mongodb"
+  useStatefulSet: true
   auth:
     enabled: false
   replicaCount: 1
@@ -110,6 +112,7 @@ opensearch:
 
 prometheus:
   server:
+    fullnameOverride: simplyblock-prometheus
     enabled: true
     statefulSet:
       enabled: true
@@ -137,7 +140,7 @@ prometheus:
       size: 5Gi
       storageClass: openebs-local-hostpath
     sidecarContainers:
-      - name: thanos-sidecar
+      thanos-sidecar:
         image: thanosio/thanos:v0.31.0
         args:
           - sidecar
@@ -173,3 +176,14 @@ prometheus:
       - name: objstore-config
         configMap:
           name: simplyblock-objstore-config
+  alertmanager:
+    enabled: false
+
+  prometheus-pushgateway:
+    enabled: false
+
+  prometheus-node-exporter:
+    enabled: false
+
+  kube-state-metrics:
+    enabled: false

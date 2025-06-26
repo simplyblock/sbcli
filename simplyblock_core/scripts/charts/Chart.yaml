@@ -14,7 +14,7 @@ sources:
 
 dependencies:
   - name: mongodb
-    version: 13.16.5
+    version: 13.16.4
     repository: https://charts.bitnami.com/bitnami
   - name: opensearch
     version: 2.14.1
