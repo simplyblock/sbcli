@@ -248,6 +248,10 @@ while True:
 
         nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
+
+            # get fresh node object, something could have changed until the last for loop is reached
+            snode = db.get_storage_node_by_id(snode.get_id())
+
             if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                                     StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
                 logger.info(f"Node status is: {snode.status}, skipping")
