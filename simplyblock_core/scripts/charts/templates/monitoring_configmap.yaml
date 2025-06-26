@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{.Release.Name}}-simplyblock-prometheus-config
+  name: {{ .Release.Name }}-simplyblock-prometheus-config
   labels:
     app: simplyblock-prometheus
   namespace: {{ .Release.Namespace }}
