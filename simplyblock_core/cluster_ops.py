@@ -81,7 +81,7 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
 
-    retries = 20
+    retries = 30
     reachable=False
     while retries > 0:
 
