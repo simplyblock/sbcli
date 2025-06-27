@@ -81,7 +81,7 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
 
-    retries = 10
+    retries = 20
     reachable=False
     while retries > 0:
 
@@ -106,12 +106,14 @@ def _add_graylog_input(cluster_ip, password):
         session = requests.session()
         session.auth = ("admin", password)
         response = session.request("POST", url, headers=headers, data=payload)
-        logger.debug(response.text)
         if response.status_code == 201:
             logger.info("Graylog input created...")
             reachable=True
             break
 
+        logger.debug(response.text)
+        retries -= 1
+        time.sleep(5)
     if not reachable:
         logger.error(f"Failed to create graylog input: {response.text}")
         return False
@@ -271,7 +273,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     elif mode == "kubernetes":
         if not contact_point:
             contact_point = 'https://hooks.slack.com/services/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' 
-            
+
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
