@@ -405,7 +405,6 @@ def _prepare_cluster_devices_partitions(snode, devices):
     new_devices = []
     jm_devices = []
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-    bdevs_names = [d['name'] for d in rpc_client.get_bdevs()]
     for index, nvme in enumerate(devices):
         if nvme.status == "not_found":
             continue
@@ -415,51 +414,36 @@ def _prepare_cluster_devices_partitions(snode, devices):
             new_devices.append(nvme)
             continue
 
-        if nvme.is_partition:
-            dev_part = f"{nvme.nvme_bdev[:-2]}p1"
-            if dev_part in bdevs_names:
-                if dev_part not in jm_devices:
-                    jm_devices.append(dev_part)
+        # look for partitions
+        partitioned_devices = _search_for_partitions(rpc_client, nvme)
+        logger.debug("partitioned_devices")
+        logger.debug(partitioned_devices)
+        if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
+            logger.info("Partitioned devices found")
+        else:
+            logger.info(f"Creating partitions for {nvme.nvme_bdev}")
+            _create_device_partitions(rpc_client, nvme, snode, snode.num_partitions_per_dev, snode.jm_percent,
+                                      snode.partition_size)
+            partitioned_devices = _search_for_partitions(rpc_client, nvme)
+            if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
+                logger.info("Device partitions created")
+            else:
+                logger.error("Failed to create partitions")
+                return False
 
-            new_device = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
-            if not new_device:
+        jm_devices.append(partitioned_devices.pop(0).nvme_bdev)
+
+        for dev in partitioned_devices:
+            ret = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
+            if not ret:
                 logger.error("failed to create dev stack")
                 return False
-            new_devices.append(new_device)
-            if new_device.status == NVMeDevice.STATUS_ONLINE:
-                device_events.device_create(new_device)
-
-        else:
-            # look for partitions
-            partitioned_devices = _search_for_partitions(rpc_client, nvme)
-            logger.debug("partitioned_devices")
-            logger.debug(partitioned_devices)
-            if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
-                logger.info("Partitioned devices found")
-            else:
-                logger.info(f"Creating partitions for {nvme.nvme_bdev}")
-                _create_device_partitions(rpc_client, nvme, snode, snode.num_partitions_per_dev, snode.jm_percent,
-                                          snode.partition_size)
-                partitioned_devices = _search_for_partitions(rpc_client, nvme)
-                if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
-                    logger.info("Device partitions created")
-                else:
-                    logger.error("Failed to create partitions")
-                    return False
-
-            jm_devices.append(partitioned_devices.pop(0).nvme_bdev)
-
-            for dev in partitioned_devices:
-                ret = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
-                if not ret:
-                    logger.error("failed to create dev stack")
-                    return False
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    if dev.cluster_device_order < 0:
-                        dev.cluster_device_order = dev_order
-                        dev_order += 1
-                    device_events.device_create(dev)
-                new_devices.append(dev)
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                if dev.cluster_device_order < 0:
+                    dev.cluster_device_order = dev_order
+                    dev_order += 1
+                device_events.device_create(dev)
+            new_devices.append(dev)
 
     snode.nvme_devices = new_devices
 
