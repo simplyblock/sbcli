@@ -65,7 +65,7 @@ data:
       editable: true
     - name: GRAYLOG
       type: elasticsearch
-      url: http://simplyblock-opensearch:9200
+      url: http://opensearch-cluster-master:9200
       isDefault: false
       access: proxy
       uid: graylog_uid
