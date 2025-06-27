@@ -406,9 +406,6 @@ def _prepare_cluster_devices_partitions(snode, devices):
     jm_devices = []
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
     for index, nvme in enumerate(devices):
-        if nvme.status == "not_found":
-            continue
-
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             new_devices.append(nvme)
@@ -468,9 +465,6 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     new_devices = []
     for index, nvme in enumerate(devices):
-        if nvme.status == "not_found":
-            continue
-
         if nvme.status == NVMeDevice.STATUS_JM:
             jm_device = _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart=False)
             if not jm_device:
