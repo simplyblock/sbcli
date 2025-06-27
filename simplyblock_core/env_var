@@ -1,6 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=19.0.4
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre-nw
+SIMPLY_BLOCK_VERSION=1.0.0
 
 
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-PRE
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-latest
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:spdk-sock-async-latest

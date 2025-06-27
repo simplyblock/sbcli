@@ -642,6 +642,7 @@ class RPCClient:
             "keep_alive_timeout_ms": 10000,
             "timeout_us": constants.NVME_TIMEOUT_US,
             "transport_ack_timeout": 13,
+            "tcp_connect_timeout_ms": 5000
         }
         return self._request("bdev_nvme_set_options", params)
 
