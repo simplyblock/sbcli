@@ -61,7 +61,6 @@ mongodb:
   nodeSelector:
     simplyblock.io/role: mgmt-plane
 
-
 opensearch:
   fullnameOverride: "simplyblock-opensearch"
   singleNode: true

@@ -86,7 +86,7 @@ data:
 
     backend opensearch_services
         balance roundrobin
-        server-template opensearch- 1 simplyblock-opensearch.{{ .Release.Namespace }}.svc.cluster.local:9200 check resolvers kube-dns init-addr libc,none
+        server-template opensearch- 1 opensearch-cluster-master.{{ .Release.Namespace }}.svc.cluster.local:9200 check resolvers kube-dns init-addr libc,none
 
     frontend web_api_front
         bind *:80

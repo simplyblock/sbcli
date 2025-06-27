@@ -139,7 +139,7 @@ spec:
         - name: graylog
           image: graylog/graylog:5.0
           command: ["/usr/bin/tini", "--"]
-          args: ["wait-for-it", "simplyblock-opensearch:9200", "--", "/docker-entrypoint.sh"]
+          args: ["wait-for-it", "opensearch-cluster-master:9200", "--", "/docker-entrypoint.sh"]
           env:
             - name: GRAYLOG_NODE_ID_FILE
               value: "/usr/share/graylog/data/config/node-id"
@@ -158,7 +158,7 @@ spec:
             - name: GRAYLOG_HTTP_EXTERNAL_URI
               value: "http://localhost/graylog/"
             - name: GRAYLOG_ELASTICSEARCH_HOSTS
-              value: "http://simplyblock-opensearch:9200"
+              value: "http://opensearch-cluster-master:9200"
             - name: GRAYLOG_MONGODB_URI
               value: "mongodb://simplyblock-mongodb:27017/graylog"
             - name: GRAYLOG_SKIP_PREFLIGHT_CHECKS
