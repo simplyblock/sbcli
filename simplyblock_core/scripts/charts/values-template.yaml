@@ -132,6 +132,17 @@ prometheus:
                   values:
                     - simplyblock-prometheus
             topologyKey: "kubernetes.io/hostname"
+    service:
+      servicePort: 9090
+      type: ClusterIP
+      gRPC:
+        enabled: true
+        servicePort: 10901
+      additionalPorts:
+        - name: http-thanos
+          port: 10902
+          targetPort: 10902
+          protocol: TCP
     securityContext:
       fsGroup: 65534
     persistentVolume:
