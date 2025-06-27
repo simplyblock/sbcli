@@ -53,7 +53,7 @@ mongodb:
       requiredDuringSchedulingIgnoredDuringExecution:
         - labelSelector:
             matchExpressions:
-              - key: app.kubernetes.io/name
+              - key: app.kubernetes.io/component
                 operator: In
                 values:
                   - mongodb
@@ -69,21 +69,23 @@ opensearch:
   nodeSelector:
     simplyblock.io/role: mgmt-plane
 
-  antiAffinity: custom
+  # antiAffinity: custom
 
-  customAntiAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchExpressions:
-            - key: app
-              operator: In
-              values:
-                - simplyblock-opensearch
-        topologyKey: "kubernetes.io/hostname"
+  antiAffinity: "hard"
+
+  # customAntiAffinity:
+  #   requiredDuringSchedulingIgnoredDuringExecution:
+  #     - labelSelector:
+  #         matchExpressions:
+  #           - key: app
+  #             operator: In
+  #             values:
+  #               - simplyblock-opensearch
+  #       topologyKey: "kubernetes.io/hostname"
 
   persistence:
     enabled: true
-    storageClassName: openebs-local-hostpath
+    storageClass: openebs-local-hostpath
     size: 10Gi
 
   resources:
@@ -127,7 +129,7 @@ prometheus:
         requiredDuringSchedulingIgnoredDuringExecution:
           - labelSelector:
               matchExpressions:
-                - key: app
+                - key: app.kubernetes.io/component
                   operator: In
                   values:
                     - simplyblock-prometheus

@@ -199,20 +199,20 @@ mongodb_command_patch = [
     "--bind_ip_all"
 ]
 
-mongodb_readiness_probe = {
-    "exec": {
-        "command": [
-            "mongosh",
-            "--eval",
-            "db.adminCommand('ping')"
-        ]
-    },
-    "initialDelaySeconds": 5,
-    "periodSeconds": 10,
-    "timeoutSeconds": 5,
-    "failureThreshold": 3,
-    "successThreshold": 1
-}
+# mongodb_readiness_probe = {
+#     "exec": {
+#         "command": [
+#             "mongosh",
+#             "--eval",
+#             "db.adminCommand('ping')"
+#         ]
+#     },
+#     "initialDelaySeconds": 5,
+#     "periodSeconds": 10,
+#     "timeoutSeconds": 5,
+#     "failureThreshold": 3,
+#     "successThreshold": 1
+# }
 
 mongodb_patch = {
     "spec": {
@@ -222,8 +222,8 @@ mongodb_patch = {
                 "containers": [
                     {
                         "name": "mongodb",
-                        "command": mongodb_command_patch,
-                        "readinessProbe": mongodb_readiness_probe
+                        "command": mongodb_command_patch
+                    #    "readinessProbe": mongodb_readiness_probe
                     }
                 ]
             }
