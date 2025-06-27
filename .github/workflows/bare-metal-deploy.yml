@@ -39,8 +39,9 @@ on:
       k8s_snode:
         description: "Run snode on k8s"
         required: false
-        default: false
+        default: true
         type: boolean
+
 
     outputs:
       cluster_ip:
