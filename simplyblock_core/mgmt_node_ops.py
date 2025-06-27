@@ -169,7 +169,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             else:
                 raise TimeoutError("MongoDB pods did not become ready in time.")
 
-            utils.initiate_mongodb_rs()
+            #utils.initiate_mongodb_rs()
 
             response = apps_v1.patch_namespaced_deployment(
                 name=constants.GRAYLOG_STATEFULSET_NAME,
