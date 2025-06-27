@@ -196,7 +196,8 @@ os_patch = {
 mongodb_command_patch = [
     "mongod",
     "--replSet", "rs0",
-    "--bind_ip_all"
+    "--bind_ip_all",
+    "--dbpath", "/bitnami/mongodb"
 ]
 
 # mongodb_readiness_probe = {
@@ -214,23 +215,28 @@ mongodb_command_patch = [
 #     "successThreshold": 1
 # }
 
+# mongodb_patch = {
+#     "spec": {
+#         "replicas": 3,
+#         "template": {
+#             "spec": {
+#                 "containers": [
+#                     {
+#                         "name": "mongodb",
+#                         "command": mongodb_command_patch
+#                     #    "readinessProbe": mongodb_readiness_probe
+#                     }
+#                 ]
+#             }
+#         }
+#     }
+# }
+
 mongodb_patch = {
     "spec": {
         "replicas": 3,
-        "template": {
-            "spec": {
-                "containers": [
-                    {
-                        "name": "mongodb",
-                        "command": mongodb_command_patch
-                    #    "readinessProbe": mongodb_readiness_probe
-                    }
-                ]
-            }
-        }
     }
 }
-
 
 graylog_env_patch = [
     {

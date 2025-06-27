@@ -1829,7 +1829,7 @@ def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
     ready_pods = 0
     pods = k8s_core_v1.list_namespaced_pod(
         namespace=namespace,
-        label_selector=f"app={statefulset_name}"
+        label_selector="app.kubernetes.io/name=mongodb"
     ).items
 
     for pod in pods:

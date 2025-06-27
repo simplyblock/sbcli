@@ -29,7 +29,7 @@ openebs:
   enabled: true
 
 mongodb:
-  architecture: standalone
+  architecture: replicaset
   fullnameOverride: "simplyblock-mongodb"
   useStatefulSet: true
   auth:
@@ -69,20 +69,7 @@ opensearch:
   nodeSelector:
     simplyblock.io/role: mgmt-plane
 
-  # antiAffinity: custom
-
   antiAffinity: "hard"
-
-  # customAntiAffinity:
-  #   requiredDuringSchedulingIgnoredDuringExecution:
-  #     - labelSelector:
-  #         matchExpressions:
-  #           - key: app
-  #             operator: In
-  #             values:
-  #               - simplyblock-opensearch
-  #       topologyKey: "kubernetes.io/hostname"
-
   persistence:
     enabled: true
     storageClass: openebs-local-hostpath
