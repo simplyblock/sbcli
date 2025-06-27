@@ -243,9 +243,9 @@ graylog_env_patch = [
         "name": "GRAYLOG_MONGODB_URI",
         "value": (
             "mongodb://"
-            "simplyblock-mongodb-0.simplyblock-mongodb:27017,"
-            "simplyblock-mongodb-1.simplyblock-mongodb:27017,"
-            "simplyblock-mongodb-2.simplyblock-mongodb:27017/graylog?"
+            "simplyblock-mongodb-0.simplyblock-mongodb-headless:27017,"
+            "simplyblock-mongodb-1.simplyblock-mongodb-headless:27017,"
+            "simplyblock-mongodb-2.simplyblock-mongodb-headless:27017/graylog?"
             "replicaSet=rs0"
         )
     }
