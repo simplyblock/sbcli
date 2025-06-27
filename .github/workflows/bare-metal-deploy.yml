@@ -39,7 +39,7 @@ on:
       k8s_snode:
         description: "Run snode on k8s"
         required: false
-        default: true
+        default: false
         type: boolean
 
     outputs:
@@ -89,6 +89,13 @@ jobs:
         repository: simplyblock-io/simplyblock-csi
         path: simplyblock-csi
 
+    - name: Install Helm
+      if: ${{ inputs.k8s_snode == true }}
+      run: |
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        chmod 700 get_helm.sh
+        ./get_helm.sh
+
     - name: Deploy cluster 
       id: deployment
       run: |
@@ -106,6 +113,9 @@ jobs:
           eval $DEPLOY_CMD
         else
           echo "Setup docker snodes"
+          echo "making sure the cluster is clean"
+          helm uninstall sb-controller || true
+          helm uninstall simplyblock-csi || true
           eval $DEPLOY_CMD
         fi
         echo "mnodes=$MNODES" >> ${GITHUB_OUTPUT:-/dev/stdout}
@@ -118,13 +128,6 @@ jobs:
         NR_HUGEPAGES: ${{ inputs.nr_hugepages }}
         SBCLI_BRANCH: ${{ inputs.sbcli_source }}
         SIMPLY_BLOCK_DOCKER_IMAGE: ${{ inputs.docker_image }}
-
-    - name: Install Helm
-      if: ${{ inputs.k8s_snode == true }}
-      run: |
-        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-        chmod 700 get_helm.sh
-        ./get_helm.sh
         
     - name: Setup k8s
       id: k8sdeployment
