@@ -96,6 +96,12 @@ jobs:
         chmod 700 get_helm.sh
         ./get_helm.sh
 
+    - name: Install kubectl
+      if: ${{ inputs.k8s_snode == true }}
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
     - name: Deploy cluster 
       id: deployment
       run: |
@@ -116,6 +122,7 @@ jobs:
           echo "making sure the cluster is clean"
           helm uninstall sb-controller || true
           helm uninstall simplyblock-csi || true
+          kubectl get pods | grep snode-spdk-deployment | awk '{print $1}' | xargs kubectl delete pod
           eval $DEPLOY_CMD
         fi
         echo "mnodes=$MNODES" >> ${GITHUB_OUTPUT:-/dev/stdout}
