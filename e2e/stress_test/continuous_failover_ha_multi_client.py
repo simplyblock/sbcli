@@ -476,13 +476,17 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             # Retry mechanism for restarting the node
             for attempt in range(max_retries):
                 try:
+                    force=False
                     if attempt == max_retries - 1:
-                        self.logger.info("[CHECK] Restarting Node via CLI as via API Fails.")
-                        self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
-                                                  node_id=self.current_outage_node,
-                                                  force=True)
+                        force=True
+                        self.logger.info("[CHECK] Restarting Node via CLI with Force flag as via API Fails.")
                     else:
-                        self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+                        self.logger.info("[CHECK] Restarting Node via CLI as via API Fails.")
+                    self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
+                                              node_id=self.current_outage_node,
+                                              force=force)
+                    # else:
+                    #     self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
                     break  # Exit loop if successful
                 except Exception as _:
