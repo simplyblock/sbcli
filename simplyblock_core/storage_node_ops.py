@@ -2,6 +2,7 @@
 import datetime
 import json
 import os
+from typing import List
 
 import threading
 
@@ -31,6 +32,39 @@ from simplyblock_core.utils import pull_docker_image_with_retry
 
 
 logger = utils.get_logger(__name__)
+
+
+def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_names: List[str], reattach: bool):
+    """Connect snode to device
+
+    This only performs the actual operation between both involved SPDK instances,
+    no book-keeping is done here.
+
+    More sensibly this would be a member function of either StorageNode or NVMeDevice.
+    """
+
+    logger.info(f'Connecting to {name}')
+    bdev_name = f"{name}n1"
+    if bdev_name in bdev_names:
+        logger.debug("Already connected")
+        return bdev_name
+
+    if reattach and rpc_client.bdev_nvme_controller_list(name):
+        rpc_client.bdev_nvme_detach_controller(name)
+        time.sleep(1)
+
+    for ip in device.nvmf_ip.split(","):
+        rpc_client.bdev_nvme_attach_controller_tcp(
+                name, device.nvmf_nqn, ip, device.nvmf_port,
+                multipath=device.nvmf_multipath,
+        )
+        if device.nvmf_multipath:
+            rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
+
+    if not rpc_client.get_bdevs(bdev_name):
+        raise RuntimeError(f"Failed to connect to device: {device.get_id()}")
+
+    return bdev_name
 
 
 def get_next_cluster_device_order(db_controller, cluster_id):
@@ -628,32 +662,12 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
                 continue
 
             if not dev.alceml_bdev:
-                logger.error(f"device alceml bdev not found!, {dev.get_id()}")
-                continue
-            name = f"remote_{dev.alceml_bdev}"
-            bdev_name = f"{name}n1"
-            if bdev_name in node_bdev_names:
-                logger.info(f"bdev found {bdev_name}")
-            else:
-                # if rpc_client.bdev_nvme_controller_list(name):
-                #     logger.info(f"detaching {name} from {this_node.get_id()}")
-                #     rpc_client.bdev_nvme_detach_controller(name)
-                #     time.sleep(1)
-                if dev.nvmf_multipath:
-                    for ip in dev.nvmf_ip.split(","):
-                        logger.info(f"Connecting {name} to {this_node.get_id()}")
-                        rpc_client.bdev_nvme_attach_controller_tcp(
-                            name, dev.nvmf_nqn, ip, dev.nvmf_port, multipath=True)
-                        rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
-                else:
-                    logger.info(f"Connecting {name} to {this_node.get_id()}")
-                    rpc_client.bdev_nvme_attach_controller_tcp(
-                        name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port, multipath=False)
-                ret = rpc_client.get_bdevs(bdev_name)
-                if not ret:
-                    logger.error(f"Failed to connect to device: {dev.get_id()}")
-                    continue
-            dev.remote_bdev = bdev_name
+                raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
+
+            dev.remote_bdev = connect_device(
+                    f"remote_{dev.alceml_bdev}", dev, rpc_client,
+                    bdev_names=node_bdev_names, reattach=False
+            )
             remote_devices.append(dev)
 
     return remote_devices
@@ -709,55 +723,18 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         if not org_dev or org_dev in new_devs or org_dev_node.get_id() == this_node.get_id():
             continue
 
-        name = f"remote_{org_dev.jm_bdev}"
-        bdev_name = f"{name}n1"
-        org_dev.remote_bdev = bdev_name
-
-        if org_dev.status == NVMeDevice.STATUS_ONLINE:
-
-            if bdev_name in node_bdev_names:
-                logger.debug(f"bdev found {bdev_name}")
-                org_dev.status = JMDevice.STATUS_ONLINE
-                new_devs.append(org_dev)
-            elif org_dev_node.status == StorageNode.STATUS_ONLINE:
-                if rpc_client.bdev_nvme_controller_list(name):
-                    logger.info(f"detaching {name} from {this_node.get_id()}")
-                    rpc_client.bdev_nvme_detach_controller(name)
-                    time.sleep(1)
-
-                if org_dev.nvmf_multipath:
-                    for ip in org_dev.nvmf_ip.split(","):
-                        logger.info(f"Connecting {name} to {this_node.get_id()}")
-                        ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                            name, org_dev.nvmf_nqn, ip, org_dev.nvmf_port, multipath=True)
-                        rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
-
-                    # if ret:
-                    org_dev.status = JMDevice.STATUS_ONLINE
-                    # else:
-                    #     logger.error(f"failed to connect to remote JM {name}")
-                    #     org_dev.status = JMDevice.STATUS_UNAVAILABLE
-                else:
-                    logger.info(f"Connecting {name} to {this_node.get_id()}")
-                    ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                        name, org_dev.nvmf_nqn, org_dev.nvmf_ip, org_dev.nvmf_port, multipath=False)
-                    if ret:
-                        org_dev.status = JMDevice.STATUS_ONLINE
-                    else:
-                        logger.error(f"failed to connect to remote JM {name}")
-                        org_dev.status = JMDevice.STATUS_UNAVAILABLE
-                new_devs.append(org_dev)
-            else:
-                org_dev.status = JMDevice.STATUS_UNAVAILABLE
-                new_devs.append(org_dev)
-
-        else:
-            # if bdev_name in node_bdev_names:
-            #     logger.debug(f"bdev found {bdev_name}")
-            #     rpc_client.bdev_nvme_detach_controller(name)
-
+        if org_dev.status != NVMeDevice.STATUS_ONLINE or  org_dev_node.status != StorageNode.STATUS_ONLINE:
             org_dev.status = JMDevice.STATUS_UNAVAILABLE
-            new_devs.append(org_dev)
+        else:
+            try:
+                org_dev.remote_bdev = connect_device(
+                        f"remote_{org_dev.jm_bdev}", org_dev, rpc_client,
+                        bdev_names=node_bdev_names, reattach=True,
+                )
+            except RuntimeError:
+                logger.error(f'Failed to connect to {org_dev.get_id()}')
+                org_dev.status = JMDevice.STATUS_UNAVAILABLE
+        new_devs.append(org_dev)
 
     return new_devs
 
@@ -1195,7 +1172,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            node.remote_devices = _connect_to_remote_devs(node)
+            try:
+                node.remote_devices = _connect_to_remote_devs(node)
+            except RuntimeError:
+                logger.error('Failed to connect to remote devices')
+                return False
             node.write_to_db(kv_store)
 
         if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY, Cluster.STATUS_IN_EXPANSION]:
@@ -1742,7 +1723,11 @@ def restart_storage_node(
     snode.write_to_db()
 
     logger.info("Connecting to remote devices")
-    snode.remote_devices = _connect_to_remote_devs(snode)
+    try:
+        snode.remote_devices = _connect_to_remote_devs(snode)
+    except RuntimeError:
+        logger.error('Failed to connect to remote devices')
+        return False
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.health_check = True
@@ -1785,7 +1770,11 @@ def restart_storage_node(
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+            try:
+                node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+            except RuntimeError:
+                logger.error('Failed to connect to remote devices')
+                return False
             node.write_to_db(kv_store)
 
         logger.info("Sending device status event")
@@ -1827,8 +1816,14 @@ def restart_storage_node(
             for node in snodes:
                 if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                     continue
-                node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+
+                try:
+                    node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+                except RuntimeError:
+                    logger.error('Failed to connect to remote devices')
+                    return False
                 node.write_to_db(kv_store)
+                    
 
             logger.info("Sending device status event")
             snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -2257,7 +2252,12 @@ def resume_storage_node(node_id):
 
     logger.info("Connecting to remote devices")
     snode = db_controller.get_storage_node_by_id(node_id)
-    snode.remote_devices = _connect_to_remote_devs(snode)
+    try:
+        snode.remote_devices = _connect_to_remote_devs(snode)
+    except RuntimeError:
+        logger.error('Failed to connect to remote devices')
+        return False
+
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
@@ -2814,7 +2814,11 @@ def set_node_status(node_id, status, reconnect_on_online=True):
     if snode.status == StorageNode.STATUS_ONLINE and reconnect_on_online:
         snode = db_controller.get_storage_node_by_id(node_id)
         logger.info("Connecting to remote devices")
-        snode.remote_devices = _connect_to_remote_devs(snode)
+        try:
+            snode.remote_devices = _connect_to_remote_devs(snode)
+        except RuntimeError:
+            logger.error('Failed to connect to remote devices')
+            return False
         if snode.enable_ha_jm:
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.health_check = True
