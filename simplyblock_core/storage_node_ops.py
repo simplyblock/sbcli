@@ -407,6 +407,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
 
     for device in devices:
         ensure_partitions_internal(device, force=True)
+        time.sleep(5)
 
     for controller, address in {(device.nvme_controller, device.pcie_address) for device in devices}:
         _, error = rpc_client.bdev_nvme_detach_controller(controller)
@@ -420,6 +421,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
 
         for discovered_device in discovered_devices:
             rpc_client.bdev_examine(discovered_device)
+            time.sleep(1)
 
     rpc_client.bdev_wait_for_examine()
     bdevs = {
@@ -459,10 +461,12 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
         ret = _create_storage_device_stack(rpc_client, partition, snode, after_restart=False)
         if not ret:
             raise RuntimeError('Failed to create dev stack')
+        time.sleep(1)
 
     snode.nvme_devices = data_partitions
 
     jm_device = _create_jm_stack_on_raid(rpc_client, journal_partitions, snode, after_restart=False)
+    time.sleep(1)
     if not jm_device:
         raise RuntimeError("Failed to create JM device")
 
