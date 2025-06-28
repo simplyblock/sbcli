@@ -423,7 +423,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
 
     rpc_client.bdev_wait_for_examine()
     bdevs = {
-            bdev['name']: bdev.pop('name')
+            bdev['name']: bdev
             for bdev
             in rpc_client.get_bdevs()
     }
