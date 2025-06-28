@@ -458,10 +458,11 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
     # TODO end function here and use a generic helper for creating storage stacks/journal devices instead
 
     for partition in data_partitions:
+        time.sleep(5)
         ret = _create_storage_device_stack(rpc_client, partition, snode, after_restart=False)
         if not ret:
             raise RuntimeError('Failed to create dev stack')
-        time.sleep(1)
+        time.sleep(5)
 
     snode.nvme_devices = data_partitions
 
