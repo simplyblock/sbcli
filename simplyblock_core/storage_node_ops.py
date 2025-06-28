@@ -381,7 +381,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
     def ensure_partitions_internal(device: NVMeDevice, /, force=False):
         if set(expected_partitions(device)) <= bdev_names:
             logger.debug(f'Device {device.nvme_bdev} contains expected partitions')
-            return
+            return False
 
         if set(expected_partitions(device)) & bdev_names:
             if not force:
@@ -404,12 +404,16 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
 
         time.sleep(3)
         rpc_client.nbd_stop_disk(nbd_device)
+        time.sleep(1)
+        return True
 
-    for device in devices:
-        ensure_partitions_internal(device, force=True)
-        time.sleep(5)
+    modified_devices = [
+        device
+        for device in devices
+        if ensure_partitions_internal(device, force=True)
+    ]
 
-    for controller, address in {(device.nvme_controller, device.pcie_address) for device in devices}:
+    for controller, address in {(device.nvme_controller, device.pcie_address) for device in modified_devices}:
         _, error = rpc_client.bdev_nvme_detach_controller(controller)
         if error:
             raise RuntimeError(error)
@@ -439,7 +443,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
     maximum_device_order = get_next_cluster_device_order(DBController(), snode.cluster_id)
     data_partitions =  [
         NVMeDevice({
-            **device.to_dict(),
+            **partition.to_dict(),
             uuid: str(uuid.uuid4()),
             'device_name': partition,
             'nvme_bdev': partition,
@@ -447,9 +451,9 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
             'cluster_device_order': maximum_device_order + i,
             'size': bdevs[partition]['block_size'] * bdevs[partition]['num_blocks'],
         })
-        for i, partition
+        for i, (device, partition)
         in enumerate(
-            partition
+            (device, partition)
             for device in devices
             for partition in list(expected_partitions(device))[1:]
         )
