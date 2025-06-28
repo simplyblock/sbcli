@@ -443,7 +443,7 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices: List[NVMeDe
     maximum_device_order = get_next_cluster_device_order(DBController(), snode.cluster_id)
     data_partitions =  [
         NVMeDevice({
-            **partition.to_dict(),
+            **device.to_dict(),
             uuid: str(uuid.uuid4()),
             'device_name': partition,
             'nvme_bdev': partition,
