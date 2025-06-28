@@ -1128,7 +1128,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
                 ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
             else:
-                ret = _prepare_cluster_devices_partitions(snode, nvme_devs)
+                try:
+                    _prepare_cluster_devices_partitions(snode, nvme_devs)
+                    ret = True
+                except RuntimeError:
+                    ret = False
             if not ret:
                 logger.error("Failed to prepare cluster devices")
                 return False
@@ -1710,7 +1714,11 @@ def restart_storage_node(
 
             ret = _prepare_cluster_devices_jm_on_dev(snode, snode.nvme_devices)
         else:
-            ret = _prepare_cluster_devices_partitions(snode, snode.nvme_devices)
+            try:
+                _prepare_cluster_devices_partitions(snode, snode.nvme_devices)
+                ret = True
+            except RuntimeError:
+                ret = False
         if not ret:
             logger.error("Failed to prepare cluster devices")
             # return False
