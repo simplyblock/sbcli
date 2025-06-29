@@ -49,7 +49,7 @@ class StorageNodeParams(BaseModel):
     iobuf_large_pool_count: int = Field(0)
 
 
-@api.put('/')
+@api.post('/')
 def add(path: ClusterPath, body: StorageNodeParams):
     cluster = path.cluster()
     task_id_or_false = tasks_controller.add_node_add_task(
