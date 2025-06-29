@@ -43,7 +43,7 @@ jobs:
             -u admin:${{ inputs.cluster_secret }} \
             -H "Accept: application/json" \
             "${{ inputs.cluster_ip }}/graylog/api/search/universal/relative?query=container_name:app_WebAppAPI.*&limit=10000" \
-          | jq -r '.messages | map(.message) | map(.message) | join("\n")' \
+          | jq -r '.messages | map(.message) | map(.message) | reverse | join("\n")' \
           > api.log
 
     - name: 'Upload artifact'
