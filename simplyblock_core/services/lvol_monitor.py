@@ -50,6 +50,17 @@ def pre_lvol_delete_rebalance():
     if lvol_del_start_time == 0:
         lvol_del_start_time = time.time()
 
+
+def resume_comp(lvol):
+    logger.info("resuming compression")
+    node = db.get_storage_node_by_id(lvol.node_id)
+    rpc_client = RPCClient(
+        node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+    ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+    if not ret:
+        logger.error("Failed to resume JC compression")
+
+
 def post_lvol_delete_rebalance(lvol):
     global lvol_del_start_time
     diff = time.time() - lvol_del_start_time
@@ -59,14 +70,14 @@ def post_lvol_delete_rebalance(lvol):
         current_cap = records[0].size_used
         start_cap = records[-1].size_used
         if start_cap - current_cap > int(total_size * 10 / 100):
-            logger.info("no task found on same node, resuming compression")
-            node = db.get_storage_node_by_id(lvol.node_id)
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
-            ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-            if not ret:
-                logger.error("Failed to resume JC compression")
+            resume_comp(lvol)
         lvol_del_start_time = 0
+        return True
+    lvol_records = db.get_lvol_stats(lvol, 1)
+    if lvol_records:
+        total_size = db.get_cluster_capacity(cluster, 1)[0].size_total
+        if lvol_records[0].size_used > int(total_size * 10 / 100):
+            resume_comp(lvol)
 
 # get DB controller
 db = db_controller.DBController()
