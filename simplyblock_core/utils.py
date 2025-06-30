@@ -103,6 +103,11 @@ def get_nics_data():
             'status': device['operstate'],
             'net_type': device['link_type']}
         iface_list[nic] = iface
+        if "altnames" in device and len(device["altnames"]) > 0:
+            for altname in device["altnames"]:
+                altname_info = iface
+                altname_info["name"] = altname
+                iface_list[altname] = altname_info
     return iface_list
 
 
