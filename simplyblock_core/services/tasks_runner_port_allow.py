@@ -4,6 +4,7 @@ import time
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
 from simplyblock_core.controllers import tasks_events, tcp_ports_events, health_controller
+from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -88,7 +89,9 @@ while True:
                         snode_api = SNodeClient(f"{node.mgmt_ip}:5000", timeout=3, retry=2)
 
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
-                        snode_api.firewall_set_port(port_number, "tcp", "allow", node.rpc_port)
+
+                        fw_api = FirewallClient(f"{node.mgmt_ip}:5001", timeout=5, retry=2)
+                        fw_api.firewall_set_port(port_number, "tcp", "allow", node.rpc_port)
                         tcp_ports_events.port_allowed(node, port_number)
 
                         task.function_result = f"Port {port_number} allowed on node"
