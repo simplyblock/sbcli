@@ -1782,49 +1782,6 @@ def get_k8s_core_client():
     config.load_incluster_config()
     return client.CoreV1Api()
 
-def initiate_mongodb_rs():
-    k8s_core_v1 = client.CoreV1Api()
-    namespace = "simplyblock"
-    container = "mongodb"
-    pod_name = "simplyblock-mongodb-0"
-
-    js_command = (
-        'rs.initiate({_id: "rs0", members: ['
-        '{_id: 0, host: "simplyblock-mongodb-0.simplyblock-mongodb:27017", priority: 2},'
-        '{_id: 1, host: "simplyblock-mongodb-1.simplyblock-mongodb:27017", priority: 1},'
-        '{_id: 2, host: "simplyblock-mongodb-2.simplyblock-mongodb:27017", priority: 1}'
-        ']})'
-    )
-
-    full_command = f'mongosh --eval \'{js_command}\''
-
-
-    exec_command = ["/bin/sh", "-c", full_command]
-
-    resp = stream(k8s_core_v1.connect_get_namespaced_pod_exec,
-                  pod_name,
-                  namespace,
-                  command=exec_command,
-                  container=container,
-                  stderr=True, stdin=False,
-                  stdout=True, tty=False,
-                  _preload_content=False)
-
-    result = ""
-    while resp.is_open():
-        resp.update(timeout=1)
-        if resp.peek_stdout():
-            result = resp.read_stdout()
-            print(f"STDOUT: \n{result}")
-        if resp.peek_stderr():
-            print(f"STDERR: \n{resp.read_stderr()}")
-
-    resp.close()
-
-    if resp.returncode != 0:
-        raise Exception(resp.readline_stderr())
-    logger.debug(f"ReplicaSet Init Output:\n{result}")
-
 def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
     ready_pods = 0
     pods = k8s_core_v1.list_namespaced_pod(

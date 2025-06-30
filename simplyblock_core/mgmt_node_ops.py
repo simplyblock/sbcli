@@ -157,7 +157,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             )
 
             logger.info(f"Patched StatefulSet {constants.MONGODB_STATEFULSET_NAME}: {response.status.replicas} replicas")
-            max_wait = 200 
+            max_wait = 300 
             interval = 5
             waited = 0
             while waited < max_wait:
@@ -168,8 +168,6 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
                 waited += interval
             else:
                 raise TimeoutError("MongoDB pods did not become ready in time.")
-
-            #utils.initiate_mongodb_rs()
 
             response = apps_v1.patch_namespaced_deployment(
                 name=constants.GRAYLOG_STATEFULSET_NAME,

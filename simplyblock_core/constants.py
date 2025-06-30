@@ -200,53 +200,30 @@ mongodb_command_patch = [
     "--dbpath", "/bitnami/mongodb"
 ]
 
-# mongodb_readiness_probe = {
-#     "exec": {
-#         "command": [
-#             "mongosh",
-#             "--eval",
-#             "db.adminCommand('ping')"
-#         ]
-#     },
-#     "initialDelaySeconds": 5,
-#     "periodSeconds": 10,
-#     "timeoutSeconds": 5,
-#     "failureThreshold": 3,
-#     "successThreshold": 1
-# }
-
-# mongodb_patch = {
-#     "spec": {
-#         "replicas": 3,
-#         "template": {
-#             "spec": {
-#                 "containers": [
-#                     {
-#                         "name": "mongodb",
-#                         "command": mongodb_command_patch
-#                     #    "readinessProbe": mongodb_readiness_probe
-#                     }
-#                 ]
-#             }
-#         }
-#     }
-# }
-
 mongodb_patch = {
     "spec": {
         "replicas": 3,
     }
 }
 
+# graylog_env_patch = [
+#     {
+#         "name": "GRAYLOG_MONGODB_URI",
+#         "value": (
+#             "mongodb://"
+#             "simplyblock-mongodb-0.simplyblock-mongodb-headless:27017,"
+#             "simplyblock-mongodb-1.simplyblock-mongodb-headless:27017,"
+#             "simplyblock-mongodb-2.simplyblock-mongodb-headless:27017/graylog?"
+#             "replicaSet=rs0"
+#         )
+#     }
+# ]
+
 graylog_env_patch = [
     {
         "name": "GRAYLOG_MONGODB_URI",
         "value": (
-            "mongodb://"
-            "simplyblock-mongodb-0.simplyblock-mongodb-headless:27017,"
-            "simplyblock-mongodb-1.simplyblock-mongodb-headless:27017,"
-            "simplyblock-mongodb-2.simplyblock-mongodb-headless:27017/graylog?"
-            "replicaSet=rs0"
+            "mongodb://simplyblock-mongodb-headless:27017/graylog?replicaSet=rs0"
         )
     }
 ]
