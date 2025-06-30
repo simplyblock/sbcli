@@ -74,11 +74,12 @@ class FirewallClient:
         logger.error("Unknown http status: %s", ret_code)
         return None, None
 
-    def firewall_set_port(self, port_id, port_type="tcp", action="block"):
+    def firewall_set_port(self, port_id, port_type="tcp", action="block", rpc_port=None):
         params = {
             "port_id": port_id,
             "port_type": port_type,
             "action": action,
+            "rpc_port": rpc_port,
         }
         return self._request("POST", "firewall", params)
 
