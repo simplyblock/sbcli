@@ -1,3 +1,5 @@
+{{- if .Values.monitoring.enabled }}
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -868,3 +870,4 @@ data:
         options:
           path: /var/lib/grafana/dashboards
           foldersFromFilesStructure: true
+{{- end }}

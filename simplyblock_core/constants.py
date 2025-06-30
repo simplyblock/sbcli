@@ -223,7 +223,7 @@ graylog_env_patch = [
     {
         "name": "GRAYLOG_MONGODB_URI",
         "value": (
-            "mongodb://simplyblock-mongodb-headless:27017/graylog?replicaSet=rs0"
+            "mongodb://simplyblock-mongodb-headless:27017/graylog?replicaSet=rs0&connectTimeoutMS=3000&serverSelectionTimeoutMS=5000&socketTimeoutMS=5000"
         )
     }
 ]

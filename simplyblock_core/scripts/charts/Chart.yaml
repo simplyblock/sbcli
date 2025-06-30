@@ -16,12 +16,15 @@ dependencies:
   - name: mongodb
     version: 13.16.4
     repository: https://charts.bitnami.com/bitnami
+    condition: monitoring.enabled
   - name: opensearch
     version: 2.9.0
     repository: https://opensearch-project.github.io/helm-charts
+    condition: monitoring.enabled
   - name: prometheus
     version: "25.18.0"
     repository: "https://prometheus-community.github.io/helm-charts"
+    condition: monitoring.enabled
   - name: openebs
     version: 3.9.0 
     repository: https://openebs.github.io/charts

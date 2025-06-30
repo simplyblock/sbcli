@@ -18,6 +18,7 @@ export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
 export CONTACT_POINT=${11}
 export K8S_NAMESPACE=${12}
+export DISABLE_MONITORING=${13}
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]

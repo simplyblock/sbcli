@@ -1,3 +1,4 @@
+{{- if .Values.monitoring.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -394,3 +395,4 @@ spec:
             name: simplyblock-grafana-dashboard-node-exporter
         - name: grafana-data
           emptyDir: {}
+{{- end }}

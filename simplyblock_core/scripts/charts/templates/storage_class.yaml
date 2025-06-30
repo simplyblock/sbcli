@@ -1,3 +1,4 @@
+{{- if .Values.monitoring.enabled }}
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -6,3 +7,4 @@ provisioner: openebs.io/local
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
 reclaimPolicy: Retain
+{{- end }}
