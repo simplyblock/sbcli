@@ -7,8 +7,7 @@ cluster:
   id: "${CLUSTER_ID}"
 
 monitoring:
-  disableByEnv: "${DISABLE_MONITORING}"
-  enabled: {{ tpl (include "monitoring.enabled" .) . }}
+  enabled: ${ENABLE_MONITORING}
 
 log:
   deletionInterval: "${LOG_DELETION_INTERVAL}"

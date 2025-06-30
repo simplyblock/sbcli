@@ -36,6 +36,12 @@ else
     exit 1
 fi
 
+if [[ "${DISABLE_MONITORING,,}" == "false" ]]; then
+   export ENABLE_MONITORING=true
+else
+  export ENABLE_MONITORING=false
+fi
+
 envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 
 /usr/local/bin/helm dependency build "$DIR"/charts/
