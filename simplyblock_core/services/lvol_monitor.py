@@ -43,6 +43,30 @@ def set_snapshot_health_check(snap, health_check_status):
     snap.write_to_db()
 
 
+lvol_del_start_time = 0
+def pre_lvol_delete_rebalance():
+    global lvol_del_start_time
+    if lvol_del_start_time == 0:
+        lvol_del_start_time = time.time()
+
+def post_lvol_delete_rebalance(lvol):
+    global lvol_del_start_time
+    diff = time.time() - lvol_del_start_time
+    if diff > 0:
+        records = db.get_cluster_capacity(cluster, int(diff/5))
+        total_size = records[0].size_total
+        current_cap = records[0].size_used
+        start_cap = records[-1].size_used
+        if start_cap - current_cap > int(total_size * 10 / 100):
+            logger.info("no task found on same node, resuming compression")
+            node = db.get_storage_node_by_id(lvol.node_id)
+            rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+            ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+            if not ret:
+                logger.error("Failed to resume JC compression")
+        lvol_del_start_time = 0
+
 # get DB controller
 db = db_controller.DBController()
 
@@ -104,9 +128,11 @@ while True:
                             logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
                             lvol_events.lvol_delete(lvol)
                             lvol.remove(db.kv_store)
+                            post_lvol_delete_rebalance(lvol)
 
                         elif ret == 1: # deletion is in progress.
                             logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
+                            pre_lvol_delete_rebalance()
 
                         elif ret == 2: # deletion error
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}")
