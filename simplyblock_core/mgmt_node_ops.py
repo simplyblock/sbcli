@@ -157,7 +157,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
             )
 
             logger.info(f"Patched StatefulSet {constants.MONGODB_STATEFULSET_NAME}: {response.status.replicas} replicas")
-            max_wait = 120 
+            max_wait = 200 
             interval = 5
             waited = 0
             while waited < max_wait:

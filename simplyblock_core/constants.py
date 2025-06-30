@@ -166,9 +166,9 @@ os_env_patch = [
     {"name": "plugins.security.disabled", "value": "true"},
     {"name": "discovery.type", "value": ""},
     {"name": "discovery.seed_hosts", "value": ",".join([
-        "simplyblock-opensearch-0.simplyblock-opensearch",
-        "simplyblock-opensearch-1.simplyblock-opensearch",
-        "simplyblock-opensearch-2.simplyblock-opensearch"
+        "simplyblock-opensearch-0.opensearch-cluster-master-headless",
+        "simplyblock-opensearch-1.opensearch-cluster-master-headless",
+        "simplyblock-opensearch-2.opensearch-cluster-master-headless"
     ])},
     {"name": "cluster.initial_master_nodes", "value": ",".join([
         "simplyblock-opensearch-0",
