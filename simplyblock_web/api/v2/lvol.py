@@ -1,27 +1,67 @@
-from typing import Annotated, Literal, Optional, Tuple, Union
+from uuid import UUID
+from typing import Annotated, List, Literal, Optional, Tuple, Union
 
-from flask import abort, url_for
-from flask_openapi3 import APIBlueprint
-from pydantic import BaseModel, Field, RootModel
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel, Field, StringConstraints, RootModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.models.lvol_model import LVol
 
-from .pool import PoolPath
+from .cluster import Cluster
+from .pool import Pool
+from .snapshot import instance_api as snapshot_instance_api, SnapshotDTO
 from . import util
 
 
-api = APIBlueprint('volume', __name__, url_prefix='/volumes')
+api = APIRouter(prefix='/volumes')
 db = DBController()
 
 
+class VolumeDTO(BaseModel):
+    id: UUID
+    name: str
+    status: str
+    health_check: bool
+    nqn: str
+    size: util.Unsigned
+    cloned_from: Optional[util.UrlPath]
+    max_rw_iops: util.Unsigned
+    max_rw_mbytes: util.Unsigned
+    max_r_mbytes: util.Unsigned
+    max_w_mbytes: util.Unsigned
+    ha: bool
+
+    @staticmethod
+    def from_model(model: LVol, cluster_id: str):
+        return VolumeDTO(
+            id=UUID(model.get_id()),
+            name=model.name,
+            status=model.status,
+            health_check=model.health_check,
+            nqn=model.nqn,
+            size=model.size,
+            cloned_from=snapshot_instance_api.url_path_for(
+                'get',
+                cluster_id=cluster_id,
+                pool_id=model.pool_uuid,
+                snapshot_id=model.cloned_from_snap
+            ) if model.cloned_from_snap else None,
+            ha=model.ha_type == 'ha',
+            max_rw_iops=model.rw_ios_per_sec,
+            max_rw_mbytes=model.rw_mbytes_per_sec,
+            max_r_mbytes=model.r_mbytes_per_sec,
+            max_w_mbytes=model.w_mbytes_per_sec,
+        )
+
+
 @api.get('/')
-def list(path: PoolPath):
+def list(cluster: Cluster, pool: Pool) -> List[VolumeDTO]:
     return [
-        lvol.get_clean_dict()
+        VolumeDTO.from_model(lvol, cluster.get_id())
         for lvol
-        in db.get_lvols_by_pool_id(path.pool().get_id())
+        in db.get_lvols_by_pool_id(pool.get_id())
     ]
 
 
@@ -46,14 +86,14 @@ class _CloneParams(BaseModel):
     size: util.Size = 0
 
 
-@api.post('/')
-def add(path: PoolPath, body: RootModel[Union[_CreateParams, _CloneParams]]):
-    data = body.root
+@api.post('/', status_code=201, responses={201: {"content": None}})
+def add(
+        cluster: Cluster, pool: Pool,
+        parameters: RootModel[Union[_CreateParams, _CloneParams]]
+) -> Response:
+    data = parameters.root
     if db.get_lvol_by_name(data.name) is not None:
-        abort(409, f'Volume {data.name} exists')
-
-    cluster = path.cluster()
-    pool = path.pool()
+        raise HTTPException(409, f'Volume {data.name} exists')
 
     if isinstance(data, _CreateParams):
         volume_id_or_false, error = lvol_controller.add_lvol_ha(
@@ -88,31 +128,31 @@ def add(path: PoolPath, body: RootModel[Union[_CreateParams, _CloneParams]]):
     if volume_id_or_false == False:  # noqa
         raise ValueError(error)
 
-    entity_url = url_for(
-            'api.v2.cluster.instance.pool.instance.volume.instance.get',
+    entity_url = instance_api.url_path_for(
+            'get',
             cluster_id=cluster.get_id(),
             pool_id=pool.get_id(),
             volume_id=volume_id_or_false,
     )
-    return '', 201, {'Location': entity_url}
+    return Response(status_code=201, headers={'Location': entity_url})
 
 
-instance_api = APIBlueprint('instance', __name__, url_prefix='/<volume_id>')
+instance_api = APIRouter(prefix='/<volume_id>')
 
 
-class VolumePath(PoolPath):
-    volume_id: str = Field(pattern=core_utils.UUID_PATTERN)
+def _lookup_volume(volume_id: Annotated[str, StringConstraints(pattern=core_utils.UUID_PATTERN)]) -> LVol:
+    volume = db.get_lvol_by_id(volume_id)
+    if volume is None:
+        raise HTTPException(404, f'Volume {volume_id} not found')
+    return volume
 
-    def volume(self):
-        volume = db.get_lvol_by_id(self.volume_id)
-        if volume is None:
-            abort(404, 'Volume not found')
-        return volume
+
+Volume = Annotated[LVol, Depends(_lookup_volume)]
 
 
 @instance_api.get('/')
-def get(path: VolumePath):
-    return path.volume().get_clean_dict()
+def get(cluster: Cluster, pool: Pool, volume: Volume) -> VolumeDTO:
+    return VolumeDTO.from_model(volume, cluster.get_id())
 
 
 class UpdatableLVolParams(BaseModel):
@@ -124,10 +164,8 @@ class UpdatableLVolParams(BaseModel):
     size: Optional[util.Size] = None
 
 
-@instance_api.put('/')
-def update(path: VolumePath, body: UpdatableLVolParams):
-    volume = path.volume()
-
+@instance_api.put('/', status_code=204, responses={204: {"content": None}})
+def update(cluster: Cluster, pool: Pool, volume: Volume, body: UpdatableLVolParams) -> Response:
     updatable_attributes = {'name', 'max_rw_iops', 'max_rw_mbytes', 'max_w_mbytes', 'max_r_mbytes'}
     if ((body.model_fields_set & updatable_attributes) and
             not lvol_controller.set_lvol(uuid=volume.get_id(), **{
@@ -141,34 +179,31 @@ def update(path: VolumePath, body: UpdatableLVolParams):
     if 'size' in body.model_fields_set:
         success, msg = lvol_controller.resize_lvol(volume.get_id(), body.size)
         if not success:
-            abort(400, msg)
+            raise HTTPException(400, msg)
 
-    return '', 204
+    return Response(status_code=204)
 
 
-@instance_api.delete('/')
-def delete(path: VolumePath):
-    volume = path.volume()
+@instance_api.delete('/', status_code=204, responses={204: {"content": None}})
+def delete(cluster: Cluster, pool: Pool, volume: Volume) -> Response:
     if not lvol_controller.delete_lvol(volume.get_id()):
         raise ValueError('Failed to delete volume')
 
-    return '', 204
+    return Response(status_code=204)
 
 
-@instance_api.post('/inflate')
-def inflate(path: VolumePath):
-    volume = path.volume()
+@instance_api.post('/inflate', status_code=204, responses={204: {"content": None}})
+def inflate(cluster: Cluster, pool: Pool, volume: Volume) -> Response:
     if not volume.cloned_from_snap:
-        abort(400, 'Volume must be cloned')
+        raise HTTPException(400, 'Volume must be cloned')
     if not lvol_controller.inflate_lvol(volume.get_id()):
         raise ValueError('Failed to inflate volume')
 
-    return '', 204
+    return Response(status_code=204)
 
 
 @instance_api.get('/connect')
-def connect(path: VolumePath):
-    volume = path.volume()
+def connect(cluster: Cluster, pool: Pool, volume: Volume):
     details_or_false = lvol_controller.connect_lvol(volume.get_id())
     if details_or_false == False:  # noqa
         raise ValueError('Failed to query connection details')
@@ -176,20 +211,18 @@ def connect(path: VolumePath):
 
 
 @instance_api.get('/capacity')
-def capacity(path: VolumePath, query: util.HistoryQuery):
-    volume = path.volume()
-    records_or_false = lvol_controller.get_capacity(volume.get_id(), query.history, parse_sizes=False)
+def capacity(cluster: Cluster, pool: Pool, volume: Volume, history: Optional[str] = None):
+    records_or_false = lvol_controller.get_capacity(volume.get_id(), history, parse_sizes=False)
     if records_or_false == False:  # noqa
         raise ValueError('Failed to compute capacity')
     return records_or_false
 
 
 @instance_api.get('/iostats')
-def iostats(path: VolumePath, query: util.HistoryQuery):
-    volume = path.volume()
+def iostats(cluster: Cluster, pool: Pool, volume: Volume, history: Optional[str] = None):
     records_or_false = lvol_controller.get_io_stats(
         volume.get_id(),
-        query.history,
+        history,
         parse_sizes=False,
         with_sizes=True
     )
@@ -199,13 +232,12 @@ def iostats(path: VolumePath, query: util.HistoryQuery):
 
 
 @instance_api.get('/snapshots')
-def snapshot(path: VolumePath):
-    volume = path.volume()
+def snapshot(cluster: Cluster, pool: Pool, volume: Volume) -> List[SnapshotDTO]:
     return [
-        snapshot.get_clean_dict()
+        SnapshotDTO.from_model(snapshot, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot
         in db.get_snapshots()
-        if snapshot.lvol.get_id() == volume.get_id()
+        if snapshot.lvol is not None and snapshot.lvol.get_id() == volume.get_id()
     ]
 
 
@@ -213,19 +245,22 @@ class _SnapshotParams(BaseModel):
     name: str
 
 
-@instance_api.post('/snapshots')
-def create_snapshot(path: VolumePath, body: _SnapshotParams):
-    pool = path.pool()
+@instance_api.post('/snapshots', status_code=201, responses={201: {"content": None}})
+def create_snapshot(
+        cluster: Cluster, pool: Pool, volume: Volume,
+        parameters: _SnapshotParams
+) -> Response:
     snapshot_id, err_or_false = snapshot_controller.add(
-        path.volume().get_id(), body.name
+        volume.get_id(), parameters.name
     )
     if err_or_false:
         raise ValueError(err_or_false)
-    entity_url = url_for(
-            'api.v2.cluster.instance.pool.instance.snapshot.instance.get',
-            cluster_id=path.cluster_id, pool_id=pool.get_id(), snapshot_id=snapshot_id,
+
+    entity_url = snapshot_instance_api.url_path_for(
+            'get',
+            cluster_id=cluster.get_id(), pool_id=pool.get_id(), snapshot_id=snapshot_id,
     )
-    return '', 201, {'Location': entity_url}
+    return Response(status_code=201, headers={'Location': entity_url})
 
 
-api.register_api(instance_api)
+api.include_router(instance_api)

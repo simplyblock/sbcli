@@ -1,29 +1,42 @@
 from threading import Thread
-from typing import List, Optional
+from typing import Annotated, List, Optional
+from uuid import UUID
 
-from flask import abort, jsonify
-from flask_openapi3 import APIBlueprint
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel, Field, StringConstraints
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import caching_node_controller
 from simplyblock_core import utils as core_utils
+from simplyblock_core.models.caching_node import CachingNode as CachingNodeModel
 from simplyblock_web import utils as web_utils
 
-from .cluster import ClusterPath
+from .cluster import Cluster
 from . import util
 
 
-api = APIBlueprint('caching_node', __name__, url_prefix='/caching_nodes')
+api = APIRouter(prefix='/caching_nodes')
 db = DBController()
 
 
+class CachingNodeDTO(BaseModel):
+    id: UUID
+    status: str
+
+    @staticmethod
+    def from_model(model: CachingNodeModel):
+        return CachingNodeDTO(
+            id=UUID(model.get_id()),
+            status=model.status,
+        )
+
+
 @api.get('/')
-def list(path: ClusterPath):
+def list(cluster: Cluster) -> List[CachingNodeDTO]:
     return [
-        caching_node.get_clean_dict()
+        CachingNodeDTO.from_model(caching_node)
         for caching_node
-        in db.get_caching_nodes_by_cluster_id(path.cluster_id)
+        in db.get_caching_nodes_by_cluster_id(cluster.get_id())
     ]
 
 
@@ -38,85 +51,76 @@ class CachingNodeParams(BaseModel):
     multipathing: bool = Field(True)
 
 
-@api.put('/')
-def add(path: ClusterPath, body: CachingNodeParams):
+@api.post('/', status_code=201, responses={201: {"content": None}})
+def add(cluster: Cluster, parameters: CachingNodeParams) -> Response:
     Thread(
         target=caching_node_controller.add_node,
         kwargs={
-            'cluster_id': path.cluster_id,
-            'node_ip': body.node_ip,
-            'iface_name': body.interface_name,
-            'data_nics_list': body.data_nics,
-            'spdk_cpu_mask': body.spdk_cpu_mask,
-            'spdk_mem': body.spdk_mem,
-            'spdk_image': body.spdk_image,
-            'namespace': body.namespace,
-            'multipathing': body.multipathing,
+            'cluster_id': cluster.get_id(),
+            'node_ip': parameters.node_ip,
+            'iface_name': parameters.interface_name,
+            'data_nics_list': parameters.data_nics,
+            'spdk_cpu_mask': parameters.spdk_cpu_mask,
+            'spdk_mem': parameters.spdk_mem,
+            'spdk_image': parameters.spdk_image,
+            'namespace': parameters.namespace,
+            'multipathing': parameters.multipathing,
         },
     ).start()
 
-    return '', 201  # FIXME: Provide URL for checking task status
+    return Response(status_code=201)  # FIXME: Provide URL for checking task status
 
 
-instance_api = APIBlueprint('instance', __name__, url_prefix='/<caching_node_id>')
+instance_api = APIRouter(prefix='/<caching_node_id>')
 
 
-class CachingNodePath(ClusterPath):
-    caching_node_id: str = Field(pattern=core_utils.UUID_PATTERN)
+def _caching_node_lookup(caching_node_id: Annotated[str, StringConstraints(pattern=core_utils.UUID_PATTERN)]) -> CachingNodeModel:
+    caching_node = db.get_caching_node_by_id(caching_node_id)
+    if caching_node is None:
+        raise HTTPException(404, f'Caching Node {caching_node_id} not found')
+
+    return caching_node
+
+
+CachingNode = Annotated[CachingNodeModel, Depends(_caching_node_lookup)]
 
 
 @instance_api.get('/')
-def get(path: CachingNodePath):
-    caching_node = db.get_caching_node_by_id(path.caching_node_id)
-    if caching_node is None:
-        abort(404)
-
-    return caching_node.get_clean_dict()
+def get(cluster: Cluster, caching_node: CachingNode) -> CachingNodeDTO:
+    return CachingNodeDTO.from_model(caching_node)
 
 
 class _LVolBody(BaseModel):
     lvol_id: str = Field(pattern=core_utils.UUID_PATTERN)
 
 
-@instance_api.put('/connect')
-def connect(path: CachingNodePath, body: _LVolBody):
-    caching_node = db.get_caching_node_by_id(path.caching_node_id)
-    if caching_node is None:
-        abort(404)
-
-    lvol = db.get_lvol_by_id(body.lvol_id)
+@instance_api.post('/connect')
+def connect(cluster: Cluster, caching_node: CachingNode, parameters: _LVolBody):
+    lvol = db.get_lvol_by_id(parameters.lvol_id)
     if lvol is None:
-        abort(404)
+        raise HTTPException(404, f'LVol {parameters.lvol_id} not found')
 
     dev_path_or_false = caching_node_controller.connect(caching_node.get_id(), lvol.get_id())
     if not dev_path_or_false:
         raise ValueError('Failed to connect LVol')
 
-    return jsonify(dev_path_or_false)
+    return dev_path_or_false
 
 
-@instance_api.put('/disconnect')
-def disconnect(path: CachingNodePath, body: _LVolBody):
-    caching_node = db.get_caching_node_by_id(path.caching_node_id)
-    if caching_node is None:
-        abort(404)
-
-    lvol = db.get_lvol_by_id(body.lvol_id)
+@instance_api.post('/disconnect', status_code=204, responses={204: {"content": None}})
+def disconnect(cluster: Cluster, caching_node: CachingNode, parameters: _LVolBody) -> Response:
+    lvol = db.get_lvol_by_id(parameters.lvol_id)
     if lvol is None:
-        abort(404)
+        raise HTTPException(404, f'LVol {parameters.lvol_id} not found')
 
     if not caching_node_controller.disconnect(caching_node.get_id(), lvol.get_id()):
         raise ValueError('Failed to disconnect LVol')
 
-    return '', 204
+    return Response(status_code=204)
 
 
 @instance_api.get('/volumes')
-def list_lvols(path: CachingNodePath):
-    caching_node = db.get_caching_node_by_id(path.caching_node_id)
-    if caching_node is None:
-        abort(404)
-
+def list_lvols(cluster: Cluster, caching_node: CachingNode):
     return [
         {
             "UUID": clvol.lvol.get_id(),
@@ -130,16 +134,12 @@ def list_lvols(path: CachingNodePath):
     ]
 
 
-@instance_api.put('/recreate')
-def recreate(path: CachingNodePath):
-    caching_node = db.get_caching_node_by_id(path.caching_node_id)
-    if caching_node is None:
-        abort(404)
-
+@instance_api.post('/recreate', status_code=204, responses={204: {"content": None}})
+def recreate(cluster: Cluster, caching_node: CachingNode) -> Response:
     if not caching_node_controller.recreate(caching_node.get_id()):
         raise ValueError('Failed to recreate caching node')
 
-    return '', 204
+    return Response(status_code=204)
 
 
-api.register_api(instance_api)
+api.include_router(instance_api)

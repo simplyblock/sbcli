@@ -1,29 +1,56 @@
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional
+from uuid import UUID
 
-from flask import abort, url_for
-from flask_openapi3 import APIBlueprint
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel, StringConstraints
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import pool_controller
 from simplyblock_core import utils as core_utils
-from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.pool import Pool as PoolModel
 
 from . import util as util
-from .cluster import ClusterPath
+from .cluster import Cluster
+from .lvol import VolumeDTO
 
 
-api = APIBlueprint('pool', __name__, url_prefix='/pools')
+api = APIRouter(prefix='/pools')
 db = DBController()
 
 
+class PoolDTO(BaseModel):
+    id: UUID
+    name: str
+    status: str
+    max_size: util.Unsigned
+    lvol_max_size: util.Unsigned
+    max_rw_iops: util.Unsigned
+    max_rw_mbytes: util.Unsigned
+    max_r_mbytes: util.Unsigned
+    max_w_mbytes: util.Unsigned
+
+    @staticmethod
+    def from_model(model: PoolModel):
+        return PoolDTO(
+            id=UUID(model.get_id()),
+            name=model.name,
+            status=model.status,
+            max_size=model.pool_max_size,
+            lvol_max_size=model.lvol_max_size,
+            max_rw_iops=model.max_rw_ios_per_sec,
+            max_rw_mbytes=model.max_rw_mbytes_per_sec,
+            max_r_mbytes=model.max_r_mbytes_per_sec,
+            max_w_mbytes=model.max_w_mbytes_per_sec,
+        )
+
+
 @api.get('/')
-def list(path: ClusterPath):
+def list(cluster: Cluster) -> List[PoolDTO]:
     return [
-        pool.get_clean_dict()
+        PoolDTO.from_model(pool)
         for pool
         in db.get_pools()
-        if pool.cluster_id == path.cluster().get_id()
+        if pool.cluster_id == cluster.get_id()
     ]
 
 
@@ -38,54 +65,52 @@ class PoolParams(BaseModel):
     max_w_mbytes: util.Unsigned = 0
 
 
-@api.post('/')
-def add(path: ClusterPath, body: PoolParams):
-    cluster = path.cluster()
-
+@api.post('/', status_code=201, responses={201: {"content": None}})
+def add(cluster: Cluster, parameters: PoolParams) -> Response:
     for pool in db.get_pools():
-        if pool.cluster_id == cluster.get_id() and pool.name == body.name:
-            abort(409, f'Pool {body.name} already exists')
+        if pool.cluster_id == cluster.get_id() and pool.name == parameters.name:
+            raise HTTPException(409, f'Pool {parameters.name} already exists')
 
     id_or_false =  pool_controller.add_pool(
-        body.name, body.pool_max, body.lvol_max, body.max_rw_iops, body.max_rw_mbytes,
-        body.max_r_mbytes, body.max_w_mbytes, body.secret, cluster.get_id()
+        parameters.name, parameters.pool_max, parameters.lvol_max, parameters.max_rw_iops, parameters.max_rw_mbytes,
+        parameters.max_r_mbytes, parameters.max_w_mbytes, parameters.secret, cluster.get_id()
     )
 
     if not id_or_false:
         raise ValueError('Failed to create pool')
-    return '', 201, {'Location': url_for('api.v2.cluster.instance.pool.instance.get', cluster_id=cluster.get_id(), pool_id=id_or_false)}
+
+    entity_url = instance_api.url_path_for('get', cluster_id=cluster.get_id(), pool_id=id_or_false)
+    return Response(status_code=201, headers={'Location': entity_url})
 
 
-instance_api = APIBlueprint('instance', __name__, url_prefix='/<pool_id>')
+instance_api = APIRouter(prefix='/<pool_id>')
 
 
-class PoolPath(ClusterPath):
-    pool_id: Annotated[str, Field(core_utils.UUID_PATTERN)]
+def _lookup_pool(pool_id: Annotated[str, StringConstraints(pattern=core_utils.UUID_PATTERN)]) -> PoolModel:
+    pool = db.get_pool_by_id(pool_id)
+    if pool is None:
+        raise HTTPException(404, f'Pool {pool_id} not found')
 
-    def pool(self) -> Pool:
-        pool = db.get_pool_by_id(self.pool_id)
-        if pool is None:
-            abort(404)
+    return pool
 
-        return pool
+
+Pool = Annotated[PoolModel, Depends(_lookup_pool)]
 
 
 @instance_api.get('/')
-def get(path: PoolPath):
-    return path.pool().get_clean_dict()
+def get(cluster: Cluster, pool: Pool) -> PoolDTO:
+    return PoolDTO.from_model(pool)
 
 
-@instance_api.delete('/')
-def delete(path: PoolPath):
-    pool = path.pool()
-
+@instance_api.delete('/', status_code=204, responses={204: {"content": None}})
+def delete(cluster: Cluster, pool: Pool) -> Response:
     if pool.status == Pool.STATUS_INACTIVE:
-        abort(400, 'Pool is inactive')
+        raise HTTPException(400, 'Pool is inactive')
 
-    if not pool_controller.delete_pool(path.pool().get_id()):
+    if not pool_controller.delete_pool(pool.get_id()):
         raise ValueError('Failed to delete pool')
 
-    return '', 204
+    return Response(status_code=204)
 
 
 class UpdatablePoolParams(BaseModel):
@@ -98,40 +123,36 @@ class UpdatablePoolParams(BaseModel):
     max_w_mbytes: Optional[util.Unsigned] = None
 
 
-@instance_api.put('/')
-def update(path: PoolPath, body: UpdatablePoolParams):
+@instance_api.put('/', status_code=204, responses={204: {"content": None}})
+def update(cluster: Cluster, pool: Pool, parameters: UpdatablePoolParams) -> Response:
     ret, err = pool_controller.set_pool(
-        path.pool().get_id(),
+        pool.get_id(),
         **{
             key: value
             for key, value
-            in body.model_dump().items()
-            if key in body.model_fields_set
+            in parameters.model_dump().items()
+            if key in parameters.model_fields_set
         },
     )
     if err is not None:
         raise ValueError('Failed to update pool')
 
-    return '', 204
-
-
-class _LimitQuery(BaseModel):
-    limit: int = 20
+    return Response(status_code=204)
 
 
 @instance_api.get('/iostats')
-def iostats(path: PoolPath, query: _LimitQuery):
-    records = db.get_pool_stats(path.pool(), query.limit)
+def iostats(cluster: Cluster, pool: Pool, limit: int = 20):
+    records = db.get_pool_stats(pool, limit)
     return core_utils.process_records(records, 20)
 
 
 @instance_api.get('/lvol')
-def lvols(path: PoolPath):
+def lvols(cluster: Cluster, pool: Pool) -> List[VolumeDTO]:
     return [
-        lvol.get_clean_dict()
+        VolumeDTO.from_model(lvol, cluster_id=cluster.get_id())
         for lvol
-        in db.get_lvols_by_pool_id(path.pool().get_id())
+        in db.get_lvols_by_pool_id(pool.get_id())
     ]
 
 
-api.register_api(instance_api)
+api.include_router(instance_api)

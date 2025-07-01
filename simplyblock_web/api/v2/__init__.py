@@ -1,4 +1,7 @@
-from flask_openapi3 import APIBlueprint
+from typing import Annotated, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import caching_node
 from . import cluster
@@ -9,30 +12,39 @@ from . import pool
 from . import snapshot
 from . import storage_node
 from . import task
-from .auth import api_token_required
+
+from simplyblock_core.db_controller import DBController
+
+_db = DBController()
+security = HTTPBearer()
 
 
-storage_node.instance_api.register_api(device.api)
-pool.instance_api.register_api(lvol.api)
-pool.instance_api.register_api(snapshot.api)
+def _verify_api_token(
+        credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+        cluster_id: Optional[str] = None,
+):
+    authorized_cluster_id = next((
+        cluster.id
+        for cluster
+        in _db.get_clusters()
+        if cluster.secret == credentials.credentials
+    ), None)
+    if (authorized_cluster_id is None) or (cluster_id is not None and cluster_id != authorized_cluster_id):
+        raise HTTPException(401, 'Invalid token')
 
-cluster.instance_api.register_api(caching_node.api)
-cluster.instance_api.register_api(pool.api)
-cluster.instance_api.register_api(storage_node.api)
-cluster.instance_api.register_api(task.api)
+
+storage_node.instance_api.include_router(device.api)
+pool.instance_api.include_router(lvol.api)
+pool.instance_api.include_router(snapshot.api)
+
+cluster.instance_api.include_router(caching_node.api)
+cluster.instance_api.include_router(pool.api)
+cluster.instance_api.include_router(storage_node.api)
+cluster.instance_api.include_router(task.api)
 
 
-api = APIBlueprint(
-        'v2',
-        __name__,
-        url_prefix='v2',
-        abp_security=[{'token_v2': []}],
+api = APIRouter(
+    dependencies=[Depends(_verify_api_token)],
 )
-api.register_api(cluster.api)
-api.register_api(management_node.api)
-
-
-@api.before_request
-@api_token_required
-def auth():
-    pass
+api.include_router(cluster.api)
+api.include_router(management_node.api)

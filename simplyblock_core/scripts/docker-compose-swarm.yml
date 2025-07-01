@@ -49,7 +49,7 @@ services:
   WebAppAPI:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_web/app.py"
+    command: "uvicorn simplyblock_web.api:public_api --root-path=/api"
     networks:
       - localnet
     deploy:

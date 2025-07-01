@@ -15,7 +15,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    command: "python simplyblock_web/app.py"
+    command: "uvicorn simplyblock_web.api:public_api --root-path=/api --log-level=debug"
     volumes:
       - "fdb-config:/etc/foundationdb"
     environment:
