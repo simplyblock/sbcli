@@ -10,7 +10,7 @@ def test_pool(call, cluster):
     pool_uuid = call('POST', f'/clusters/{cluster}/pools', data={'name': 'poolX'})
     assert re.match(util.uuid_regex, pool_uuid)
 
-    assert call('GET', f'/clusters/{cluster}/pools/{pool_uuid}')['uuid'] == pool_uuid
+    assert call('GET', f'/clusters/{cluster}/pools/{pool_uuid}')['id'] == pool_uuid
     assert pool_uuid in util.list_ids(call, f'/clusters/{cluster}/pools')
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool_uuid}')
@@ -32,24 +32,20 @@ def test_pool_delete_missing(call, cluster):
 
 
 def test_pool_update(call, cluster, pool):
-    values = [
-        ('name', 'pool_name', 'poolY'),
-        ('pool_max', 'pool_max_size', 1),
-        ('lvol_max', 'lvol_max_size', 1),
-        ('max_rw_iops', 'max_rw_ios_per_sec', 1),
-        ('max_rw_mbytes', 'max_rw_mbytes_per_sec', 1),
-        ('max_r_mbytes', 'max_r_mbytes_per_sec', 1),
-        ('max_w_mbytes', 'max_w_mbytes_per_sec', 1),
-    ]
+    params = {
+        'name': 'poolY',
+        'max_size': 1,
+        'lvol_max_size': 1,
+        'max_rw_iops': 1,
+        'max_rw_mbytes': 1,
+        'max_r_mbytes': 1,
+        'max_w_mbytes': 1,
+    }
 
-    call('PUT', f'/clusters/{cluster}/pools/{pool}', data={
-        parameter: value
-        for parameter, _, value
-        in values
-    })
+    call('PUT', f'/clusters/{cluster}/pools/{pool}', data=params)
 
     pool = call('GET', f'/clusters/{cluster}/pools/{pool}')
-    for _, field, value in values:
+    for field, value in params.items():
         assert pool[field] == value
 
 

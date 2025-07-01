@@ -15,7 +15,7 @@ def test_lvol(call, cluster, pool):
     })
     assert re.match(util.uuid_regex, lvol_uuid)
 
-    assert call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')['uuid'] == lvol_uuid
+    assert call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')['id'] == lvol_uuid
     assert lvol_uuid in util.list_ids(call, f'/clusters/{cluster}/pools/{pool}/volumes')
 
     call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
@@ -29,14 +29,10 @@ def test_lvol(call, cluster, pool):
 
 
 def test_lvol_get(call, cluster, pool, lvol):
-    pool_name = call('GET', f'/clusters/{cluster}/pools/{pool}')['pool_name']
     lvol_details = call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}')
 
-    assert lvol_details['lvol_name'] == 'lvolX'
-    assert lvol_details['lvol_type'] == 'lvol'
-    assert lvol_details['uuid'] == lvol
-    assert lvol_details['pool_name'] == pool_name
-    assert lvol_details['pool_uuid'] == pool
+    assert lvol_details['name'] == 'lvolX'
+    assert lvol_details['id'] == lvol
     assert lvol_details['size'] == 2 * 10 ** 9
     # TODO assert schema
 
@@ -51,10 +47,10 @@ def test_lvol_update(call, cluster, pool, lvol):
     })
     lvol_details = call('GET', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol}')
     print(lvol_details)
-    assert lvol_details['rw_ios_per_sec'] == 1
-    assert lvol_details['rw_mbytes_per_sec'] == 1
-    assert lvol_details['r_mbytes_per_sec'] == 1
-    assert lvol_details['w_mbytes_per_sec'] == 1
+    assert lvol_details['max_rw_iops'] == 1
+    assert lvol_details['max_rw_mbytes'] == 1
+    assert lvol_details['max_r_mbytes'] == 1
+    assert lvol_details['max_w_mbytes'] == 1
 
 
 def test_resize(call, cluster, pool, lvol):

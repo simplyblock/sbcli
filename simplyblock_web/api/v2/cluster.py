@@ -1,23 +1,20 @@
 from threading import Thread
-from typing import Literal, Optional
+from typing import Annotated, List, Literal, Optional
+from uuid import UUID
 
-from flask import abort, jsonify
-from flask_openapi3 import APIBlueprint
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster
-from simplyblock_core import cluster_ops, utils as core_utils
+from simplyblock_core.models.cluster import Cluster as ClusterModel
+from simplyblock_core import cluster_ops
 
+from .dtos import ClusterDTO
 from . import util as util
 
 
-api = APIBlueprint('cluster', __name__, url_prefix='/clusters')
+api = APIRouter(prefix='/clusters')
 db = DBController()
-
-
-class _LimitQuery(BaseModel):
-    limit: int = Field(50)
 
 
 class _UpdateParams(BaseModel):
@@ -46,117 +43,113 @@ class ClusterParams(BaseModel):
     strict_node_anti_affinity: bool = False
 
 
-@api.get('/')
-def list():
+@api.get('/', name='clusters:list')
+def list() -> List[ClusterDTO]:
     return [
-        cluster.get_clean_dict()
+        ClusterDTO.from_model(cluster)
         for cluster
         in db.get_clusters()
     ]
 
 
-@api.put('/')
-def add(body: ClusterParams):
-    cluster_id_or_false = cluster_ops.add_cluster(**body.model_dump())
+@api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
+def add(request: Request, parameters: ClusterParams):
+    cluster_id_or_false = cluster_ops.add_cluster(**parameters.model_dump())
     if not cluster_id_or_false:
         raise ValueError('Failed to create cluster')
 
-    return jsonify(cluster_id_or_false)
+    entity_url = request.app.url_path_for('get', cluster_id=cluster_id_or_false)
+    return Response(status_code=201, headers={'Location': entity_url})
 
 
-
-instance_api = APIBlueprint('instance', __name__, url_prefix='/<cluster_id>')
-
-
-class ClusterPath(BaseModel):
-    cluster_id: str = Field(pattern=core_utils.UUID_PATTERN)
-
-    def cluster(self) -> Cluster:
-        cluster = db.get_cluster_by_id(self.cluster_id)
-        if cluster is None:
-            abort(404)
-
-        return cluster
+instance_api = APIRouter(prefix='/{cluster_id}')
 
 
-@instance_api.get('/')
-def get(path: ClusterPath):
-    return path.cluster().get_clean_dict()
+def _cluster_lookup(cluster_id: UUID):
+    try:
+        return db.get_cluster_by_id(str(cluster_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
-@instance_api.delete('/')
-def delete(path: ClusterPath):
-    cluster_ops.delete_cluster(path.cluster().get_id())
-    return '', 204
+Cluster = Annotated[ClusterModel, Depends(_cluster_lookup)]
 
 
-@instance_api.get('/capacity')
-def capacity(path: ClusterPath, query: util.HistoryQuery):
+@instance_api.get('/', name='clusters:detail')
+def get(cluster: Cluster) -> ClusterDTO:
+    return ClusterDTO.from_model(cluster)
+
+
+@instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
+def delete(cluster: Cluster) -> Response:
+    cluster_ops.delete_cluster(cluster.get_id())
+    return Response(status_code=204)
+
+
+@instance_api.get('/capacity', name='clusters:capacity')
+def capacity(cluster: Cluster, history: Optional[str] = None):
     capacity_or_false = cluster_ops.get_capacity(
-            path.cluster().get_id(), query.history)
+            cluster.get_id(), history)
     if not capacity_or_false:
         raise ValueError('Failed to compute capacity')
 
     return capacity_or_false
 
 
-@instance_api.get('/iostats')
-def iostats(path: ClusterPath, query: util.HistoryQuery):
+@instance_api.get('/iostats', name='clusters:iostats')
+def iostats(cluster: Cluster, history: Optional[str] = None):
     iostats_or_false = cluster_ops.get_iostats_history(
-            path.cluster().get_id(), query.history, with_sizes=True)
+            cluster.get_id(), history, with_sizes=True)
     if not iostats_or_false:
         raise ValueError('Failed to compute capacity')
 
     return iostats_or_false
 
 
-@instance_api.get('/logs')
-def logs(path: ClusterPath, query: _LimitQuery):
+@instance_api.get('/logs', name='clusters:logs')
+def logs(cluster: Cluster, limit: int = 50):
     logs_or_false = cluster_ops.get_logs(
-            path.cluster().get_id(), is_json=True, limit=query.limit)
+            cluster.get_id(), is_json=True, limit=limit)
     if not logs_or_false:
         raise ValueError('Failed to access logs')
 
     return logs_or_false
 
 
-@instance_api.post('/start')
-def start(path: ClusterPath):
+@instance_api.post('/start', name='clusters:start', status_code=202, responses={202: {"content": None}})
+def start(cluster: Cluster) -> Response:
     Thread(
         target=cluster_ops.cluster_grace_startup,
-        args=(path.cluster().get_id(),),
+        args=(cluster.get_id(),),
     ).start()
-    return '', 202  # FIXME: Provide URL for checking task status
+    return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 
-@instance_api.post('/shutdown')
-def shutdown(path: ClusterPath):
+@instance_api.post('/shutdown', name='clusters:shutdown', status_code=202, responses={202: {"content": None}})
+def shutdown(cluster: Cluster) -> Response:
     Thread(
         target=cluster_ops.cluster_grace_shutdown,
-        args=(path.cluster().get_id(),),
+        args=(cluster.get_id(),),
     ).start()
-    return '', 202  # FIXME: Provide URL for checking task status
+    return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 
-@instance_api.post('/activate')
-def activate(path: ClusterPath):
+@instance_api.post('/activate', name='clusters:activate', status_code=202, responses={202: {"content": None}})
+def activate(cluster: Cluster) -> Response:
     Thread(
         target=cluster_ops.cluster_activate,
-        args=(path.cluster().get_id(),),
+        args=(cluster.get_id(),),
     ).start()
-    return '', 202  # FIXME: Provide URL for checking task status
+    return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 
-@instance_api.post('/update')
-def update(path: ClusterPath, body: _UpdateParams):
+@instance_api.post('/update', name='clusters:upgrade', status_code=204, responses={204: {"content": None}})
+def update( cluster: Cluster, parameters: _UpdateParams) -> Response:
     cluster_ops.update_cluster(
-        cluster_id=path.cluster().get_id(),
-        mgmt_image=body.management_image,
-        mgmt_only=body.spdk_image is None and not body.restart,
-        spdk_image=body.spdk_image,
-        restart=body.restart
+        cluster_id=cluster.get_id(),
+        mgmt_image=parameters.management_image,
+        mgmt_only=parameters.spdk_image is None and not parameters.restart,
+        spdk_image=parameters.spdk_image,
+        restart=parameters.restart
     )
-    return '', 204
-
-
-api.register_api(instance_api)
+    return Response(status_code=204)
