@@ -692,11 +692,13 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        jm_device_per_node = args.jm_device_per_node
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity,
+            jm_device_per_node)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -723,13 +725,15 @@ class CLIWrapperBase:
         enable_qos = args.enable_qos
         disable_monitoring = args.disable_monitoring
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        jm_device_per_node = args.jm_device_per_node
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring,
+            strict_node_anti_affinity, jm_device_per_node)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

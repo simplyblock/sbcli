@@ -435,6 +435,7 @@ class _GPTPartitionsParams(BaseModel):
     jm_percent: int = Field(3, ge=0, le=100)
     num_partitions: int = Field(1, ge=0)
     partition_percent: int = Field(0, ge=0, le=100)
+    jm_device_count: int = Field(1, ge=0, le=100)
 
 
 @api.post('/make_gpt_partitions', responses={
@@ -445,11 +446,16 @@ class _GPTPartitionsParams(BaseModel):
 def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     cmd_list = [
         f"parted -fs {body.nbd_device} mklabel gpt",
-        f"parted -f {body.nbd_device} mkpart journal \"0%\" \"{body.jm_percent}%\""
     ]
-    sg_cmd_list = [
-        f"sgdisk -t 1:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}",
-    ]
+    sg_cmd_list = []
+
+    perc_per_jm_partition = body.jm_percent / body.jm_device_count
+    for jm_partition in range(body.jm_device_count):
+        st = jm_partition * perc_per_jm_partition
+        en = st + perc_per_jm_partition
+        cmd_list.append(f"parted -f {body.nbd_device} mkpart journal{(jm_partition + 1)} \"{st}%\" \"{en}%\"")
+        sg_cmd_list.append(f"sgdisk -t {(jm_partition + 1)}:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}")
+
     if body.partition_percent:
         perc_per_partition = body.partition_percent
     else:

@@ -52,6 +52,7 @@ class StorageNode(BaseNodeObject):
     jc_singleton_mask: str = ""
     jm_cpu_mask: str = ""
     jm_device: JMDevice = None # type: ignore[assignment]
+    jm_devices: List[JMDevice] = []
     jm_percent: int = 3
     jm_vuid: int = 0
     lvols: int = 0
