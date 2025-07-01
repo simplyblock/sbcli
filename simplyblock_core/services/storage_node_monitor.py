@@ -82,7 +82,7 @@ def get_next_cluster_status(cluster_id):
             else:
                 node_offline_devices += 1
 
-        if node_offline_devices > 0 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED):
+        if node_offline_devices > 0:
             affected_nodes += 1
             if node.mgmt_ip not in affected_physical_nodes:
                 affected_physical_nodes.append(node.mgmt_ip)
@@ -101,13 +101,16 @@ def get_next_cluster_status(cluster_id):
     n = cluster.distr_ndcs
     k = cluster.distr_npcs
    
-    # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
-    if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n+k)):
-        return Cluster.STATUS_DEGRADED
-    else if (affected_nodes < k or online_devices < (n + k) or (online_nodes < (n+k) and cluster.strict_node_anti_affinity)):
-        return Cluster.STATUS_SUSPENDED
-    else 
-        return Cluster.STATUS_ACTIVE
+   if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):
+    return Cluster.STATUS_DEGRADED
+   elif (
+    affected_nodes < k or 
+    online_devices < (n + k) or 
+    (online_nodes < (n + k) and cluster.strict_node_anti_affinity)
+   ):
+    return Cluster.STATUS_SUSPENDED
+   else:
+    return Cluster.STATUS_ACTIVE
 
 
 def update_cluster_status(cluster_id):
