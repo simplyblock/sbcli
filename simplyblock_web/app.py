@@ -2,48 +2,24 @@
 # encoding: utf-8
 
 import logging
-from flask import redirect, request
-from flask_openapi3 import OpenAPI
 
-from simplyblock_web import utils
-from simplyblock_web.api import public_api
-from simplyblock_web.api.v2.auth import api_token_required_scheme
+from fastapi import FastAPI
+import uvicorn
+
+from simplyblock_web.api import public
 from simplyblock_core import constants, utils as core_utils
 
 logger = core_utils.get_logger(__name__)
+logger.setLevel(constants.LOG_WEB_LEVEL)
+logging.getLogger().setLevel(constants.LOG_WEB_LEVEL)
 
 
 core_utils.init_sentry_sdk()
 
 
-app = OpenAPI(
-        __name__,
-        security_schemes={
-            'token_v2': api_token_required_scheme,
-        },
-)
-app.logger.setLevel(constants.LOG_WEB_LEVEL)
-app.url_map.strict_slashes = False
-app.register_error_handler(Exception, utils.error_handler)
-
-
-# Add routes
-app.register_blueprint(public_api, url_prefix='/api')
-
-
-@app.route('/', methods=['GET'])
-def status():
-    return utils.get_response("Live")
-
-
-# Redirect unqualified URLs to the API
-@app.before_request
-def redirect_v1():
-    if request.path.startswith('/api') or request.path.startswith('/static'):
-        return None
-    return redirect(f'/api/v1{request.path}' + ('?' + request.query_string.decode() if request.query_string else ''), code=308)
+app = FastAPI()
+app.include_router(public, prefix='/api')
 
 
 if __name__ == '__main__':
-    logging.getLogger('werkzeug').setLevel(constants.LOG_WEB_LEVEL)
-    app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)
+    uvicorn.run('app:app', host='0.0.0.0', port=5000, log_level='debug', forwarded_allow_ips='192.168.1.0/24')

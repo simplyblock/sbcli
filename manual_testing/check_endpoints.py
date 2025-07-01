@@ -17,7 +17,7 @@ c = Cluster()
 print("waiting for mgmt node to be up...")
 time.sleep(30)
 
-BASE_URL = "http://mgmt-server:5000"
+BASE_URL = "http://mgmt-server:5000/api/v2"
 CLUSTER_UUID = str(uuid.uuid4())
 SECRET = utils.generate_string(20)
 
@@ -27,7 +27,7 @@ c.write_to_db(db_controller.kv_store)
 
 
 AUTH_HEADER = {
-    "Authorization": f"{CLUSTER_UUID} {SECRET}"
+    "Authorization": f"Bearer {SECRET}"
 }
 
 def check_endpoint(name, url):
@@ -45,14 +45,13 @@ def check_endpoint(name, url):
 
 
 if __name__ == "__main__":
-    check_endpoint("Cluster Root", f"{BASE_URL}/cluster/")
-    check_endpoint("Cluster Info", f"{BASE_URL}/cluster/{CLUSTER_UUID}")
-    check_endpoint("Cluster Status", f"{BASE_URL}/cluster/status/{CLUSTER_UUID}")
-    check_endpoint("Cluster Logs", f"{BASE_URL}/cluster/get-logs/{CLUSTER_UUID}")
+    check_endpoint("Cluster Root", f"{BASE_URL}/clusters/")
+    check_endpoint("Cluster Info", f"{BASE_URL}/clusters/{CLUSTER_UUID}")
+    check_endpoint("Cluster Logs", f"{BASE_URL}/clusters/{CLUSTER_UUID}/logs")
     # FIXME: this endpoint return 500 error
     # check_endpoint("Cluster Tasks", f"{BASE_URL}/cluster/get-tasks/{CLUSTER_UUID}")
-    check_endpoint("Cluster Capacity", f"{BASE_URL}/cluster/capacity/{CLUSTER_UUID}")
-    check_endpoint("Capacity History (1d)", f"{BASE_URL}/cluster/capacity/{CLUSTER_UUID}/history/1d")
-    check_endpoint("IOStats History (1d)", f"{BASE_URL}/cluster/iostats/{CLUSTER_UUID}/history/1d")
+    check_endpoint("Cluster Capacity", f"{BASE_URL}/clusters/{CLUSTER_UUID}/capacity")
+    check_endpoint("Capacity History (1d)", f"{BASE_URL}/clusters/{CLUSTER_UUID}/capacity?history=1d")
+    check_endpoint("IOStats History (1d)", f"{BASE_URL}/clusters/{CLUSTER_UUID}/iostats?history=1d")
 
     print("✅ All cluster endpoint checks passed!")

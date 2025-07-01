@@ -1,52 +1,51 @@
-from flask import abort
-from flask_openapi3 import APIBlueprint
-from pydantic import Field
+from typing import Annotated, List
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import snapshot_controller
-from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core import utils as core_utils
+from simplyblock_core.models.snapshot import SnapShot as SnapshotModel
 
-from .pool import PoolPath
+from .cluster import Cluster
+from .pool import Pool
+from .dtos import SnapshotDTO
 
-api = APIBlueprint('snapshot', __name__, url_prefix='/snapshots')
+api = APIRouter(prefix='/snapshots')
 db = DBController()
 
 
-@api.get('/')
-def list(path: PoolPath):
+@api.get('/', name='clusters:pools:snapshots:list')
+def list(request: Request, cluster: Cluster, pool: Pool) -> List[SnapshotDTO]:
     return [
-        snapshot.get_clean_dict()
-        for storage_node
-        in db.get_storage_nodes_by_cluster_id(path.cluster_id)
+        SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot
-        in db.get_snapshots_by_node_id(storage_node.get_id())
+        in db.get_snapshots()
+        if snapshot.pool_uuid == pool.get_id()
     ]
 
 
-instance_api = APIBlueprint('instance', __name__, url_prefix='/<snapshot_id>')
+instance_api = APIRouter(prefix='/{snapshot_id}')
 
 
-class SnapshotPath(PoolPath):
-    snapshot_id: str = Field(pattern=core_utils.UUID_PATTERN)
-
-    def snapshot(self) -> SnapShot:
-        snapshot = db.get_snapshot_by_id(self.snapshot_id)
-        if snapshot is None:
-            abort(404, 'Snapshot does not exist')
-        return snapshot
+def _lookup_snapshot(snapshot_id: UUID) -> SnapshotModel:
+    snapshot = db.get_snapshot_by_id(str(snapshot_id))
+    if snapshot is None:
+        raise HTTPException(404, 'Snapshot does not exist')
+    return snapshot
 
 
-@instance_api.get('/')
-def get(path: SnapshotPath):
-    return path.snapshot().get_clean_dict()
+Snapshot = Annotated[SnapshotModel, Depends(_lookup_snapshot)]
 
 
-@instance_api.delete('/')
-def delete(path: SnapshotPath):
-    if not snapshot_controller.delete(path.snapshot().get_id()):
+@instance_api.get('/', name='clusters:pools:snapshots:detail')
+def get(request: Request, cluster: Cluster, pool: Pool, snapshot: Snapshot) -> SnapshotDTO:
+    return SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
+
+
+@instance_api.delete('/', name='clusters:pools:snapshots:delete', status_code=204, responses={204: {"content": None}})
+def delete(cluster: Cluster, pool: Pool, snapshot: Snapshot) -> Response:
+    if not snapshot_controller.delete(snapshot.get_id()):
         raise ValueError('Failed to delete snapshot')
-    return '', 204
 
-
-api.register_api(instance_api)
+    return Response(status_code=204)

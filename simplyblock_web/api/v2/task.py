@@ -1,42 +1,42 @@
+from typing import Annotated, List
+from uuid import UUID
 
-from flask import abort
-from flask_openapi3 import APIBlueprint
-from pydantic import Field
+from fastapi import APIRouter, Depends, HTTPException
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.controllers import tasks_controller
-from simplyblock_core import utils as core_utils
 
-from .cluster import ClusterPath
+from .cluster import Cluster
+from .dtos import TaskDTO
 
-api = APIBlueprint('task', __name__, url_prefix='/tasks')
+api = APIRouter(prefix='/tasks')
 db = DBController()
 
 
-@api.get('/')
-def list(path: ClusterPath):
+@api.get('/', name='clusters:tasks:list')
+def list(cluster: Cluster) -> List[TaskDTO]:
     return [
-        task.get_clean_dict()
+        TaskDTO.from_model(task)
         for task
-        in tasks_controller.list_tasks(path.cluster_id)
-        if task.cluster_id == path.cluster().get_id()
+        in tasks_controller.list_tasks(cluster.get_id())
+        if task.cluster_id == cluster.get_id()
     ]
 
 
-instance_api = APIBlueprint('instance', __name__, url_prefix='/<task_id>')
+instance_api = APIRouter(prefix='/{task_id}')
 
 
-class TaskPath(ClusterPath):
-    task_id: str = Field(pattern=core_utils.UUID_PATTERN)
-
-    def task(self) -> JobSchedule:
-        task = db.get_task_by_id(self.task_id)
-        if task is None:
-            abort(404, 'Task does not exist')
-        return task
+def _lookup_task(task_id: UUID) -> JobSchedule:
+    task = db.get_task_by_id(str(task_id))
+    if task is None:
+        raise HTTPException(404, 'Task does not exist')
+    return task
 
 
-@instance_api.get('/')
-def get(path: TaskPath):
-    return path.task().get_clean_dict()
+Task = Annotated[JobSchedule, Depends(_lookup_task)]
+
+
+@instance_api.get('/', name='clusters:tasks:detail')
+def get(cluster: Cluster, task: Task) -> TaskDTO:
+    return TaskDTO.from_model(task)

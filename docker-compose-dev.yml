@@ -15,7 +15,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    command: "python simplyblock_web/app.py"
+    command: "python3 simplyblock_web/app.py"
     volumes:
       - "fdb-config:/etc/foundationdb"
     environment:
