@@ -1803,7 +1803,7 @@ def restart_storage_node(
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         logger.info("Recreate lvstore")
         try:
-            ret = recreate_lvstore(snode)
+            ret = recreate_lvstore(snode, force=force)
         except Exception as e:
             logger.error(e)
             return False
@@ -2938,7 +2938,7 @@ def recreate_lvstore_on_sec(secondary_node):
     return True
 
 
-def recreate_lvstore(snode):
+def recreate_lvstore(snode, force=False):
     db_controller = DBController()
 
     snode.lvstore_status = "in_creation"
@@ -3026,8 +3026,9 @@ def recreate_lvstore(snode):
     ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
     if not ret:
         logger.error(f"Failed to recover lvstore: {snode.lvstore} on node: {snode.get_id()}")
-        _kill_app()
-        raise Exception("Failed to recover lvstore")
+        if not force:
+            _kill_app()
+            raise Exception("Failed to recover lvstore")
 
     # If ANY LVol BDev recovery failed then stop spdk process
     ret = rpc_client.get_bdevs()
