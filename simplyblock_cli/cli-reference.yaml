@@ -801,7 +801,7 @@ commands:
             type:
               range:
                 min: 1
-                max: 2
+                max: 3
             default: 1
       - name: add
         help: "Adds a new cluster"
@@ -911,7 +911,7 @@ commands:
             type:
               range:
                 min: 1
-                max: 2
+                max: 3
             default: 1
       - name: activate
         help: >
