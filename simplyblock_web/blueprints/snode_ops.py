@@ -570,38 +570,6 @@ def bind_device_to_spdk(body: utils.DeviceParams):
     return utils.get_response(True)
 
 
-class _FirewallParams(BaseModel):
-    port_id: int
-    port_type: str
-    action: str
-    rpc_port: int = Field(ge=1, le=65536)
-
-
-@api.post('/firewall_set_port', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def firewall_set_port(body: _FirewallParams):
-    ret = node_utils.firewall_port(
-        body.port_id,
-        body.port_type,
-        block=(body.action == "block"),
-        rpc_port=body.rpc_port
-    )
-    return utils.get_response(ret)
-
-
-@api.get('/get_firewall', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def get_firewall(query: utils.RPCPortParams):
-    ret = node_utils.firewall_get(str(query.rpc_port))
-    return utils.get_response(ret)
-
-
 @api.post('/set_hugepages', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
