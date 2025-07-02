@@ -481,6 +481,30 @@ def get_file_content(path: FilePath):
         return utils.get_response(None, err)
 
 
+class _FirewallParams(BaseModel):
+    port_id: int
+    port_type: str
+    action: str
+
+
+@api.post('/firewall_set_port', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def firewall_set_port(body: _FirewallParams):
+    return utils.get_response(False, "deprecated bath post snode/firewall_set_port")
+
+
+@api.get('/get_firewall', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def get_firewall():
+    return utils.get_response(False, "deprecated bath get snode/get_firewall")
+
+
 @api.post('/set_hugepages', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
