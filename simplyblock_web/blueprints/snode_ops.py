@@ -453,7 +453,7 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     for jm_partition in range(body.jm_device_count):
         st = jm_partition * perc_per_jm_partition
         en = st + perc_per_jm_partition
-        cmd_list.append(f"parted -f {body.nbd_device} mkpart journal{(jm_partition + 1)} \"{st}%\" \"{en}%\"")
+        cmd_list.append(f"parted -f {body.nbd_device} mkpart journal{(jm_partition + 1)} \"{int(st)}%\" \"{int(en)}%\"")
         sg_cmd_list.append(f"sgdisk -t {(jm_partition + 1)}:6527994e-2c5a-4eec-9613-8f5944074e8b {body.nbd_device}")
 
     if body.partition_percent:
