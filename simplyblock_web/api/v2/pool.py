@@ -1,5 +1,4 @@
 from typing import Annotated, List, Optional
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, StringConstraints
@@ -11,40 +10,14 @@ from simplyblock_core.models.pool import Pool as PoolModel
 
 from . import util as util
 from .cluster import Cluster
-from .lvol import VolumeDTO
+from .dtos import PoolDTO
 
 
 api = APIRouter(prefix='/pools')
 db = DBController()
 
 
-class PoolDTO(BaseModel):
-    id: UUID
-    name: str
-    status: str
-    max_size: util.Unsigned
-    lvol_max_size: util.Unsigned
-    max_rw_iops: util.Unsigned
-    max_rw_mbytes: util.Unsigned
-    max_r_mbytes: util.Unsigned
-    max_w_mbytes: util.Unsigned
-
-    @staticmethod
-    def from_model(model: PoolModel):
-        return PoolDTO(
-            id=UUID(model.get_id()),
-            name=model.name,
-            status=model.status,
-            max_size=model.pool_max_size,
-            lvol_max_size=model.lvol_max_size,
-            max_rw_iops=model.max_rw_ios_per_sec,
-            max_rw_mbytes=model.max_rw_mbytes_per_sec,
-            max_r_mbytes=model.max_r_mbytes_per_sec,
-            max_w_mbytes=model.max_w_mbytes_per_sec,
-        )
-
-
-@api.get('/')
+@api.get('/', name='clusters:pools:list')
 def list(cluster: Cluster) -> List[PoolDTO]:
     return [
         PoolDTO.from_model(pool)
@@ -65,7 +38,7 @@ class PoolParams(BaseModel):
     max_w_mbytes: util.Unsigned = 0
 
 
-@api.post('/', status_code=201, responses={201: {"content": None}})
+@api.post('/', name='clusters:pools:create', status_code=201, responses={201: {"content": None}})
 def add(cluster: Cluster, parameters: PoolParams) -> Response:
     for pool in db.get_pools():
         if pool.cluster_id == cluster.get_id() and pool.name == parameters.name:
@@ -97,12 +70,12 @@ def _lookup_pool(pool_id: Annotated[str, StringConstraints(pattern=core_utils.UU
 Pool = Annotated[PoolModel, Depends(_lookup_pool)]
 
 
-@instance_api.get('/')
+@instance_api.get('/', name='clusters:pools:detail')
 def get(cluster: Cluster, pool: Pool) -> PoolDTO:
     return PoolDTO.from_model(pool)
 
 
-@instance_api.delete('/', status_code=204, responses={204: {"content": None}})
+@instance_api.delete('/', name='clusters:pools:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster, pool: Pool) -> Response:
     if pool.status == Pool.STATUS_INACTIVE:
         raise HTTPException(400, 'Pool is inactive')
@@ -123,7 +96,7 @@ class UpdatablePoolParams(BaseModel):
     max_w_mbytes: Optional[util.Unsigned] = None
 
 
-@instance_api.put('/', status_code=204, responses={204: {"content": None}})
+@instance_api.put('/', name='clusters:pools:update', status_code=204, responses={204: {"content": None}})
 def update(cluster: Cluster, pool: Pool, parameters: UpdatablePoolParams) -> Response:
     ret, err = pool_controller.set_pool(
         pool.get_id(),
@@ -140,19 +113,10 @@ def update(cluster: Cluster, pool: Pool, parameters: UpdatablePoolParams) -> Res
     return Response(status_code=204)
 
 
-@instance_api.get('/iostats')
+@instance_api.get('/iostats', name='clusters:pools:iostats')
 def iostats(cluster: Cluster, pool: Pool, limit: int = 20):
     records = db.get_pool_stats(pool, limit)
     return core_utils.process_records(records, 20)
-
-
-@instance_api.get('/lvol')
-def lvols(cluster: Cluster, pool: Pool) -> List[VolumeDTO]:
-    return [
-        VolumeDTO.from_model(lvol, cluster_id=cluster.get_id())
-        for lvol
-        in db.get_lvols_by_pool_id(pool.get_id())
-    ]
 
 
 api.include_router(instance_api)

@@ -14,7 +14,7 @@ from . import swagger_ui
 from . import metrics
 
 
-api = Flask('API v1', __name__)
+api = Flask('API v1')
 api.register_blueprint(cluster.bp)
 api.register_blueprint(mgmt_node.bp)
 api.register_blueprint(device.bp)

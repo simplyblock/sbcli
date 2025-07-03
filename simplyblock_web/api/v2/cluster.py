@@ -1,6 +1,5 @@
 from threading import Thread
 from typing import Annotated, List, Literal, Optional
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, StringConstraints
@@ -9,6 +8,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core import cluster_ops, utils as core_utils
 
+from .dtos import ClusterDTO
 from . import util as util
 
 
@@ -42,31 +42,7 @@ class ClusterParams(BaseModel):
     strict_node_anti_affinity: bool = False
 
 
-class ClusterDTO(BaseModel):
-    id: UUID
-    nqn: str
-    block_size: util.Unsigned
-    cap_crit: util.Percent
-    cap_warn: util.Percent
-    prov_cap_crit: util.Unsigned
-    prov_cap_warn: util.Unsigned
-    ha: bool
-
-    @staticmethod
-    def from_model(model: ClusterModel):
-        return ClusterDTO(
-            id=UUID(model.get_id()),
-            nqn=model.nqn,
-            block_size=model.blk_size,
-            cap_warn=model.cap_warn,
-            cap_crit=model.cap_crit,
-            prov_cap_warn=model.prov_cap_warn,
-            prov_cap_crit=model.prov_cap_crit,
-            ha=model.ha_type == 'ha',
-        )
-
-
-@api.get('/')
+@api.get('/', name='clusters:list')
 def list() -> List[ClusterDTO]:
     return [
         ClusterDTO.from_model(cluster)
@@ -75,7 +51,7 @@ def list() -> List[ClusterDTO]:
     ]
 
 
-@api.post('/', status_code=201, responses={201: {"content": None}})
+@api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
 def add(parameters: ClusterParams):
     cluster_id_or_false = cluster_ops.add_cluster(**parameters.model_dump())
     if not cluster_id_or_false:
@@ -99,18 +75,18 @@ def _cluster_lookup(cluster_id: Annotated[str, StringConstraints(pattern=core_ut
 Cluster = Annotated[ClusterModel, Depends(_cluster_lookup)]
 
 
-@instance_api.get('/')
+@instance_api.get('/', name='clusters:detail')
 def get(cluster: Cluster) -> ClusterDTO:
     return ClusterDTO.from_model(cluster)
 
 
-@instance_api.delete('/', status_code=204, responses={204: {"content": None}})
+@instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster) -> Response:
     cluster_ops.delete_cluster(cluster.get_id())
     return Response(status_code=204)
 
 
-@instance_api.get('/capacity')
+@instance_api.get('/capacity', name='clusters:capacity')
 def capacity(cluster: Cluster, history: Optional[str] = None):
     capacity_or_false = cluster_ops.get_capacity(
             cluster.get_id(), history)
@@ -120,7 +96,7 @@ def capacity(cluster: Cluster, history: Optional[str] = None):
     return capacity_or_false
 
 
-@instance_api.get('/iostats')
+@instance_api.get('/iostats', name='clusters:iostats')
 def iostats(cluster: Cluster, history: Optional[str] = None):
     iostats_or_false = cluster_ops.get_iostats_history(
             cluster.get_id(), history, with_sizes=True)
@@ -130,7 +106,7 @@ def iostats(cluster: Cluster, history: Optional[str] = None):
     return iostats_or_false
 
 
-@instance_api.get('/logs')
+@instance_api.get('/logs', name='clusters:logs')
 def logs(cluster: Cluster, limit: int = 50):
     logs_or_false = cluster_ops.get_logs(
             cluster.get_id(), is_json=True, limit=limit)
@@ -140,7 +116,7 @@ def logs(cluster: Cluster, limit: int = 50):
     return logs_or_false
 
 
-@instance_api.post('/start', status_code=202, responses={202: {"content": None}})
+@instance_api.post('/start', name='clusters:start', status_code=202, responses={202: {"content": None}})
 def start(cluster: Cluster) -> Response:
     Thread(
         target=cluster_ops.cluster_grace_startup,
@@ -149,7 +125,7 @@ def start(cluster: Cluster) -> Response:
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 
-@instance_api.post('/shutdown', status_code=202, responses={202: {"content": None}})
+@instance_api.post('/shutdown', name='clusters:shutdown', status_code=202, responses={202: {"content": None}})
 def shutdown(cluster: Cluster) -> Response:
     Thread(
         target=cluster_ops.cluster_grace_shutdown,
@@ -158,7 +134,7 @@ def shutdown(cluster: Cluster) -> Response:
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 
-@instance_api.post('/activate', status_code=202, responses={202: {"content": None}})
+@instance_api.post('/activate', name='clusters:activate', status_code=202, responses={202: {"content": None}})
 def activate(cluster: Cluster) -> Response:
     Thread(
         target=cluster_ops.cluster_activate,
@@ -167,7 +143,7 @@ def activate(cluster: Cluster) -> Response:
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 
-@instance_api.post('/update', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/update', name='clusters:upgrade', status_code=204, responses={204: {"content": None}})
 def update( cluster: Cluster, parameters: _UpdateParams) -> Response:
     cluster_ops.update_cluster(
         cluster_id=cluster.get_id(),

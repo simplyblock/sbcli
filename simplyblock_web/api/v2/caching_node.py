@@ -1,6 +1,5 @@
 from threading import Thread
 from typing import Annotated, List, Optional
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field, StringConstraints
@@ -12,6 +11,7 @@ from simplyblock_core.models.caching_node import CachingNode as CachingNodeModel
 from simplyblock_web import utils as web_utils
 
 from .cluster import Cluster
+from .dtos import CachingNodeDTO
 from . import util
 
 
@@ -19,19 +19,7 @@ api = APIRouter(prefix='/caching_nodes')
 db = DBController()
 
 
-class CachingNodeDTO(BaseModel):
-    id: UUID
-    status: str
-
-    @staticmethod
-    def from_model(model: CachingNodeModel):
-        return CachingNodeDTO(
-            id=UUID(model.get_id()),
-            status=model.status,
-        )
-
-
-@api.get('/')
+@api.get('/', name='clusters:caching_nodes:list')
 def list(cluster: Cluster) -> List[CachingNodeDTO]:
     return [
         CachingNodeDTO.from_model(caching_node)
@@ -51,7 +39,7 @@ class CachingNodeParams(BaseModel):
     multipathing: bool = Field(True)
 
 
-@api.post('/', status_code=201, responses={201: {"content": None}})
+@api.post('/', name='clusters:caching_nodes:create', status_code=201, responses={201: {"content": None}})
 def add(cluster: Cluster, parameters: CachingNodeParams) -> Response:
     Thread(
         target=caching_node_controller.add_node,
@@ -85,7 +73,7 @@ def _caching_node_lookup(caching_node_id: Annotated[str, StringConstraints(patte
 CachingNode = Annotated[CachingNodeModel, Depends(_caching_node_lookup)]
 
 
-@instance_api.get('/')
+@instance_api.get('/', name='clusters:caching_nodes:detail')
 def get(cluster: Cluster, caching_node: CachingNode) -> CachingNodeDTO:
     return CachingNodeDTO.from_model(caching_node)
 
@@ -94,7 +82,7 @@ class _LVolBody(BaseModel):
     lvol_id: str = Field(pattern=core_utils.UUID_PATTERN)
 
 
-@instance_api.post('/connect')
+@instance_api.post('/connect', name='clusters:caching_nodes:connect')
 def connect(cluster: Cluster, caching_node: CachingNode, parameters: _LVolBody):
     lvol = db.get_lvol_by_id(parameters.lvol_id)
     if lvol is None:
@@ -107,7 +95,7 @@ def connect(cluster: Cluster, caching_node: CachingNode, parameters: _LVolBody):
     return dev_path_or_false
 
 
-@instance_api.post('/disconnect', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/disconnect', name='clusters:caching_nodes:disconnect', status_code=204, responses={204: {"content": None}})
 def disconnect(cluster: Cluster, caching_node: CachingNode, parameters: _LVolBody) -> Response:
     lvol = db.get_lvol_by_id(parameters.lvol_id)
     if lvol is None:
@@ -119,7 +107,7 @@ def disconnect(cluster: Cluster, caching_node: CachingNode, parameters: _LVolBod
     return Response(status_code=204)
 
 
-@instance_api.get('/volumes')
+@instance_api.get('/volumes', name='clusters:caching_nodes:volumes')
 def list_lvols(cluster: Cluster, caching_node: CachingNode):
     return [
         {
@@ -134,7 +122,7 @@ def list_lvols(cluster: Cluster, caching_node: CachingNode):
     ]
 
 
-@instance_api.post('/recreate', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/recreate', name='clusters:caching_nodes:recreate', status_code=204, responses={204: {"content": None}})
 def recreate(cluster: Cluster, caching_node: CachingNode) -> Response:
     if not caching_node_controller.recreate(caching_node.get_id()):
         raise ValueError('Failed to recreate caching node')
