@@ -636,11 +636,11 @@ class RPCClient:
             "bdev_retry_count": 1,
             "transport_retry_count": 3,
             "ctrlr_loss_timeout_sec": 1,
-            "fast_io_fail_timeout_sec" : 0,
+            "fast_io_fail_timeout_sec": 0,
             "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 10000,
+            "keep_alive_timeout_ms": 30000,
             "timeout_us": constants.NVME_TIMEOUT_US,
-            "transport_ack_timeout": 13,
+            "transport_ack_timeout": 11,
         }
         return self._request("bdev_nvme_set_options", params)
 
