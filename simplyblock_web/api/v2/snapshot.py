@@ -50,6 +50,3 @@ def delete(cluster: Cluster, pool: Pool, snapshot: Snapshot) -> Response:
         raise ValueError('Failed to delete snapshot')
 
     return Response(status_code=204)
-
-
-api.include_router(instance_api)

@@ -41,6 +41,3 @@ ManagementNode = Annotated[MgmtNode, Depends(_lookup_management_node)]
 @instance_api.get('/', name='management_node:detail')
 def get(cluster: Cluster, management_node: ManagementNode) -> ManagementNodeDTO:
     return ManagementNodeDTO.from_model(management_node)
-
-
-api.include_router(instance_api)

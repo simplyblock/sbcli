@@ -153,6 +153,3 @@ def update( cluster: Cluster, parameters: _UpdateParams) -> Response:
         restart=parameters.restart
     )
     return Response(status_code=204)
-
-
-api.include_router(instance_api)

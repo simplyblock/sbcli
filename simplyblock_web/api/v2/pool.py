@@ -117,6 +117,3 @@ def update(cluster: Cluster, pool: Pool, parameters: UpdatablePoolParams) -> Res
 def iostats(cluster: Cluster, pool: Pool, limit: int = 20):
     records = db.get_pool_stats(pool, limit)
     return core_utils.process_records(records, 20)
-
-
-api.include_router(instance_api)

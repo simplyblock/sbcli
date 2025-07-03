@@ -128,6 +128,3 @@ def recreate(cluster: Cluster, caching_node: CachingNode) -> Response:
         raise ValueError('Failed to recreate caching node')
 
     return Response(status_code=204)
-
-
-api.include_router(instance_api)

@@ -81,6 +81,3 @@ def reset(cluster: Cluster, storage_node: StorageNode, device: Device) -> Respon
         raise ValueError('Failed to reset device')
 
     return Response(status_code=204)
-
-
-api.include_router(instance_api)

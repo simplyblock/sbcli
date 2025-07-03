@@ -217,6 +217,3 @@ def restart(cluster: Cluster, storage_node: StorageNode, body: _RestartParams) -
     ).start()
 
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
-
-
-api.include_router(instance_api)

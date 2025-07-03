@@ -3,7 +3,6 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import caching_node
 from . import cluster
 from . import device
 from . import lvol
@@ -11,7 +10,6 @@ from . import management_node
 from . import pool
 from . import snapshot
 from . import storage_node
-from . import task
 
 from simplyblock_core.db_controller import DBController
 
@@ -32,16 +30,28 @@ def _verify_api_token(
     if (authorized_cluster_id is None) or (cluster_id is not None and cluster_id != authorized_cluster_id):
         raise HTTPException(401, 'Invalid token')
 
+# Assemble routes here to avoid circular imports
+device.api.include_router(device.instance_api)
 
 storage_node.instance_api.include_router(device.api)
-pool.instance_api.include_router(lvol.api)
-pool.instance_api.include_router(snapshot.api)
+storage_node.api.include_router(storage_node.instance_api)
 
-cluster.instance_api.include_router(caching_node.api)
-cluster.instance_api.include_router(pool.api)
 cluster.instance_api.include_router(storage_node.api)
-cluster.instance_api.include_router(task.api)
 
+
+lvol.api.include_router(lvol.instance_api)
+pool.instance_api.include_router(lvol.api)
+
+snapshot.api.include_router(snapshot.instance_api)
+pool.instance_api.include_router(lvol.instance_api)
+
+pool.api.include_router(pool.instance_api)
+
+cluster.instance_api.include_router(pool.api)
+
+
+cluster.api.include_router(cluster.instance_api)
+management_node.api.include_router(management_node.instance_api)
 
 api = APIRouter(
     dependencies=[Depends(_verify_api_token)],
