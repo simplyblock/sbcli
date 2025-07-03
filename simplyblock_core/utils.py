@@ -105,6 +105,11 @@ def get_nics_data():
             'status': device['operstate'],
             'net_type': device['link_type']}
         iface_list[nic] = iface
+        if "altnames" in device and len(device["altnames"]) > 0:
+            for altname in device["altnames"]:
+                altname_info = iface
+                altname_info["name"] = altname
+                iface_list[altname] = altname_info
     return iface_list
 
 
@@ -529,7 +534,6 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
 
     return int(4.0 * small_pool_count), int(2.5 * large_pool_count)
 
-
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
     '''
     1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (25) * lvol_count
@@ -539,17 +543,15 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     return: minimum_hp_memory in bytes
     '''
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 12 * lvol_count) * (1024 * 1024) + (
+    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (
             250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(1.2*memory_consumption)
-
 
 def calculate_minimum_sys_memory(max_prov):
     minimum_sys_memory = (2000 * 1024) * convert_size(max_prov, 'GB') + 500 * 1024 * 1024
 
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
-
 
 def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory, huge_total_memory):
     total_free_memory = free_sys_memory + huge_total_memory
@@ -1801,15 +1803,16 @@ def get_k8s_batch_client():
     config.load_incluster_config()
     return client.BatchV1Api()
 
-def remove_container(client: docker.DockerClient, name, timeout=3):
+def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
     try:
         container = client.containers.get(name)
-        container.stop(timeout=timeout)
-        container.remove()
+        if graceful_timeout:
+            container.stop(timeout=graceful_timeout)
+        container.remove(force=(not graceful_timeout))
     except NotFound:
         pass
     except APIError as e:
-        if e.response and 'Conflict ("removal of container {container.id} is already in progress")' != e.response.reason:
+        if e.status_code != 409:
             raise
 
 def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):

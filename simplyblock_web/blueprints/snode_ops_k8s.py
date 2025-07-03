@@ -15,6 +15,7 @@ from jinja2 import Environment, FileSystemLoader
 import yaml
 from pydantic import BaseModel, Field
 
+from . import snode_ops
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, pod_name
@@ -340,6 +341,8 @@ def spdk_process_start(body: SPDKParams):
     k8s_job_name_length = len(node_prepration_job_name+node_name)
     if k8s_job_name_length > 63:
         node_prepration_job_name += node_name[k8s_job_name_length-63:]
+    else:
+        node_prepration_job_name += node_name
 
     logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
@@ -555,3 +558,5 @@ def apply_config():
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)
+
+api.post('/bind_device_to_spdk')(snode_ops.bind_device_to_spdk)

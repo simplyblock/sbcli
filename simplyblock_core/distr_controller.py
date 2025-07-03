@@ -25,12 +25,24 @@ def send_node_status_event(node, node_status, target_node=None):
         "status": node_status}
     events = {"events": [node_status_event]}
     logger.debug(node_status_event)
+    skipped_nodes = []
     if target_node:
         snodes = [target_node]
     else:
         snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
+        for node in snodes:
+            if node.status == StorageNode.STATUS_SCHEDULABLE:
+                skipped_nodes.append(node)
+
     for node in snodes:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,  StorageNode.STATUS_DOWN]:
+            continue
+        node_found_same_host = False
+        for n in skipped_nodes:
+            if node.mgmt_ip == n.mgmt_ip:
+                node_found_same_host = True
+                break
+        if node_found_same_host:
             continue
         logger.info(f"Sending to: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
@@ -44,14 +56,26 @@ def send_dev_status_event(device, status, target_node=None):
         return
     db_controller = DBController()
     storage_ID = device.cluster_device_order
+    skipped_nodes = []
+
     if target_node:
         snodes = [db_controller.get_storage_node_by_id(target_node.get_id())]
     else:
         snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
+        for node in snodes:
+            if node.status == StorageNode.STATUS_SCHEDULABLE:
+                skipped_nodes.append(node)
+
     for node in snodes:
         if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
             continue
-
+        node_found_same_host = False
+        for n in skipped_nodes:
+            if node.mgmt_ip == n.mgmt_ip:
+                node_found_same_host = True
+                break
+        if node_found_same_host:
+            continue
         dev_status = status
 
         if status == NVMeDevice.STATUS_ONLINE and node.get_id() != device.node_id:

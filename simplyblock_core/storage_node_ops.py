@@ -1814,7 +1814,11 @@ def restart_storage_node(
     else:
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         logger.info("Recreate lvstore")
-        ret = recreate_lvstore(snode)
+        try:
+            ret = recreate_lvstore(snode, force=force)
+        except Exception as e:
+            logger.error(e)
+            return False
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if not ret:
             logger.error("Failed to recreate lvstore")
@@ -2946,7 +2950,7 @@ def recreate_lvstore_on_sec(secondary_node):
     return True
 
 
-def recreate_lvstore(snode):
+def recreate_lvstore(snode, force=False):
     db_controller = DBController()
 
     snode.lvstore_status = "in_creation"
@@ -3023,6 +3027,37 @@ def recreate_lvstore(snode):
 
     ### 6- wait for examine
     ret = rpc_client.bdev_wait_for_examine()
+
+    def _kill_app():
+        storage_events.snode_restart_failed(snode)
+        snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+        snode_api.spdk_process_kill(snode.rpc_port)
+        set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+
+    # If LVol Store recovery failed then stop spdk process
+    ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+    if not ret:
+        logger.error(f"Failed to recover lvstore: {snode.lvstore} on node: {snode.get_id()}")
+        if not force:
+            _kill_app()
+            raise Exception("Failed to recover lvstore")
+
+    # If ANY LVol BDev recovery failed then stop spdk process
+    ret = rpc_client.get_bdevs()
+    node_bdev_names = {}
+    if ret:
+        for b in ret:
+            node_bdev_names[b['name']] = b
+            for al in b['aliases']:
+                node_bdev_names[al] = b
+
+    for lv in lvol_list:
+        bdev_name = lv.lvol_uuid
+        passed = health_controller.check_bdev(bdev_name, bdev_names=node_bdev_names)
+        if not passed:
+            logger.error(f"Failed to recover BDev: {bdev_name} on node: {snode.get_id()}")
+            _kill_app()
+            raise Exception("Failed to recover lvstore")
 
     logger.info("Suspending JC compression")
     ret = rpc_client.jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=True)
