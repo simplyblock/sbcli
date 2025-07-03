@@ -104,7 +104,7 @@ def get_next_cluster_status(cluster_id):
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
     if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n+k)):
         return Cluster.STATUS_DEGRADED
-    elif (affected_nodes < k or online_devices < (n + k) or (online_nodes < (n+k) and cluster.strict_node_anti_affinity)):
+    elif (affected_nodes > k or online_devices < (n + k) or (online_nodes < (n+k) and cluster.strict_node_anti_affinity)):
         return Cluster.STATUS_SUSPENDED
     else:
         return Cluster.STATUS_ACTIVE
