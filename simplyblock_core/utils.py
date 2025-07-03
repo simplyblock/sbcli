@@ -16,7 +16,6 @@ from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
-from kubernetes.stream import stream
 
 import tempfile
 from jinja2 import Environment, FileSystemLoader
