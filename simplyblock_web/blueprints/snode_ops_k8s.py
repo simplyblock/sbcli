@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from . import snode_ops
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
-from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, pod_name
+from simplyblock_web.node_utils_k8s import namespace_id_file
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -408,11 +408,12 @@ def spdk_process_start(body: SPDKParams):
         'type': 'boolean'
     })}}},
 })
-def spdk_process_kill():
+def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
-        resp = k8s_core_v1.delete_namespaced_pod(deployment_name, namespace)
+        pod_name = f"/snode-spdk-deployment-{query.rpc_port}"
+        resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
         retries = 10
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
@@ -434,8 +435,9 @@ def spdk_process_kill():
     return utils.get_response(True)
 
 
-def _is_pod_up():
+def _is_pod_up(rpc_port):
     k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
+    pod_name = f"/snode-spdk-deployment-{rpc_port}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -455,8 +457,8 @@ def _is_pod_up():
         'type': 'boolean'
     })}}},
 })
-def spdk_process_is_up():
-    if _is_pod_up():
+def spdk_process_is_up(query: utils.RPCPortParams):
+    if _is_pod_up(query.rpc_port):
         return utils.get_response(True)
     else:
         return utils.get_response(False, "SPDK container is not running")
@@ -485,6 +487,7 @@ class _FirewallParams(BaseModel):
     port_id: int
     port_type: str
     action: str
+    rpc_port: int = Field(ge=1, le=65536)
 
 
 @api.post('/firewall_set_port', responses={
@@ -494,7 +497,7 @@ class _FirewallParams(BaseModel):
 })
 def firewall_set_port(body: _FirewallParams):
     k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
-
+    pod_name = f"/snode-spdk-deployment-{body.rpc_port}"
     for pod in k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace()).items:
         if not pod.metadata.name.startswith(pod_name):
             continue
