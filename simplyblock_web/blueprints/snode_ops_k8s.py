@@ -412,7 +412,7 @@ def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
-        pod_name = f"/snode-spdk-deployment-{query.rpc_port}"
+        pod_name = f"snode-spdk-deployment-{query.rpc_port}"
         resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
         retries = 10
         while retries > 0:
@@ -437,7 +437,7 @@ def spdk_process_kill(query: utils.RPCPortParams):
 
 def _is_pod_up(rpc_port):
     k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
-    pod_name = f"/snode-spdk-deployment-{rpc_port}"
+    pod_name = f"snode-spdk-deployment-{rpc_port}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -497,7 +497,7 @@ class _FirewallParams(BaseModel):
 })
 def firewall_set_port(body: _FirewallParams):
     k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
-    pod_name = f"/snode-spdk-deployment-{body.rpc_port}"
+    pod_name = f"snode-spdk-deployment-{body.rpc_port}"
     for pod in k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace()).items:
         if not pod.metadata.name.startswith(pod_name):
             continue
