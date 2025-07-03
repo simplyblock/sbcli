@@ -332,7 +332,8 @@ def spdk_process_start(body: SPDKParams):
 
     if _is_pod_up(body.rpc_port):
         logger.info("SPDK deployment found, removing...")
-        spdk_process_kill()
+        query = utils.RPCPortParams(rpc_port=body.rpc_port)
+        spdk_process_kill(query)
 
     node_prepration_job_name = "snode-spdk-job-"
     node_name = os.environ.get("HOSTNAME", "")
