@@ -330,7 +330,7 @@ def spdk_process_start(body: SPDKParams):
 
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MB') if body.total_mem else ""
 
-    if _is_pod_up():
+    if _is_pod_up(body.rpc_port):
         logger.info("SPDK deployment found, removing...")
         spdk_process_kill()
 
