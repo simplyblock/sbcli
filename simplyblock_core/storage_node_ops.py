@@ -2888,8 +2888,6 @@ def recreate_lvstore_on_sec(secondary_node):
             logger.error(err)
             return False
 
-        primary_node_api = SNodeClient(primary_node.api_endpoint)
-
         ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
@@ -2964,7 +2962,6 @@ def recreate_lvstore(snode, force=False):
         snode.rpc_username, snode.rpc_password)
 
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    sec_node_api = SNodeClient(sec_node.api_endpoint, timeout=5, retry=5)
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):

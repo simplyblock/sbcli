@@ -4,10 +4,7 @@ import logging
 import os
 import time
 
-import jc
-from kubernetes.stream import stream
-from simplyblock_core.utils import get_k8s_core_client, get_k8s_batch_client
-from concurrent.futures import ThreadPoolExecutor
+from simplyblock_core.utils import get_k8s_batch_client
 
 
 node_name = os.environ.get("HOSTNAME")

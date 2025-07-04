@@ -7,8 +7,6 @@ import requests
 import boto3
 import re
 
-import jc
-
 from simplyblock_core import shell_utils
 
 
