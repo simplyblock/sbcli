@@ -891,7 +891,7 @@ class CLIWrapperBase:
         cloned_db.memory_size = database.memory_size
         cloned_db.disk_size = database.disk_size
         cloned_db.storage_class = database.storage_class
-        database.cloned_from = database.uuid
+        cloned_db.cloned_from = database.uuid
         cloned_db.status = "running"
         cloned_db.write_to_db(db_controller.DBController().kv_store)
         

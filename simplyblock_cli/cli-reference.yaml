@@ -1771,13 +1771,13 @@ commands:
       - name: snapshot
         help: "creates a snapshot of the disk. TODO: need to pause Disk Writes Temporarily"
         arguments:
-          - name: "snapshot_name"
-            help: "the name of the snapshot"
-            dest: snapshot_name
-            type: str
           - name: "database_id"
             help: "the UUID of that database"
             dest: database_id
+            type: str
+          - name: "snapshot_name"
+            help: "the name of the snapshot"
+            dest: snapshot_name
             type: str
       - name: list-snapshots
         help: "lists all snapshots of a database"
@@ -1811,11 +1811,11 @@ commands:
           - name: "--memory"
             help: "the new memory of the database"
             dest: memory
-            type: int 
+            type: str
           - name: "--disk"
             help: "the new size of the disk for the database. It can decreased to a maximum of 10% of the current size"
             dest: disk
-            type: int
+            type: str
       - name: "list-hierarchy"
         help: "Lists a hierarchy (nesting) of db clones starting from the base db"
         arguments:
