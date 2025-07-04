@@ -579,16 +579,16 @@ runcmd:
                                     "name": "default",
                                     "masquerade": {}
                                 }
-                            ],
-                            "resources": {
-                                "requests": {
-                                    "memory": memory
-                                }
-                            },
-                            "cpu": {
-                                "cores": vcpu_count
+                            ]
+                        },
+                        "resources": {
+                            "requests": {
+                                "memory": memory
                             }
                         },
+                        "cpu": {
+                            "cores": vcpu_count
+                        }
                     },
                      "networks": [
                         {
@@ -663,6 +663,14 @@ runcmd:
         raise
 
 def stop_postgresql_deployment2(deployment_name: str, namespace: str = "default"):
+    """
+    Deletes the Kubevirt VirtualMachine to stop the PostgreSQL deployment.
+    This effectively "removes" the VM from Kubernetes.
+
+    Args:
+        deployment_name (str): The name of the Kubevirt VirtualMachine to delete.
+        namespace (str, optional): The Kubernetes namespace. Defaults to "default".
+    """
     # Load Kubernetes config
     config.load_kube_config()
 
@@ -673,24 +681,26 @@ def stop_postgresql_deployment2(deployment_name: str, namespace: str = "default"
     plural = "virtualmachines"
 
     try:
-        # Set running to false to stop the VM
-        patch_body = {"spec": {"running": False}}
-        kubevirt_api.patch_namespaced_custom_object(
+        # Delete the VirtualMachine object
+        # Using V1DeleteOptions with propagation_policy="Background" or "Foreground"
+        # can control whether dependent objects (like pods) are deleted.
+        # For a VM, deleting the VM object itself is usually sufficient.
+        kubevirt_api.delete_namespaced_custom_object(
             group=group,
             version=version,
             namespace=namespace,
             plural=plural,
             name=deployment_name,
-            body=patch_body
+            body=client.V1DeleteOptions(propagation_policy="Foreground")
         )
-        print(f"Kubevirt VirtualMachine '{deployment_name}' stopping.")
-        # You might want to poll the VM status here to ensure it's truly stopped
-        time.sleep(10) # Give it some time to process the stop request
+        print(f"Kubevirt VirtualMachine '{deployment_name}' deleted to stop the deployment.")
+        # Give Kubernetes time to process the deletion
+        time.sleep(10)
     except client.exceptions.ApiException as e:
-        print(f"Error stopping Kubevirt VirtualMachine: {e}")
-        # Handle cases where VM might not exist
+        print(f"Error deleting Kubevirt VirtualMachine: {e}")
+        # Handle cases where VM might not exist (already deleted, etc.)
         if e.status == 404:
-            print(f"VirtualMachine '{deployment_name}' not found, skipping stop.")
+            print(f"VirtualMachine '{deployment_name}' not found, skipping stop (it's already gone).")
         else:
             raise
 
