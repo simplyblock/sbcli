@@ -3027,12 +3027,6 @@ def recreate_lvstore(snode, force=False):
                 _kill_app()
                 raise Exception("Failed to recover lvstore")
 
-    logger.info("Suspending JC compression")
-    ret = rpc_client.jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=True)
-    if not ret:
-        logger.error("Failed to suspend JC compression")
-        # return False
-
     ret = rpc_client.bdev_lvol_set_lvs_opts(
         snode.lvstore,
         groupid=snode.jm_vuid,
