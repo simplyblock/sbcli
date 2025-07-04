@@ -1,0 +1,17 @@
+# postgres-pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data-pvc
+  annotations:
+    simplybk/secret-name: simplyblock-pvc-keys
+    simplybk/secret-namespace: spdk-csi
+spec:
+  volumeMode: Block
+  accessModes:
+    - ReadWriteMany
+  storageClassName: simplyblock-csi-sc
+  resources:
+    requests:
+      storage: 10Gi # Adjust storage size as needed
+

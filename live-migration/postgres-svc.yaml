@@ -1,0 +1,12 @@
+# postgres-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+spec:
+  selector:
+    app: postgres # Matches the label on our VM
+  ports:
+    - protocol: TCP
+      port: 5432 # Default PostgreSQL port
+      targetPort: 5432 # Port on the VM
