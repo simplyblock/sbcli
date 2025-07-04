@@ -435,7 +435,7 @@ def spdk_process_kill():
 
 
 def _is_pod_up():
-    k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
+    k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
