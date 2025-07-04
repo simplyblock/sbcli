@@ -891,15 +891,59 @@ class CLIWrapperBase:
         cloned_db.memory_size = database.memory_size
         cloned_db.disk_size = database.disk_size
         cloned_db.storage_class = database.storage_class
+        database.cloned_from = database.uuid
         cloned_db.status = "running"
         cloned_db.write_to_db(db_controller.DBController().kv_store)
         
         return True
 
-    # def database__resize(self, sub_command, args):
-    #     """
-    #     TODO
-    #     Add a new database entry.
-    #     """
-    #     db = db_controller.DBController()
-    #     return db.add_entry(args.key, args.value)
+    def database__resize(self, sub_command, args):
+        database = db_controller.DBController().get_managed_database(args.database_id)
+        if not database:
+            raise ValueError(f"Database with ID {args.database_id} does not exist.")
+
+        if not args.new_disk_size and not args.new_memory_size and not args.new_vcpu_count:
+            raise ValueError("At least one of new_disk_size, new_memory_size, or new_vcpu_count must be specified.")
+        
+        new_disk_size = utils.parse_size(args.new_disk_size) if args.new_disk_size else database.disk_size
+        new_memory = utils.parse_size(args.new_memory_size) if args.new_memory_size else database.memory_size
+        new_vcpu_count = args.new_vcpu_count if args.new_vcpu_count else database.vcpu_count
+
+        managed_db_ops.resize_postgresql_database(
+            deployment_name=database.deployment_id,
+            pvc_name=database.pvc_id,
+            new_disk_size=args.new_disk_size,
+            new_memory=args.new_memory_size,
+            new_vcpu_count=args.new_vcpu_count,
+        )        
+
+        database.vcpu_count = new_vcpu_count
+        database.memory_size = new_memory
+        database.disk_size = new_disk_size
+        database.write_to_db(db_controller.kv_store)
+
+
+    def database__list_hierarchy(self, sub_command, args):
+        """
+        List the hierarchy of clones of managed databases.
+        """
+        database = db_controller.DBController().get_managed_database(args.database_id)
+        if not database:
+            raise ValueError(f"Database with ID {args.database_id} does not exist.")
+
+        # Start with the current database and traverse up the hierarchy
+        if not database.cloned_from:
+            return "This database is not a clone and has no hierarchy."
+        # Initialize the hierarchy list with the current database
+        hierarchy = [f"Database ID: {database.uuid}, Deployment Name: {database.deployment_id}, Type: {database.type}, Version: {database.version}"]
+        hierarchy.append(f"Current Database: {database.deployment_id} (ID: {database.uuid})")
+
+        cloned_db = database.cloned_from
+        while cloned_db:
+            parent_db = db_controller.DBController().get_managed_database(cloned_db)
+            if not parent_db:
+                break
+            hierarchy.append(f"Database ID: {parent_db.uuid}, Deployment Name: {parent_db.deployment_id}, Type: {parent_db.type}, Version: {parent_db.version}")
+            cloned_db = parent_db.cloned_from
+
+

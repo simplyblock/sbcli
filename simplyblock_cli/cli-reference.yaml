@@ -1808,13 +1808,13 @@ commands:
             help: "the new VCPU count for the database"
             dest: vcpu
             type: int
-          - name: "--ram"
+          - name: "--memory"
             help: "the new memory of the database"
-            dest: vcpu
+            dest: memory
             type: int 
           - name: "--disk"
             help: "the new size of the disk for the database. It can decreased to a maximum of 10% of the current size"
-            dest: vcpu
+            dest: disk
             type: int
       - name: "list-hierarchy"
         help: "Lists a hierarchy (nesting) of db clones starting from the base db"
