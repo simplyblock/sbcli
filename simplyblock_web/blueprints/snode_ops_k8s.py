@@ -497,25 +497,7 @@ class _FirewallParams(BaseModel):
     })}}},
 })
 def firewall_set_port(body: _FirewallParams):
-    k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
-    pod_name = f"snode-spdk-deployment-{body.rpc_port}"
-    for pod in k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace()).items:
-        if not pod.metadata.name.startswith(pod_name):
-            continue
-
-        ret = node_utils_k8s.firewall_port_k8s(
-                body.port_id,
-                body.port_type,
-                body.action=="block",
-                k8s_core_v1,
-                node_utils_k8s.get_namespace(),
-                pod.metadata.name,
-                "spdk_container",
-        )
-        return utils.get_response(ret)
-
-    return utils.get_response(False)
-
+    return utils.get_response(False, "deprecated bath post snode/firewall_set_port")
 
 @api.get('/get_firewall', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
@@ -523,8 +505,7 @@ def firewall_set_port(body: _FirewallParams):
     })}}},
 })
 def get_firewall():
-    ret = node_utils_k8s.firewall_get_k8s()
-    return utils.get_response(ret)
+    return utils.get_response(False, "deprecated bath get snode/get_firewall")
 
 
 @api.post('/set_hugepages', responses={

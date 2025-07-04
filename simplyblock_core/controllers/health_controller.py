@@ -8,6 +8,7 @@ import jc
 
 from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -141,8 +142,8 @@ def _check_spdk_process_up(ip, rpc_port):
 
 def _check_port_on_node(snode, port_id):
     try:
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=5, retry=2)
-        iptables_command_output, _ = snode_api.get_firewall(snode.rpc_port)
+        fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
+        iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
         result = jc.parse('iptables', iptables_command_output)
         for chain in result:
             if chain['chain'] in ["INPUT", "OUTPUT"]:
