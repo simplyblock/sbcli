@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from . import snode_ops
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
-from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, pod_name
+from simplyblock_web.node_utils_k8s import namespace_id_file
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -330,9 +330,10 @@ def spdk_process_start(body: SPDKParams):
 
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MB') if body.total_mem else ""
 
-    if _is_pod_up():
-        logger.info("SPDK deployment found, removing...")
-        spdk_process_kill()
+    if _is_pod_up(body.rpc_port):
+        logger.info("SPDK pod found, removing...")
+        query = utils.RPCPortParams(rpc_port=body.rpc_port)
+        spdk_process_kill(query)
 
     node_prepration_job_name = "snode-spdk-job-"
     node_name = os.environ.get("HOSTNAME", "")
@@ -408,11 +409,12 @@ def spdk_process_start(body: SPDKParams):
         'type': 'boolean'
     })}}},
 })
-def spdk_process_kill():
+def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
-        resp = k8s_core_v1.delete_namespaced_pod(deployment_name, namespace)
+        pod_name = f"snode-spdk-pod-{query.rpc_port}"
+        resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
         retries = 10
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
@@ -434,8 +436,9 @@ def spdk_process_kill():
     return utils.get_response(True)
 
 
-def _is_pod_up():
+def _is_pod_up(rpc_port):
     k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
+    pod_name = f"snode-spdk-pod-{rpc_port}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -455,8 +458,8 @@ def _is_pod_up():
         'type': 'boolean'
     })}}},
 })
-def spdk_process_is_up():
-    if _is_pod_up():
+def spdk_process_is_up(query: utils.RPCPortParams):
+    if _is_pod_up(query.rpc_port):
         return utils.get_response(True)
     else:
         return utils.get_response(False, "SPDK container is not running")
@@ -485,6 +488,7 @@ class _FirewallParams(BaseModel):
     port_id: int
     port_type: str
     action: str
+    rpc_port: int = Field(ge=1, le=65536)
 
 
 @api.post('/firewall_set_port', responses={
@@ -494,7 +498,6 @@ class _FirewallParams(BaseModel):
 })
 def firewall_set_port(body: _FirewallParams):
     return utils.get_response(False, "deprecated bath post snode/firewall_set_port")
-
 
 @api.get('/get_firewall', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({

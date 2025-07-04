@@ -1,5 +1,7 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
 SIMPLY_BLOCK_VERSION=19.2.0
 
-SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:main
+
+SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:multi_sn_k8s_worker
+
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:main-latest
