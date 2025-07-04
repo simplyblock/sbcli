@@ -7,8 +7,6 @@ import requests
 import boto3
 import re
 
-import jc
-
 from simplyblock_core import shell_utils
 
 
@@ -233,51 +231,3 @@ def get_available_device_name(instance_id):
     except Exception as e:
         logger.error(f"Failed to get available device name: {str(e)}")
         return None
-
-def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
-    cmd_list = []
-    try:
-        iptables_command_output = firewall_get(rpc_port)
-        if type(iptables_command_output) is str:
-            iptables_command_output = [iptables_command_output]
-        for rules in iptables_command_output:
-            result = jc.parse('iptables', rules)
-            for chain in result:
-                if chain['chain'] in ["INPUT", "OUTPUT"]:
-                    for rule in chain['rules']:
-                        if str(port_id) in rule['options']:
-                            cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']} -w")
-
-    except Exception as e:
-        logger.error(e)
-
-    if block:
-        cmd_list.extend([
-            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP -w",
-            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP -w",
-        ])
-
-    cmd_list.append("iptables -L -n -v -w")
-
-    out = ""
-    spk_name = "spdk"
-    if rpc_port:
-        spk_name = f"spdk_{rpc_port}"
-    for cmd in cmd_list:
-        stream = os.popen(f"docker exec {spk_name} {cmd}")
-        ret = stream.read()
-        if ret != "":
-            out += ret + "\n"
-            logger.info(ret)
-
-    return out
-
-
-def firewall_get(rpc_port=None):
-    spk_name = "spdk"
-    if rpc_port:
-        spk_name = f"spdk_{rpc_port}"
-    cmd = f"docker exec {spk_name} iptables -L -n -w"
-    stream = os.popen(cmd)
-    ret = stream.read()
-    return ret

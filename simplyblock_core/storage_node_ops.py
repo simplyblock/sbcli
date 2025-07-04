@@ -18,6 +18,7 @@ from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINU
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -2084,7 +2085,7 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Stopping SPDK")
     try:
-        SNodeClient(snode.api_endpoint, timeout=30, retry=1).spdk_process_kill(snode.rpc_port)
+        SNodeClient(snode.api_endpoint, timeout=10, retry=10).spdk_process_kill(snode.rpc_port)
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
@@ -2873,8 +2874,6 @@ def recreate_lvstore_on_sec(secondary_node):
             logger.error(err)
             return False
 
-        primary_node_api = SNodeClient(primary_node.api_endpoint)
-
         ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
@@ -2883,8 +2882,9 @@ def recreate_lvstore_on_sec(secondary_node):
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
 
+            fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 3- block primary port
-            primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "block", primary_node.rpc_port)
+            fw_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "block", primary_node.rpc_port)
             tcp_ports_events.port_deny(primary_node, primary_node.lvol_subsys_port)
 
             ### 4- set leadership to false
@@ -2908,8 +2908,10 @@ def recreate_lvstore_on_sec(secondary_node):
                 logger.error("Error connecting to hublvol: %s", e)
                 # return False
 
+
+            fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 8- allow port on primary
-            primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow", primary_node.rpc_port)
+            fw_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow", primary_node.rpc_port)
             tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
 
         ### 7- add lvols to subsystems
@@ -2946,7 +2948,6 @@ def recreate_lvstore(snode, force=False):
         snode.rpc_username, snode.rpc_password)
 
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    sec_node_api = SNodeClient(sec_node.api_endpoint, timeout=5, retry=5)
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
@@ -2980,8 +2981,10 @@ def recreate_lvstore(snode, force=False):
             sec_node.write_to_db()
             time.sleep(3)
 
+            fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
+
             ### 3- block secondary port
-            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
+            fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
             time.sleep(0.5)
@@ -3063,7 +3066,10 @@ def recreate_lvstore(snode, force=False):
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
-            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
+
+            fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
+            ### 3- block secondary port
+            fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
     if prim_node_suspend:
