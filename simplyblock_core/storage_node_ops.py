@@ -3023,8 +3023,9 @@ def recreate_lvstore(snode, force=False):
         passed = health_controller.check_bdev(bdev_name, bdev_names=node_bdev_names)
         if not passed:
             logger.error(f"Failed to recover BDev: {bdev_name} on node: {snode.get_id()}")
-            _kill_app()
-            raise Exception("Failed to recover lvstore")
+            if not force:
+                _kill_app()
+                raise Exception("Failed to recover lvstore")
 
     logger.info("Suspending JC compression")
     ret = rpc_client.jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=True)
