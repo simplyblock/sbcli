@@ -88,6 +88,11 @@ while True:
                         port_number = task.function_params["port_number"]
                         snode_api = SNodeClient(f"{node.mgmt_ip}:5000", timeout=3, retry=2)
 
+                        sec_node = db.get_storage_node_by_id(node.secondary_node_id)
+                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                            sec_rpc_client = sec_node.rpc_client()
+                            sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
 
                         fw_api = FirewallClient(f"{node.mgmt_ip}:5001", timeout=5, retry=2)

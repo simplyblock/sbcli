@@ -6,7 +6,8 @@ from datetime import datetime
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.controllers import health_controller, lvol_events
+from simplyblock_core.controllers import health_controller, lvol_events, lvol_controller, tasks_controller
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
@@ -49,6 +50,17 @@ def pre_lvol_delete_rebalance():
     if lvol_del_start_time == 0:
         lvol_del_start_time = time.time()
 
+
+def resume_comp(lvol):
+    logger.info("resuming compression")
+    node = db.get_storage_node_by_id(lvol.node_id)
+    rpc_client = RPCClient(
+        node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+    ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+    if not ret:
+        logger.error("Failed to resume JC compression")
+
+
 def post_lvol_delete_rebalance(lvol):
     global lvol_del_start_time
     diff = time.time() - lvol_del_start_time
@@ -58,14 +70,14 @@ def post_lvol_delete_rebalance(lvol):
         current_cap = records[0].size_used
         start_cap = records[-1].size_used
         if start_cap - current_cap > int(total_size * 10 / 100):
-            logger.info("no task found on same node, resuming compression")
-            node = db.get_storage_node_by_id(lvol.node_id)
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
-            ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-            if not ret:
-                logger.error("Failed to resume JC compression")
+            resume_comp(lvol)
         lvol_del_start_time = 0
+        return True
+    lvol_records = db.get_lvol_stats(lvol, 1)
+    if lvol_records:
+        total_size = db.get_cluster_capacity(cluster, 1)[0].size_total
+        if lvol_records[0].size_used > int(total_size * 10 / 100):
+            resume_comp(lvol)
 
 # get DB controller
 db = db_controller.DBController()
@@ -128,6 +140,20 @@ while True:
                             logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
                             lvol_events.lvol_delete(lvol)
                             lvol.remove(db.kv_store)
+                            # check for full devices
+                            full_devs_ids = []
+                            all_devs_ids = []
+                            for dev in snode.nvme_devices:
+                                if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED ]:
+                                    continue
+                                all_devs_ids.append(dev.get_id())
+                                if dev.status == NVMeDevice.STATUS_CANNOT_ALLOCATE:
+                                    full_devs_ids.append(dev.get_id())
+
+                            if 0 < len(full_devs_ids) == len(all_devs_ids):
+                                logger.info(f"All devices are full, starting expansion migrations")
+                                for dev_id in full_devs_ids:
+                                    tasks_controller.add_new_device_mig_task(dev_id)
                             post_lvol_delete_rebalance(lvol)
 
                         elif ret == 1: # deletion is in progress.
