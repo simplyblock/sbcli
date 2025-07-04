@@ -1804,17 +1804,17 @@ commands:
             help: "the UUID of that database that needs to be stopped"
             dest: database_id
             type: str
-          - name: "--vcpu"
+          - name: "--vcpu_count"
             help: "the new VCPU count for the database"
-            dest: vcpu
+            dest: vcpu_count
             type: int
-          - name: "--memory"
+          - name: "--memory_size"
             help: "the new memory of the database"
-            dest: memory
+            dest: memory_size
             type: str
-          - name: "--disk"
+          - name: "--disk_size"
             help: "the new size of the disk for the database. It can decreased to a maximum of 10% of the current size"
-            dest: disk
+            dest: disk_size
             type: str
       - name: "list-hierarchy"
         help: "Lists a hierarchy (nesting) of db clones starting from the base db"

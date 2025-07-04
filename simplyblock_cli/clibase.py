@@ -902,24 +902,24 @@ class CLIWrapperBase:
         if not database:
             raise ValueError(f"Database with ID {args.database_id} does not exist.")
 
-        if not args.new_disk_size and not args.new_memory_size and not args.new_vcpu_count:
-            raise ValueError("At least one of new_disk_size, new_memory_size, or new_vcpu_count must be specified.")
+        if not args.disk_size and not args.memory_size and not args.vcpu_count:
+            raise ValueError("At least one of disk_size, memory_size, or vcpu_count must be specified.")
         
-        new_disk_size = utils.parse_size(args.new_disk_size) if args.new_disk_size else database.disk_size
-        new_memory = utils.parse_size(args.new_memory_size) if args.new_memory_size else database.memory_size
-        new_vcpu_count = args.new_vcpu_count if args.new_vcpu_count else database.vcpu_count
+        disk_size = utils.parse_size(args.disk_size) if args.disk_size else database.disk_size
+        new_memory = utils.parse_size(args.memory_size) if args.memory_size else database.memory_size
+        vcpu_count = args.vcpu_count if args.vcpu_count else database.vcpu_count
 
         managed_db_ops.resize_postgresql_database(
             deployment_name=database.deployment_id,
             pvc_name=database.pvc_id,
-            new_disk_size=args.new_disk_size,
-            new_memory=args.new_memory_size,
-            new_vcpu_count=args.new_vcpu_count,
+            new_disk_size=args.disk_size,
+            new_memory=args.memory_size,
+            new_vcpu_count=args.vcpu_count,
         )        
 
-        database.vcpu_count = new_vcpu_count
+        database.vcpu_count = vcpu_count
         database.memory_size = new_memory
-        database.disk_size = new_disk_size
+        database.disk_size = disk_size
         database.write_to_db(db_controller.kv_store)
 
 

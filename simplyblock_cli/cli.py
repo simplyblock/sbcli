@@ -787,9 +787,9 @@ class CLIWrapper(CLIWrapperBase):
     def init_database__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'resize a database by increasing the disk size or VCPU or RAM')
         subcommand.add_argument('database_id', help='the UUID of that database that needs to be stopped', type=str)
-        argument = subcommand.add_argument('--vcpu', help='the new VCPU count for the database', type=int, dest='vcpu')
-        argument = subcommand.add_argument('--memory', help='the new memory of the database', type=str, dest='memory')
-        argument = subcommand.add_argument('--disk', help='the new size of the disk for the database. It can decreased to a maximum of 10%% of the current size', type=str, dest='disk')
+        argument = subcommand.add_argument('--vcpu_count', help='the new VCPU count for the database', type=int, dest='vcpu_count')
+        argument = subcommand.add_argument('--memory_size', help='the new memory of the database', type=str, dest='memory_size')
+        argument = subcommand.add_argument('--disk_size', help='the new size of the disk for the database. It can decreased to a maximum of 10%% of the current size', type=str, dest='disk_size')
 
     def init_database__list_hierarchy(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-hierarchy', 'Lists a hierarchy (nesting) of db clones starting from the base db')
