@@ -536,7 +536,6 @@ runcmd:
         )
     )
 
-
     # Define the Kubevirt VirtualMachine object
     vm_body = {
         "apiVersion": "kubevirt.io/v1",
@@ -549,7 +548,7 @@ runcmd:
             }
         },
         "spec": {
-            "running": True,
+            "runStrategy": "Always",
             "template": {
                 "metadata": {
                     "labels": {
@@ -590,34 +589,33 @@ runcmd:
                                 "cores": vcpu_count
                             }
                         },
-                        "networks": [
-                            {
-                                "name": "default",
-                                "pod": {}
-                            }
-                        ],
-                        "volumes": [
-                            {
-                                "name": "rootdisk",
-                                "containerDisk": {
-                                    "image": "rrukmantiyo/kubevirt-images:ubuntu-22.04"
-                                }
-                            },
-                            {
-                                "name": "datadisk",
-                                "persistentVolumeClaim": {
-                                    "claimName": pvc_name
-                                }
-                            },
-                            {
-                                "name": "cloudinitdisk",
-                                "cloudInitNoCloud": {
-                                    "userData": cloud_init_user_data
-                                }
-                            }
-                        ]
                     },
-
+                     "networks": [
+                        {
+                            "name": "default",
+                            "pod": {}
+                        }
+                    ],
+                    "volumes": [
+                        {
+                            "name": "rootdisk",
+                            "containerDisk": {
+                                "image": "rrukmantiyo/kubevirt-images:ubuntu-22.04"
+                            }
+                        },
+                        {
+                            "name": "datadisk",
+                            "persistentVolumeClaim": {
+                                "claimName": pvc_name
+                            }
+                        },
+                        {
+                            "name": "cloudinitdisk",
+                            "cloudInitNoCloud": {
+                                "userData": cloud_init_user_data
+                            }
+                        }
+                    ],
                     "affinity": pod_affinity
                 }
             }
