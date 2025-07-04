@@ -31,7 +31,7 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     v1 = client.CoreV1Api()
     v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
     # wait for the PVC to be created
-    start_postgresql_deployment(name, version, vcpu_count, memory, pvc_name, namespace)
+    start_postgresql_deployment2(name, version, vcpu_count, memory, pvc_name, namespace)
 
     db_controller = DBController()
     database = ManagedDatabase()
@@ -57,7 +57,6 @@ def get_nodes_with_label(label_selector):
     
     # Retrieve nodes with the specified label
     return v1.list_node(label_selector=label_selector)
-    
 
 def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
     # load Kubernetes config
@@ -180,7 +179,6 @@ def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: 
     apps_v1 = client.AppsV1Api()
     apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
 
-
 def stop_postgresql_deployment(deployment_name: str, namespace: str = "default"):
     # Load Kubernetes config
     config.load_kube_config()
@@ -300,7 +298,6 @@ def create_pvc_clone(clone_name, source_pvc_name, storage_class, disk_size, name
     except client.exceptions.ApiException as e:
         print(f"Error creating PVC clone: {e}")
 
-
 def resize_postgresql_database(deployment_name: str, pvc_name: str, new_vcpu_count: int, new_memory: str, new_disk_size: str, namespace: str = "default"):
     """
     Resizes a PostgreSQL database Kubevirt VM by updating its vCPU, memory, and disk size.
@@ -345,7 +342,7 @@ def resize_postgresql_database(deployment_name: str, pvc_name: str, new_vcpu_cou
 
         # 2. Stop and Start VirtualMachine (Applies CPU/Memory changes and triggers filesystem expansion)
         print(f"Stopping Kubevirt VM '{deployment_name}' to apply all new parameters and ensure PVC filesystem expansion...")
-        stop_postgresql_deployment(deployment_name, namespace)
+        stop_postgresql_deployment2(deployment_name, namespace)
         
         # Wait a bit for VM to be fully stopped
         time.sleep(15) 
@@ -431,7 +428,6 @@ def resize_postgresql_database(deployment_name: str, pvc_name: str, new_vcpu_cou
         if database:
             database.status = "resize_failed"
             database.write_to_db(db_controller.kv_store)
-
 
 def start_postgresql_deployment2(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
     """
@@ -667,7 +663,6 @@ runcmd:
     except client.exceptions.ApiException as e:
         print(f"Error creating Kubevirt VirtualMachine: {e}")
         raise
-
 
 def stop_postgresql_deployment2(deployment_name: str, namespace: str = "default"):
     # Load Kubernetes config
