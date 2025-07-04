@@ -437,7 +437,7 @@ def spdk_process_kill(query: utils.RPCPortParams):
 
 
 def _is_pod_up(rpc_port):
-    k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
+    k8s_core_v1 = core_utils.get_k8s_core_client()
     pod_name = f"snode-spdk-pod-{rpc_port}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
