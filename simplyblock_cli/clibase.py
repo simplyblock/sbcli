@@ -905,23 +905,23 @@ class CLIWrapperBase:
         if not args.disk_size and not args.memory_size and not args.vcpu_count:
             raise ValueError("At least one of disk_size, memory_size, or vcpu_count must be specified.")
         
-        disk_size = utils.parse_size(args.disk_size) if args.disk_size else database.disk_size
-        new_memory = utils.parse_size(args.memory_size) if args.memory_size else database.memory_size
+        disk_size = args.disk_size if args.disk_size else database.disk_size
+        new_memory = args.memory_size if args.memory_size else database.memory_size
         vcpu_count = args.vcpu_count if args.vcpu_count else database.vcpu_count
 
         managed_db_ops.resize_postgresql_database(
             deployment_name=database.deployment_id,
             pvc_name=database.pvc_id,
-            new_disk_size=args.disk_size,
-            new_memory=args.memory_size,
-            new_vcpu_count=args.vcpu_count,
-        )        
+            new_disk_size=disk_size,
+            new_memory=new_memory,
+            new_vcpu_count=vcpu_count,
+        )
 
         database.vcpu_count = vcpu_count
         database.memory_size = new_memory
         database.disk_size = disk_size
-        database.write_to_db(db_controller.kv_store)
-
+        database.write_to_db(db_controller.DBController().kv_store)
+        return True
 
     def database__list_hierarchy(self, sub_command, args):
         """
@@ -946,4 +946,6 @@ class CLIWrapperBase:
             hierarchy.append(f"Database ID: {parent_db.uuid}, Deployment Name: {parent_db.deployment_id}, Type: {parent_db.type}, Version: {parent_db.version}")
             cloned_db = parent_db.cloned_from
 
+        hierarchy.reverse()
+        return "\n".join(hierarchy)
 

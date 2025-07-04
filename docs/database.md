@@ -10,6 +10,21 @@ By default this will create a database connect to the database
 kubectl run -it --rm psql-client --image=postgres -- bash
 ```
 
+connect to DB with password password
+psql -h postgres1-svc -U simplyblock_admin -d simplyblock_db
+```
+
+```
+CREATE TABLE Persons (
+    PersonID int,
+    LastName varchar(255),
+    FirstName varchar(255),
+    Address varchar(255),
+    City varchar(255)
+);
+
+INSERT INTO Persons (PersonID, LastName, FirstName, Address, City) VALUES(1, 'Jhon', 'Doe', 'BakerStreet', 'London');
+```
 ### create a snapshot
 
 ```

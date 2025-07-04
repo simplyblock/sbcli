@@ -345,89 +345,32 @@ def resize_postgresql_database(deployment_name: str, pvc_name: str, new_vcpu_cou
         stop_postgresql_deployment2(deployment_name, namespace)
         
         # Wait a bit for VM to be fully stopped
-        time.sleep(15) 
+        time.sleep(40)
 
         print(f"Starting Kubevirt VM '{deployment_name}' with new vCPU, memory, and disk size...")
-        
-        managed_db = db_controller.get_database_by_deployment_id(deployment_name, namespace)
-        if not managed_db:
-            raise ValueError(f"ManagedDatabase entry for VM '{deployment_name}' not found.")
-
-        # Re-create the VM with new parameters.
-        # For Kubevirt VMs, updating resources requires patching the VM object.
-        # If stop_postgresql_deployment sets 'running: false', start_postgresql_deployment
-        # needs to ensure 'running: true' is set along with resource changes.
-        # A simpler way for resize is to PATCH the running VM's spec.template.domain.
-        # However, for disk resize requiring restart, a delete+create or stop+patch+start
-        # is often more reliable. Given your earlier logic, stop+start is chosen.
-        # In this specific case, start_postgresql_deployment will recreate it if it doesn't exist,
-        # but if it was just stopped (running: false), we need to update its spec.
-        
-        # A more robust resize for VM:
-        # 1. Resize PVC
-        # 2. Stop VM (set running: false)
-        # 3. Patch VM spec.template.domain.resources and cpu with new values
-        # 4. Start VM (set running: true)
-
-        # Let's implement the stop+patch+start pattern for VMs more explicitly for resize
-        vm_current = kubevirt_api.get_namespaced_custom_object(
-            group="kubevirt.io", version="v1", namespace=namespace, plural="virtualmachines", name=deployment_name
+        start_postgresql_deployment2(
+            deployment_name=deployment_name,
+            version="14",  # Assuming PostgreSQL 14, adjust as needed
+            vcpu_count=new_vcpu_count,
+            memory=new_memory,
+            pvc_name=pvc_name,
+            namespace=namespace
         )
-        
-        # Update VM's resource requests directly in the object
-        vm_current["spec"]["template"]["spec"]["domain"]["resources"]["requests"]["memory"] = new_memory
-        vm_current["spec"]["template"]["spec"]["domain"]["cpu"]["cores"] = new_vcpu_count
-        vm_current["spec"]["running"] = True # Set it to running again
-
-        kubevirt_api.patch_namespaced_custom_object(
-            group="kubevirt.io",
-            version="v1",
-            namespace=namespace,
-            plural="virtualmachines",
-            name=deployment_name,
-            body=vm_current # Patch with the updated body
-        )
-        print(f"Kubevirt VM '{deployment_name}' patched and started with new configuration.")
-
-        # Kubevirt does not have a direct "wait_for_deployment_completion" like Deployments.
-        # You'd typically poll the VM's status.running or status.ready conditions.
-        # For simplicity, we'll just add a sleep for this example.
         print(f"Waiting for Kubevirt VM '{deployment_name}' to start...")
-        time.sleep(60) # Give VM time to boot and PostgreSQL to start
-
-        # 3. Update DBController record
-        database = db_controller.get_database_by_deployment_id(deployment_name, namespace)
-        if database:
-            database.vcpu_count = new_vcpu_count
-            database.memory_size = new_memory
-            database.disk_size = new_disk_size
-            database.status = "running"
-            database.write_to_db(db_controller.kv_store)
-            print(f"Database record for '{deployment_name}' updated in DBController.")
-        else:
-            print(f"Warning: Database record for '{deployment_name}' not found in DBController after resize.")
-
+        time.sleep(10) # Give VM time to boot and PostgreSQL to start
         print(f"PostgreSQL Kubevirt VM '{deployment_name}' resized successfully.")
 
     except client.exceptions.ApiException as e:
         print(f"Kubernetes API error during resize: {e}")
-        database = db_controller.get_database_by_deployment_id(deployment_name, namespace)
-        if database:
-            database.status = "resize_failed"
-            database.write_to_db(db_controller.kv_store)
+        raise
         
     except ValueError as e:
         print(f"Configuration error during resize: {e}")
-        database = db_controller.get_database_by_deployment_id(deployment_name, namespace)
-        if database:
-            database.status = "resize_failed"
-            database.write_to_db(db_controller.kv_store)
+        raise
+
     except Exception as e:
         print(f"An unexpected error occurred during resize: {e}")
-        database = db_controller.get_database_by_deployment_id(deployment_name, namespace)
-        if database:
-            database.status = "resize_failed"
-            database.write_to_db(db_controller.kv_store)
+        raise
 
 def start_postgresql_deployment2(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
     """
