@@ -177,11 +177,11 @@ class DBController(metaclass=Singleton):
         ret = SnapShot().read_from_db(self.kv_store)
         return ret
 
-    def get_snapshot_by_id(self, id) -> Optional[SnapShot]:
+    def get_snapshot_by_id(self, id) -> SnapShot:
         ret = SnapShot().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
-        return None
+        if not ret:
+            raise KeyError(f'Snapshot {id} not found')
+        return ret[0]
 
     def get_lvol_by_id(self, id) -> Optional[LVol]:
         lvols = LVol().read_from_db(self.kv_store, id=id)
