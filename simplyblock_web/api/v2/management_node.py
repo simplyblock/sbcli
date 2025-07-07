@@ -9,7 +9,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from .cluster import Cluster
 from .dtos import ManagementNodeDTO
 
-api = APIRouter(prefix='/management_nodes')
+api = APIRouter(prefix='/management-nodes')
 db = DBController()
 
 

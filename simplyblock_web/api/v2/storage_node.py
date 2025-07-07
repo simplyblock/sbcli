@@ -16,7 +16,7 @@ from .cluster import Cluster
 from .dtos import StorageNodeDTO
 
 
-api = APIRouter(prefix='/storage_nodes')
+api = APIRouter(prefix='/storage-nodes')
 db = DBController()
 
 
