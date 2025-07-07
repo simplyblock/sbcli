@@ -935,15 +935,32 @@ class CLIWrapperBase:
         if not database.cloned_from:
             return "This database is not a clone and has no hierarchy."
         # Initialize the hierarchy list with the current database
-        hierarchy = [f"Database ID: {database.uuid}, Deployment Name: {database.deployment_id}, Type: {database.type}, Version: {database.version}"]
-        hierarchy.append(f"Current Database: {database.deployment_id} (ID: {database.uuid})")
+        hierarchy = [{
+            "Deployment Name": database.deployment_id,
+            "Type": database.type,
+            "Version": database.version,
+            "VCPU Count": database.vcpu_count,
+            "Memory Size": database.memory_size,
+            "Disk Size": database.disk_size,
+            "Storage Class": database.storage_class,
+        }]
 
         cloned_db = database.cloned_from
         while cloned_db:
             parent_db = db_controller.DBController().get_managed_database(cloned_db)
             if not parent_db:
                 break
-            hierarchy.append(f"Database ID: {parent_db.uuid}, Deployment Name: {parent_db.deployment_id}, Type: {parent_db.type}, Version: {parent_db.version}")
+            hierarchy.append(
+                {
+            "Deployment Name": database.deployment_id,
+            "Type": database.type,
+            "Version": database.version,
+            "VCPU Count": database.vcpu_count,
+            "Memory Size": database.memory_size,
+            "Disk Size": database.disk_size,
+            "Storage Class": database.storage_class,
+        }
+            )
             cloned_db = parent_db.cloned_from
 
         hierarchy.reverse()
