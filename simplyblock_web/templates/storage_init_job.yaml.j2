@@ -60,7 +60,7 @@ spec:
         - name: rootfs
           hostPath:
             path: /
-        - name: etc-simplyblock
+        - name: var-simplyblock
           hostPath:
             path: /var/simplyblock
       containers:
@@ -70,35 +70,35 @@ spec:
             privileged: true
           volumeMounts:
             - name: grub
-              mountPath: /host/etc/default/grub
+              mountPath: /etc/default/grub
             - name: boot
-              mountPath: /host/boot
+              mountPath: /boot
             - name: usr-bin
-              mountPath: /host/usr/bin
+              mountPath: /usr/bin
             - name: usr-sbin
-              mountPath: /host/usr/sbin
+              mountPath: /usr/sbin
             - name: lib
-              mountPath: /host/lib
+              mountPath: /lib
             - name: lib64
-              mountPath: /host/lib64
+              mountPath: /lib64
             - name: usr-lib
-              mountPath: /host/usr/lib
+              mountPath: /usr/lib
             - name: dev
-              mountPath: /host/dev
+              mountPath: /dev
             - name: run
-              mountPath: /host/run
+              mountPath: /run
             - name: proc
-              mountPath: /host/proc
+              mountPath: /proc
             - name: sys
-              mountPath: /host/sys
+              mountPath: /sys
             - name: usr-share
-              mountPath: /host/usr/share
+              mountPath: /usr/share
             - name: os-release
-              mountPath: /host/etc/os-release
+              mountPath: /etc/os-release
             - name: rootfs
               mountPath: /host
-            - name: etc-simplyblock
-              mountPath: /etc/simplyblock
+            - name: var-simplyblock
+              mountPath: /var/simplyblock
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -130,7 +130,7 @@ spec:
 
 
               echo "--- Reading isolated cores from config ---"
-              CONFIG_FILE="/etc/simplyblock/sn_config_file"
+              CONFIG_FILE="/var/simplyblock/sn_config_file"
 
               if [[ ! -f "$CONFIG_FILE" ]]; then
                   echo "[ERROR] Config file $CONFIG_FILE not found."
