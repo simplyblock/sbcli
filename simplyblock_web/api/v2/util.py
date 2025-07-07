@@ -9,6 +9,7 @@ from pydantic import BeforeValidator, Field
 Unsigned = Annotated[int, Field(ge=0)]
 Size = Annotated[Unsigned, BeforeValidator(core_utils.parse_size)]
 Percent = Annotated[int, Field(ge=0, le=100)]
+Port = Annotated[int, Field(ge=0, lt=65536)]
 
 
 def _validate_url_path(value: Any) -> str:
