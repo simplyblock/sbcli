@@ -105,7 +105,27 @@ spec:
               set -e
 
               echo "--- Installing curl & networking tools ---"
-              apt-get update && apt-get install -y iproute2 curl grep jq
+
+              if [[ -f /etc/os-release ]]; then
+                  source /etc/os-release
+                  OS_ID=$ID
+              else
+                  echo "[ERROR] Unable to detect OS"
+                  exit 1
+              fi
+              echo "[INFO] Detected OS: $OS_ID"
+
+              case "$OS_ID" in
+                  debian|ubuntu)
+                      apt update && apt install -y iproute2 curl grep jq nvme-cli tuned
+                      ;;
+                  centos|rhel|rocky|almalinux)
+                      dnf install -y iproute curl grep jq nvme-cli kernel-modules-extra tuned
+                      ;;
+                  *)
+                      echo "[WARN] OS $OS_ID not supported for automatic NVMe package installation"
+                      ;;
+              esac
 
               NODE_IP=$(ip route get 1.1.1.1 | grep -oE 'src [0-9.]+' | awk '{print $2}')
               echo "Detected node IP: $NODE_IP"
