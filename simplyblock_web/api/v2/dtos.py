@@ -1,5 +1,5 @@
 from ipaddress import IPv4Address
-from typing import List, Optional
+from typing import List, Literal, Tuple, Optional
 from uuid import UUID
 
 from fastapi import Request
@@ -33,24 +33,34 @@ class CachingNodeDTO(BaseModel):
 class ClusterDTO(BaseModel):
     id: UUID
     nqn: str
+    status: Literal['active', 'read_only', 'inactive', 'suspended', 'degraded', 'unready', 'in_activation', 'in_expansion']
+    rebalancing: bool
     block_size: util.Unsigned
-    cap_crit: util.Percent
-    cap_warn: util.Percent
-    prov_cap_crit: util.Unsigned
-    prov_cap_warn: util.Unsigned
+    coding: Tuple[util.Unsigned, util.Unsigned]
     ha: bool
+    utliziation_critical: util.Percent
+    utilization_warning: util.Percent
+    provisioned_cacacity_critical: util.Unsigned
+    provisioned_cacacity_warning: util.Unsigned
+    node_affinity: bool
+    anti_affinity: bool
 
     @staticmethod
     def from_model(model: Cluster):
         return ClusterDTO(
             id=UUID(model.get_id()),
             nqn=model.nqn,
+            status=model.status,  # type: ignore
+            rebalancing=model.is_re_balancing,
             block_size=model.blk_size,
-            cap_warn=model.cap_warn,
-            cap_crit=model.cap_crit,
-            prov_cap_warn=model.prov_cap_warn,
-            prov_cap_crit=model.prov_cap_crit,
+            coding=(model.distr_ndcs, model.distr_npcs),
             ha=model.ha_type == 'ha',
+            utilization_warning=model.cap_warn,
+            utliziation_critical=model.cap_crit,
+            provisioned_cacacity_warning=model.prov_cap_warn,
+            provisioned_cacacity_critical=model.prov_cap_crit,
+            node_affinity=model.enable_node_affinity,
+            anti_affinity=model.strict_node_anti_affinity,
         )
 
 
@@ -99,7 +109,7 @@ class ManagementNodeDTO(BaseModel):
 class PoolDTO(BaseModel):
     id: UUID
     name: str
-    status: str
+    status: Literal['active', 'inactive']
     max_size: util.Unsigned
     lvol_max_size: util.Unsigned
     max_rw_iops: util.Unsigned
@@ -112,7 +122,7 @@ class PoolDTO(BaseModel):
         return PoolDTO(
             id=UUID(model.get_id()),
             name=model.pool_name,
-            status=model.status,
+            status=model.status,  # type: ignore
             max_size=model.pool_max_size,
             lvol_max_size=model.lvol_max_size,
             max_rw_iops=model.max_rw_ios_per_sec,
@@ -154,7 +164,6 @@ class StorageNodeDTO(BaseModel):
     status: str
     ip: IPv4Address
 
-
     @staticmethod
     def from_model(model: StorageNode):
         return StorageNodeDTO(
@@ -194,13 +203,16 @@ class VolumeDTO(BaseModel):
     status: str
     health_check: bool
     nqn: str
+    nodes: List[util.UrlPath]
+    port: util.Port
     size: util.Unsigned
     cloned_from: Optional[util.UrlPath]
+    crypto_key: Optional[Tuple[str, str]]
+    high_availability: bool
     max_rw_iops: util.Unsigned
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    ha: bool
 
     @staticmethod
     def from_model(model: LVol, request: Request, cluster_id: str):
@@ -210,6 +222,15 @@ class VolumeDTO(BaseModel):
             status=model.status,
             health_check=model.health_check,
             nqn=model.nqn,
+            nodes=[
+                str(request.url_for(
+                    'clusters:storage-nodes:detail',
+                    cluster_id=cluster_id,
+                    storage_node_id=node_id,
+                ))
+                for node_id in model.nodes
+            ],
+            port=model.subsys_port,
             size=model.size,
             cloned_from=str(request.url_for(
                 'clusters:pools:snapshots:detail',
@@ -217,7 +238,12 @@ class VolumeDTO(BaseModel):
                 pool_id=model.pool_uuid,
                 snapshot_id=model.cloned_from_snap
             )) if model.cloned_from_snap else None,
-            ha=model.ha_type == 'ha',
+            crypto_key=(
+                (model.crypto_key1, model.crypto_key2)
+                if model.crypto_key1 and model.crypto_key2
+                else None
+            ),
+            high_availability=model.ha_type == 'ha',
             max_rw_iops=model.rw_ios_per_sec,
             max_rw_mbytes=model.rw_mbytes_per_sec,
             max_r_mbytes=model.r_mbytes_per_sec,
