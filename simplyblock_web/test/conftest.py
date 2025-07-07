@@ -39,18 +39,18 @@ def call(request):
 
 
 @pytest.fixture(scope='module')
-def pool(call, cluster):
-    pool_uuid = call('POST', f'/clusters/{cluster}/pools', data={'name': 'poolX', 'secret': False})
+def storage_pool(call, cluster):
+    pool_uuid = call('POST', f'/clusters/{cluster}/storage-pools', data={'name': 'poolX', 'secret': False})
     yield pool_uuid
-    call('DELETE', f'/clusters/{cluster}/pools/{pool_uuid}')
+    call('DELETE', f'/clusters/{cluster}/storage-pools/{pool_uuid}')
 
 
 @pytest.fixture(scope='module')
-def lvol(call, cluster, pool):
-    lvol_uuid = call('POST', f'/clusters/{cluster}/pools/{pool}/volumes', data={
-        'name': 'lvolX',
+def volume(call, cluster, storage_pool):
+    volume_uuid = call('POST', f'/clusters/{cluster}/storage-pools/{storage_pool}/volumes', data={
+        'name': 'volumeX',
         'size': '2G',
     })
-    yield lvol_uuid
-    call('DELETE', f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
-    util.await_deletion(call, f'/clusters/{cluster}/pools/{pool}/volumes/{lvol_uuid}')
+    yield volume_uuid
+    call('DELETE', f'/clusters/{cluster}/storage-pools/{storage_pool}/volumes/{volume_uuid}')
+    util.await_deletion(call, f'/clusters/{cluster}/storage-pools/{storage_pool}/volumes/{volume_uuid}')

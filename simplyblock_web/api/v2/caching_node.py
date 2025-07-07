@@ -79,37 +79,37 @@ def get(cluster: Cluster, caching_node: CachingNode) -> CachingNodeDTO:
     return CachingNodeDTO.from_model(caching_node)
 
 
-class _LVolBody(BaseModel):
-    lvol_id: str = Field(pattern=core_utils.UUID_PATTERN)
+class _VolumeBody(BaseModel):
+    volume_id: str = Field(pattern=core_utils.UUID_PATTERN)
 
 
 @instance_api.post('/connect', name='clusters:caching_nodes:connect')
-def connect(cluster: Cluster, caching_node: CachingNode, parameters: _LVolBody):
-    lvol = db.get_lvol_by_id(parameters.lvol_id)
+def connect(cluster: Cluster, caching_node: CachingNode, parameters: _VolumeBody):
+    lvol = db.get_lvol_by_id(parameters.volume_id)
     if lvol is None:
-        raise HTTPException(404, f'LVol {parameters.lvol_id} not found')
+        raise HTTPException(404, f'Volume {parameters.volume_id} not found')
 
     dev_path_or_false = caching_node_controller.connect(caching_node.get_id(), lvol.get_id())
     if not dev_path_or_false:
-        raise ValueError('Failed to connect LVol')
+        raise ValueError('Failed to connect Volume')
 
     return dev_path_or_false
 
 
 @instance_api.post('/disconnect', name='clusters:caching_nodes:disconnect', status_code=204, responses={204: {"content": None}})
-def disconnect(cluster: Cluster, caching_node: CachingNode, parameters: _LVolBody) -> Response:
-    lvol = db.get_lvol_by_id(parameters.lvol_id)
+def disconnect(cluster: Cluster, caching_node: CachingNode, parameters: _VolumeBody) -> Response:
+    lvol = db.get_lvol_by_id(parameters.volume_id)
     if lvol is None:
-        raise HTTPException(404, f'LVol {parameters.lvol_id} not found')
+        raise HTTPException(404, f'Volume {parameters.volume_id} not found')
 
     if not caching_node_controller.disconnect(caching_node.get_id(), lvol.get_id()):
-        raise ValueError('Failed to disconnect LVol')
+        raise ValueError('Failed to disconnect Volume')
 
     return Response(status_code=204)
 
 
 @instance_api.get('/volumes', name='clusters:caching_nodes:volumes')
-def list_lvols(cluster: Cluster, caching_node: CachingNode):
+def list_volumes(cluster: Cluster, caching_node: CachingNode):
     return [
         {
             "UUID": clvol.lvol.get_id(),
