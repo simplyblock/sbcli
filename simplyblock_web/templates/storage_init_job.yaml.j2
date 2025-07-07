@@ -160,27 +160,6 @@ spec:
 
               echo "[INFO] Isolated cores to apply: $ISOLATED_CORES"
 
-              if [[ -f /etc/os-release ]]; then
-                  source /etc/os-release
-                  OS_ID=$ID
-              else
-                  echo "[ERROR] Unable to detect OS"
-                  exit 1
-              fi
-              echo "[INFO] Detected OS: $OS_ID"
-
-              case "$OS_ID" in
-                  debian|ubuntu)
-                      apt update && apt install -y nvme-cli tuned
-                      ;;
-                  centos|rhel|rocky|almalinux)
-                      dnf install -y nvme-cli kernel-modules-extra tuned
-                      ;;
-                  *)
-                      echo "[WARN] OS $OS_ID not supported for automatic NVMe package installation"
-                      ;;
-              esac
-
               modprobe nvme-tcp
               echo "[INFO] Loaded nvme-tcp module"
 
