@@ -12,6 +12,17 @@ from simplyblock_core.rpc_client import RPCClient
 logger = logging.getLogger()
 
 
+def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNode:
+    try:
+        return next(
+            node
+            for node in db_controller.get_storage_nodes()
+            if node.jm_device.get_id() == id
+        )
+    except StopIteration:
+        raise KeyError(f'No storage node with JM device {id}')
+
+
 def device_set_state(device_id, state):
     db_controller = DBController()
     try:
@@ -69,23 +80,15 @@ def device_set_io_error(device_id, is_error):
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
-    except KeyError:
-        logger.error("device not found")
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
-        return False
-
-    device = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device = dev
             break
-
-    if not device:
-        logger.error("device not found")
 
     if device.io_error == is_error:
         return True
@@ -284,14 +287,11 @@ def set_device_testing_mode(device_id, mode):
     db_controller = DBController()
     try:
         device = db_controller.get_storage_device_by_id(device_id)
-    except KeyError:
-        logger.error("device not found")
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
-    snode = db_controller.get_storage_node_by_id(device.node_id)
-    if not snode:
-        logger.error("node not found")
-        return False
     if not snode.enable_test_device:
         logger.error("Test device is disabled on this storage node")
         return False
@@ -332,14 +332,9 @@ def device_remove(device_id, force=True):
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
-    except KeyError:
-        logger.error("device not found")
-        return False
-
-    try:
         snode = db_controller.get_storage_node_by_id(dev.node_id)
-    except KeyError:
-        logger.exception("node not found")
+    except KeyError as e:
+        logger.error(e)
         return False
 
     for dev in snode.nvme_devices:
@@ -525,14 +520,9 @@ def reset_storage_device(dev_id):
     db_controller = DBController()
     try:
         device = db_controller.get_storage_device_by_id(dev_id)
-    except KeyError:
-        logger.error("device not found")
-        return False
-
-    try:
         snode = db_controller.get_storage_node_by_id(device.node_id)
-    except KeyError:
-        logger.exception("node not found")
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
@@ -579,18 +569,10 @@ def device_set_retries_exhausted(device_id, retries_exhausted):
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
-    except KeyError:
-        logger.error("device not found")
-        return False
-
-    try:
         snode = db_controller.get_storage_node_by_id(dev.node_id)
-    except KeyError:
-        logger.exception("node not found")
+    except KeyError as e:
+        logger.error(e)
         return False
-
-    if not dev:
-        logger.error("device not found")
 
     if dev.retries_exhausted == retries_exhausted:
         return True
@@ -604,14 +586,9 @@ def device_set_failed(device_id):
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
-    except KeyError:
-        logger.error("device not found")
-        return False
-
-    try:
         snode = db_controller.get_storage_node_by_id(dev.node_id)
-    except KeyError:
-        logger.exception("node not found")
+    except KeyError as e:
+        logger.error(e)
         return False
 
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
@@ -637,21 +614,15 @@ def add_device(device_id):
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
-    except KeyError:
-        logger.error("device not found")
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if dev.status != NVMeDevice.STATUS_NEW:
         logger.error("Device must be in new state")
         return False
 
-    try:
-        snode = db_controller.get_storage_node_by_id(dev.node_id)
-    except KeyError:
-        logger.exception("node not found")
-        return False
-
-    device_obj = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device_obj = dev
@@ -775,16 +746,14 @@ def device_set_failed_and_migrated(device_id):
 
 def set_jm_device_state(device_id, state):
     db_controller = DBController()
-    jm_device = None
-    snode = None
-    for node in db_controller.get_storage_nodes():
-        if node.jm_device.get_id() == device_id:
-            jm_device = node.jm_device
-            snode = node
-            break
-    if not jm_device:
-        logger.error("device not found")
+
+    try:
+        snode = get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError as e:
+        logger.error(e)
         return False
+
+    jm_device = snode.jm_device
 
     if jm_device.status != state:
         jm_device.status = state
@@ -816,15 +785,11 @@ def set_jm_device_state(device_id, state):
 
 def remove_jm_device(device_id, force=False):
     db_controller = DBController()
-    jm_device = None
-    snode = None
-    for node in db_controller.get_storage_nodes():
-        if node.jm_device.get_id() == device_id:
-            jm_device = node.jm_device
-            snode = node
-            break
-    if not jm_device:
-        logger.error("device not found")
+
+    try:
+        snode = get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
@@ -859,16 +824,14 @@ def remove_jm_device(device_id, force=False):
 
 def restart_jm_device(device_id, force=False, format_alceml=False):
     db_controller = DBController()
-    jm_device = None
-    snode = None
-    for node in db_controller.get_storage_nodes():
-        if node.jm_device.get_id() == device_id:
-            jm_device = node.jm_device
-            snode = node
-            break
-    if not jm_device:
-        logger.error("device not found")
+
+    try:
+        snode = get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError as e:
+        logger.error(e)
         return False
+
+    jm_device = snode.jm_device
 
     if jm_device.status == JMDevice.STATUS_ONLINE:
         logger.warning("device is online")
