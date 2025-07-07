@@ -17,11 +17,83 @@ spec:
           operator: Exists
         - effect: NoExecute
           operator: Exists
+      volumes:
+        - name: grub
+          hostPath:
+            path: /etc/default/grub
+        - name: boot
+          hostPath:
+            path: /boot
+        - name: usr-bin
+          hostPath:
+            path: /usr/bin
+        - name: usr-sbin
+          hostPath:
+            path: /usr/sbin
+        - name: lib
+          hostPath:
+            path: /lib
+        - name: lib64
+          hostPath:
+            path: /lib64
+        - name: usr-lib
+          hostPath:
+            path: /usr/lib
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: run
+          hostPath:
+            path: /run
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: usr-share
+          hostPath:
+            path: /usr/share
+        - name: os-release
+          hostPath:
+            path: /etc/os-release
+        - name: rootfs
+          hostPath:
+            path: /
       containers:
         - name: init-setup
           image: ubuntu:22.04
           securityContext:
             privileged: true
+          volumeMounts:
+            - name: grub
+              mountPath: /host/etc/default/grub
+            - name: boot
+              mountPath: /host/boot
+            - name: usr-bin
+              mountPath: /host/usr/bin
+            - name: usr-sbin
+              mountPath: /host/usr/sbin
+            - name: lib
+              mountPath: /host/lib
+            - name: lib64
+              mountPath: /host/lib64
+            - name: usr-lib
+              mountPath: /host/usr/lib
+            - name: dev
+              mountPath: /host/dev
+            - name: run
+              mountPath: /host/run
+            - name: proc
+              mountPath: /host/proc
+            - name: sys
+              mountPath: /host/sys
+            - name: usr-share
+              mountPath: /host/usr/share
+            - name: os-release
+              mountPath: /host/etc/os-release
+            - name: rootfs
+              mountPath: /host
           command: ["/bin/bash", "-c"]
           args:
             - |
