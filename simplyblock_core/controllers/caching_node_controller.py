@@ -13,13 +13,22 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.caching_node import CachingNode, CachedLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.utils import addNvmeDevices
+from simplyblock_core.utils import addNvmeDevices, UUID_PATTERN
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = lg.getLogger()
 
 db_controller = DBController()
+
+
+def _get_caching_node(identifier: str) -> CachingNode:
+    if UUID_PATTERN.match(identifier):
+        return db_controller.get_caching_node_by_id(identifier)
+    else:
+        return db_controller.get_caching_node_by_hostname(
+                identifier if identifier != 'this' else utils.get_hostname()
+        )
 
 
 def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spdk_mem, spdk_image=None, namespace=None, multipathing=True):
@@ -240,8 +249,9 @@ def add_node(cluster_id, node_ip, iface_name, data_nics_list, spdk_cpu_mask, spd
 
 def recreate(node_id):
     db_controller = DBController()
-    snode = db_controller.get_caching_node_by_id(node_id)
-    if not snode:
+    try:
+        snode = db_controller.get_caching_node_by_id(node_id)
+    except KeyError:
         logger.error(f"Can not find caching node: {node_id}")
         return False
 
@@ -346,19 +356,11 @@ def connect(caching_node_id, lvol_id, force=False):
         logger.error("Pool is disabled")
         return False
 
-    cnode = None
-    if caching_node_id == 'this':
-        hostn = utils.get_hostname()
-        logger.info(f"Trying to get node by hostname: {hostn}")
-        cnode = db_controller.get_caching_node_by_hostname(hostn)
-    else:
-        cnode = db_controller.get_caching_node_by_id(caching_node_id)
-        if not cnode:
-            logger.info(f"Caching node uuid not found: {caching_node_id}")
-            cnode = db_controller.get_caching_node_by_hostname(caching_node_id)
-            if not cnode:
-                logger.error("Caching node not found")
-                return False
+    try:
+        cnode = _get_caching_node(caching_node_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
 
     for clvol in cnode.lvols:
         if clvol.lvol_id == lvol_id:
@@ -487,19 +489,11 @@ def disconnect(caching_node_id, lvol_id):
         logger.error(f"LVol not found: {lvol_id}")
         return False
 
-    cnode = None
-    if caching_node_id == 'this':
-        hostn = utils.get_hostname()
-        logger.info(f"Trying to get node by hostname: {hostn}")
-        cnode = db_controller.get_caching_node_by_hostname(hostn)
-    else:
-        cnode = db_controller.get_caching_node_by_id(caching_node_id)
-        if not cnode:
-            logger.info(f"Caching node uuid not found: {caching_node_id}")
-            cnode = db_controller.get_caching_node_by_hostname(caching_node_id)
-            if not cnode:
-                logger.error("Caching node not found")
-                return False
+    try:
+        cnode = _get_caching_node(caching_node_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
 
     caching_lvol = None
     for clvol in cnode.lvols:
@@ -641,20 +635,11 @@ def list_nodes(is_json=False):
 
 
 def list_lvols(caching_node_id):
-    db_controller = DBController()
-    cnode = None
-    if caching_node_id == 'this':
-        hostn = utils.get_hostname()
-        logger.info(f"Trying to get node by hostname: {hostn}")
-        cnode = db_controller.get_caching_node_by_hostname(hostn)
-    else:
-        cnode = db_controller.get_caching_node_by_id(caching_node_id)
-        if not cnode:
-            logger.info(f"Caching node uuid not found: {caching_node_id}")
-            cnode = db_controller.get_caching_node_by_hostname(caching_node_id)
-            if not cnode:
-                logger.error("Caching node not found")
-                return False
+    try:
+        cnode = _get_caching_node(caching_node_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
 
     data = []
 
@@ -678,8 +663,9 @@ def list_lvols(caching_node_id):
 
 def remove_node(node_id, force=False):
     db_controller = DBController()
-    snode = db_controller.get_caching_node_by_id(node_id)
-    if not snode:
+    try:
+        snode = db_controller.get_caching_node_by_id(node_id)
+    except KeyError:
         logger.error(f"Can not find caching node: {node_id}")
         return False
 

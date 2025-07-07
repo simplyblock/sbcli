@@ -65,9 +65,11 @@ def add_node_to_cluster():
 @bp.route('/cachingnode/<string:uuid>', methods=['GET'])
 def list_caching_nodes(uuid):
     if uuid:
-        node = db.get_caching_node_by_id(uuid)
-        if not node:
-            node = db.get_caching_node_by_hostname(uuid)
+        node = (
+                db.get_caching_node_by_id(uuid)
+                if core_utils.UUID_PATTERN.match(uuid)
+                else db.get_caching_node_by_hostname(uuid)
+        )
 
         if node:
             nodes = [node]
@@ -105,8 +107,9 @@ def get_caching_node_by_system_id(uuid):
 
 @bp.route('/cachingnode/connect/<string:uuid>', methods=['PUT'])
 def caching_node_connect(uuid):
-    cnode = db.get_caching_node_by_id(uuid)
-    if not cnode:
+    try:
+        cnode = db.get_caching_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 
     cl_data = request.get_json()
@@ -125,8 +128,9 @@ def caching_node_connect(uuid):
 
 @bp.route('/cachingnode/disconnect/<string:uuid>', methods=['PUT'])
 def caching_node_disconnect(uuid):
-    cnode = db.get_caching_node_by_id(uuid)
-    if not cnode:
+    try:
+        cnode = db.get_caching_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 
     cl_data = request.get_json()
@@ -145,8 +149,9 @@ def caching_node_disconnect(uuid):
 
 @bp.route('/cachingnode/lvols/<string:uuid>', methods=['GET'])
 def caching_node_list_lvols(uuid):
-    cnode = db.get_caching_node_by_id(uuid)
-    if not cnode:
+    try:
+        cnode = db.get_caching_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 
     data = []
@@ -168,8 +173,9 @@ def caching_node_list_lvols(uuid):
 
 @bp.route('/cachingnode/recreate/<string:uuid>', methods=['GET'])
 def recreate_caching_node(uuid):
-    cnode = db.get_caching_node_by_id(uuid)
-    if not cnode:
+    try:
+        cnode = db.get_caching_node_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Caching node not found: {uuid}", 404)
 
     data = caching_node_controller.recreate(cnode.get_id())
