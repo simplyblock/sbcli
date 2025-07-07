@@ -29,7 +29,7 @@ services:
       placement:
         constraints: [ node.role == manager ]
       resources:
-        limits:
+        reservations:
           memory: 4g
 
   fdb-backup-agent:
