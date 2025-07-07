@@ -18,9 +18,6 @@ spec:
         - effect: NoExecute
           operator: Exists
       volumes:
-        - name: grub
-          hostPath:
-            path: /etc/default/grub
         - name: boot
           hostPath:
             path: /boot
@@ -54,9 +51,9 @@ spec:
         - name: usr-share
           hostPath:
             path: /usr/share
-        - name: os-release
+        - name: etc
           hostPath:
-            path: /etc/os-release
+            path: /etc
         - name: rootfs
           hostPath:
             path: /
@@ -69,8 +66,6 @@ spec:
           securityContext:
             privileged: true
           volumeMounts:
-            - name: grub
-              mountPath: /etc/default/grub
             - name: boot
               mountPath: /boot
             - name: usr-bin
@@ -93,8 +88,8 @@ spec:
               mountPath: /sys
             - name: usr-share
               mountPath: /usr/share
-            - name: os-release
-              mountPath: /etc/os-release
+            - name: etc
+              mountPath: /etc
             - name: rootfs
               mountPath: /host
             - name: var-simplyblock
