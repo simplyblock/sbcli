@@ -68,7 +68,7 @@ while True:
                             logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
 
                         if not ping_check:
-                            msg = f"Node ping is false, retry task"
+                            msg = "Node ping is false, retry task"
                             logger.info(msg)
                             task.function_result = msg
                             task.status = JobSchedule.STATUS_SUSPENDED
@@ -105,7 +105,7 @@ while True:
                                 node.remote_devices = remote_devices
                                 node.write_to_db()
                             else:
-                                msg = f"Node unable to connect to remote devs, retry task"
+                                msg = "Node unable to connect to remote devs, retry task"
                                 logger.info(msg)
                                 task.function_result = msg
                                 task.status = JobSchedule.STATUS_SUSPENDED
@@ -114,7 +114,7 @@ while True:
 
                         except Exception as e:
                             logger.error(e)
-                            msg = f"Error when connect to remote devs, retry task"
+                            msg = "Error when connect to remote devs, retry task"
                             logger.info(msg)
                             task.function_result = msg
                             task.status = JobSchedule.STATUS_SUSPENDED
