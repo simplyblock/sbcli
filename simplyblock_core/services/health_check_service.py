@@ -210,7 +210,7 @@ while True:
 
                 lvstore_check = True
                 snode = db.get_storage_node_by_id(snode.get_id())
-                if snode.lvstore_status == "ready":
+                if snode.status == StorageNode.STATUS_ONLINE:
 
                     lvstore_stack = snode.lvstore_stack
                     lvstore_check &= health_controller._check_node_lvstore(
