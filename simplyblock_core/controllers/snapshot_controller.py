@@ -228,8 +228,9 @@ def list(all=False):
 
 
 def delete(snapshot_uuid, force_delete=False):
-    snap = db_controller.get_snapshot_by_id(snapshot_uuid)
-    if not snap:
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+    except KeyError:
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
@@ -351,11 +352,11 @@ def delete(snapshot_uuid, force_delete=False):
 
 
 def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None):
-    snap = db_controller.get_snapshot_by_id(snapshot_id)
-    if not snap:
-        msg=f"Snapshot not found {snapshot_id}"
-        logger.error(msg)
-        return False, msg
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
 
     try:
         pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)

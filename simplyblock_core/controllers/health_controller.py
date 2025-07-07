@@ -754,8 +754,9 @@ def check_lvol(lvol_id):
 
 def check_snap(snap_id):
     db_controller = DBController()
-    snap = db_controller.get_snapshot_by_id(snap_id)
-    if not snap:
+    try:
+        snap = db_controller.get_snapshot_by_id(snap_id)
+    except KeyError:
         logger.error(f"snap not found: {snap_id}")
         return False
 

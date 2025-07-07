@@ -861,14 +861,17 @@ def delete_lvol(id_or_name, force_delete=False):
 
         # if lvol is clone and snapshot is deleted, then delete snapshot
         if lvol.cloned_from_snap:
-            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
-            if snap and snap.deleted is True:
-                lvols_count = 0
-                for lvol in db_controller.get_lvols():  # pass
-                    if lvol.cloned_from_snap == snap.get_id():
-                        lvols_count += 1
-                if lvols_count == 0:
-                    snapshot_controller.delete(snap.get_id())
+            try:
+                snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+                if snap.deleted is True:
+                    lvols_count = 0
+                    for lvol in db_controller.get_lvols():  # pass
+                        if lvol.cloned_from_snap == snap.get_id():
+                            lvols_count += 1
+                    if lvols_count == 0:
+                        snapshot_controller.delete(snap.get_id())
+            except KeyError:
+                pass # already removed
 
         logger.info("Done")
         return True
@@ -968,9 +971,12 @@ def delete_lvol(id_or_name, force_delete=False):
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
     if lvol.cloned_from_snap:
-        snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
-        if snap and snap.deleted is True:
-            snapshot_controller.delete(snap.get_id())
+        try:
+            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            if snap.deleted is True:
+                snapshot_controller.delete(snap.get_id())
+        except KeyError:
+            pass # already deleted
 
     logger.info("Done")
     return True
