@@ -2977,7 +2977,7 @@ def recreate_lvstore(snode, force=False):
             sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
-            # time.sleep(0.2)
+            time.sleep(0.5)
             ### 4- set leadership to false
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -2987,7 +2987,7 @@ def recreate_lvstore(snode, force=False):
             rpc_client.jc_explicit_synchronization(snode.jm_vuid)
 
     ### 5- examine
-    time.sleep(0.2)
+    # time.sleep(0.2)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     ret = rpc_client.bdev_examine(snode.raid)
     # time.sleep(1)
