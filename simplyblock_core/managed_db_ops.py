@@ -401,6 +401,12 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
 
 runcmd:
+  - [ sh, -xc, "echo 'Attempting to format /dev/vdb and mount it'" ]
+  # Check if /dev/vdb1 exists (i.e., already partitioned/formatted)
+  - [ sh, -xc, "if ! blkid -p /dev/vdb1; then echo 'Partition /dev/vdb1 not found. Creating and formatting.'; parted -s /dev/vdb mklabel gpt mkpart primary ext4 0% 100%; mkfs.ext4 -F /dev/vdb1; fi" ]
+  - [ sh, -xc, "if ! grep -qs '/mnt/data ' /proc/mounts; then echo '/mnt/data not mounted. Mounting.'; mkdir -p /mnt/data; mount /dev/vdb1 /mnt/data; fi" ]
+  # Add fstab entry only if it's not already there
+  - [ sh, -xc, "if ! grep -q '/mnt/data' /etc/fstab; then echo 'Adding /etc/fstab entry.'; echo 'UUID=$(blkid -s UUID -o value /dev/vdb1) /mnt/data ext4 defaults 0 2' >> /etc/fstab; fi" ]
   # Install PostgreSQL on Ubuntu/Debian
   - apt-get update -y
   - apt-get install -y postgresql postgresql-contrib
