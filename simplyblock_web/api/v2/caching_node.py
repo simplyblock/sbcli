@@ -16,7 +16,7 @@ from .dtos import CachingNodeDTO
 from . import util
 
 
-api = APIRouter(prefix='/caching_nodes')
+api = APIRouter(prefix='/caching-nodes')
 db = DBController()
 
 
