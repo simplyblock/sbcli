@@ -5,7 +5,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import cluster
 from . import device
-from . import lvol
+from . import volume
 from . import management_node
 from . import pool
 from . import snapshot
@@ -39,8 +39,8 @@ storage_node.api.include_router(storage_node.instance_api)
 cluster.instance_api.include_router(storage_node.api)
 
 
-lvol.api.include_router(lvol.instance_api)
-pool.instance_api.include_router(lvol.api)
+volume.api.include_router(volume.instance_api)
+pool.instance_api.include_router(volume.api)
 
 snapshot.api.include_router(snapshot.instance_api)
 pool.instance_api.include_router(snapshot.api)

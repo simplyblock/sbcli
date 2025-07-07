@@ -8,15 +8,15 @@ from simplyblock_core.controllers import snapshot_controller
 from simplyblock_core.models.snapshot import SnapShot as SnapshotModel
 
 from .cluster import Cluster
-from .pool import Pool
+from .pool import StoragePool
 from .dtos import SnapshotDTO
 
 api = APIRouter(prefix='/snapshots')
 db = DBController()
 
 
-@api.get('/', name='clusters:pools:snapshots:list')
-def list(request: Request, cluster: Cluster, pool: Pool) -> List[SnapshotDTO]:
+@api.get('/', name='clusters:storage-pools:snapshots:list')
+def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[SnapshotDTO]:
     return [
         SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot
@@ -38,13 +38,13 @@ def _lookup_snapshot(snapshot_id: UUID) -> SnapshotModel:
 Snapshot = Annotated[SnapshotModel, Depends(_lookup_snapshot)]
 
 
-@instance_api.get('/', name='clusters:pools:snapshots:detail')
-def get(request: Request, cluster: Cluster, pool: Pool, snapshot: Snapshot) -> SnapshotDTO:
+@instance_api.get('/', name='clusters:storage-pools:snapshots:detail')
+def get(request: Request, cluster: Cluster, pool: StoragePool, snapshot: Snapshot) -> SnapshotDTO:
     return SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
 
 
-@instance_api.delete('/', name='clusters:pools:snapshots:delete', status_code=204, responses={204: {"content": None}})
-def delete(cluster: Cluster, pool: Pool, snapshot: Snapshot) -> Response:
+@instance_api.delete('/', name='clusters:storage-pools:snapshots:delete', status_code=204, responses={204: {"content": None}})
+def delete(cluster: Cluster, pool: StoragePool, snapshot: Snapshot) -> Response:
     if not snapshot_controller.delete(snapshot.get_id()):
         raise ValueError('Failed to delete snapshot')
 

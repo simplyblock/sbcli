@@ -20,7 +20,7 @@ api = APIRouter(prefix='/storage-nodes')
 db = DBController()
 
 
-@api.get('/', name='clusters:storage_nodes:list')
+@api.get('/', name='clusters:storage-nodes:list')
 def list(cluster: Cluster) -> List[StorageNodeDTO]:
     return [
         StorageNodeDTO.from_model(storage_node)
@@ -46,7 +46,7 @@ class StorageNodeParams(BaseModel):
     iobuf_large_pool_count: int = Field(0)
 
 
-@api.post('/', name='clusters:storage_nodes:create', status_code=201, responses={201: {"content": None}})
+@api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
 def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Response:
     task_id_or_false = tasks_controller.add_node_add_task(
         cluster.get_id(),
@@ -71,7 +71,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Re
     if not task_id_or_false:
         raise ValueError('Failed to create add-node task')
 
-    task_url = request.app.url_path_for('clusters:storage_node:detail', cluster_id=cluster.get_id(), task_id=task_id_or_false)
+    task_url = request.app.url_path_for('clusters:storage-nodes:detail', cluster_id=cluster.get_id(), task_id=task_id_or_false)
     return Response(status_code=201, headers={'Location': task_url})
 
 
@@ -88,12 +88,12 @@ def _storage_node_lookup(storage_node_id: UUID) -> StorageNodeModel:
 StorageNode = Annotated[StorageNodeModel, Depends(_storage_node_lookup)]
 
 
-@instance_api.get('/', name='clusters:storage_nodes:detail')
+@instance_api.get('/', name='clusters:storage-nodes:detail')
 def get(cluster: Cluster, storage_node: StorageNode):
     return StorageNodeDTO.from_model(storage_node)
 
 
-@instance_api.delete('/', name='clusters:storage_nodes:delete')
+@instance_api.delete('/', name='clusters:storage-nodes:delete')
 def delete(cluster: Cluster, storage_node: StorageNode):
     none_or_false = storage_node_ops.remove_storage_node(storage_node.get_id())
     if none_or_false == False:  # noqa
@@ -102,7 +102,7 @@ def delete(cluster: Cluster, storage_node: StorageNode):
     return Response(status_code=204)
 
 
-@instance_api.get('/capacity', name='clusters:storage_nodes:capacity')
+@instance_api.get('/capacity', name='clusters:storage-nodes:capacity')
 def capacity(cluster: Cluster, storage_node: StorageNode, history: Optional[str] = None):
     storage_node = storage_node
     records_or_false = storage_node_ops.get_node_iostats_history(
@@ -116,7 +116,7 @@ def capacity(cluster: Cluster, storage_node: StorageNode, history: Optional[str]
     return records_or_false
 
 
-@instance_api.get('/iostats', name='clusters:storage_nodes:iostats')
+@instance_api.get('/iostats', name='clusters:storage-nodes:iostats')
 def iostats(cluster: Cluster, storage_node: StorageNode, history: Optional[str] = None):
     storage_node = storage_node
     records_or_false = storage_node_ops.get_node_iostats_history(
@@ -130,7 +130,7 @@ def iostats(cluster: Cluster, storage_node: StorageNode, history: Optional[str] 
     return records_or_false
 
 
-@instance_api.get('/nics', name='clusters:storage_nodes:nics:list')
+@instance_api.get('/nics', name='clusters:storage-nodes:nics:list')
 def nics(cluster: Cluster, storage_node: StorageNode):
     storage_node = storage_node
     return [
@@ -145,7 +145,7 @@ def nics(cluster: Cluster, storage_node: StorageNode):
     ]
 
 
-@instance_api.get('/nics/{nic_id}/iostats', name='clusters:storage_nodes:nics:iostats')
+@instance_api.get('/nics/{nic_id}/iostats', name='clusters:storage-nodes:nics:iostats')
 def nic_iostats(cluster: Cluster, storage_node: StorageNode, nic_id: str):
     storage_node = storage_node
     nic = next((
@@ -163,7 +163,7 @@ def nic_iostats(cluster: Cluster, storage_node: StorageNode, nic_id: str):
     ]
 
 
-@instance_api.post('/suspend', name='clusters:storage_nodes:suspend', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/suspend', name='clusters:storage-nodes:suspend', status_code=204, responses={204: {"content": None}})
 def suspend(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
     storage_node = storage_node
     if not storage_node_ops.suspend_storage_node(storage_node.get_id(), force):
@@ -172,7 +172,7 @@ def suspend(cluster: Cluster, storage_node: StorageNode, force: bool = False) ->
     return Response(status_code=204)
 
 
-@instance_api.post('/resume', name='clusters:storage_nodes:resume', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/resume', name='clusters:storage-nodes:resume', status_code=204, responses={204: {"content": None}})
 def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
     storage_node = storage_node
     if not storage_node_ops.resume_storage_node(storage_node.get_id()):
@@ -181,7 +181,7 @@ def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
     return Response(status_code=204)
 
 
-@instance_api.post('/shutdown', name='clusters:storage_nodes:shutdown', status_code=202, responses={202: {"content": None}})
+@instance_api.post('/shutdown', name='clusters:storage-nodes:shutdown', status_code=202, responses={202: {"content": None}})
 def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
     storage_node = storage_node
     Thread(
@@ -197,8 +197,8 @@ class _RestartParams(BaseModel):
     reattach_volume: bool = False
 
 
-@instance_api.post('/start', name='clusters:storage_nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
-@instance_api.post('/restart', name='clusters:storage_nodes:restart', status_code=202, responses={202: {"content": None}})
+@instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
+@instance_api.post('/restart', name='clusters:storage-nodes:restart', status_code=202, responses={202: {"content": None}})
 def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartParams = _RestartParams()) -> Response:
     storage_node = storage_node
     Thread(

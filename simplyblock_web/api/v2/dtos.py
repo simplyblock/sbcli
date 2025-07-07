@@ -106,12 +106,12 @@ class ManagementNodeDTO(BaseModel):
         )
 
 
-class PoolDTO(BaseModel):
+class StoragePoolDTO(BaseModel):
     id: UUID
     name: str
     status: Literal['active', 'inactive']
     max_size: util.Unsigned
-    lvol_max_size: util.Unsigned
+    volume_max_size: util.Unsigned
     max_rw_iops: util.Unsigned
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
@@ -119,12 +119,12 @@ class PoolDTO(BaseModel):
 
     @staticmethod
     def from_model(model: Pool):
-        return PoolDTO(
+        return StoragePoolDTO(
             id=UUID(model.get_id()),
             name=model.pool_name,
             status=model.status,  # type: ignore
             max_size=model.pool_max_size,
-            lvol_max_size=model.lvol_max_size,
+            volume_max_size=model.lvol_max_size,
             max_rw_iops=model.max_rw_ios_per_sec,
             max_rw_mbytes=model.max_rw_mbytes_per_sec,
             max_r_mbytes=model.max_r_mbytes_per_sec,
@@ -233,7 +233,7 @@ class VolumeDTO(BaseModel):
             port=model.subsys_port,
             size=model.size,
             cloned_from=str(request.url_for(
-                'clusters:pools:snapshots:detail',
+                'clusters:storage-pools:snapshots:detail',
                 cluster_id=cluster_id,
                 pool_id=model.pool_uuid,
                 snapshot_id=model.cloned_from_snap
