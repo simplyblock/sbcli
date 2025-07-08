@@ -506,7 +506,7 @@ def cluster_expand(cl_id) -> None:
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
                 set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to expand cluster, No enough secondary nodes")
+                raise ValueError("A minimum of 2 new nodes are required to expand cluster")
 
             snode = db_controller.get_storage_node_by_id(snode.get_id())
             snode.secondary_node_id = secondary_nodes[0]
