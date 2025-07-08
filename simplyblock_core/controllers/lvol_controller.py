@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Tuple
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -872,13 +872,6 @@ def delete_lvol(id_or_name, force_delete=False):
 
         logger.info("Done")
         return True
-
-    # disconnect from caching nodes:
-    cnodes = db_controller.get_caching_nodes()
-    for cnode in cnodes:
-        for lv in cnode.lvols:
-            if lv.lvol_id == lvol.get_id():
-                caching_node_controller.disconnect(cnode.get_id(), lvol.get_id())
 
     if lvol.ha_type == 'single':
         if snode.status  != StorageNode.STATUS_ONLINE:

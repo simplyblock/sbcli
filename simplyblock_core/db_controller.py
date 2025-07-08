@@ -5,7 +5,6 @@ import fdb
 from typing import List, Optional
 
 from simplyblock_core import constants
-from simplyblock_core.models.caching_node import CachingNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.deployer import Deployer
 from simplyblock_core.models.events import EventObj
@@ -88,32 +87,6 @@ class DBController(metaclass=Singleton):
         if len(ret) == 0:
             raise KeyError(f'StorageNode {id} not found')
         return ret[0]
-
-    # todo: change this function for multi cluster
-    def get_caching_nodes(self) -> List[CachingNode]:
-        ret = CachingNode().read_from_db(self.kv_store)
-        ret = sorted(ret, key=lambda x: x.create_dt)
-        return ret
-
-    def get_caching_node_by_id(self, id)  -> Optional[CachingNode]:
-        ret = CachingNode().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
-        return None
-
-    def get_caching_node_by_system_id(self, system_id)  -> Optional[CachingNode]:
-        nodes = CachingNode().read_from_db(self.kv_store)
-        for node in nodes:
-            if node.system_uuid == system_id:
-                return node
-        return None
-
-    def get_caching_node_by_hostname(self, hostname)  -> Optional[CachingNode]:
-        nodes = self.get_caching_nodes()
-        for node in nodes:
-            if node.hostname == hostname:
-                return node
-        return None
 
     def get_storage_node_by_hostname(self, hostname) -> Optional[StorageNode]:
         nodes = self.get_storage_nodes()

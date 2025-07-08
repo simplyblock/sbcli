@@ -23,8 +23,6 @@ def status():
 
 
 MODES = [
-    "caching_docker_node",
-    "caching_kubernetes_node",
     "storage_node",
     "storage_node_k8s",
 ]
@@ -37,16 +35,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     mode = args.mode
-    if mode == "caching_docker_node":
-        from simplyblock_web.blueprints import node_api_basic, caching_node_ops
-        app.register_api(node_api_basic.api)
-        app.register_api(caching_node_ops.api)
-
-    if mode == "caching_kubernetes_node":
-        from simplyblock_web.blueprints import node_api_basic, caching_node_ops_k8s
-        app.register_api(node_api_basic.api)
-        app.register_api(caching_node_ops_k8s.api)
-
     if mode == "storage_node":
         from simplyblock_web.blueprints import snode_ops
         app.register_api(snode_ops.api)

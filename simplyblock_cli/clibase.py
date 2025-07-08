@@ -13,7 +13,7 @@ from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
     tasks_controller
-from simplyblock_core.controllers import caching_node_controller, health_controller
+from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster
 
@@ -624,48 +624,6 @@ class CLIWrapperBase:
 
         success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
         return details
-
-    def caching_node__deploy(self, sub_command, args):
-        return caching_node_controller.deploy(args.ifname)
-
-    def caching_node__add_node(self, sub_command, args):
-        cluster_id = args.cluster_id
-        node_ip = args.node_ip
-        ifname = args.ifname
-        data_nics = []
-        spdk_image = args.spdk_image
-        namespace = args.namespace
-        multipathing = args.multipathing == "on"
-        spdk_cpu_mask = args.spdk_cpu_mask
-        spdk_mem = args.spdk_mem
-
-        return caching_node_controller.add_node(
-            cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing)
-
-    def caching_node__list(self, sub_command, args):
-        return caching_node_controller.list_nodes()
-
-    def caching_node__list_lvols(self, sub_command, args):
-        return caching_node_controller.list_lvols(args.node_id)
-
-    def caching_node__remove(self, sub_command, args):
-        return caching_node_controller.remove_node(args.node_id, args.force)
-
-    def caching_node__connect(self, sub_command, args):
-        return caching_node_controller.connect(args.node_id, args.lvol_id)
-
-    def caching_node__disconnect(self, sub_command, args):
-        return caching_node_controller.disconnect(args.node_id, args.lvol_id)
-
-    def caching_node__recreate(self, sub_command, args):
-        return caching_node_controller.recreate(args.node_id)
-
-    def caching_node__get_lvol_stats(self, sub_command, args):
-        data = caching_node_controller.get_io_stats(args.lvol_id, args.history)
-        if data:
-            return utils.print_table(data)
-        else:
-            return False
 
     def storage_node_list_devices(self, args):
         node_id = args.node_id
