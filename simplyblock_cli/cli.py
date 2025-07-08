@@ -27,7 +27,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
-        self.init_caching_node()
         super().__init__()
 
     def init_storage_node(self):
@@ -728,70 +727,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
 
 
-    def init_caching_node(self):
-        subparser = self.add_command('caching-node', 'Caching node commands', aliases=['cn',])
-        self.init_caching_node__deploy(subparser)
-        self.init_caching_node__add_node(subparser)
-        self.init_caching_node__list(subparser)
-        self.init_caching_node__list_lvols(subparser)
-        self.init_caching_node__remove(subparser)
-        self.init_caching_node__connect(subparser)
-        self.init_caching_node__disconnect(subparser)
-        self.init_caching_node__recreate(subparser)
-        self.init_caching_node__get_lvol_stats(subparser)
-
-
-    def init_caching_node__deploy(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'deploy', 'Deploys a caching node on this machine (local run)')
-        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname')
-
-    def init_caching_node__add_node(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a new caching node to the cluster')
-        subcommand.add_argument('cluster_id', help='Cluster id', type=str)
-        subcommand.add_argument('node_ip', help='Node IP address', type=str)
-        subcommand.add_argument('ifname', help='Management interface name', type=str)
-        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=regex_type(r'^(0x|0X)?[a-fA-F0-9]+$'), dest='spdk_cpu_mask')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--memory', help='SPDK huge memory allocation. By default it will acquire all available huge pages.', type=size_type(min=utils.parse_size('1G'), max=None), dest='spdk_mem')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image')
-        argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace')
-        argument = subcommand.add_argument('--multipathing', help='Enable multipathing for logical volume connection, default: on', type=str, default='True', dest='multipathing', choices=['on','off',])
-
-    def init_caching_node__list(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'list', 'Lists all caching nodes')
-
-    def init_caching_node__list_lvols(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'list-lvols', 'Lists all connected logical volumes')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-
-    def init_caching_node__remove(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'remove', 'Removes a caching node from the cluster')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-        argument = subcommand.add_argument('--force', help='Force remove', dest='force', action='store_true')
-
-    def init_caching_node__connect(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'connect', 'Connects a logical volume to the caching node')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
-
-    def init_caching_node__disconnect(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'disconnect', 'Disconnects a logical volume from the caching node')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
-
-    def init_caching_node__recreate(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'recreate', 'Recreate a caching node\'s bdevs')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-
-    def init_caching_node__get_lvol_stats(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'get-lvol-stats', 'Gets a logical volume\'s statistics')
-        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
-        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
-
-
     def run(self):
         args = self.parser.parse_args()
         if args.debug:
@@ -1104,33 +1039,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
-                else:
-                    self.parser.print_help()
-
-            elif args.command in ['caching-node', 'cn']:
-                sub_command = args_dict['caching-node']
-                if sub_command in ['deploy']:
-                    ret = self.caching_node__deploy(sub_command, args)
-                elif sub_command in ['add-node']:
-                    if not self.developer_mode:
-                        args.spdk_cpu_mask = None
-                        args.spdk_mem = None
-                        args.spdk_image = None
-                    ret = self.caching_node__add_node(sub_command, args)
-                elif sub_command in ['list']:
-                    ret = self.caching_node__list(sub_command, args)
-                elif sub_command in ['list-lvols']:
-                    ret = self.caching_node__list_lvols(sub_command, args)
-                elif sub_command in ['remove']:
-                    ret = self.caching_node__remove(sub_command, args)
-                elif sub_command in ['connect']:
-                    ret = self.caching_node__connect(sub_command, args)
-                elif sub_command in ['disconnect']:
-                    ret = self.caching_node__disconnect(sub_command, args)
-                elif sub_command in ['recreate']:
-                    ret = self.caching_node__recreate(sub_command, args)
-                elif sub_command in ['get-lvol-stats']:
-                    ret = self.caching_node__get_lvol_stats(sub_command, args)
                 else:
                     self.parser.print_help()
 
