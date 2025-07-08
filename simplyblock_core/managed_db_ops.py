@@ -561,6 +561,8 @@ runcmd:
     )
 
     # Define the Kubevirt VirtualMachine object
+    # VPCU hotplug is currently not supported by ARM64 architecture.
+    # Current hotplug implementation involves live-migration of the VM workload.
     vm_body = {
         "apiVersion": "kubevirt.io/v1",
         "kind": "VirtualMachine",
@@ -605,14 +607,12 @@ runcmd:
                                 }
                             ]
                         },
-                        "resources": {
-                            "requests": {
-                                "memory": memory
-                            }
-                        },
                         "cpu": {
                             "cores": vcpu_count
-                        }
+                        },
+                        "memory": {
+                            "guest": memory
+                        },
                     },
                      "networks": [
                         {

@@ -38,3 +38,15 @@ and the snapshots can be viewed
 sbcli-dev db list-snapshots 6cfd6dfe-ed13-407d-8431-83fb42ce51ac
 ```
 
+### setup hotplug
+
+First we set:
+* the rollout strategy to `LiveUpdate`
+* `LiveMigrate` as `workloadUpdateStrategy` in the KubeVirt CR.
+
+```
+kubectl --namespace kubevirt patch kv kubevirt -p='[{"op": "add", "path": "/spec/configuration/vmRolloutStrategy", "value": "LiveUpdate"}]' --type='json'
+kubectl --namespace kubevirt patch kv kubevirt -p='[{"op": "add", "path": "/spec/workloadUpdateStrategy/workloadUpdateMethods", "value": ["LiveMigrate"]}]' --type='json'
+
+```
+
