@@ -65,14 +65,14 @@ def add(request: Request, parameters: ClusterParams):
 instance_api = APIRouter(prefix='/{cluster_id}')
 
 
-def _cluster_lookup(cluster_id: UUID):
+def _lookup_cluster(cluster_id: UUID):
     try:
         return db.get_cluster_by_id(str(cluster_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
 
 
-Cluster = Annotated[ClusterModel, Depends(_cluster_lookup)]
+Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
 
 
 @instance_api.get('/', name='clusters:detail')

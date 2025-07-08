@@ -26,14 +26,14 @@ def list(cluster: Cluster, storage_node: StorageNode) -> List[DeviceDTO]:
 instance_api = APIRouter(prefix='/{device_id}')
 
 
-def _device_lookup(storage_node: StorageNode, device_id: UUID) -> NVMeDevice:
+def _lookup_device(storage_node: StorageNode, device_id: UUID) -> NVMeDevice:
     try:
         return db.get_storage_device_by_id(str(device_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
 
 
-Device = Annotated[NVMeDevice, Depends(_device_lookup)]
+Device = Annotated[NVMeDevice, Depends(_lookup_device)]
 
 
 @instance_api.get('/', name='clusters:storage_nodes:devices:detail')
