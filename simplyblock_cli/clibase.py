@@ -593,12 +593,6 @@ class CLIWrapperBase:
     def storage_pool__disable(self, sub_command, args):
         return pool_controller.set_status(args.pool_id, Pool.STATUS_INACTIVE)
 
-    def storage_pool__get_secret(self, sub_command, args):
-        return pool_controller.get_secret(args.pool_id)
-
-    def storage_pool__update_secret(self, sub_command, args):
-        return pool_controller.set_secret(args.pool_id, args.secret)
-
     def storage_pool__get_capacity(self, sub_command, args):
         return pool_controller.get_capacity(args.pool_id)
 
