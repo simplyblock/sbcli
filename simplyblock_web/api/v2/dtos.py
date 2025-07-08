@@ -5,7 +5,6 @@ from uuid import UUID
 from fastapi import Request
 from pydantic import BaseModel
 
-from simplyblock_core.models.caching_node import CachingNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -16,18 +15,6 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
 from . import util
-
-
-class CachingNodeDTO(BaseModel):
-    id: UUID
-    status: str
-
-    @staticmethod
-    def from_model(model: CachingNode):
-        return CachingNodeDTO(
-            id=UUID(model.get_id()),
-            status=model.status,
-        )
 
 
 class ClusterDTO(BaseModel):
