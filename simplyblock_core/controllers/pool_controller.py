@@ -22,7 +22,7 @@ def _generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, has_secret, cluster_id):
+def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id):
     db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
@@ -58,8 +58,6 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.cluster_id = cluster.get_id()
     pool.numeric_id = _generate_numeric_id(pool_list)
     pool.pool_name = name
-    if has_secret:
-        pool.secret = _generate_string(20)
     pool.pool_max_size = pool_max
     pool.lvol_max_size = lvol_max
     pool.max_rw_ios_per_sec = max_rw_iops
@@ -302,36 +300,6 @@ def get_io_stats(pool_id, history, records_count=20):
             "Write lat": record["write_latency_ps"],
         })
     return utils.print_table(out)
-
-
-def get_secret(pool_id):
-    db_controller = DBController()
-    try:
-        pool = db_controller.get_pool_by_id(pool_id)
-    except KeyError:
-        logger.error(f"Pool not found {pool_id}")
-        return False
-
-    if pool.secret:
-        return pool.secret
-    else:
-        return "Pool has no secret"
-
-
-def set_secret(pool_id, secret):
-    db_controller = DBController()
-    try:
-        pool = db_controller.get_pool_by_id(pool_id)
-    except KeyError:
-        logger.error(f"Pool not found {pool_id}")
-        return False
-
-    secret = secret.strip()
-    if len(secret) < 20:
-        return "Secret must be at least 20 char"
-
-    pool.secret = secret
-    pool.write_to_db(db_controller.kv_store)
 
 
 def get_pool_total_capacity(pool_id):

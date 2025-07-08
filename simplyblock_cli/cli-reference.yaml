@@ -1537,12 +1537,6 @@ commands:
             help: "Maximum Write Megabytes Per Second"
             dest: max_w_mbytes
             type: int
-          - name: "--has-secret"
-            help: "Pool is created with a secret (all further API interactions with the pool and logical volumes in the pool require this secret)"
-            dest: has_secret
-            type: bool
-            action: store_true
-            private: true
       - name: set
         help: "Sets a storage pool's attributes"
         arguments:

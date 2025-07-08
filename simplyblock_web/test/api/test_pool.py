@@ -28,7 +28,7 @@ def test_pool(call, cluster):
 
 def test_pool_duplicate(call, cluster, pool):
     with pytest.raises(HTTPError):
-        call('POST', '/pool', data={'name': 'poolX', 'cluster_id': cluster, 'no_secret': True})
+        call('POST', '/pool', data={'name': 'poolX', 'cluster_id': cluster})
 
 
 def test_pool_delete_missing(call):

@@ -655,8 +655,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--has-secret', help='Pool is created with a secret (all further API interactions with the pool and logical volumes in the pool require this secret)', dest='has_secret', action='store_true')
 
     def init_storage_pool__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'Sets a storage pool\'s attributes')
@@ -1076,8 +1074,6 @@ class CLIWrapper(CLIWrapperBase):
             elif args.command in ['storage-pool', 'pool']:
                 sub_command = args_dict['storage-pool']
                 if sub_command in ['add']:
-                    if not self.developer_mode:
-                        args.has_secret = None
                     ret = self.storage_pool__add(sub_command, args)
                 elif sub_command in ['set']:
                     ret = self.storage_pool__set(sub_command, args)
