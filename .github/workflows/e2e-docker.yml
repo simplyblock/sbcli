@@ -3,7 +3,9 @@ name: End-to-end test docker
 on:
   push:
     branches:
-      - main
+      # - main
+      - R*-PRE
+      - R*-Hotfix
 
   workflow_dispatch:
     inputs:
