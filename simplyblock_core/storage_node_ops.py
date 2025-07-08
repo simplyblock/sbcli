@@ -1501,7 +1501,7 @@ def restart_storage_node(
 
     # Calculate pool count
 
-    number_of_alceml_devices = snode.number_of_alceml_devices
+    # number_of_alceml_devices = snode.number_of_alceml_devices
     #small_pool_count, large_pool_count = utils.calculate_pool_count(
     #    number_of_alceml_devices, snode.number_of_distribs * 2, snode.cpu, len(snode.poller_cpu_cores) or snode.cpu)
 
