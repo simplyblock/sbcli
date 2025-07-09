@@ -418,7 +418,7 @@ runcmd:
                             }
                         },
                         "pvc": {
-                            "accessModes": ["ReadWriteMany"],
+                            "accessModes": ["ReadWriteOnce"],
                             "resources": {
                                 "requests": {
                                     "storage": "20Gi"
