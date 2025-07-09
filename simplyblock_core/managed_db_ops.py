@@ -281,58 +281,7 @@ def wait_for_vmi_deletion(vmi_name: str, namespace: str = "default"):
     else:
         raise TimeoutError(f"Timed out waiting for VMI {vmi_name} to be deleted.")
 
-def start_postgresql_deployment2(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
-    """
-    Provisions a PostgreSQL VirtualMachine using Kubevirt, with node affinity
-    based on Simplyblock storage plane nodes.
-
-    Args:
-        deployment_name (str): The desired name for the Kubevirt VirtualMachine.
-        version (str): PostgreSQL version (primarily used for cloud-init path, assumed '14' in template).
-        vcpu_count (int): Number of vCPUs for the VM.
-        memory (str): Memory size for the VM (e.g., "4Gi").
-        pvc_name (str): The name of the PersistentVolumeClaim for the PostgreSQL data.
-        namespace (str, optional): The Kubernetes namespace. Defaults to "default".
-    """
-    # load Kubernetes config
-    config.load_kube_config()
-
-    # Define the Kubevirt API client
-    kubevirt_api = client.CustomObjectsApi()
-    core_v1 = client.CoreV1Api()
-
-    cloud_init_user_data = f"""
-#cloud-config
-hostname: {deployment_name}-vm
-password: ubuntu 
-chpasswd: {{"expire": false}}
-runcmd:
-  # Install PostgreSQL on Ubuntu/Debian
-  - mkdir -p /mnt/postgres_data
-  - |
-    if ! blkid /dev/vdb; then
-      mkfs -t ext4 /dev/vdb
-    fi
-  - mount /dev/vdb /mnt/postgres_data
-  - echo "PostgreSQL data mounted at /mnt/postgres_data"
-  - echo "Installing PostgreSQL..."
-
-  - apt-get update -y
-  - apt-get install -y podman
-  - mkdir -p /mnt/postgres_data/pgdata
-  - chown -R 999:999 /mnt/postgres_data/pgdata
-  - chmod 700 /mnt/postgres_data/pgdata
-  - |
-    podman run -d \
-        --name postgres15 \
-        -e POSTGRES_DB={db_name} \
-        -e POSTGRES_USER={db_user} \
-        -e POSTGRES_PASSWORD={db_password} \
-        -v /mnt/postgres_data/pgdata:/var/lib/postgresql/data:Z \
-        -p 5432:5432 \
-        docker.io/library/postgres:15
-"""
-
+def get_pod_affinity(pvc_name: str):
     db_controller = DBController()
     lvols = db_controller.get_lvols()
     lvol = next((lvol for lvol in lvols if lvol.pvc_name == pvc_name), None)
@@ -387,8 +336,61 @@ runcmd:
                 ),
             ],
         )
-    )
+    ) 
+    return pod_affinity
 
+def start_postgresql_deployment2(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
+    """
+    Provisions a PostgreSQL VirtualMachine using Kubevirt, with node affinity
+    based on Simplyblock storage plane nodes.
+
+    Args:
+        deployment_name (str): The desired name for the Kubevirt VirtualMachine.
+        version (str): PostgreSQL version (primarily used for cloud-init path, assumed '14' in template).
+        vcpu_count (int): Number of vCPUs for the VM.
+        memory (str): Memory size for the VM (e.g., "4Gi").
+        pvc_name (str): The name of the PersistentVolumeClaim for the PostgreSQL data.
+        namespace (str, optional): The Kubernetes namespace. Defaults to "default".
+    """
+    # load Kubernetes config
+    config.load_kube_config()
+
+    # Define the Kubevirt API client
+    kubevirt_api = client.CustomObjectsApi()
+
+    cloud_init_user_data = f"""
+#cloud-config
+hostname: {deployment_name}-vm
+password: ubuntu 
+chpasswd: {{"expire": false}}
+runcmd:
+  # Install PostgreSQL on Ubuntu/Debian
+  - mkdir -p /mnt/postgres_data
+  - |
+    if ! blkid /dev/vdb; then
+      mkfs -t ext4 /dev/vdb
+    fi
+  - mount /dev/vdb /mnt/postgres_data
+  - echo "PostgreSQL data mounted at /mnt/postgres_data"
+  - echo "Installing PostgreSQL..."
+
+  - apt-get update -y
+  - apt-get install -y podman
+  - mkdir -p /mnt/postgres_data/pgdata
+  - chown -R 999:999 /mnt/postgres_data/pgdata
+  - chmod 700 /mnt/postgres_data/pgdata
+  - |
+    podman run -d \
+        --name postgres15 \
+        -e POSTGRES_DB={db_name} \
+        -e POSTGRES_USER={db_user} \
+        -e POSTGRES_PASSWORD={db_password} \
+        -v /mnt/postgres_data/pgdata:/var/lib/postgresql/data:Z \
+        -p 5432:5432 \
+        docker.io/library/postgres:15
+"""
+
+    pod_affinity = get_pod_affinity(pvc_name=pvc_name)
     # Define the Kubevirt VirtualMachine object
     # VPCU hotplug is currently not supported by ARM64 architecture.
     # Current hotplug implementation involves live-migration of the VM workload.
@@ -416,7 +418,7 @@ runcmd:
                             }
                         },
                         "pvc": {
-                            "accessModes": ["ReadWriteOnce"],
+                            "accessModes": ["ReadWriteMany"],
                             "resources": {
                                 "requests": {
                                     "storage": "20Gi"
@@ -508,35 +510,47 @@ runcmd:
             body=vm_body
         )
         print(f"Kubevirt VirtualMachine '{deployment_name}' created successfully.")
-
-        service_body = client.V1Service(
-            api_version="v1",
-            kind="Service",
-            metadata=client.V1ObjectMeta(name=f"{deployment_name}-svc"),
-            spec=client.V1ServiceSpec(
-                selector={"app": "postgres", "name": deployment_name},
-                ports=[
-                    client.V1ServicePort(
-                        protocol="TCP",
-                        port=5432,
-                        target_port=5432
-                    )
-                ],
-                type="ClusterIP"
-            )
-        )
-        try:
-            core_v1.create_namespaced_service(namespace=namespace, body=service_body)
-            print(f"Kubernetes Service '{deployment_name}-svc' created successfully.")
-        except client.exceptions.ApiException as e:
-            if e.status == 409: # Conflict, service already exists
-                print(f"Service '{deployment_name}-svc' already exists, skipping creation.")
-            else:
-                print(f"Error creating Service: {e}")
-
     except client.exceptions.ApiException as e:
         print(f"Error creating Kubevirt VirtualMachine: {e}")
         raise
+
+    create_k8s_service(deployment_name, namespace)
+
+def create_k8s_service(deployment_name: str, namespace: str = "default"):
+    """
+    Creates a Kubernetes Service for the PostgreSQL deployment.
+    This function is deprecated and replaced by start_postgresql_deployment2.
+    """
+    # Load Kubernetes config
+    config.load_kube_config()
+    core_v1 = client.CoreV1Api()
+
+    service_body = client.V1Service(
+        api_version="v1",
+        kind="Service",
+        metadata=client.V1ObjectMeta(name=f"{deployment_name}-svc"),
+        spec=client.V1ServiceSpec(
+            selector={"app": "postgres", "name": deployment_name},
+            ports=[
+                client.V1ServicePort(
+                    protocol="TCP",
+                    port=5432,
+                    target_port=5432
+                )
+            ],
+            type="ClusterIP"
+        )
+    )
+
+    # Create the Service for the VirtualMachine
+    try:
+        core_v1.create_namespaced_service(namespace=namespace, body=service_body)
+        print(f"Kubernetes Service '{deployment_name}-svc' created successfully.")
+    except client.exceptions.ApiException as e:
+        if e.status == 409: # Conflict, service already exists
+            print(f"Service '{deployment_name}-svc' already exists, skipping creation.")
+        else:
+            print(f"Error creating Service: {e}")
 
 def stop_postgresql_deployment2(deployment_name: str, namespace: str = "default"):
     """
