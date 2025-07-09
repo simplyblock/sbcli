@@ -168,6 +168,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize')
         argument = subcommand.add_argument('--force', help='Force restart', dest='force', action='store_true')
         argument = subcommand.add_argument('--ssd-pcie', help='New Nvme PCIe address to add to the storage node. Can be more than one.', type=str, default='', dest='ssd_pcie', required=False, nargs='+')
+        argument = subcommand.add_argument('--force-lvol-recreate', help='Force LVol recreate on node restart even if lvol bdev was not recovered', type=bool, dest='force_lvol_recreate')
 
     def init_storage_node__shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'shutdown', 'Initiates a storage node shutdown')
