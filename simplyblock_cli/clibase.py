@@ -892,9 +892,9 @@ class CLIWrapperBase:
         cloned_db.pvc_id = args.clone_name
         cloned_db.type = database.type
         cloned_db.version = database.version
-        cloned_db.vcpu_count = database.vcpu_count
-        cloned_db.memory_size = database.memory_size
-        cloned_db.disk_size = database.disk_size
+        cloned_db.vcpu_count = vcpu_count
+        cloned_db.memory_size = new_memory
+        cloned_db.disk_size = disk_size
         cloned_db.storage_class = database.storage_class
         cloned_db.cloned_from = database.uuid
         cloned_db.status = "running"
