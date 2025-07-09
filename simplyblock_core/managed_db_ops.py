@@ -505,6 +505,29 @@ runcmd:
                         "name": deployment_name
                     }
                 },
+                "dataVolumeTemplates": [
+                    {
+                        "metadata": {
+                            "name": "rootdisk"
+                        },
+                        "spec": {
+                            "source": {
+                                "container": {
+                                    "url": "docker://rrukmantiyo/kubevirt-images:ubuntu-22.04"
+                                }
+                            },
+                            "pvc": {
+                                "accessModes": ["ReadWriteOnce"],
+                                "resources": {
+                                    "requests": {
+                                        "storage": "20Gi"
+                                    }
+                                },
+                                "storageClassName": "simplyblock-csi-sc"
+                            }
+                        }
+                    }
+                ],
                 "spec": {
                     "evictionStrategy": "LiveMigrate",
                     "domain": {
@@ -546,8 +569,8 @@ runcmd:
                     "volumes": [
                         {
                             "name": "rootdisk",
-                            "containerDisk": {
-                                "image": "rrukmantiyo/kubevirt-images:ubuntu-22.04"
+                            "dataVolume": {
+                                "name": "rootdisk"
                             }
                         },
                         {
