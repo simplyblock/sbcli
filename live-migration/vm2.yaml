@@ -1,4 +1,5 @@
 # postgres-vm.yaml
+# if I use this VM I am able to console access using virtctl console postgres-vm
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
@@ -33,7 +34,8 @@ spec:
       volumes:
         - name: rootdisk
           containerDisk:
-            image: kubevirt/cirros-container-disk-demo:latest # Changed to Ubuntu 22.04 image
+            # image: rrukmantiyo/kubevirt-images:ubuntu-22.04
+            image: quay.io/containerdisks/fedora:latest 
         - name: datadisk
           persistentVolumeClaim:
             claimName: postgres-data-pvc
@@ -41,21 +43,14 @@ spec:
           cloudInitNoCloud:
             userData: |
               #cloud-config
-              hostname: postgres-vm
-              users:
-                - name: cloud-user
-                  groups: wheel
-                  sudo: ALL=(ALL) NOPASSWD:ALL
-                  shell: /bin/bash
-                  passwd: "$6$6MS4rswi8Os9xINl$ZmR3ZnWhM1GT9O7ZML9/1ynSCE.aw72ZXktqXfeofO..Op7jAVPEBXtYY/lqYg9tA132Zq8OTpTqAsgUvQdDo."
-
+              password: fedora
+              ssh_pwauth: True
+              chpasswd: { expire: False }
               runcmd:
                 - lsblk
                 - df -h
 
-                - sleep 5
-                - mkdir -p /mnt/data
-                - file -s /dev/vdb
+                # - mkdir -p /mnt/data
 
                 # - |
                 #   if ! blkid /dev/vdb; then
