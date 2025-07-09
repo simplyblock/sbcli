@@ -1,0 +1,67 @@
+# postgres-vm.yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: postgres-vm
+spec:
+  runStrategy: "Always"
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      evictionStrategy: LiveMigrate
+      domain:
+        devices:
+          disks:
+            - disk:
+                bus: virtio
+              name: rootdisk
+            - disk:
+                bus: virtio
+              name: datadisk
+          interfaces:
+            - name: default
+              masquerade: {}
+        memory: 
+          guest: 2Gi
+        cpu:
+          cores: 2
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          containerDisk:
+            image: kubevirt/cirros-container-disk-demo:latest # Changed to Ubuntu 22.04 image
+        - name: datadisk
+          persistentVolumeClaim:
+            claimName: postgres-data-pvc
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              hostname: postgres-vm
+              users:
+                - name: cloud-user
+                  groups: wheel
+                  sudo: ALL=(ALL) NOPASSWD:ALL
+                  shell: /bin/bash
+                  passwd: "$6$6MS4rswi8Os9xINl$ZmR3ZnWhM1GT9O7ZML9/1ynSCE.aw72ZXktqXfeofO..Op7jAVPEBXtYY/lqYg9tA132Zq8OTpTqAsgUvQdDo."
+
+              runcmd:
+                - lsblk
+                - df -h
+
+                - sleep 5
+                - mkdir -p /mnt/data
+                - file -s /dev/vdb
+
+                # - |
+                #   if ! blkid /dev/vdb; then
+                #     mkfs -t ext4 /dev/vdb
+                #   fi
+
+                # - mount /dev/vdb /mnt/data
+                # - lsblk
+                # - df -h

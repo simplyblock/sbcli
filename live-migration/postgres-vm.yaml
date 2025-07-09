@@ -43,10 +43,14 @@ spec:
             userData: |
               #cloud-config
               hostname: postgres-vm
-              users:
-                - name: cloud-user
-                  groups: wheel
-                  sudo: ALL=(ALL) NOPASSWD:ALL
+                users:
+                  - name: cloud-user
+                    groups: wheel
+                    sudo: ALL=(ALL) NOPASSWD:ALL
+                    shell: /bin/bash
+                    passwd: "$6$FmygXsJk$x5K5ZWxzNcd7kE5XaPY0UMC8yWTQAPOIvYkJmdrxA5D01zmDjhMJ7Z3Wj6rYhsxtVzLPXAV1eQCE6WZ2BS5Ub0"
+                    ssh-authorized-keys:
+                      - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCUB/sc4zU36OrPIFxV2UPZWGdzgg7+0HgqmmrSJIEuSMtXfNeyCDuV40JCqmmKX1vuQ7Df36IK9vR5KlBcM6K+PDwpjnd1xLfgnecqL5LxtqZTJSWc/oV2irA6JgtMIFgNX2S+DhwdyfxLG8dxyW1iKDzBgWANP+phk8WQfR13UBpdmzKYalbMLIsN87O12Ua1fF1KH5Qq0mVCPZnncCrJZCcHy9gYkxaXdcMtfRdmlVTjaZ8Z6RJ8G5RNfOywNMXAOJsbHSu609VTtqszLjeRJz21mhVWzLWYwk8PgBLkptwMHKGc6dMVC42jalXHWw5Qr7rlyoPoIeUMtMSQl/9FtMJgAawnKQNZmX00zyjXrWAz+SfZvp2z0dgQ8epgzaznewznXxnbnSjbaOU8WNr4/EdfNv/gUyCJM5Hm1Y6l1FRYOJpGarV6qa9eCEJP0WqD4BzQZNl1/h51xv2MwHncCw6NzGYMkUoInlR0WAZ/XyMZwLcwY2ZpvYyr9XldmiE= root@vm06.simplyblock5.localdomain
 
               runcmd:
                 # Install PostgreSQL on Ubuntu/Debian

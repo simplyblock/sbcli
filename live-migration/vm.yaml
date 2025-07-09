@@ -1,0 +1,43 @@
+# postgres-vm.yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: postgres-vm
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      evictionStrategy: LiveMigrate
+      domain:
+        devices:
+          disks:
+            - disk:
+                bus: virtio
+              name: rootdisk
+            - disk:
+                bus: virtio
+              name: datadisk # Disk for PostgreSQL data
+          interfaces:
+            - name: default
+              masquerade: {}
+        resources:
+          requests:
+            memory: 2Gi # Adjust memory as needed
+        cpu:
+          cores: 2 # Adjust CPU cores as needed
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          containerDisk:
+            image: quay.io/kubevirt/cirros-container-disk-demo # Changed to Ubuntu 22.04 image
+        - name: datadisk
+          persistentVolumeClaim:
+            claimName: postgres-data-pvc
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userDataBase64: SGkuXG4=

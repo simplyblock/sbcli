@@ -391,7 +391,7 @@ def start_postgresql_deployment2(deployment_name: str, version: str, vcpu_count:
     # Define the Kubevirt API client
     kubevirt_api = client.CustomObjectsApi()
     core_v1 = client.CoreV1Api()
-    DISK_DEVICE="/dev/vdb"
+    # DISK_DEVICE="/dev/vdb"
 
     cloud_init_user_data = f"""
 #cloud-config
@@ -403,86 +403,6 @@ users:
 
 runcmd:
 - |
-    # --- START OF DISK AUTOMATION SCRIPT ---
-    # IMPORTANT: Change /dev/vdb to your actual block device name.
-    # You can verify with `lsblk` inside a test VM.
-    MOUNT_POINT="/mnt/data"
-    FILESYSTEM_TYPE="ext4" # Or xfs, etc.
-
-    echo "Starting disk automation for $DISK_DEVICE..." | tee -a /var/log/cloud-init-disk.log
-
-    # 1. Check if the disk is already partitioned and has a filesystem
-    #    We look for a filesystem on the *device itself* or its first partition.
-    #    This is crucial: if a filesystem is found, we assume it's already set up.
-    HAS_FILESYSTEM=$(blkid -o value -s TYPE "${DISK_DEVICE}" || blkid -o value -s TYPE "${DISK_DEVICE}1" 2>/dev/null)
-    HAS_PARTITION=$(test -b "${DISK_DEVICE}1" && echo "true" || echo "false") # Check if first partition exists
-
-    if [ -n "$HAS_FILESYSTEM" ]; then
-        echo "$DISK_DEVICE already contains a filesystem ($HAS_FILESYSTEM). Skipping format." | tee -a /var/log/cloud-init-disk.log
-        # If a filesystem exists, ensure there's a partition or we might be mounting the raw device.
-        if [ "$HAS_PARTITION" = "false" ]; then
-            # This case is less common but valid if the FS was put directly on the raw device
-            TARGET_DEVICE="${DISK_DEVICE}"
-        else
-            TARGET_DEVICE="${DISK_DEVICE}1" # Assume it's on the first partition
-        fi
-    else
-        echo "$DISK_DEVICE does not contain a recognizable filesystem. Partitioning and formatting." | tee -a /var/log/cloud-init-disk.log
-        # 2. Partition the disk only if it doesn't have a recognizable partition table
-        #    'parted -s -- "$DISK_DEVICE" print' will exit non-zero if no valid table.
-        if ! parted -s -- "$DISK_DEVICE" print &>/dev/null; then
-            echo "Creating GPT partition label on $DISK_DEVICE." | tee -a /var/log/cloud-init-disk.log
-            parted -s -- "$DISK_DEVICE" mklabel gpt
-        fi
-
-        # 3. Create a primary partition covering the entire disk
-        echo "Creating primary partition on $DISK_DEVICE." | tee -a /var/log/cloud-init-disk.log
-        parted -s -- "$DISK_DEVICE" mkpart primary $FILESYSTEM_TYPE 0% 100%
-        # Give the kernel a moment to recognize the new partition
-        partprobe "$DISK_DEVICE" || true
-        sleep 2
-        
-        TARGET_DEVICE="${DISK_DEVICE}1" # The new partition will be /dev/vdb1
-
-        # 4. Create the filesystem
-        echo "Creating $FILESYSTEM_TYPE filesystem on $TARGET_DEVICE." | tee -a /var/log/cloud-init-disk.log
-        mkfs."$FILESYSTEM_TYPE" -F "$TARGET_DEVICE" | tee -a /var/log/cloud-init-disk.log
-    fi
-
-    # 5. Get the UUID of the target device (whether newly formatted or existing)
-    FS_UUID=$(blkid -o value -s UUID "$TARGET_DEVICE" || true) # Use || true to prevent script exiting if UUID not found
-    if [ -z "$FS_UUID" ]; then
-        echo "ERROR: Could not get UUID for $TARGET_DEVICE. Cannot configure fstab." | tee -a /var/log/cloud-init-disk.log
-        exit 1
-    fi
-    echo "Filesystem UUID: $FS_UUID" | tee -a /var/log/cloud-init-disk.log
-
-    # 6. Create mount point if it doesn't exist
-    if [ ! -d "$MOUNT_POINT" ]; then
-        echo "Creating mount point $MOUNT_POINT." | tee -a /var/log/cloud-init-disk.log
-        mkdir -p "$MOUNT_POINT"
-    fi
-
-    # 7. Add entry to /etc/fstab if not already present
-    if ! grep -q "$MOUNT_POINT" /etc/fstab; then
-        echo "Adding $MOUNT_POINT entry to /etc/fstab." | tee -a /var/log/cloud-init-disk.log
-        echo "UUID=$FS_UUID $MOUNT_POINT $FILESYSTEM_TYPE defaults 0 2" | tee -a /etc/fstab
-    else
-        echo "$MOUNT_POINT already in /etc/fstab. Updating if necessary." | tee -a /var/log/cloud-init-disk.log
-        # Optional: More advanced check to update existing entry if UUID changed,
-        # but for block volumes, the UUID from mkfs should be stable.
-    fi
-
-    # 8. Mount the filesystem
-    if ! mountpoint -q "$MOUNT_POINT"; then
-        echo "Mounting $TARGET_DEVICE to $MOUNT_POINT." | tee -a /var/log/cloud-init-disk.log
-        mount "$MOUNT_POINT" | tee -a /var/log/cloud-init-disk.log; exit 1;
-    else
-        echo "$MOUNT_POINT is already mounted." | tee -a /var/log/cloud-init-disk.log
-    fi
-
-    echo "Disk automation finished." | tee -a /var/log/cloud-init-disk.log
-    # --- END OF DISK AUTOMATION SCRIPT ---
   - apt-get update -y
   - apt-get install -y postgresql postgresql-contrib
   - systemctl enable postgresql
@@ -496,7 +416,6 @@ runcmd:
   - sudo -u postgres psql -c "CREATE DATABASE {db_name};"
   - sudo -u postgres psql -c "CREATE USER {db_user} WITH ENCRYPTED PASSWORD '{db_password}';"
   - sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {db_user};"
-
   - systemctl restart postgresql
 """
 
