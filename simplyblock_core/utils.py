@@ -11,6 +11,7 @@ import sys
 import uuid
 import time
 from typing import Union
+from pathlib import Path
 from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
@@ -1169,43 +1170,32 @@ def get_nvme_pci_devices():
         return [], []
 
 
-def get_bound_driver(pci_address):
-    driver_path = f"/sys/bus/pci/devices/{pci_address}/driver"
-    if os.path.islink(driver_path):
-        return os.path.basename(os.readlink(driver_path))
-    return None
-
-
 def unbind_pci_driver(pci_address):
-    current_driver = get_bound_driver(pci_address)
-    if current_driver:
-        unbind_path = f"/sys/bus/pci/devices/{pci_address}/driver/unbind"
-        try:
-            cmd = f"echo {pci_address} | sudo tee {unbind_path}"
-            subprocess.run(cmd, shell=True, check=True)
-            logger.debug(f"Unbound {pci_address} from {current_driver}.")
-        except Exception as e:
-            logger.error(f"Failed to unbind {pci_address} from {current_driver}: {e}")
+    device = Path(f'/sys/bus/pci/devices/{pci_address}')
+    driver = device / 'driver'
+    current_driver_name = driver.readlink().name if driver.exists() else None
+
+    if current_driver_name is not None:
+        (driver / 'unbind').write_text(pci_address)
+
+    driver_override = (driver / 'driver_override')
+    if driver_override.read_text() != '(null)\n':
+        driver_override.write_text('\n')
 
 
-def bind_to_nvme_driver(pci_address):
+def ensure_nvme_driver(pci_address):
     NVME_DRIVER = "nvme"
-    current_driver = get_bound_driver(pci_address)
-    if current_driver == NVME_DRIVER:
-        logger.info(f"{pci_address} is already bound to {NVME_DRIVER}.")
+    device = Path(f'/sys/bus/pci/devices/{pci_address}')
+    driver = device / 'driver'
+    current_driver_name = driver.readlink().name if driver.exists() else None
+    if current_driver_name == NVME_DRIVER:
+        logger.debug(f"{pci_address} is already bound to {NVME_DRIVER}.")
         return
 
-    # Unbind from current driver if any
     unbind_pci_driver(pci_address)
 
-    # Bind to nvme
-    new_id_path = f"/sys/bus/pci/drivers/{NVME_DRIVER}/bind"
-    try:
-        cmd = f"echo {pci_address} | sudo tee {new_id_path}"
-        subprocess.run(cmd, shell=True, check=True)
-        logger.debug(f"Bound {pci_address} to {NVME_DRIVER}.")
-    except Exception as e:
-        logger.error(f"Failed to bind {pci_address} to {NVME_DRIVER}: {e}")
+    Path(f'/sys/bus/pci/drivers/{NVME_DRIVER}/bind').write_text(f'{pci_address}\n')
+    logger.debug(f"Bound {pci_address} to {NVME_DRIVER}.")
 
 
 def detect_nvmes(pci_allowed, pci_blocked):
@@ -1234,8 +1224,11 @@ def detect_nvmes(pci_allowed, pci_blocked):
         rest = ssd_pci_set - user_pci_set
         pci_addresses = list(rest)
 
-    for pci in pci_addresses:
-        bind_to_nvme_driver(pci)
+    try:
+        for pci in pci_addresses:
+            ensure_nvme_driver(pci)
+    except OSError as e:
+        raise RuntimeError('Failed to bind device to nvme driver') from e
 
     nvme_base_path = '/sys/class/nvme/'
     nvme_devices = [dev for dev in os.listdir(nvme_base_path) if dev.startswith('nvme')]
@@ -1470,14 +1463,17 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         else:
             system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nics"].append(nic)
 
-    for nvme, val in nvmes.items():
-        pci = val["pci_address"]
-        numa = val["numa_node"]
-        unbind_pci_driver(pci)
-        if numa in sockets_to_use:
-            system_info[numa]["nvmes"].append(pci)
-        else:
-            system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nvmes"].append(pci)
+    try:
+        for nvme, val in nvmes.items():
+            pci = val["pci_address"]
+            numa = val["numa_node"]
+            unbind_pci_driver(pci)
+            if numa in sockets_to_use:
+                system_info[numa]["nvmes"].append(pci)
+            else:
+                system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nvmes"].append(pci)
+    except OSError as e:
+        raise RuntimeError('Failed to unbind PCI device drivers') from e
 
     nvme_by_numa = {nid: [] for nid in sockets_to_use}
     nvme_numa_neg1 = []
