@@ -41,52 +41,20 @@ spec:
           cloudInitNoCloud:
             userData: |
               #cloud-config
-              hostname: postgres-vm
-              users:
-                - name: cloud-user
-                  groups: wheel
-                  sudo: ALL=(ALL) NOPASSWD:ALL
-
+              password: fedora
+              ssh_pwauth: True
+              chpasswd: { expire: False }
               runcmd:
                 - lsblk
                 - df -h
-                # - apt-get update -y
-                # - apt-get install -y postgresql postgresql-contrib xfsprogs
 
-                # Wait for datadisk to appear
-                - sleep 5
-                - mkdir -p /mnt/data
+                # - mkdir -p /mnt/data
 
-                # Format if needed (only if no FS exists)
-                - |
-                  if ! blkid /dev/vdb; then
-                    mkfs -t ext4 /dev/vdb
-                  fi
-
-                # Mount and replace data directory
-                - mount /dev/vdb /mnt/data
-                # - systemctl stop postgresql
-                - lsblk
-                - df -h
-
-                # # Move existing data if needed (first-time only)
                 # - |
-                #   if [ ! -d /mnt/data/main ]; then
-                #     mv /var/lib/postgresql /mnt/data/postgresql
-                #     ln -s /mnt/data/postgresql /var/lib/postgresql
+                #   if ! blkid /dev/vdb; then
+                #     mkfs -t ext4 /dev/vdb
                 #   fi
 
-                # # Fix permissions
-                # - chown -R postgres:postgres /mnt/data/postgresql
-
-                # - systemctl enable postgresql
-                # - systemctl start postgresql
-
-                # # Configure to listen on all interfaces
-                # - sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" /etc/postgresql/14/main/postgresql.conf
-                # - echo "host    all             all             0.0.0.0/0               md5" >> /etc/postgresql/14/main/pg_hba.conf
-
-                # # Create DB/user only if DB doesn't exist
-                # - sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'mydatabase'" | grep -q 1 || sudo -u postgres psql -c "CREATE DATABASE mydatabase;"
-                # - sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='myuser'" | grep -q 1 || sudo -u postgres psql -c "CREATE USER myuser WITH ENCRYPTED PASSWORD 'mypassword';"
-                # - sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE mydatabase TO myuser;"
+                # - mount /dev/vdb /mnt/data
+                # - lsblk
+                # - df -h

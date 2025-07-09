@@ -11,7 +11,7 @@ kubectl run -it --rm psql-client --image=postgres -- bash
 ```
 
 connect to DB with password mypassword
-psql -h postgres1-svc -U myuser -d mydatabase
+psql -h postgres1-svc -U simplyblock_admin -d simplyblock_db
 ```
 
 ```
@@ -47,6 +47,4 @@ First we set:
 ```
 kubectl --namespace kubevirt patch kv kubevirt -p='[{"op": "add", "path": "/spec/configuration/vmRolloutStrategy", "value": "LiveUpdate"}]' --type='json'
 kubectl --namespace kubevirt patch kv kubevirt -p='[{"op": "add", "path": "/spec/workloadUpdateStrategy/workloadUpdateMethods", "value": ["LiveMigrate"]}]' --type='json'
-
 ```
-
