@@ -402,7 +402,7 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
 
 runcmd:
-- |
+  # Install PostgreSQL on Ubuntu/Debian
   - apt-get update -y
   - apt-get install -y postgresql postgresql-contrib
   - systemctl enable postgresql
@@ -416,6 +416,7 @@ runcmd:
   - sudo -u postgres psql -c "CREATE DATABASE {db_name};"
   - sudo -u postgres psql -c "CREATE USER {db_user} WITH ENCRYPTED PASSWORD '{db_password}';"
   - sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {db_user};"
+
   - systemctl restart postgresql
 """
 
