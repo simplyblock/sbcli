@@ -412,6 +412,9 @@ runcmd:
 
   - apt-get update -y
   - apt-get install -y podman
+  - mkdir -p /mnt/postgres_data/pgdata
+  - chown -R 999:999 /mnt/postgres_data/pgdata
+  - chmod 700 /mnt/postgres_data/pgdata
   - |
     podman run -d \
         --name postgres15 \
