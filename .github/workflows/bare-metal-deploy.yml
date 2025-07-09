@@ -180,7 +180,9 @@ jobs:
             --set storagenode.create=true \
             --set storagenode.numPartitions=1 \
             --set image.storageNode.tag=latest \
-            --set storagenode.ifname=eth0     
+            --set storagenode.ifname=eth0 \
+            --set storagenode.distr_ndcs=${NDCS} \
+            --set storagenode.distr_npcs=${NPCS}   
       env:
         NDCS: ${{ inputs.ndcs }}
         NPCS: ${{ inputs.npcs }}
