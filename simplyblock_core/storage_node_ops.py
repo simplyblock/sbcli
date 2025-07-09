@@ -1376,7 +1376,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[]):
+        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[], force_lvol_recreate=False):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -1805,7 +1805,7 @@ def restart_storage_node(
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         logger.info("Recreate lvstore")
         try:
-            ret = recreate_lvstore(snode, force=force)
+            ret = recreate_lvstore(snode, force=force_lvol_recreate)
         except Exception as e:
             logger.error(e)
             return False

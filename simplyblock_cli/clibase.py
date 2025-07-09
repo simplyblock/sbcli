@@ -188,7 +188,7 @@ class CLIWrapperBase:
             node_id, max_lvol, max_snap, max_prov,
             spdk_image, spdk_debug,
             small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
-            new_ssd_pcie=ssd_pcie)
+            new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
 
     def storage_node__shutdown(self, sub_command, args):
         return storage_ops.shutdown_storage_node(args.node_id, args.force)
