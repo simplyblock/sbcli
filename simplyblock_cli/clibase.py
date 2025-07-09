@@ -868,7 +868,8 @@ class CLIWrapperBase:
         new_memory = args.memory_size if args.memory_size else database.memory_size
         vcpu_count = args.vcpu_count if args.vcpu_count else database.vcpu_count
 
-        managed_db_ops.create_pvc_clone(clone_name=args.clone_name,
+        pvc_clone_name = f"{args.clone_name}-pvc"
+        managed_db_ops.create_pvc_clone(clone_name=pvc_clone_name,
                                         source_pvc_name=database.pvc_id,
                                         storage_class=database.storage_class,
                                         namespace=database.namespace,
@@ -880,7 +881,7 @@ class CLIWrapperBase:
             version=database.version,
             vcpu_count=vcpu_count,
             memory=new_memory,
-            pvc_name=args.clone_name,
+            pvc_name=pvc_clone_name,
             namespace=database.namespace,
         )
 
