@@ -2,18 +2,24 @@ import uuid, time
 from kubernetes import client, config
 from simplyblock_core.models.managed_db import ManagedDatabase
 from simplyblock_core.db_controller import DBController
+from kubernetes.client.rest import ApiException
 
 db_user = "simplyblock_admin"
 db_name = "simplyblock_db"
 db_password = "password"
+cpu_scale_factor = 2  # Scale factor for CPU limits
+memory_scale_factor = 2  # Scale factor for memory limits
 
 simplyblock_storage_node_label = "type=simplyblock-storage-plane"
 
-def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_count, memory, namespace="default"):
+def create_pvc(pvc_name: str, storage_class: str, disk_size: str, namespace: str = "default"):
+    """
+    Creates a PersistentVolumeClaim (PVC) for PostgreSQL deployment.
+    This function is deprecated and replaced by create_postgresql_deployment.
+    """
     # Load Kubernetes config
     config.load_kube_config()
-
-    pvc_name = f"{name}-pvc"
+    
     # Define PersistentVolumeClaim
     pvc = client.V1PersistentVolumeClaim(
         metadata=client.V1ObjectMeta(name=pvc_name),
@@ -30,7 +36,24 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
     # Create the PersistentVolumeClaim
     v1 = client.CoreV1Api()
     v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
-    # wait for the PVC to be created
+    # Wait for PVC to be created
+    wait_for_pvc(v1, pvc_name, namespace)
+
+def wait_for_pvc(v1: client.CoreV1Api, pvc_name: str, namespace: str = "default", timeout: int = 60):
+    print(f"Waiting for PVC {pvc_name} to be bound...")
+    for _ in range(timeout): 
+        pvc_status = v1.read_namespaced_persistent_volume_claim(name=pvc_name, namespace=namespace)
+        if pvc_status.status.phase == "Bound":
+            print(f"PVC {pvc_name} is bound.")
+            break
+        time.sleep(5)
+    else:
+        raise TimeoutError(f"PVC {pvc_name} was not bound within timeout period.")
+    
+
+def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_count, memory, namespace="default"):
+    pvc_name = f"{name}-pvc"
+    create_pvc(pvc_name, storage_class, disk_size, namespace)
     start_postgresql_deployment2(name, version, vcpu_count, memory, pvc_name, namespace)
 
     db_controller = DBController()
@@ -57,159 +80,6 @@ def get_nodes_with_label(label_selector):
     
     # Retrieve nodes with the specified label
     return v1.list_node(label_selector=label_selector)
-
-def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
-    # load Kubernetes config
-    config.load_kube_config()
-
-    resource_requests = {
-        "cpu": str(vcpu_count),
-        "memory": memory
-    }
-    resource_limits = {
-        "cpu": str(vcpu_count * 4),
-        "memory": str(int(memory.rstrip('G')) * 2) + "G"
-    }
-
-    container = client.V1Container(
-        name="postgres",
-        image=f"postgres:{version}",
-        ports=[client.V1ContainerPort(container_port=5432)],
-        env=[
-            client.V1EnvVar(name="POSTGRES_USER", value="admin"),
-            client.V1EnvVar(name="POSTGRES_PASSWORD", value="password"),
-            client.V1EnvVar(name="PGDATA", value="/var/lib/postgresql/data/pgdata"),
-        ],
-        resources=client.V1ResourceRequirements(
-            requests=resource_requests,
-            limits=resource_limits
-        ),
-        volume_mounts=[client.V1VolumeMount(
-            mount_path="/var/lib/postgresql/data",
-            name="postgres-data"
-        )]
-    )
-
-    # get all kubernetes nodes with label type=simplyblock-storage-plane
-    print(f"Waiting for PVC {pvc_name} to be created...")
-    time.sleep(30)
-    k8snodes = get_nodes_with_label("type=simplyblock-storage-plane")
-    lvols = DBController().get_lvols()
-    lvol = next((lvol for lvol in lvols if lvol.pvc_name == pvc_name), None)
-    if not lvol:
-        raise ValueError(f"LVol with name {pvc_name} not found in the database.")
-    
-    nodes_ids = lvol.nodes
-
-    primary_storage_node = DBController().get_storage_node_by_id(nodes_ids[0])
-    secondary_storage_node = DBController().get_storage_node_by_id(nodes_ids[1])
-
-    k8snode_primary = ""
-    k8snode_secondary = ""
-
-    for k8snode in k8snodes.items:
-        node_ips = [addr.address for addr in k8snode.status.addresses if addr.type == "InternalIP"]
-        if not node_ips:
-            continue
-
-        if primary_storage_node.mgmt_ip in node_ips:
-            k8snode_primary = k8snode.metadata.name
-        elif secondary_storage_node.mgmt_ip in node_ips:
-            k8snode_secondary = k8snode.metadata.name
-
-    pod_affinity = client.V1Affinity(
-        node_affinity=client.V1NodeAffinity(
-            preferred_during_scheduling_ignored_during_execution=[
-                client.V1PreferredSchedulingTerm(
-                    weight=100,
-                    preference=client.V1NodeSelectorTerm(
-                        match_expressions=[
-                            client.V1NodeSelectorRequirement(
-                                key="kubernetes.io/hostname",
-                                operator="In",
-                                values=[k8snode_primary]
-                            )
-                        ]
-                    )
-                ),
-                client.V1PreferredSchedulingTerm(
-                    weight=50,
-                    preference=client.V1NodeSelectorTerm(
-                        match_expressions=[
-                            client.V1NodeSelectorRequirement(
-                                key="kubernetes.io/hostname",
-                                operator="In",
-                                values=[k8snode_secondary]
-                            )
-                        ]
-                    )
-                ),
-            ],
-        )
-    )
-
-    deployment_spec = client.V1DeploymentSpec(
-        replicas=1,
-        selector=client.V1LabelSelector(
-            match_labels={"app": deployment_name}
-        ),
-        template=client.V1PodTemplateSpec(
-            metadata=client.V1ObjectMeta(labels={"app": deployment_name}),
-            spec=client.V1PodSpec(
-                containers=[container],
-                affinity=pod_affinity,
-                volumes=[client.V1Volume(
-                    name="postgres-data",
-                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                        claim_name=pvc_name
-                    )
-                )]
-            )
-        )
-    )
-
-    deployment = client.V1Deployment(
-        api_version="apps/v1",
-        kind="Deployment",
-        metadata=client.V1ObjectMeta(name=deployment_name),
-        spec=deployment_spec
-    )
-
-    # Create the Deployment
-    apps_v1 = client.AppsV1Api()
-    apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
-
-def stop_postgresql_deployment(deployment_name: str, namespace: str = "default"):
-    # Load Kubernetes config
-    config.load_kube_config()
-
-    # Delete the Deployment
-    apps_v1 = client.AppsV1Api()
-    try:
-        apps_v1.delete_namespaced_deployment(deployment_name, namespace=namespace)
-        print("Deployment stopped.")
-    except client.exceptions.ApiException as e:
-        print(f"Error stopping deployment: {e}")
-
-def delete_postgresql_resources(deployment_name: str, pvc_name: str, namespace: str = "default"):
-    # Load Kubernetes config
-    config.load_kube_config()
-
-    # Delete the Deployment
-    apps_v1 = client.AppsV1Api()
-    core_v1 = client.CoreV1Api()
-    try:
-        apps_v1.delete_namespaced_deployment(deployment_name, namespace=namespace)
-        print("Deployment deleted.")
-    except client.exceptions.ApiException as e:
-        print(f"Error deleting deployment: {e}")
-
-    # Delete the PersistentVolumeClaim
-    try:
-        core_v1.delete_namespaced_persistent_volume_claim(name=pvc_name, namespace=namespace)
-        print("PersistentVolumeClaim deleted.")
-    except client.exceptions.ApiException as e:
-        print(f"Error deleting PVC: {e}")
 
 def create_pvc_snapshot(snapshot_name: str, pvc_name: str, namespace: str = "default"):
     # Load Kubernetes config
@@ -294,11 +164,12 @@ def create_pvc_clone(clone_name, source_pvc_name, storage_class, disk_size, name
     v1 = client.CoreV1Api()
     try:
         v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=clone_pvc)
+        wait_for_pvc(v1, clone_name, namespace)
         print("PVC clone created successfully.")
     except client.exceptions.ApiException as e:
         print(f"Error creating PVC clone: {e}")
 
-def resize_postgresql_database(deployment_name: str, pvc_name: str, new_vcpu_count: int, new_memory: str, new_disk_size: str, namespace: str = "default"):
+def resize_postgresql_database(deployment_name: str, pvc_name: str, new_vcpu_count: int, new_memory: str, new_disk_size: str, version: str, namespace: str = "default"):
     """
     Resizes a PostgreSQL database Kubevirt VM by updating its vCPU, memory, and disk size.
     This version first resizes the PVC, then stops and restarts the VM
@@ -344,13 +215,14 @@ def resize_postgresql_database(deployment_name: str, pvc_name: str, new_vcpu_cou
         print(f"Stopping Kubevirt VM '{deployment_name}' to apply all new parameters and ensure PVC filesystem expansion...")
         stop_postgresql_deployment2(deployment_name, namespace)
         
-        # Wait a bit for VM to be fully stopped
-        time.sleep(40)
+        # wait for the VM to be deleted
+        # get VirtualmachineImages objects and wait for the VM to be deleted
+        wait_for_vmi_deletion(deployment_name, namespace)
 
-        print(f"Starting Kubevirt VM '{deployment_name}' with new vCPU, memory, and disk size...")
+        print(f"Starting Kubevirt VM '{deployment_name}' with new vCPU: {new_vcpu_count}, memory: {new_memory}, and disk size: {new_disk_size}...")
         start_postgresql_deployment2(
             deployment_name=deployment_name,
-            version="14",  # Assuming PostgreSQL 14, adjust as needed
+            version=version,  # Assuming PostgreSQL 14, adjust as needed
             vcpu_count=new_vcpu_count,
             memory=new_memory,
             pvc_name=pvc_name,
@@ -372,6 +244,43 @@ def resize_postgresql_database(deployment_name: str, pvc_name: str, new_vcpu_cou
         print(f"An unexpected error occurred during resize: {e}")
         raise
 
+def wait_for_vmi_deletion(vmi_name: str, namespace: str = "default"):
+    config.load_kube_config()  # or config.load_incluster_config() in-cluster
+    api = client.CustomObjectsApi()
+
+    group = "kubevirt.io"
+    version = "v1"
+    plural = "virtualmachineinstances"
+
+    # Poll until the VMI is deleted
+    timeout_seconds = 300
+    interval = 5
+    elapsed = 0
+
+    print(f"Waiting for VMI {vmi_name} to be deleted...")
+
+    while elapsed < timeout_seconds:
+        try:
+            api.get_namespaced_custom_object(
+                group=group,
+                version=version,
+                namespace=namespace,
+                plural=plural,
+                name=vmi_name
+            )
+            print(f"VMI {vmi_name} still exists...waiting")
+        except ApiException as e:
+            if e.status == 404:
+                print(f"VMI {vmi_name} has been deleted.")
+                break
+            else:
+                print(f"Unexpected error while checking VMI: {e}")
+                raise
+        time.sleep(interval)
+        elapsed += interval
+    else:
+        raise TimeoutError(f"Timed out waiting for VMI {vmi_name} to be deleted.")
+
 def start_postgresql_deployment2(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
     """
     Provisions a PostgreSQL VirtualMachine using Kubevirt, with node affinity
@@ -391,9 +300,7 @@ def start_postgresql_deployment2(deployment_name: str, version: str, vcpu_count:
     # Define the Kubevirt API client
     kubevirt_api = client.CustomObjectsApi()
     core_v1 = client.CoreV1Api()
-    # DISK_DEVICE="/dev/vdb"
 
-    # TODO: we should use postgresql version provided in the input parameters
     cloud_init_user_data = f"""
 #cloud-config
 hostname: {deployment_name}-vm
@@ -425,10 +332,6 @@ runcmd:
         -p 5432:5432 \
         docker.io/library/postgres:15
 """
-
-    # get all kubernetes nodes with label type=simplyblock-storage-plane
-    print(f"Waiting for PVC {pvc_name} to be created...")
-    time.sleep(30) # Await PVC provisioning. In a production system, poll PVC status.
 
     db_controller = DBController()
     lvols = db_controller.get_lvols()
@@ -668,7 +571,6 @@ def stop_postgresql_deployment2(deployment_name: str, namespace: str = "default"
         )
         print(f"Kubevirt VirtualMachine '{deployment_name}' deleted to stop the deployment.")
         # Give Kubernetes time to process the deletion
-        time.sleep(10)
     except client.exceptions.ApiException as e:
         print(f"Error deleting Kubevirt VirtualMachine: {e}")
         # Handle cases where VM might not exist (already deleted, etc.)
@@ -743,3 +645,159 @@ def parse_size_to_bytes(size_str: str) -> int:
     else:
         # Assume bytes if no unit specified
         return int(size_str)
+
+
+#### DEPRECATED Functions ####
+
+## DEPRECATED: Use start_postgresql_deployment2 instead
+def start_postgresql_deployment(deployment_name: str, version: str, vcpu_count: int, memory: str, pvc_name: str, namespace: str = "default"):
+    # load Kubernetes config
+    config.load_kube_config()
+
+    resource_requests = {
+        "cpu": str(vcpu_count),
+        "memory": memory
+    }
+    resource_limits = {
+        "cpu": str(vcpu_count * cpu_scale_factor),
+        "memory": str(int(memory.rstrip('G')) * memory_scale_factor) + "G"
+    }
+
+    container = client.V1Container(
+        name="postgres",
+        image=f"postgres:{version}",
+        ports=[client.V1ContainerPort(container_port=5432)],
+        env=[
+            client.V1EnvVar(name="POSTGRES_USER", value="admin"),
+            client.V1EnvVar(name="POSTGRES_PASSWORD", value="password"),
+            client.V1EnvVar(name="PGDATA", value="/var/lib/postgresql/data/pgdata"),
+        ],
+        resources=client.V1ResourceRequirements(
+            requests=resource_requests,
+            limits=resource_limits
+        ),
+        volume_mounts=[client.V1VolumeMount(
+            mount_path="/var/lib/postgresql/data",
+            name="postgres-data"
+        )]
+    )
+
+    # get all kubernetes nodes with label type=simplyblock-storage-plane
+    time.sleep(30)
+    k8snodes = get_nodes_with_label("type=simplyblock-storage-plane")
+    lvols = DBController().get_lvols()
+    lvol = next((lvol for lvol in lvols if lvol.pvc_name == pvc_name), None)
+    if not lvol:
+        raise ValueError(f"LVol with name {pvc_name} not found in the database.")
+    
+    nodes_ids = lvol.nodes
+
+    primary_storage_node = DBController().get_storage_node_by_id(nodes_ids[0])
+    secondary_storage_node = DBController().get_storage_node_by_id(nodes_ids[1])
+
+    k8snode_primary = ""
+    k8snode_secondary = ""
+
+    for k8snode in k8snodes.items:
+        node_ips = [addr.address for addr in k8snode.status.addresses if addr.type == "InternalIP"]
+        if not node_ips:
+            continue
+
+        if primary_storage_node.mgmt_ip in node_ips:
+            k8snode_primary = k8snode.metadata.name
+        elif secondary_storage_node.mgmt_ip in node_ips:
+            k8snode_secondary = k8snode.metadata.name
+
+    pod_affinity = client.V1Affinity(
+        node_affinity=client.V1NodeAffinity(
+            preferred_during_scheduling_ignored_during_execution=[
+                client.V1PreferredSchedulingTerm(
+                    weight=100,
+                    preference=client.V1NodeSelectorTerm(
+                        match_expressions=[
+                            client.V1NodeSelectorRequirement(
+                                key="kubernetes.io/hostname",
+                                operator="In",
+                                values=[k8snode_primary]
+                            )
+                        ]
+                    )
+                ),
+                client.V1PreferredSchedulingTerm(
+                    weight=50,
+                    preference=client.V1NodeSelectorTerm(
+                        match_expressions=[
+                            client.V1NodeSelectorRequirement(
+                                key="kubernetes.io/hostname",
+                                operator="In",
+                                values=[k8snode_secondary]
+                            )
+                        ]
+                    )
+                ),
+            ],
+        )
+    )
+
+    deployment_spec = client.V1DeploymentSpec(
+        replicas=1,
+        selector=client.V1LabelSelector(
+            match_labels={"app": deployment_name}
+        ),
+        template=client.V1PodTemplateSpec(
+            metadata=client.V1ObjectMeta(labels={"app": deployment_name}),
+            spec=client.V1PodSpec(
+                containers=[container],
+                affinity=pod_affinity,
+                volumes=[client.V1Volume(
+                    name="postgres-data",
+                    persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                        claim_name=pvc_name
+                    )
+                )]
+            )
+        )
+    )
+
+    deployment = client.V1Deployment(
+        api_version="apps/v1",
+        kind="Deployment",
+        metadata=client.V1ObjectMeta(name=deployment_name),
+        spec=deployment_spec
+    )
+
+    # Create the Deployment
+    apps_v1 = client.AppsV1Api()
+    apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
+
+def stop_postgresql_deployment(deployment_name: str, namespace: str = "default"):
+    # Load Kubernetes config
+    config.load_kube_config()
+
+    # Delete the Deployment
+    apps_v1 = client.AppsV1Api()
+    try:
+        apps_v1.delete_namespaced_deployment(deployment_name, namespace=namespace)
+        print("Deployment stopped.")
+    except client.exceptions.ApiException as e:
+        print(f"Error stopping deployment: {e}")
+
+def delete_postgresql_resources(deployment_name: str, pvc_name: str, namespace: str = "default"):
+    # Load Kubernetes config
+    config.load_kube_config()
+
+    # Delete the Deployment
+    apps_v1 = client.AppsV1Api()
+    core_v1 = client.CoreV1Api()
+    try:
+        apps_v1.delete_namespaced_deployment(deployment_name, namespace=namespace)
+        print("Deployment deleted.")
+    except client.exceptions.ApiException as e:
+        print(f"Error deleting deployment: {e}")
+
+    # Delete the PersistentVolumeClaim
+    try:
+        core_v1.delete_namespaced_persistent_volume_claim(name=pvc_name, namespace=namespace)
+        print("PersistentVolumeClaim deleted.")
+    except client.exceptions.ApiException as e:
+        print(f"Error deleting PVC: {e}")

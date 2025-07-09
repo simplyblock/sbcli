@@ -864,18 +864,22 @@ class CLIWrapperBase:
         if not database:
             raise ValueError(f"Database with ID {args.database_id} does not exist.")
         
+        disk_size = args.disk_size if args.disk_size else database.disk_size
+        new_memory = args.memory_size if args.memory_size else database.memory_size
+        vcpu_count = args.vcpu_count if args.vcpu_count else database.vcpu_count
+
         managed_db_ops.create_pvc_clone(clone_name=args.clone_name,
                                         source_pvc_name=database.pvc_id,
                                         storage_class=database.storage_class,
                                         namespace=database.namespace,
-                                        disk_size=database.disk_size,
+                                        disk_size=disk_size,
                                         )
-        
+
         managed_db_ops.start_postgresql_deployment2(
             deployment_name=args.clone_name,
             version=database.version,
-            vcpu_count=database.vcpu_count,
-            memory=database.memory_size,
+            vcpu_count=vcpu_count,
+            memory=new_memory,
             pvc_name=args.clone_name,
             namespace=database.namespace,
         )
@@ -915,6 +919,7 @@ class CLIWrapperBase:
             new_disk_size=disk_size,
             new_memory=new_memory,
             new_vcpu_count=vcpu_count,
+            version=database.version,
         )
 
         database.vcpu_count = vcpu_count

@@ -783,6 +783,9 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'clone', 'Clones a database from a snapshot')
         subcommand.add_argument('database_id', help='Database id', type=str)
         subcommand.add_argument('clone_name', help='Clone name', type=str)
+        argument = subcommand.add_argument('--vcpu_count', help='VCPU count for the database, default: 2', type=int, dest='vcpu_count')
+        argument = subcommand.add_argument('--memory_size', help='the amount of RAM for the database, default: 2G', type=str, dest='memory_size')
+        argument = subcommand.add_argument('--disk_size', help='the size of the database disk, default: 100G', type=str, dest='disk_size')
 
     def init_database__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'resize a database by increasing the disk size or VCPU or RAM')

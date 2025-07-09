@@ -1797,6 +1797,18 @@ commands:
             help: "Clone name"
             dest: clone_name
             type: str
+          - name: "--vcpu_count"
+            help: "VCPU count for the database, default: 2"
+            dest: vcpu_count
+            type: int
+          - name: "--memory_size"
+            help: "the amount of RAM for the database, default: 2G"
+            dest: memory_size
+            type: str
+          - name: "--disk_size"
+            help: "the size of the database disk, default: 100G"
+            dest: disk_size
+            type: str
       - name: resize
         help: "resize a database by increasing the disk size or VCPU or RAM"
         arguments:
