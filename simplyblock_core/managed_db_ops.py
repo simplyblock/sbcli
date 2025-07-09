@@ -22,7 +22,7 @@ def create_postgresql_deployment(name, storage_class, disk_size, version, vcpu_c
             resources=client.V1ResourceRequirements(
                 requests={"storage": disk_size}
             ),
-            volume_mode="Block",
+            volume_mode="Filesystem",
             storage_class_name=storage_class
         )
     )
@@ -277,7 +277,7 @@ def create_pvc_clone(clone_name, source_pvc_name, storage_class, disk_size, name
         metadata=client.V1ObjectMeta(name=clone_name),
         spec=client.V1PersistentVolumeClaimSpec(
             access_modes=["ReadWriteMany"],
-            volume_mode="Block",
+            volume_mode="Filesystem",
             resources=client.V1ResourceRequirements(
                 requests={"storage": disk_size}
             ),
@@ -393,31 +393,34 @@ def start_postgresql_deployment2(deployment_name: str, version: str, vcpu_count:
     core_v1 = client.CoreV1Api()
     # DISK_DEVICE="/dev/vdb"
 
+    # TODO: we should use postgresql version provided in the input parameters
     cloud_init_user_data = f"""
 #cloud-config
 hostname: {deployment_name}-vm
-users:
-  - name: cloud-user
-    groups: wheel
-    sudo: ALL=(ALL) NOPASSWD:ALL
-
+password: ubuntu 
+chpasswd: {{"expire": false}}
 runcmd:
   # Install PostgreSQL on Ubuntu/Debian
+  - mkdir -p /mnt/postgres_data
+  - |
+    if ! blkid /dev/vdb; then
+      mkfs -t ext4 /dev/vdb
+    fi
+  - mount /dev/vdb /mnt/postgres_data
+  - echo "PostgreSQL data mounted at /mnt/postgres_data"
+  - echo "Installing PostgreSQL..."
+
   - apt-get update -y
-  - apt-get install -y postgresql postgresql-contrib
-  - systemctl enable postgresql
-  - systemctl start postgresql
-
-  # Configure PostgreSQL to listen on all interfaces
-  - sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/" /etc/postgresql/14/main/postgresql.conf
-  - echo "host    all             all             0.0.0.0/0               md5" >> /etc/postgresql/14/main/pg_hba.conf
-
-  # Create a database and user
-  - sudo -u postgres psql -c "CREATE DATABASE {db_name};"
-  - sudo -u postgres psql -c "CREATE USER {db_user} WITH ENCRYPTED PASSWORD '{db_password}';"
-  - sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {db_name} TO {db_user};"
-
-  - systemctl restart postgresql
+  - apt-get install -y podman
+  - |
+    podman run -d \
+        --name postgres15 \
+        -e POSTGRES_DB={db_name} \
+        -e POSTGRES_USER={db_user} \
+        -e POSTGRES_PASSWORD={db_password} \
+        -v /mnt/postgres_data/pgdata:/var/lib/postgresql/data:Z \
+        -p 5432:5432 \
+        docker.io/library/postgres:15
 """
 
     # get all kubernetes nodes with label type=simplyblock-storage-plane

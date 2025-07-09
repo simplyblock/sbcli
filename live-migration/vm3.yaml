@@ -1,39 +1,39 @@
-# postgres-vm.yaml
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
-  name: postgres-vm
+  name: testvm
 spec:
-  runStrategy: "Always"
+  runStrategy: Halted
   template:
     metadata:
       labels:
-        app: postgres
+        kubevirt.io/size: small
+        kubevirt.io/domain: testvm
     spec:
-      evictionStrategy: LiveMigrate
       domain:
         devices:
           disks:
-            - disk:
+            - name: containerdisk
+              disk:
                 bus: virtio
-              name: rootdisk
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
             - disk:
                 bus: virtio
               name: datadisk
           interfaces:
-            - name: default
-              masquerade: {}
-        memory: 
-          guest: 2Gi
-        cpu:
-          cores: 2
+          - name: default
+            masquerade: {}
+        memory:
+          guest: 1G 
       networks:
-        - name: default
-          pod: {}
+      - name: default
+        pod: {}
       volumes:
-        - name: rootdisk
+        - name: containerdisk
           containerDisk:
-            image: quay.io/containerdisks/fedora:latest # Changed to Ubuntu 22.04 image
+            image: quay.io/containerdisks/fedora:latest 
         - name: datadisk
           persistentVolumeClaim:
             claimName: postgres-data-pvc
@@ -51,7 +51,7 @@ spec:
                 # - mkdir -p /mnt/data
 
                 # - |
-                #   if ! blkid /dev/vdc; then
+                #   if ! blkid /dev/vdb; then
                 #     mkfs -t ext4 /dev/vdb
                 #   fi
 
