@@ -498,6 +498,29 @@ runcmd:
         },
         "spec": {
             "runStrategy": "Always",
+            "dataVolumeTemplates": [
+                {
+                    "metadata": {
+                        "name": f"{deployment_name}-rootdisk"
+                    },
+                    "spec": {
+                        "source": {
+                            "registry": {
+                                "url": "docker://rrukmantiyo/kubevirt-images:ubuntu-22.04"
+                            }
+                        },
+                        "pvc": {
+                            "accessModes": ["ReadWriteOnce"],
+                            "resources": {
+                                "requests": {
+                                    "storage": "20Gi"
+                                }
+                            },
+                            "storageClassName": "simplyblock-csi-sc"
+                        }
+                    }
+                }
+            ],
             "template": {
                 "metadata": {
                     "labels": {
@@ -505,29 +528,6 @@ runcmd:
                         "name": deployment_name
                     }
                 },
-                "dataVolumeTemplates": [
-                    {
-                        "metadata": {
-                            "name": "rootdisk"
-                        },
-                        "spec": {
-                            "source": {
-                                "container": {
-                                    "url": "docker://rrukmantiyo/kubevirt-images:ubuntu-22.04"
-                                }
-                            },
-                            "pvc": {
-                                "accessModes": ["ReadWriteOnce"],
-                                "resources": {
-                                    "requests": {
-                                        "storage": "20Gi"
-                                    }
-                                },
-                                "storageClassName": "simplyblock-csi-sc"
-                            }
-                        }
-                    }
-                ],
                 "spec": {
                     "evictionStrategy": "LiveMigrate",
                     "domain": {
@@ -570,7 +570,7 @@ runcmd:
                         {
                             "name": "rootdisk",
                             "dataVolume": {
-                                "name": "rootdisk"
+                                "name": f"{deployment_name}-rootdisk"
                             }
                         },
                         {
