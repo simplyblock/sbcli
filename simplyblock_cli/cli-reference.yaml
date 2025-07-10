@@ -329,6 +329,7 @@ commands:
             help: "Force LVol recreate on node restart even if lvol bdev was not recovered"
             dest: force_lvol_recreate
             type: bool
+            action: store_true
       - name: shutdown
         help: "Initiates a storage node shutdown"
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
