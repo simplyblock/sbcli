@@ -3,7 +3,8 @@ import re
 import pytest
 from requests.exceptions import HTTPError
 
-import util
+from simplyblock_web.test import util
+from simplyblock_web.test.api.v2.util import list_ids
 
 
 def test_pool(call, cluster):
@@ -11,11 +12,11 @@ def test_pool(call, cluster):
     assert re.match(util.uuid_regex, pool_uuid)
 
     assert call('GET', f'/clusters/{cluster}/storage-pools/{pool_uuid}')['id'] == pool_uuid
-    assert pool_uuid in util.list_ids(call, f'/clusters/{cluster}/storage-pools')
+    assert pool_uuid in list_ids(call, f'/clusters/{cluster}/storage-pools')
 
     call('DELETE', f'/clusters/{cluster}/storage-pools/{pool_uuid}')
 
-    assert pool_uuid not in util.list_ids(call, f'/clusters/{cluster}/storage-pools')
+    assert pool_uuid not in list_ids(call, f'/clusters/{cluster}/storage-pools')
 
     with pytest.raises(HTTPError):
         call('GET', f'/clusters/{cluster}/storage-pools/{pool_uuid}')
