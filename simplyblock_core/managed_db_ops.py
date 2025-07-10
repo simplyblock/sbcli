@@ -374,8 +374,6 @@ runcmd:
   - echo "PostgreSQL data mounted at /mnt/postgres_data"
   - echo "Installing PostgreSQL..."
 
-  - apt-get update -y
-  - apt-get install -y podman
   - mkdir -p /mnt/postgres_data/pgdata
   - chown -R 999:999 /mnt/postgres_data/pgdata
   - chmod 700 /mnt/postgres_data/pgdata
@@ -406,29 +404,6 @@ runcmd:
         },
         "spec": {
             "runStrategy": "Always",
-            "dataVolumeTemplates": [
-                {
-                    "metadata": {
-                        "name": f"{deployment_name}-rootdisk"
-                    },
-                    "spec": {
-                        "source": {
-                            "registry": {
-                                "url": "docker://rrukmantiyo/kubevirt-images:ubuntu-22.04"
-                            }
-                        },
-                        "pvc": {
-                            "accessModes": ["ReadWriteOnce"],
-                            "resources": {
-                                "requests": {
-                                    "storage": "20Gi"
-                                }
-                            },
-                            "storageClassName": "simplyblock-csi-sc"
-                        }
-                    }
-                }
-            ],
             "template": {
                 "metadata": {
                     "labels": {
@@ -477,8 +452,8 @@ runcmd:
                     "volumes": [
                         {
                             "name": "rootdisk",
-                            "dataVolume": {
-                                "name": f"{deployment_name}-rootdisk"
+                            "containerDisk": {
+                                "image": "manoharbrm/kubevirt:ubuntu-22.02"
                             }
                         },
                         {
