@@ -151,7 +151,7 @@ class RPCClient:
             "dif_insert_or_strip": False,
             "c2h_success": True,
             "sock_priority": 0,
-            "ack_timeout": 4096,
+            "ack_timeout": 8000,
         }
         return self._request("nvmf_create_transport", params)
 
@@ -640,7 +640,7 @@ class RPCClient:
             "reconnect_delay_sec": 1,
             "keep_alive_timeout_ms": 30000,
             "timeout_us": constants.NVME_TIMEOUT_US,
-            "transport_ack_timeout": 12,
+            "transport_ack_timeout": 13,
         }
         return self._request("bdev_nvme_set_options", params)
 
