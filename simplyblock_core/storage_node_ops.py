@@ -627,7 +627,10 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     return True
 
 
-def _connect_to_remote_devs(this_node, force_connect_restarting_nodes=False):
+def _connect_to_remote_devs(
+        this_node: StorageNode, /,
+        reattach: bool = True, force_connect_restarting_nodes: bool = False
+):
     db_controller = DBController()
 
     rpc_client = RPCClient(
@@ -666,7 +669,7 @@ def _connect_to_remote_devs(this_node, force_connect_restarting_nodes=False):
 
             dev.remote_bdev = connect_device(
                     f"remote_{dev.alceml_bdev}", dev, rpc_client,
-                    bdev_names=node_bdev_names, reattach=False
+                    bdev_names=node_bdev_names, reattach=reattach,
             )
             remote_devices.append(dev)
 
@@ -1771,7 +1774,7 @@ def restart_storage_node(
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             try:
-                node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+                node.remote_devices = _connect_to_remote_devs(node, reattach=True, force_connect_restarting_nodes=True)
             except RuntimeError:
                 logger.error('Failed to connect to remote devices')
                 return False
