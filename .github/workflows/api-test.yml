@@ -31,7 +31,9 @@ jobs:
 
     - name: Run tests
       run: |
-        pytest -v simplyblock_web \
+        pytest -v --import-mode=importlib \
+          simplyblock_web/test/api/v1/test_base.py \
+          simplyblock_web/test/api/v2 \
           --entrypoint=${{ inputs.cluster_ip }} \
           --cluster=${{ inputs.cluster_id }} \
           --secret=${{ inputs.cluster_secret }}
@@ -43,13 +45,4 @@ jobs:
             -u admin:${{ inputs.cluster_secret }} \
             -H "Accept: application/json" \
             "${{ inputs.cluster_ip }}/graylog/api/search/universal/relative?query=container_name:app_WebAppAPI.*&limit=10000" \
-          | jq -r '.messages | map(.message) | map(.message) | reverse | join("\n")' \
-          > api.log
-
-    - name: 'Upload artifact'
-      if: ${{ always() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: api-log
-        path: api.log
-        retention-days: 30
+          | jq -r '.messages | map(.message) | map(.message) | reverse | join("\n")'

@@ -1,6 +1,9 @@
+import logging
+
 from flask import Flask
 
 from simplyblock_web.auth_middleware import token_required
+from simplyblock_web import utils
 
 from . import cluster
 from . import mgmt_node
@@ -14,6 +17,7 @@ from . import metrics
 
 
 api = Flask('API v1')
+api.logger.setLevel(logging.DEBUG)
 api.register_blueprint(cluster.bp)
 api.register_blueprint(mgmt_node.bp)
 api.register_blueprint(device.bp)
@@ -29,3 +33,8 @@ api.register_blueprint(metrics.bp)
 @token_required
 def before_request():
     pass
+
+
+@api.route('/', methods=['GET'])
+def status():
+    return utils.get_response("Live")
