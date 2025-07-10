@@ -387,7 +387,7 @@ runcmd:
         -e POSTGRES_PASSWORD={db_password} \
         -v /mnt/postgres_data/pgdata:/var/lib/postgresql/data:Z \
         -p 5432:5432 \
-        docker.io/library/postgres:15
+        docker.io/library/postgres:{version}
 """
 
     pod_affinity = get_pod_affinity(pvc_name=pvc_name)
