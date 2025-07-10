@@ -101,6 +101,9 @@ while True:
                 node_bdevs = rpc_client.get_bdevs()
                 if node_bdevs:
                     node_bdev_names = [b['name'] for b in node_bdevs]
+                    for bdev in node_bdevs:
+                        if "aliases" in bdev and bdev["aliases"]:
+                            node_bdev_names.extend(bdev['aliases'])
                 else:
                     node_bdev_names = []
 
