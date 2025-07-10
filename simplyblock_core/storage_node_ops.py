@@ -628,7 +628,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     return True
 
 
-def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
+def _connect_to_remote_devs(this_node, force_connect_restarting_nodes=False):
     db_controller = DBController()
 
     rpc_client = RPCClient(
@@ -646,7 +646,7 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
     allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
     allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]
 
-    if force_conect_restarting_nodes:
+    if force_connect_restarting_nodes:
         allowed_node_statuses.append(StorageNode.STATUS_RESTARTING)
         allowed_dev_statuses.append(NVMeDevice.STATUS_UNAVAILABLE)
 
@@ -1749,7 +1749,7 @@ def restart_storage_node(
     # for node in snodes:
     #     if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
     #         continue
-    #     node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+    #     node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
     #     node.write_to_db(kv_store)
     #
     # logger.info(f"Sending device status event")
@@ -1770,7 +1770,7 @@ def restart_storage_node(
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             try:
-                node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+                node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
             except RuntimeError:
                 logger.error('Failed to connect to remote devices')
                 return False
@@ -1817,7 +1817,7 @@ def restart_storage_node(
                     continue
 
                 try:
-                    node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+                    node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
                 except RuntimeError:
                     logger.error('Failed to connect to remote devices')
                     return False
