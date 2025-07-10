@@ -2898,7 +2898,7 @@ def recreate_lvstore_on_sec(secondary_node):
         ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
-            secondary_rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000,
+            secondary_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1000,
                                                   max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
@@ -2990,7 +2990,7 @@ def recreate_lvstore(snode, force=False):
     ### 2- create lvols nvmf subsystems
     for lvol in lvol_list:
         logger.info("creating subsystem %s", lvol.nqn)
-        rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1,
+        rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
                                     max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
     if sec_node:
