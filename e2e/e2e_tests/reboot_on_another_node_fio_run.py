@@ -139,7 +139,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
             
             self.logger.info(f"Shutdown Node {restart_target['node_uuid']}")
             
-            self.sbcli_utils.restart_node(node_uuid=restart_target['node_uuid'])
+            self.sbcli_utils.shutdown_node(node_uuid=restart_target['node_uuid'])
 
             # Step 3: Wait for schedulable state
             self.sbcli_utils.wait_for_storage_node_status(restart_target["node_uuid"],
