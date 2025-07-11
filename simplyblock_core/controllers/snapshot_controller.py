@@ -451,7 +451,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if pvc_namespace:
         lvol.namespace = pvc_namespace
 
-    lvol.status = LVol.STATUS_ONLINE
+    lvol.status = LVol.STATUS_IN_CREATION
     lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
