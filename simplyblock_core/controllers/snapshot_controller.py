@@ -443,7 +443,7 @@ def clone(snapshot_id, clone_name, new_size=0):
     lvol.snapshot_name = snap.snap_bdev
     lvol.subsys_port = snap.lvol.subsys_port
 
-    lvol.status = LVol.STATUS_ONLINE
+    lvol.status = LVol.STATUS_IN_CREATION
     lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
