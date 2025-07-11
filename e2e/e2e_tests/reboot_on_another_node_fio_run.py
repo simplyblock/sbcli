@@ -125,14 +125,25 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
         node_details = self.sbcli_utils.get_storage_node_details(restart_target["node_uuid"])[0]
         old_ip = node_details["mgmt_ip"]
         old_ip_data = node_details["data_nics"][0]["ip4_address"]
-        proxmox_id, vm_id = proxmox.get_proxmox(old_ip)
-        self.logger.info(f"Stopping VM {vm_id} on proxmox {proxmox_id}")
+        # proxmox_id, vm_id = proxmox.get_proxmox(old_ip)
+        # self.logger.info(f"Stopping VM {vm_id} on proxmox {proxmox_id}")
         try:
-            proxmox.stop_vm(proxmox_id, vm_id)
+            # proxmox.stop_vm(proxmox_id, vm_id)
+            self.logger.info(f"Suspending Node {restart_target['node_uuid']}")
+            self.sbcli_utils.suspend_node(node_uuid=restart_target['node_uuid'])
 
             # Step 3: Wait for schedulable state
             self.sbcli_utils.wait_for_storage_node_status(restart_target["node_uuid"],
-                                                        status="schedulable",
+                                                        status="suspended",
+                                                        timeout=600)
+            
+            self.logger.info(f"Shutdown Node {restart_target['node_uuid']}")
+            
+            self.sbcli_utils.restart_node(node_uuid=restart_target['node_uuid'])
+
+            # Step 3: Wait for schedulable state
+            self.sbcli_utils.wait_for_storage_node_status(restart_target["node_uuid"],
+                                                        status="offline",
                                                         timeout=600)
 
             # Step 4: Deploy node config on new IP
@@ -216,6 +227,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
         except Exception as e:
             raise e
         finally:
-            proxmox.start_vm(proxmox_id, vm_id, 600)
+            # proxmox.start_vm(proxmox_id, vm_id, 600)
+            self.logger.info("Final Execution!!")
 
         self.logger.info("TEST CASE PASSED !!!")
