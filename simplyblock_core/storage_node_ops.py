@@ -2,6 +2,7 @@
 import datetime
 import json
 import os
+from typing import List
 
 import threading
 
@@ -17,6 +18,7 @@ from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINU
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -31,6 +33,39 @@ from simplyblock_core.utils import pull_docker_image_with_retry
 
 
 logger = utils.get_logger(__name__)
+
+
+def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_names: List[str], reattach: bool):
+    """Connect snode to device
+
+    This only performs the actual operation between both involved SPDK instances,
+    no book-keeping is done here.
+
+    More sensibly this would be a member function of either StorageNode or NVMeDevice.
+    """
+
+    logger.info(f'Connecting to {name}')
+    bdev_name = f"{name}n1"
+    if bdev_name in bdev_names:
+        logger.debug("Already connected")
+        return bdev_name
+
+    if reattach and rpc_client.bdev_nvme_controller_list(name):
+        rpc_client.bdev_nvme_detach_controller(name)
+        time.sleep(1)
+
+    for ip in device.nvmf_ip.split(","):
+        rpc_client.bdev_nvme_attach_controller_tcp(
+                name, device.nvmf_nqn, ip, device.nvmf_port,
+                multipath=device.nvmf_multipath,
+        )
+        if device.nvmf_multipath:
+            rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
+
+    if not rpc_client.get_bdevs(bdev_name):
+        raise RuntimeError(f"Failed to connect to device: {device.get_id()}")
+
+    return bdev_name
 
 
 def get_next_cluster_device_order(db_controller, cluster_id):
@@ -593,7 +628,10 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     return True
 
 
-def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
+def _connect_to_remote_devs(
+        this_node: StorageNode, /,
+        reattach: bool = True, force_connect_restarting_nodes: bool = False
+):
     db_controller = DBController()
 
     rpc_client = RPCClient(
@@ -611,7 +649,7 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
     allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
     allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]
 
-    if force_conect_restarting_nodes:
+    if force_connect_restarting_nodes:
         allowed_node_statuses.append(StorageNode.STATUS_RESTARTING)
         allowed_dev_statuses.append(NVMeDevice.STATUS_UNAVAILABLE)
 
@@ -628,32 +666,12 @@ def _connect_to_remote_devs(this_node, force_conect_restarting_nodes=False):
                 continue
 
             if not dev.alceml_bdev:
-                logger.error(f"device alceml bdev not found!, {dev.get_id()}")
-                continue
-            name = f"remote_{dev.alceml_bdev}"
-            bdev_name = f"{name}n1"
-            if bdev_name in node_bdev_names:
-                logger.info(f"bdev found {bdev_name}")
-            else:
-                # if rpc_client.bdev_nvme_controller_list(name):
-                #     logger.info(f"detaching {name} from {this_node.get_id()}")
-                #     rpc_client.bdev_nvme_detach_controller(name)
-                #     time.sleep(1)
-                if dev.nvmf_multipath:
-                    for ip in dev.nvmf_ip.split(","):
-                        logger.info(f"Connecting {name} to {this_node.get_id()}")
-                        rpc_client.bdev_nvme_attach_controller_tcp(
-                            name, dev.nvmf_nqn, ip, dev.nvmf_port, multipath=True)
-                        rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
-                else:
-                    logger.info(f"Connecting {name} to {this_node.get_id()}")
-                    rpc_client.bdev_nvme_attach_controller_tcp(
-                        name, dev.nvmf_nqn, dev.nvmf_ip, dev.nvmf_port, multipath=False)
-                ret = rpc_client.get_bdevs(bdev_name)
-                if not ret:
-                    logger.error(f"Failed to connect to device: {dev.get_id()}")
-                    continue
-            dev.remote_bdev = bdev_name
+                raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
+
+            dev.remote_bdev = connect_device(
+                    f"remote_{dev.alceml_bdev}", dev, rpc_client,
+                    bdev_names=node_bdev_names, reattach=reattach,
+            )
             remote_devices.append(dev)
 
     return remote_devices
@@ -709,55 +727,18 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         if not org_dev or org_dev in new_devs or org_dev_node.get_id() == this_node.get_id():
             continue
 
-        name = f"remote_{org_dev.jm_bdev}"
-        bdev_name = f"{name}n1"
-        org_dev.remote_bdev = bdev_name
-
-        if org_dev.status == NVMeDevice.STATUS_ONLINE:
-
-            if bdev_name in node_bdev_names:
-                logger.debug(f"bdev found {bdev_name}")
-                org_dev.status = JMDevice.STATUS_ONLINE
-                new_devs.append(org_dev)
-            elif org_dev_node.status == StorageNode.STATUS_ONLINE:
-                if rpc_client.bdev_nvme_controller_list(name):
-                    logger.info(f"detaching {name} from {this_node.get_id()}")
-                    rpc_client.bdev_nvme_detach_controller(name)
-                    time.sleep(1)
-
-                if org_dev.nvmf_multipath:
-                    for ip in org_dev.nvmf_ip.split(","):
-                        logger.info(f"Connecting {name} to {this_node.get_id()}")
-                        ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                            name, org_dev.nvmf_nqn, ip, org_dev.nvmf_port, multipath=True)
-                        rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
-
-                    # if ret:
-                    org_dev.status = JMDevice.STATUS_ONLINE
-                    # else:
-                    #     logger.error(f"failed to connect to remote JM {name}")
-                    #     org_dev.status = JMDevice.STATUS_UNAVAILABLE
-                else:
-                    logger.info(f"Connecting {name} to {this_node.get_id()}")
-                    ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                        name, org_dev.nvmf_nqn, org_dev.nvmf_ip, org_dev.nvmf_port, multipath=False)
-                    if ret:
-                        org_dev.status = JMDevice.STATUS_ONLINE
-                    else:
-                        logger.error(f"failed to connect to remote JM {name}")
-                        org_dev.status = JMDevice.STATUS_UNAVAILABLE
-                new_devs.append(org_dev)
-            else:
-                org_dev.status = JMDevice.STATUS_UNAVAILABLE
-                new_devs.append(org_dev)
-
-        else:
-            # if bdev_name in node_bdev_names:
-            #     logger.debug(f"bdev found {bdev_name}")
-            #     rpc_client.bdev_nvme_detach_controller(name)
-
+        if org_dev.status != NVMeDevice.STATUS_ONLINE or  org_dev_node.status != StorageNode.STATUS_ONLINE:
             org_dev.status = JMDevice.STATUS_UNAVAILABLE
-            new_devs.append(org_dev)
+        else:
+            try:
+                org_dev.remote_bdev = connect_device(
+                        f"remote_{org_dev.jm_bdev}", org_dev, rpc_client,
+                        bdev_names=node_bdev_names, reattach=True,
+                )
+            except RuntimeError:
+                logger.error(f'Failed to connect to {org_dev.get_id()}')
+                org_dev.status = JMDevice.STATUS_UNAVAILABLE
+        new_devs.append(org_dev)
 
     return new_devs
 
@@ -1196,7 +1177,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            node.remote_devices = _connect_to_remote_devs(node)
+            try:
+                node.remote_devices = _connect_to_remote_devs(node)
+            except RuntimeError:
+                logger.error('Failed to connect to remote devices')
+                return False
             node.write_to_db(kv_store)
 
         if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY, Cluster.STATUS_IN_EXPANSION]:
@@ -1379,7 +1364,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[]):
+        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[], force_lvol_recreate=False):
     db_controller = DBController()
     kv_store = db_controller.kv_store
 
@@ -1740,7 +1725,11 @@ def restart_storage_node(
     snode.write_to_db()
 
     logger.info("Connecting to remote devices")
-    snode.remote_devices = _connect_to_remote_devs(snode)
+    try:
+        snode.remote_devices = _connect_to_remote_devs(snode)
+    except RuntimeError:
+        logger.error('Failed to connect to remote devices')
+        return False
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.health_check = True
@@ -1763,7 +1752,7 @@ def restart_storage_node(
     # for node in snodes:
     #     if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
     #         continue
-    #     node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+    #     node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
     #     node.write_to_db(kv_store)
     #
     # logger.info(f"Sending device status event")
@@ -1783,7 +1772,11 @@ def restart_storage_node(
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+            try:
+                node.remote_devices = _connect_to_remote_devs(node, reattach=True, force_connect_restarting_nodes=True)
+            except RuntimeError:
+                logger.error('Failed to connect to remote devices')
+                return False
             node.write_to_db(kv_store)
 
         logger.info("Sending device status event")
@@ -1802,7 +1795,11 @@ def restart_storage_node(
     else:
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         logger.info("Recreate lvstore")
-        ret = recreate_lvstore(snode)
+        try:
+            ret = recreate_lvstore(snode, force=force_lvol_recreate)
+        except Exception as e:
+            logger.error(e)
+            return False
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if not ret:
             logger.error("Failed to recreate lvstore")
@@ -1821,8 +1818,14 @@ def restart_storage_node(
             for node in snodes:
                 if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                     continue
-                node.remote_devices = _connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+
+                try:
+                    node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+                except RuntimeError:
+                    logger.error('Failed to connect to remote devices')
+                    return False
                 node.write_to_db(kv_store)
+                    
 
             logger.info("Sending device status event")
             snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -2084,7 +2087,7 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Stopping SPDK")
     try:
-        SNodeClient(snode.api_endpoint, timeout=30, retry=1).spdk_process_kill(snode.rpc_port)
+        SNodeClient(snode.api_endpoint, timeout=10, retry=10).spdk_process_kill(snode.rpc_port)
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
@@ -2258,7 +2261,12 @@ def resume_storage_node(node_id):
 
     logger.info("Connecting to remote devices")
     snode = db_controller.get_storage_node_by_id(node_id)
-    snode.remote_devices = _connect_to_remote_devs(snode)
+    try:
+        snode.remote_devices = _connect_to_remote_devs(snode)
+    except RuntimeError:
+        logger.error('Failed to connect to remote devices')
+        return False
+
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
@@ -2826,7 +2834,11 @@ def set_node_status(node_id, status, reconnect_on_online=True):
     if snode.status == StorageNode.STATUS_ONLINE and reconnect_on_online:
         snode = db_controller.get_storage_node_by_id(node_id)
         logger.info("Connecting to remote devices")
-        snode.remote_devices = _connect_to_remote_devs(snode)
+        try:
+            snode.remote_devices = _connect_to_remote_devs(snode)
+        except RuntimeError:
+            logger.error('Failed to connect to remote devices')
+            return False
         if snode.enable_ha_jm:
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.health_check = True
@@ -2883,18 +2895,17 @@ def recreate_lvstore_on_sec(secondary_node):
             logger.error(err)
             return False
 
-        primary_node_api = SNodeClient(primary_node.api_endpoint)
-
         ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
-            secondary_rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1000,
+            secondary_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1000,
                                                   max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
 
+            fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 3- block primary port
-            primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "block", primary_node.rpc_port)
+            fw_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "block", primary_node.rpc_port)
             tcp_ports_events.port_deny(primary_node, primary_node.lvol_subsys_port)
 
             ### 4- set leadership to false
@@ -2918,8 +2929,10 @@ def recreate_lvstore_on_sec(secondary_node):
                 logger.error("Error connecting to hublvol: %s", e)
                 # return False
 
+
+            fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 8- allow port on primary
-            primary_node_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow", primary_node.rpc_port)
+            fw_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow", primary_node.rpc_port)
             tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
 
         ### 7- add lvols to subsystems
@@ -2934,7 +2947,7 @@ def recreate_lvstore_on_sec(secondary_node):
     return True
 
 
-def recreate_lvstore(snode):
+def recreate_lvstore(snode, force=False):
     db_controller = DBController()
 
     snode.lvstore_status = "in_creation"
@@ -2956,7 +2969,6 @@ def recreate_lvstore(snode):
         snode.rpc_username, snode.rpc_password)
 
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    sec_node_api = SNodeClient(sec_node.api_endpoint, timeout=5, retry=5)
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
@@ -2978,7 +2990,7 @@ def recreate_lvstore(snode):
     ### 2- create lvols nvmf subsystems
     for lvol in lvol_list:
         logger.info("creating subsystem %s", lvol.nqn)
-        rpc_client.subsystem_create(lvol.nqn, 'sbcli-cn', lvol.uuid, 1,
+        rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
                                     max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
     if sec_node:
@@ -2990,11 +3002,13 @@ def recreate_lvstore(snode):
             sec_node.write_to_db()
             time.sleep(3)
 
+            fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
+
             ### 3- block secondary port
-            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
+            fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
-            # time.sleep(0.2)
+            time.sleep(0.5)
             ### 4- set leadership to false
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -3004,7 +3018,7 @@ def recreate_lvstore(snode):
             rpc_client.jc_explicit_synchronization(snode.jm_vuid)
 
     ### 5- examine
-    time.sleep(0.2)
+    # time.sleep(0.2)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     ret = rpc_client.bdev_examine(snode.raid)
     # time.sleep(1)
@@ -3012,11 +3026,43 @@ def recreate_lvstore(snode):
     ### 6- wait for examine
     ret = rpc_client.bdev_wait_for_examine()
 
-    logger.info("Suspending JC compression")
-    ret = rpc_client.jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=True)
+    def _kill_app():
+        storage_events.snode_restart_failed(snode)
+        snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+        snode_api.spdk_process_kill(snode.rpc_port)
+        set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+
+    # If LVol Store recovery failed then stop spdk process
+    ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
     if not ret:
-        logger.error("Failed to suspend JC compression")
-        # return False
+        logger.error(f"Failed to recover lvstore: {snode.lvstore} on node: {snode.get_id()}")
+        if not force:
+            _kill_app()
+            raise Exception("Failed to recover lvstore")
+
+    # If ANY LVol BDev recovery failed then stop spdk process
+    ret = rpc_client.get_bdevs()
+    node_bdev_names = {}
+    if ret:
+        for b in ret:
+            node_bdev_names[b['name']] = b
+            for al in b['aliases']:
+                node_bdev_names[al] = b
+
+    for lv in lvol_list:
+        bdev_name = lv.lvol_uuid
+        passed = health_controller.check_bdev(bdev_name, bdev_names=node_bdev_names)
+        if not passed:
+            logger.error(f"Failed to recover BDev: {bdev_name} on node: {snode.get_id()}")
+            if not force:
+                _kill_app()
+                raise Exception("Failed to recover lvstore")
+
+    # logger.info("Suspending JC compression")
+    # ret = rpc_client.jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=True)
+    # if not ret:
+    #     logger.error("Failed to suspend JC compression")
+    #     # return False
 
     ret = rpc_client.bdev_lvol_set_lvs_opts(
         snode.lvstore,
@@ -3047,7 +3093,10 @@ def recreate_lvstore(snode):
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
-            sec_node_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
+
+            fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
+            ### 3- block secondary port
+            fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
     if prim_node_suspend:

@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: snode-spdk-deployment-{{ HOSTNAME }}
+  name: snode-spdk-pod-{{ RPC_PORT }}
   namespace: {{ NAMESPACE }}
   labels:
-    app: spdk-app-{{ HOSTNAME }}
+    app: spdk-app-{{ RPC_PORT }}
     role: simplyblock-storage-node
 spec:
   restartPolicy: Never
@@ -159,14 +159,14 @@ spec:
         - name: FLUENT_CONTAINER_TAIL_EXCLUDE_PATH
           value: /var/log/pods/fluent*
         - name: FLUENT_CONTAINER_TAIL_PARSER_TYPE
-          value: /^(?<time>.+) (?<stream>stdout|stderr)( (?<logtag>.))? (?<log>.*)$/
+          value: '/^(?<time>[^ ]+) (?<stream>stdout|stderr)(?: (?<logtag>.))? (?<log>.*)$/'
       resources:
         requests:
           cpu: 200m
           memory: 0.5Gi
         limits:
           cpu: 1000m
-          memory: 1Gi
+          memory: 3Gi
       volumeMounts:
         - name: varlog
           mountPath: /var/log

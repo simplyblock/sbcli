@@ -49,12 +49,6 @@ def lvol_iostats(uuid, history):
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
-    pool = db.get_pool_by_id(lvol.pool_uuid)
-    if pool.secret:
-        req_secret = request.headers.get('secret', "")
-        if req_secret != pool.secret:
-            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
-
     data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
         "object_data": lvol.get_clean_dict(),
@@ -68,12 +62,6 @@ def lvol_capacity(uuid, history):
     lvol = db.get_lvol_by_id(uuid)
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
-
-    pool = db.get_pool_by_id(lvol.pool_uuid)
-    if pool.secret:
-        req_secret = request.headers.get('secret', "")
-        if req_secret != pool.secret:
-            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
 
     data = lvol_controller.get_capacity(uuid, history, parse_sizes=False)
     out = []
@@ -234,9 +222,10 @@ def delete_lvol(uuid):
     if not lvol:
         return utils.get_response_error(f"LVol not found: {uuid}", 404)
 
-    pool = db.get_pool_by_id(lvol.pool_uuid)
-    if not pool:
-        return utils.get_response_error(f"Pool not found: {uuid}", 404)
+    try:
+        pool = db.get_pool_by_id(lvol.pool_uuid)
+    except KeyError:
+        return utils.get_response_error(f"Pool not found: {lvol.pool_uuid}", 404)
 
     if pool.status == pool.STATUS_INACTIVE:
         return utils.get_response_error("Pool is disabled", 400)

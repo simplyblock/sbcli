@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Tuple
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -873,13 +873,6 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.info("Done")
         return True
 
-    # disconnect from caching nodes:
-    cnodes = db_controller.get_caching_nodes()
-    for cnode in cnodes:
-        for lv in cnode.lvols:
-            if lv.lvol_id == lvol.get_id():
-                caching_node_controller.disconnect(cnode.get_id(), lvol.get_id())
-
     if lvol.ha_type == 'single':
         if snode.status  != StorageNode.STATUS_ONLINE:
             logger.error(f"Node status is not online, node: {snode.get_id()}, status: {snode.status}")
@@ -1065,6 +1058,14 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     if not ret:
         return "Error setting qos limits"
 
+    if snode.secondary_node_id:
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node and sec_node.status == [StorageNode.STATUS_ONLINE,  StorageNode.STATUS_DOWN]:
+            ret = sec_node.rpc_client().bdev_set_qos_limit(
+                lvol.top_bdev, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec)
+            if not ret:
+                return "Error setting qos limits"
+
     lvol.rw_ios_per_sec = rw_ios_per_sec
     lvol.rw_mbytes_per_sec = rw_mbytes_per_sec
     lvol.r_mbytes_per_sec = r_mbytes_per_sec
@@ -1080,8 +1081,9 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
     if cluster_id:
         lvols = db_controller.get_lvols(cluster_id)
     elif pool_id_or_name:
-        pool = db_controller.get_pool_by_id(pool_id_or_name)
-        if not pool:
+        try:
+            pool = db_controller.get_pool_by_id(pool_id_or_name)
+        except KeyError:
             pool = db_controller.get_pool_by_name(pool_id_or_name)
             if pool:
                 for lv in db_controller.get_lvols_by_pool_id(pool.get_id()):

@@ -15,9 +15,10 @@ from jinja2 import Environment, FileSystemLoader
 import yaml
 from pydantic import BaseModel, Field
 
+from . import snode_ops
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
-from simplyblock_web.node_utils_k8s import deployment_name, namespace_id_file, pod_name
+from simplyblock_web.node_utils_k8s import namespace_id_file
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -329,17 +330,30 @@ def spdk_process_start(body: SPDKParams):
 
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MB') if body.total_mem else ""
 
-    if _is_pod_up():
-        logger.info("SPDK deployment found, removing...")
-        spdk_process_kill()
+    if _is_pod_up(body.rpc_port):
+        logger.info("SPDK pod found, removing...")
+        query = utils.RPCPortParams(rpc_port=body.rpc_port)
+        spdk_process_kill(query)
 
     node_prepration_job_name = "snode-spdk-job-"
+    node_prepration_core_name = "snode-spdk-core-isolate-"
     node_name = os.environ.get("HOSTNAME", "")
-
+    core_isolate = os.environ.get("CORE_ISOLATION", False)
+    if isinstance(core_isolate, str):
+       core_isolate = core_isolate.strip().lower() in ("true")
+    
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
+    core_name_length = len(node_prepration_core_name+node_name)
     if k8s_job_name_length > 63:
         node_prepration_job_name += node_name[k8s_job_name_length-63:]
+    else:
+        node_prepration_job_name += node_name
+        
+    if core_name_length > 63:
+        node_prepration_core_name += node_name[core_name_length-63:]
+    else:
+         node_prepration_core_name += node_name
 
     logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
@@ -357,6 +371,7 @@ def spdk_process_start(body: SPDKParams):
             'RPC_PASSWORD': body.rpc_password,
             'HOSTNAME': node_name,
             'JOBNAME': node_prepration_job_name,
+            'CORE_JOBNAME': node_prepration_core_name,
             'NAMESPACE': namespace,
             'FDB_CONNECTION': body.fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
@@ -386,6 +401,27 @@ def spdk_process_start(body: SPDKParams):
         )
         logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
 
+        if core_isolate:
+            core_template = env.get_template('storage_core_isolation.yaml.j2')
+            core_yaml = yaml.safe_load(core_template.render(values))
+            batch_v1 = core_utils.get_k8s_batch_client()
+            core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
+            msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
+            logger.info(msg)
+
+            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
+            logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
+
+            batch_v1.delete_namespaced_job(
+                name=core_resp.metadata.name,
+                namespace=namespace,
+                body=V1DeleteOptions(
+                    propagation_policy='Foreground',
+                    grace_period_seconds=0
+                )
+            )
+            logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
+
         env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         dep = yaml.safe_load(template.render(values))
@@ -405,11 +441,12 @@ def spdk_process_start(body: SPDKParams):
         'type': 'boolean'
     })}}},
 })
-def spdk_process_kill():
+def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
-        resp = k8s_core_v1.delete_namespaced_pod(deployment_name, namespace)
+        pod_name = f"snode-spdk-pod-{query.rpc_port}"
+        resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
         retries = 10
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
@@ -431,8 +468,9 @@ def spdk_process_kill():
     return utils.get_response(True)
 
 
-def _is_pod_up():
-    k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
+def _is_pod_up(rpc_port):
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    pod_name = f"snode-spdk-pod-{rpc_port}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -452,8 +490,8 @@ def _is_pod_up():
         'type': 'boolean'
     })}}},
 })
-def spdk_process_is_up():
-    if _is_pod_up():
+def spdk_process_is_up(query: utils.RPCPortParams):
+    if _is_pod_up(query.rpc_port):
         return utils.get_response(True)
     else:
         return utils.get_response(False, "SPDK container is not running")
@@ -482,6 +520,7 @@ class _FirewallParams(BaseModel):
     port_id: int
     port_type: str
     action: str
+    rpc_port: int = Field(ge=1, le=65536)
 
 
 @api.post('/firewall_set_port', responses={
@@ -490,25 +529,7 @@ class _FirewallParams(BaseModel):
     })}}},
 })
 def firewall_set_port(body: _FirewallParams):
-    k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
-
-    for pod in k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace()).items:
-        if not pod.metadata.name.startswith(pod_name):
-            continue
-
-        ret = node_utils_k8s.firewall_port_k8s(
-                body.port_id,
-                body.port_type,
-                body.action=="block",
-                k8s_core_v1,
-                node_utils_k8s.get_namespace(),
-                pod.metadata.name,
-                "spdk_container",
-        )
-        return utils.get_response(ret)
-
-    return utils.get_response(False)
-
+    return utils.get_response(False, "deprecated bath post snode/firewall_set_port")
 
 @api.get('/get_firewall', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
@@ -516,8 +537,7 @@ def firewall_set_port(body: _FirewallParams):
     })}}},
 })
 def get_firewall():
-    ret = node_utils_k8s.firewall_get_k8s()
-    return utils.get_response(ret)
+    return utils.get_response(False, "deprecated bath get snode/get_firewall")
 
 
 @api.post('/set_hugepages', responses={
@@ -555,3 +575,5 @@ def apply_config():
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)
+
+api.post('/bind_device_to_spdk')(snode_ops.bind_device_to_spdk)

@@ -399,20 +399,24 @@ def join_swarm(body: _JoinSwarmParams):
     node_docker = get_docker_client()
     if node_docker.info()["Swarm"]["LocalNodeState"] in ["active", "pending"]:
         logger.info("Node is part of another swarm, leaving swarm")
+        for i in range(5):
+            try:
+                node_docker.swarm.leave(force=True)
+                time.sleep(2)
+                break
+            except Exception as e:
+                logger.warning(f"Error leaving swarm: {e}")
+
+    for i in range(5):
         try:
-            node_docker.swarm.leave(force=True)
-            time.sleep(2)
+            node_docker.swarm.join([f"{body.cluster_ip}:2377"], body.join_token)
+            logger.info("Joining docker swarm > Done")
+            return utils.get_response(True)
         except Exception as e:
-            logger.error(e)
-
-    try:
-        node_docker.swarm.join([f"{body.cluster_ip}:2377"], body.join_token)
-        logger.info("Joining docker swarm > Done")
-    except Exception as e:
-        logger.error(e)
-        return utils.get_response(False, str(e))
-
-    return utils.get_response(True)
+            logger.warning(f"Error joining docker swarm: {e}")
+    msg = "Could not join docker swarm"
+    logger.error(msg)
+    return utils.get_response(False, msg)
 
 
 @api.get('/leave_swarm', responses={
@@ -422,13 +426,16 @@ def join_swarm(body: _JoinSwarmParams):
 })
 def leave_swarm():
     delete_cluster_id()
-    try:
-        node_docker = get_docker_client()
-        node_docker.swarm.leave(force=True)
-    except Exception:
-        pass
-    return utils.get_response(True)
-
+    for i in range(5):
+        try:
+            node_docker = get_docker_client()
+            node_docker.swarm.leave(force=True)
+            return utils.get_response(True)
+        except Exception as e:
+            logger.warning(f"Error leaving swarm: {e}")
+    msg = "Could not leave docker swarm"
+    logger.error(msg)
+    return utils.get_response(False, msg)
 
 class _GPTPartitionsParams(BaseModel):
     nbd_device: str = Field('/dev/nbd0')
@@ -568,38 +575,6 @@ def bind_device_to_spdk(body: utils.DeviceParams):
         time.sleep(1)
 
     return utils.get_response(True)
-
-
-class _FirewallParams(BaseModel):
-    port_id: int
-    port_type: str
-    action: str
-    rpc_port: int = Field(ge=1, le=65536)
-
-
-@api.post('/firewall_set_port', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def firewall_set_port(body: _FirewallParams):
-    ret = node_utils.firewall_port(
-        body.port_id,
-        body.port_type,
-        block=(body.action == "block"),
-        rpc_port=body.rpc_port
-    )
-    return utils.get_response(ret)
-
-
-@api.get('/get_firewall', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'string'
-    })}}},
-})
-def get_firewall(query: utils.RPCPortParams):
-    ret = node_utils.firewall_get(str(query.rpc_port))
-    return utils.get_response(ret)
 
 
 @api.post('/set_hugepages', responses={

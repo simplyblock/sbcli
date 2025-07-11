@@ -22,10 +22,13 @@ db = db_controller.DBController()
 def list_pools(uuid):
     cluster_id = utils.get_cluster_id(request)
     if uuid:
-        pool = db.get_pool_by_id(uuid)
-        if pool and pool.cluster_id == cluster_id:
-            pools = [pool]
-        else:
+        try:
+            pool = db.get_pool_by_id(uuid)
+            if pool.cluster_id == cluster_id:
+                pools = [pool]
+            else:
+                return utils.get_response_error(f"Pool not found: {uuid}", 404)
+        except KeyError:
             return utils.get_response_error(f"Pool not found: {uuid}", 404)
     else:
         pools = db.get_pools(cluster_id)
@@ -46,7 +49,6 @@ def add_pool():
         | cluster_id (required) | Cluster uuid
         | pool_max        | Pool maximum size: 10M, 10G, 10(bytes)
         | lvol_max        | LVol maximum size: 10M, 10G, 10(bytes)
-        | no_secret       | pool is created with a secret
         | max_rw_iops     | Maximum Read Write IO Per Second
         | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
         | max_r_mbytes    | Maximum Read Mega Bytes Per Second
@@ -65,10 +67,6 @@ def add_pool():
         if p.pool_name == name and p.cluster_id == cluster_id:
             return utils.get_response_error(f"Pool found with the same name: {name}", 400)
 
-    pool_secret = True
-    if 'no_secret' in pool_data:
-        pool_secret = False
-
     pool_max_size = 0
     lvol_max_size = 0
     if 'pool_max' in pool_data:
@@ -84,24 +82,20 @@ def add_pool():
 
     ret = pool_controller.add_pool(
         name, pool_max_size, lvol_max_size, max_rw_iops, max_rw_mbytes,
-        max_r_mbytes_per_sec, max_w_mbytes_per_sec, pool_secret, cluster_id)
+        max_r_mbytes_per_sec, max_w_mbytes_per_sec, cluster_id)
 
     return utils.get_response(ret)
 
 
 @bp.route('/pool/<string:uuid>', methods=['DELETE'])
 def delete_pool(uuid):
-    pool = db.get_pool_by_id(uuid)
-    if not pool:
+    try:
+        pool = db.get_pool_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
     if pool.status == Pool.STATUS_INACTIVE:
         return utils.get_response_error("Pool is disabled", 400)
-
-    if pool.secret:
-        req_secret = request.headers.get('secret', "")
-        if req_secret != pool.secret:
-            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
 
     lvols = db.get_lvols_by_pool_id(uuid)
     if lvols and len(lvols) > 0:
@@ -115,17 +109,13 @@ def delete_pool(uuid):
 
 @bp.route('/pool/<string:uuid>', methods=['PUT'])
 def update_pool(uuid):
-    pool = db.get_pool_by_id(uuid)
-    if not pool:
+    try:
+        pool = db.get_pool_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
     if pool.status == Pool.STATUS_INACTIVE:
         return utils.get_response_error("Pool is disabled")
-
-    # if pool.secret:
-    #     req_secret = request.headers.get('secret', "")
-    #     if req_secret != pool.secret:
-    #         return utils.get_response_error(f"Pool secret doesn't mach the value in the request header", 400)
 
     pool_data = request.get_json()
 
@@ -161,14 +151,10 @@ def update_pool(uuid):
 
 @bp.route('/pool/capacity/<string:uuid>', methods=['GET'])
 def pool_capacity(uuid):
-    pool = db.get_pool_by_id(uuid)
-    if not pool:
+    try:
+        db.get_pool_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
-
-    if pool.secret:
-        req_secret = request.headers.get('secret', "")
-        if req_secret != pool.secret:
-            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
 
     out = []
     total_size = 0
@@ -193,14 +179,10 @@ def pool_capacity(uuid):
 @bp.route('/pool/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/pool/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def pool_iostats(uuid, history):
-    pool = db.get_pool_by_id(uuid)
-    if not pool:
+    try:
+        pool = db.get_pool_by_id(uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
-
-    if pool.secret:
-        req_secret = request.headers.get('secret', "")
-        if req_secret != pool.secret:
-            return utils.get_response_error("Pool secret doesn't mach the value in the request header", 400)
 
     if history:
         records_number = core_utils.parse_history_param(history)
@@ -224,8 +206,9 @@ def pool_iostats(uuid, history):
 
 @bp.route('/pool/iostats-all-lvols/<string:pool_uuid>', methods=['GET'])
 def lvol_iostats(pool_uuid):
-    pool = db.get_pool_by_id(pool_uuid)
-    if not pool:
+    try:
+        db.get_pool_by_id(pool_uuid)
+    except KeyError:
         return utils.get_response_error(f"Pool not found: {pool_uuid}", 404)
 
     ret = []

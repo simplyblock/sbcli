@@ -424,7 +424,12 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             continue
         if snode.lvstore and force_lvstore_create is False:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
-            ret = storage_node_ops.recreate_lvstore(snode)
+            try:
+                ret = storage_node_ops.recreate_lvstore(snode)
+            except Exception as e:
+                logger.error(e)
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError("Failed to activate cluster")
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
@@ -501,7 +506,7 @@ def cluster_expand(cl_id) -> None:
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
                 set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to expand cluster, No enough secondary nodes")
+                raise ValueError("A minimum of 2 new nodes are required to expand cluster")
 
             snode = db_controller.get_storage_node_by_id(snode.get_id())
             snode.secondary_node_id = secondary_nodes[0]
