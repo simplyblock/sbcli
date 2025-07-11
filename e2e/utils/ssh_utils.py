@@ -736,18 +736,22 @@ class SshUtils:
         self.logger.info(f"LVOL DEVICE output: {json.dumps(data, indent=2)}")
 
         for device in data.get('Devices', []):
+            # Handle flat structure (2nd machine)
+            if "ModelNumber" in device and "DevicePath" in device:
+                model_number = device.get("ModelNumber")
+                if model_number and lvol_id and lvol_id in model_number:
+                    nvme_dict[lvol_id] = device["DevicePath"]
+
+            # Handle structured Subsystems (1st machine)
             for subsystem in device.get('Subsystems', []):
                 subsystem_nqn = subsystem.get('SubsystemNQN', '')
                 if ':lvol:' in subsystem_nqn:
-                    # Extract lvol UUID from NQN
                     lvol_uuid = subsystem_nqn.split(':lvol:')[-1]
-                    # Get the namespace name (e.g., nvme0n1)
                     ns_list = subsystem.get('Namespaces', [])
                     if ns_list:
-                        ns = ns_list[0]  # Should have only one namespace per lvol
+                        ns = ns_list[0]
                         namespace = ns.get('NameSpace')
                         if namespace:
-                            # Compose Linux device path
                             nvme_device = f"/dev/{namespace}"
                             nvme_dict[lvol_uuid] = nvme_device
 
@@ -755,7 +759,7 @@ class SshUtils:
         if lvol_id:
             return nvme_dict.get(lvol_id)
         return nvme_dict
-    
+
     # def get_already_mounted_points(self, node, mount_point):
     #     command = f"sudo df -h | grep ${mount_point}"
     #     output, _ = self.exec_command(node=node, command=command)

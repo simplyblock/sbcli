@@ -33,7 +33,8 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
         self.mount_base = "/mnt/"
         self.log_base = f"{Path.home()}/"
         self.fio_threads = []
-        self.logger.info(f"Running load test with Max Lvol:{self.max_lvols}, Start: {self.start_from}, Step:{self.step}")
+        if not self.read_only:
+            self.logger.info(f"Running load test with Max Lvol:{self.max_lvols}, Start: {self.start_from}, Step:{self.step}")
 
     def setup_environment(self):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
