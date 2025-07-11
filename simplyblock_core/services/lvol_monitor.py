@@ -6,7 +6,7 @@ from datetime import datetime
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.controllers import health_controller, lvol_events, tasks_controller
+from simplyblock_core.controllers import health_controller, lvol_events, tasks_controller, lvol_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -79,6 +79,38 @@ def post_lvol_delete_rebalance(lvol):
         if lvol_records[0].size_used > int(total_size * 10 / 100):
             resume_comp(lvol)
 
+
+def process_lvol_delete_finish(lvol):
+    logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
+
+    # 3- delete lvol bdev from secondary
+    if snode.secondary_node_id:
+        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), sec_node.get_id(), del_async=True)
+            if not ret:
+                logger.error(f"Failed to delete lvol from sec node: {sec_node.get_id()}")
+                # what to do here ?
+
+    lvol_events.lvol_delete(lvol)
+    lvol.remove(db.kv_store)
+    # check for full devices
+    full_devs_ids = []
+    all_devs_ids = []
+    for dev in snode.nvme_devices:
+        if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+            continue
+        all_devs_ids.append(dev.get_id())
+        if dev.status == NVMeDevice.STATUS_CANNOT_ALLOCATE:
+            full_devs_ids.append(dev.get_id())
+
+    if 0 < len(full_devs_ids) == len(all_devs_ids):
+        logger.info("All devices are full, starting expansion migrations")
+        for dev_id in full_devs_ids:
+            tasks_controller.add_new_device_mig_task(dev_id)
+    post_lvol_delete_rebalance(lvol)
+
+
 # get DB controller
 db = db_controller.DBController()
 
@@ -139,36 +171,64 @@ while True:
 
                     if lvol.status == lvol.STATUS_IN_DELETION:
                         ret = rpc_client.bdev_lvol_get_lvol_delete_status(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-                        if ret == 0: # delete complete
-                            logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
-                            lvol_events.lvol_delete(lvol)
-                            lvol.remove(db.kv_store)
-                            # check for full devices
-                            full_devs_ids = []
-                            all_devs_ids = []
-                            for dev in snode.nvme_devices:
-                                if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED ]:
-                                    continue
-                                all_devs_ids.append(dev.get_id())
-                                if dev.status == NVMeDevice.STATUS_CANNOT_ALLOCATE:
-                                    full_devs_ids.append(dev.get_id())
+                        if ret == 0 or ret == 2: # Lvol may have already been deleted (not found) or delete completed
+                            process_lvol_delete_finish(lvol)
 
-                            if 0 < len(full_devs_ids) == len(all_devs_ids):
-                                logger.info("All devices are full, starting expansion migrations")
-                                for dev_id in full_devs_ids:
-                                    tasks_controller.add_new_device_mig_task(dev_id)
-                            post_lvol_delete_rebalance(lvol)
-
-                        elif ret == 1: # deletion is in progress.
+                        elif ret == 1: # Async lvol deletion is in progress or queued
                             logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
                             pre_lvol_delete_rebalance()
 
-                        elif ret == 2: # deletion error
-                            logger.info(f"LVol deletion error, id: {lvol.get_id()}")
+                        elif ret == 3: # Async deletion is done, but leadership has changed (sync deletion is now blocked)
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error(f"Async deletion is done, but leadership has changed (sync deletion is now blocked)")
+
+                        elif ret == 4: # No async delete request exists for this lvol
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error(f"No async delete request exists for this lvol")
                             lvol = db.get_lvol_by_id(lvol.get_id())
                             lvol.io_error = True
                             lvol.write_to_db()
                             set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+
+                        elif ret == -1: # Operation not permitted
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error(f"Operation not permitted")
+
+                        elif ret == -2: # No such file or directory
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error("No such file or directory")
+
+                        elif ret == -5: # I/O error
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error("I/O error")
+
+                        elif ret == -11: # Try again
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error("Try again")
+
+                        elif ret == -12: # Out of memory
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error("Out of memory")
+
+                        elif ret == -16: # Device or resource busy
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error("Device or resource busy")
+
+                        elif ret == -19: # No such device
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error("No such device")
+
+                        elif ret == -35: # Leadership changed
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error("Leadership changed")
+
+                        elif ret == -36: # Failed to update lvol for deletion
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error("Failed to update lvol for deletion")
+
+                        else: # Failed to update lvol for deletion
+                            logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                            logger.error("Failed to update lvol for deletion")
 
                         continue
 
