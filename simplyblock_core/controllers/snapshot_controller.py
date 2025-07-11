@@ -557,6 +557,7 @@ def clone(snapshot_id, clone_name, new_size=0):
                 lvol.remove(db_controller.kv_store)
                 return False, error
 
+    lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
 
     if snap.snap_ref_id:
