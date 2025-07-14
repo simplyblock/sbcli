@@ -144,15 +144,17 @@ def _check_port_on_node(snode, port_id):
     try:
         fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
         iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
-        result = jc.parse('iptables', iptables_command_output)
-        for chain in result:
-            if chain['chain'] in ["INPUT", "OUTPUT"]:
-                for rule in chain['rules']:
-                    if str(port_id) in rule['options']:
-                        action = rule['target']
-                        if action in ["DROP", "REJECT"]:
-                            return False
-
+        if type(iptables_command_output) is str:
+            iptables_command_output = [iptables_command_output]
+        for rules in iptables_command_output:
+            result = jc.parse('iptables', rules)
+            for chain in result:
+                if chain['chain'] in ["INPUT", "OUTPUT"]:
+                    for rule in chain['rules']:
+                        if str(port_id) in rule['options']:
+                            action = rule['target']
+                            if action in ["DROP", "REJECT"]:
+                                return False
         return True
     except Exception as e:
         logger.error(e)
