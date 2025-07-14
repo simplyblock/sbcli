@@ -139,6 +139,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/e2e/
           python3 logs/upload_logs_to_miniio.py
+          python3 logs/cleanup.py
         if: always()
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
