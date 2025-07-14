@@ -238,12 +238,15 @@ def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
     cmd_list = []
     try:
         iptables_command_output = firewall_get(rpc_port)
-        result = jc.parse('iptables', iptables_command_output)
-        for chain in result:
-            if chain['chain'] in ["INPUT", "OUTPUT"]:
-                for rule in chain['rules']:
-                    if str(port_id) in rule['options']:
-                        cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']} -w")
+        if type(iptables_command_output) is str:
+            iptables_command_output = [iptables_command_output]
+        for rules in iptables_command_output:
+            result = jc.parse('iptables', rules)
+            for chain in result:
+                if chain['chain'] in ["INPUT", "OUTPUT"]:
+                    for rule in chain['rules']:
+                        if str(port_id) in rule['options']:
+                            cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']} -w")
 
     except Exception as e:
         logger.error(e)
