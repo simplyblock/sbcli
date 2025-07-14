@@ -1080,3 +1080,14 @@ class RPCClient:
             "policy": policy,
         }
         return self._request("bdev_nvme_set_multipath_policy", params)
+
+    def jc_get_jm_status(self, jm_vuid):
+        """
+        Returns :-
+            { 'jm1': True, 'remote_jm2': True, 'remote_jm3': False}
+        If the state is False, it means JM is not ready, or it has an active replication task.
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+        }
+        return self._request("jc_get_jm_status", params)
