@@ -83,7 +83,14 @@ def post_lvol_delete_rebalance(lvol):
 def process_lvol_delete_finish(lvol):
     logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
 
-    # 3- delete lvol bdev from secondary
+    # 3-1 async delete lvol bdev from primary
+    primary_node = db.get_storage_node_by_id(lvol.node_id)
+    if primary_node.status == StorageNode.STATUS_ONLINE:
+        ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
+        if not ret:
+            logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
+
+    # 3-2 async delete lvol bdev from secondary
     if snode.secondary_node_id:
         sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
