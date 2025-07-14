@@ -188,11 +188,12 @@ while True:
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
                     for remote_device in snode.remote_jm_devices:
-                        check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
-                        if check:
-                            connected_jms.append(remote_device.get_id())
-                        else:
-                            node_remote_devices_check = False
+                        if remote_device.remote_bdev:
+                            check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
+                            if check:
+                                connected_jms.append(remote_device.get_id())
+                            else:
+                                node_remote_devices_check = False
 
                     for jm_id in snode.jm_ids:
                         if jm_id and jm_id not in connected_jms:
