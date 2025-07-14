@@ -99,7 +99,7 @@ def get_cluster_metrics():
 def get_lvol_metrics():
     global lg
     if not lg:
-        labels = ['cluster', "pool", "lvol"]
+        labels = ['cluster', "pool", "lvol", "pvc_name"]
         for k in io_stats_keys + ["status_code", "health_check"]:
             lg["lvol_" + k] = Gauge("lvol_" + k, "lvol_" + k, labelnames=labels, registry=registry)
     return lg
@@ -242,12 +242,12 @@ def get_data():
                 for g in ng:
                     v = g.replace("lvol_", "")
                     if v in data:
-                        ng[g].labels(cluster=cl.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(data[v])
+                        ng[g].labels(cluster=cl.get_id(), lvol=lvol.get_id(), pvc_name=lvol.pvc_name, pool=lvol.pool_name).set(data[v])
                     elif v == "status_code":
-                        ng[g].labels(cluster=cl.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(
+                        ng[g].labels(cluster=cl.get_id(), lvol=lvol.get_id(), pvc_name=lvol.pvc_name, pool=lvol.pool_name).set(
                             lvol.get_status_code())
                     elif v == "health_check":
-                        ng[g].labels(cluster=cl.get_id(), lvol=lvol.get_id(), pool=lvol.pool_name).set(
+                        ng[g].labels(cluster=cl.get_id(), lvol=lvol.get_id(), pvc_name=lvol.pvc_name, pool=lvol.pool_name).set(
                             lvol.health_check)
 
 
