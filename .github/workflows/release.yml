@@ -35,6 +35,8 @@ jobs:
           version="${{ github.event.release.tag_name }}"
           echo "Replacing SIMPLY_BLOCK_VERSION with $version"
           sed -i "s/^SIMPLY_BLOCK_VERSION=.*/SIMPLY_BLOCK_VERSION=${version}/" simplyblock_core/env_var
+          echo "Replacing SIMPLY_BLOCK_DOCKER_IMAGE with $version"
+          sed -i "s/^SIMPLY_BLOCK_DOCKER_IMAGE=.*/SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:${version}/" simplyblock_core/env_var
 
       - name: Build package
         run: python setup.py sdist
