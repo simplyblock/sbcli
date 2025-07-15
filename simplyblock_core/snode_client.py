@@ -157,20 +157,6 @@ class SNodeClient:
     def get_file_content(self, file_name):
         return self._request("GET", f"get_file_content/{file_name}")
 
-
-    def firewall_set_port(self, port_id, port_type="tcp", action="block", rpc_port=None):
-        params = {
-            "port_id": port_id,
-            "port_type": port_type,
-            "action": action,
-            "rpc_port": rpc_port,
-        }
-        return self._request("POST", "firewall_set_port", params)
-
-    def get_firewall(self,rpc_port=None):
-        params = {"rpc_port": rpc_port}
-        return self._request("GET", "get_firewall", params)
-
     def spdk_proxy_restart(self,rpc_port=None):
         params = {"rpc_port": rpc_port}
         return self._request("GET", "spdk_proxy_restart", params)

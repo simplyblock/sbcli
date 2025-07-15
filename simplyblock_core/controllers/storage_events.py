@@ -58,6 +58,6 @@ def snode_restart_failed(node):
         event=ec.EVENT_STATUS_CHANGE,
         db_object=node,
         caused_by=ec.CAUSED_BY_CLI,
-        message=f"Storage node LVStore recovery failed",
+        message="Storage node LVStore recovery failed",
         node_id=node.get_id())
 

@@ -10,7 +10,7 @@ from typing import List, Optional, Union
 import cpuinfo
 import requests
 from flask_openapi3 import APIBlueprint
-from kubernetes.client import ApiException
+from kubernetes.client import ApiException, V1DeleteOptions
 from jinja2 import Environment, FileSystemLoader
 import yaml
 from pydantic import BaseModel, Field
@@ -338,7 +338,7 @@ def spdk_process_start(body: SPDKParams):
 
     try:
         env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
-        template = env.get_template('storage_deploy_spdk.yaml.j2')
+
         values = {
             'SPDK_IMAGE': body.spdk_image,
             "L_CORES": body.l_cores,
@@ -358,6 +358,29 @@ def spdk_process_start(body: SPDKParams):
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib
         }
+
+        job_template = env.get_template('storage_init_job.yaml.j2')
+        job_yaml = yaml.safe_load(job_template.render(values))
+        batch_v1 = core_utils.get_k8s_batch_client()
+        job_resp = batch_v1.create_namespaced_job(namespace=namespace, body=job_yaml)
+        msg = f"Job created: '{job_resp.metadata.name}' in namespace '{namespace}"
+        logger.info(msg)
+
+        node_utils_k8s.wait_for_job_completion(job_resp.metadata.name, namespace)
+        logger.info(f"Job '{job_resp.metadata.name}' completed successfully")
+
+        batch_v1.delete_namespaced_job(
+            name=job_resp.metadata.name,
+            namespace=namespace,
+            body=V1DeleteOptions(
+                propagation_policy='Foreground',
+                grace_period_seconds=0
+            )
+        )
+        logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
+
+        env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
+        template = env.get_template('storage_deploy_spdk.yaml.j2')
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)
         k8s_core_v1 = core_utils.get_k8s_core_client()
@@ -402,7 +425,7 @@ def spdk_process_kill():
 
 
 def _is_pod_up():
-    k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
+    k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -460,24 +483,7 @@ class _FirewallParams(BaseModel):
     })}}},
 })
 def firewall_set_port(body: _FirewallParams):
-    k8s_core_v1 = node_utils_k8s.get_k8s_core_client()
-
-    for pod in k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace()).items:
-        if not pod.metadata.name.startswith(pod_name):
-            continue
-
-        ret = node_utils_k8s.firewall_port_k8s(
-                body.port_id,
-                body.port_type,
-                body.action=="block",
-                k8s_core_v1,
-                node_utils_k8s.get_namespace(),
-                pod.metadata.name,
-                "spdk_container",
-        )
-        return utils.get_response(ret)
-
-    return utils.get_response(False)
+    return utils.get_response(False, "deprecated bath post snode/firewall_set_port")
 
 
 @api.get('/get_firewall', responses={
@@ -486,8 +492,7 @@ def firewall_set_port(body: _FirewallParams):
     })}}},
 })
 def get_firewall():
-    ret = node_utils_k8s.firewall_get_k8s()
-    return utils.get_response(ret)
+    return utils.get_response(False, "deprecated bath get snode/get_firewall")
 
 
 @api.post('/set_hugepages', responses={
