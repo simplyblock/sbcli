@@ -114,9 +114,9 @@ def test_convert_size(size, unit, expected):
 
 def test_singleton():
     with pytest.raises(ValueError):
-        helpers.singleton([])
+        helpers.single([])
 
-    assert helpers.singleton([1]) == 1
+    assert helpers.single([1]) == 1
 
     with pytest.raises(ValueError):
-        helpers.singleton([1, 2])
+        helpers.single([1, 2])
