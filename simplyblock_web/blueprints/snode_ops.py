@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import subprocess
 import time
 from typing import List, Optional, Union
 
@@ -14,6 +15,7 @@ from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
 
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
+import simplyblock_core.utils.pci as pci_utils
 from simplyblock_web import utils, node_utils
 
 logger = core_utils.get_logger(__name__)
@@ -491,62 +493,16 @@ class _DeviceParams(BaseModel):
 
 
 @api.post('/bind_device_to_nvme')
-def bind_device_to_nvme(body: _DeviceParams):
-    device_path = f"/sys/bus/pci/devices/{body.device_pci}"
-    driver_link = f"{device_path}/driver"
-    cmd_list = []
-    # Add check and unbind from uio_pci_generic if bound
-    cmd_list.append(
-        f'if [ "$(readlink -f {driver_link})" = "/sys/bus/pci/drivers/uio_pci_generic" ]; then '
-        f'echo -n "{body.device_pci}" > /sys/bus/pci/drivers/uio_pci_generic/unbind; fi'
-    )
-
-    # Add check and unbind from vfio-pci if bound
-    cmd_list.append(
-        f'if [ "$(readlink -f {driver_link})" = "/sys/bus/pci/drivers/vfio-pci" ]; then '
-        f'echo -n "{body.device_pci}" > /sys/bus/pci/drivers/vfio-pci/unbind; fi'
-    )
-
-    # Set override to nvme
-    cmd_list.append(
-        f'echo "nvme" > {device_path}/driver_override'
-    )
-
-    # Bind to nvme only if not already bound
-    cmd_list.append(
-        f'if [ "$(readlink -f {driver_link})" != "/sys/bus/pci/drivers/nvme" ]; then '
-        f'echo -n "{body.device_pci}" > /sys/bus/pci/drivers/nvme/bind; fi'
-    )
-
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
+def bind_device_to_nvme(body: utils.DeviceParams):
+    pci_utils.ensure_driver(body.device_pci, 'nvme')
     return utils.get_response(True)
 
 
 @api.post('/delete_dev_gpt_partitions')
 def delete_gpt_partitions_for_dev(body: _DeviceParams):
     bind_device_to_nvme(body)
-
-    device_pci = body.device_pci
-    device_path = f"/sys/bus/pci/devices/{device_pci}"
-    driver_link = os.path.join(device_path, "nvme/nvme*/")
-
-    device_name = os.popen(f"ls {driver_link} | grep nvme").read().strip()
-    if device_name:
-        cmd_list = [
-            f"parted -fs /dev/{device_name} mklabel gpt",
-            #f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
-        ]
-
-        for cmd in cmd_list:
-            logger.debug(cmd)
-            ret = os.popen(cmd).read().strip()
-            logger.debug(ret)
-            time.sleep(1)
-
+    device_name = pci_utils.nvme_device_name(body.device_pci)
+    subprocess.check_call(['parted', '-fs', f'/dev/{device_name}', 'mklabel' 'gpt'])
     return utils.get_response(True)
 
 
@@ -567,21 +523,8 @@ if not os.environ.get("WITHOUT_CLOUD_INFO"):
 
 
 @api.post('/bind_device_to_spdk')
-def bind_device_to_spdk(body: _DeviceParams):
-    cmd_list = [
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
-        f"echo \"\" > /sys/bus/pci/devices/{body.device_pci}/driver_override",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/bind",
-        f"echo \"uio_pci_generic\" > /sys/bus/pci/devices/{body.device_pci}/driver_override",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers_probe",
-    ]
-
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
-
+def bind_device_to_spdk(body: utils.DeviceParams):
+    pci_utils.ensure_driver(body.device_pci, 'uio_pci_generic', override=True)
     return utils.get_response(True)
 
 
