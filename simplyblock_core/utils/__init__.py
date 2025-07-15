@@ -1743,7 +1743,7 @@ def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
             raise
 
 def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):
-    TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    TOP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
 
