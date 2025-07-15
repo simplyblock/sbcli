@@ -269,6 +269,19 @@ jobs:
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
+      - name: Cleanup log folder
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/cleanup.py
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          MNODES: "${{ needs.deploy.outputs.mnodes }}"
+          STORAGE_PRIVATE_IPS: "${{ needs.deploy.outputs.storage_private_ips }}"
+          USER: "root"
+
       - name: 'Cleanup build folder'
         run: |
           ls -la ./
