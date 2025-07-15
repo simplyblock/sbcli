@@ -4,7 +4,7 @@ from typing import Annotated, Optional
 
 from pydantic import StringConstraints
 
-from .helpers import singleton
+from .helpers import single
 
 
 PCI = Path('/sys/bus/pci')
@@ -55,8 +55,8 @@ def list(*, driver: Optional[str] = None, device_class: Optional[bytes] = None):
 
 
 def nvme_device_name(address: PCIAddress):
-    controller = singleton((_device(address) / 'nvme').iterdir())
-    return singleton(
+    controller = single((_device(address) / 'nvme').iterdir())
+    return single(
             name
             for path
             in controller.iterdir()

@@ -1,4 +1,4 @@
-def singleton(xs):
+def single(xs):
     """Returns the single value in the passed collection
 
     If `xs` contains zero or multiple values, a ValueError error is raised.
