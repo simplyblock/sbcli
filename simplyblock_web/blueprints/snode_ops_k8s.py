@@ -236,32 +236,7 @@ class _DeviceParams(BaseModel):
     device_pci: str
 
 
-@api.post('/delete_dev_gpt_partitions')
-def delete_gpt_partitions_for_dev(body: _DeviceParams):
-    cmd_list = [
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
-    ]
-
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
-
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{body.device_pci}/nvme/nvme*/ | grep nvme").read().strip()
-    cmd_list = [
-        f"parted -fs /dev/{device_name} mklabel gpt",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
-    ]
-
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
-
-    return utils.get_response(True)
+api.post('/delete_dev_gpt_partitions')(snode_ops.delete_gpt_partitions_for_dev)
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
