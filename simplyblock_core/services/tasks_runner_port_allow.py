@@ -132,7 +132,7 @@ while True:
                                 lvstore_check &= health_controller._check_node_hublvol(node)
 
                         if lvstore_check is False:
-                            msg = f"Node LVolStore check fail, retry later"
+                            msg = "Node LVolStore check fail, retry later"
                             logger.warning(msg)
                             task.function_result = msg
                             task.status = JobSchedule.STATUS_SUSPENDED
