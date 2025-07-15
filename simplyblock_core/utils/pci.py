@@ -63,9 +63,18 @@ def nvme_device_name(address: PCIAddress):
             if (name := path.name).startswith(controller.name)
     )
 
+
 def bound_driver_name(address: PCIAddress) -> Optional[str]:
     driver = _driver(address)
     return driver.readlink().name if driver.exists() else None
+
+
+def unbind_driver(address: PCIAddress):
+    driver = _driver(address)
+    if not driver.exists():
+        return
+
+    (driver / 'unbind').write_text(address)
 
 
 def ensure_driver(address: PCIAddress, driver_name: str, *, override: bool = False):
