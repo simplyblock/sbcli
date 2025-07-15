@@ -1193,6 +1193,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
             ip = nic.ip4_address
             port = lvol.subsys_port
             out.append({
+                "ns_id": lvol.ns_id,
                 "transport": transport,
                 "ip": ip,
                 "port": port,
