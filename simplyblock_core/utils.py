@@ -165,19 +165,18 @@ def get_docker_client(cluster_id=None):
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes()
     if not nodes:
-        logger.error("No mgmt nodes was found in the cluster!")
-        return False
+        raise RuntimeError("No mgmt nodes was found in the cluster!")
 
     docker_ips = [node.docker_ip_port for node in nodes]
 
     for ip in docker_ips:
         try:
-            c = docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
-            return c
+            return docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
         except Exception as e:
             print(e)
             raise e
-    return False
+
+    raise RuntimeError("No docker client found for this IP")
 
 
 def dict_agg(data, mean=False, keys=None):
