@@ -85,9 +85,11 @@ data_files.append(('', ["requirements.txt"]))
 
 console_scripts = [
     f'{COMMAND_NAME}=simplyblock_cli.cli:main',
+    f'{SIMPLYBLOCK_DEFAULT_CLI_CMD}=simplyblock_cli.cli:main'
 ]
-if COMMAND_NAME != SIMPLYBLOCK_DEFAULT_CLI_CMD:
-    console_scripts.append(f'{SIMPLYBLOCK_DEFAULT_CLI_CMD}=simplyblock_cli.cli:main')
+
+# to remove duplicates if COMMAND_NAME is same as SIMPLYBLOCK_DEFAULT_CLI_CMD
+console_scripts = list(set(console_scripts))
 
 setup(
     name=COMMAND_NAME,
