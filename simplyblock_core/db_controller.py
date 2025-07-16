@@ -273,11 +273,11 @@ class DBController(metaclass=Singleton):
     def get_job_tasks(self, cluster_id, reverse=True, limit=0) -> List[JobSchedule]:
         return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
 
-    def get_task_by_id(self, task_id) -> Optional[JobSchedule]:
+    def get_task_by_id(self, task_id) -> JobSchedule:
         for task in self.get_job_tasks(" "):
             if task.uuid == task_id:
                 return task
-        return None
+        raise KeyError(f'Task {task_id} not found')
 
     def get_snapshots_by_node_id(self, node_id) -> List[SnapShot]:
         ret = []
