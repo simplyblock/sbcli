@@ -4,6 +4,7 @@ from setuptools import setup, find_packages
 
 from setuptools.command.install import install as _install
 
+SIMPLYBLOCK_DEFAULT_CLI_CMD = "sbctl"
 
 def _post_install():
     from subprocess import getstatusoutput
@@ -74,13 +75,19 @@ def get_requirements():
         return fh.readlines()
 
 
-COMMAND_NAME = get_env_var("SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
+COMMAND_NAME = get_env_var("SIMPLY_BLOCK_COMMAND_NAME", SIMPLYBLOCK_DEFAULT_CLI_CMD)
 VERSION = get_env_var("SIMPLY_BLOCK_VERSION", "1")
 
 data_files = gen_data_files("simplyblock_core","simplyblock_web")
 data_files.append(('', ["requirements.txt"]))
 # data_files.append(('/etc/simplyblock', ["requirements.txt"]))
 
+
+console_scripts = [
+    f'{COMMAND_NAME}=simplyblock_cli.cli:main',
+]
+if COMMAND_NAME != SIMPLYBLOCK_DEFAULT_CLI_CMD:
+    console_scripts.append(f'{SIMPLYBLOCK_DEFAULT_CLI_CMD}=simplyblock_cli.cli:main')
 
 setup(
     name=COMMAND_NAME,
@@ -95,10 +102,7 @@ setup(
     long_description_content_type="text/markdown",
     install_requires=get_requirements(),
     entry_points={
-        'console_scripts': [
-            f'{COMMAND_NAME}=simplyblock_cli.cli:main',
-            'sbctl=simplyblock_cli.cli:main',
-        ]
+        'console_scripts': console_scripts
     },
     include_package_data=True,
     data_files=data_files,
@@ -106,5 +110,4 @@ setup(
         '': ["/etc/simplyblock/requirements.txt"],
         '/etc/simplyblock': ["requirements.txt"]
     },
-    # cmdclass={'install': install},
 )
