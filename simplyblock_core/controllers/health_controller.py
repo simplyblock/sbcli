@@ -687,9 +687,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     logger.info(f"Checking lvol on node: {node_id}")
 
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     try:
@@ -735,9 +736,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
 def check_lvol(lvol_id):
     db_controller = DBController()
 
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if lvol.ha_type == 'single':

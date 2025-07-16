@@ -25,11 +25,13 @@ def list_lvols(uuid):
     cluster_id = utils.get_cluster_id(request)
     lvols = []
     if uuid:
-        lvol = db.get_lvol_by_id(uuid)
-        if lvol:
+        try:
+            lvol = db.get_lvol_by_id(uuid)
             node = db.get_storage_node_by_id(lvol.node_id)
             if node.cluster_id == cluster_id:
                 lvols = [lvol]
+        except KeyError:
+            pass
 
         if not lvols:
             return utils.get_response_error(f"LVol not found: {uuid}", 404)
@@ -45,9 +47,10 @@ def list_lvols(uuid):
 @bp.route('/lvol/iostats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/lvol/iostats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def lvol_iostats(uuid, history):
-    lvol = db.get_lvol_by_id(uuid)
-    if not lvol:
-        return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    try:
+        lvol = db.get_lvol_by_id(uuid)
+    except KeyError as e:
+        return utils.get_response_error(str(e), 404)
 
     data = lvol_controller.get_io_stats(uuid, history, parse_sizes=False, with_sizes=True)
     ret = {
@@ -59,9 +62,10 @@ def lvol_iostats(uuid, history):
 @bp.route('/lvol/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/lvol/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def lvol_capacity(uuid, history):
-    lvol = db.get_lvol_by_id(uuid)
-    if not lvol:
-        return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    try:
+        lvol = db.get_lvol_by_id(uuid)
+    except KeyError as e:
+        return utils.get_response_error(str(e), 404)
 
     data = lvol_controller.get_capacity(uuid, history, parse_sizes=False)
     out = []
@@ -179,9 +183,10 @@ def add_lvol():
 
 @bp.route('/lvol/<string:uuid>', methods=['PUT'])
 def update_lvol(uuid):
-    lvol = db.get_lvol_by_id(uuid)
-    if not lvol:
-        return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    try:
+        db.get_lvol_by_id(uuid)
+    except KeyError as e:
+        return utils.get_response_error(str(e), 404)
 
     cl_data = request.get_json()
 
@@ -218,9 +223,10 @@ def update_lvol(uuid):
 
 @bp.route('/lvol/<string:uuid>', methods=['DELETE'])
 def delete_lvol(uuid):
-    lvol = db.get_lvol_by_id(uuid)
-    if not lvol:
-        return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    try:
+        lvol = db.get_lvol_by_id(uuid)
+    except KeyError as e:
+        return utils.get_response_error(str(e), 404)
 
     try:
         pool = db.get_pool_by_id(lvol.pool_uuid)
@@ -237,9 +243,10 @@ def delete_lvol(uuid):
 
 @bp.route('/lvol/resize/<string:uuid>', methods=['PUT'])
 def resize_lvol(uuid):
-    lvol = db.get_lvol_by_id(uuid)
-    if not lvol:
-        return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    try:
+        db.get_lvol_by_id(uuid)
+    except KeyError as e:
+        return utils.get_response_error(str(e), 404)
 
     cl_data = request.get_json()
     if 'size' not in cl_data:
@@ -253,9 +260,10 @@ def resize_lvol(uuid):
 
 @bp.route('/lvol/connect/<string:uuid>', methods=['GET'])
 def connect_lvol(uuid):
-    lvol = db.get_lvol_by_id(uuid)
-    if not lvol:
-        return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    try:
+        db.get_lvol_by_id(uuid)
+    except KeyError as e:
+        return utils.get_response_error(str(e), 404)
 
     ret = lvol_controller.connect_lvol(uuid)
     return utils.get_response(ret)
@@ -277,9 +285,11 @@ def create_snapshot():
 
 @bp.route('/lvol/inflate_lvol/<string:uuid>', methods=['PUT'])
 def inflate_lvol(uuid):
-    lvol = db.get_lvol_by_id(uuid)
-    if not lvol:
-        return utils.get_response_error(f"LVol not found: {uuid}", 404)
+    try:
+        lvol = db.get_lvol_by_id(uuid)
+    except KeyError as e:
+        return utils.get_response_error(str(e), 404)
+
     if not lvol.cloned_from_snap:
         return utils.get_response_error(f"LVol: {uuid} must be cloned LVol not regular one", 404)
 
