@@ -154,7 +154,7 @@ while True:
 
                 sec_node_bdev_names = {}
                 sec_node_lvols_nqns = {}
-
+                sec_node = None
                 if snode.secondary_node_id:
                     sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
                     if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
@@ -177,7 +177,35 @@ while True:
                         continue
 
                     if lvol.status == lvol.STATUS_IN_DELETION:
-                        ret = rpc_client.bdev_lvol_get_lvol_delete_status(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+
+                        # check leadership
+                        leader_node = None
+                        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                            ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
+                            if not ret:
+                                raise Exception("Failed to get LVol info")
+                            lvs_info = ret[0]
+                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                leader_node = snode
+
+                        if not leader_node and sec_node:
+                            ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
+                            if not ret:
+                                raise Exception("Failed to get LVol info")
+                            lvs_info = ret[0]
+                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                leader_node = sec_node
+
+                        if not leader_node:
+                            raise Exception("Failed to get leader node")
+
+                        try:
+                            ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(
+                                f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+                        except Exception as e:
+                            # timeout detected, check other node
+                            break
+
                         if ret == 0 or ret == 2: # Lvol may have already been deleted (not found) or delete completed
                             process_lvol_delete_finish(lvol)
 
