@@ -3,7 +3,7 @@ name: End-to-end test docker
 on:
   push:
     branches:
-      # - main
+      - main
       - R*-PRE
       - R*-Hotfix
 
@@ -67,7 +67,7 @@ jobs:
         timeout-minutes: 15
         run: |
           cd deploy/bare-metal
-          cluster="${{ inputs.cluster }}"
+          cluster="${{ inputs.cluster || 'c141' }}"
           cluster="${cluster:1}"
           echo "cleaning up cluster $cluster"
           KEY="~/.ssh/simplyblock-us-east-2.pem"
@@ -79,7 +79,7 @@ jobs:
     uses: ./.github/workflows/bare-metal-deploy.yml
     with:
       runs_on: self-hosted
-      cluster: ${{ github.event.inputs.cluster || 'c141' }}
+      cluster: ${{ inputs.cluster || 'c141' }}
       docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
       sbcli_source: ${{ github.head_ref || github.ref_name }}
       ndcs: ${{ github.event.inputs.ndcs }}
@@ -123,14 +123,8 @@ jobs:
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
           export SSH_USER=root
-          TESTNAME=""
-          if [ -n "${{ github.event.inputs.test_case_to_run }}" ]; then
-            TESTNAME=" --testname ${{ github.event.inputs.test_case_to_run }}"
-            echo "Running specific test cases: $TESTNAME"
-          else
-            echo "Running all test cases"
-          fi
-          python3 e2e.py $TESTNAME \
+          TEST_CASE=${{ inputs.test_case_to_run || (github.ref == 'refs/heads/main' && 'TestHASingleNodeFailure') || '' }}
+          python3 e2e.py ${TEST_CASE:+--testname} ${TEST_CASE} \
                   --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test || true }}
         env:
           NDCS: ${{ github.event.inputs.ndcs || 1 }}
