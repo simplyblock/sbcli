@@ -2597,7 +2597,7 @@ def deploy(ifname, isolate_cores=False):
     logger.info("Config Validated successfully.")
 
     logger.info("NVMe SSD devices found on node:")
-    stream = os.popen(f"lspci -Dnn | grep -i '\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\]'")
+    stream = os.popen(f"lspci -Dnn | grep -i '\\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\\]'")
     for line in stream.readlines():
         logger.info(line.strip())
 
