@@ -195,11 +195,11 @@ class DBController(metaclass=Singleton):
                 return lvol
         return None
 
-    def get_mgmt_node_by_id(self, id) -> Optional[MgmtNode]:
+    def get_mgmt_node_by_id(self, id) -> MgmtNode:
         ret = MgmtNode().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
-        return None
+        if not ret:
+            raise KeyError(f'ManagementNode {id} not found')
+        return ret[0]
 
     def get_mgmt_nodes(self, cluster_id=None) -> List[MgmtNode]:
         nodes = MgmtNode().read_from_db(self.kv_store)
@@ -207,12 +207,12 @@ class DBController(metaclass=Singleton):
             nodes = [n for n in nodes if n.cluster_id == cluster_id]
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_mgmt_node_by_hostname(self, hostname) -> Optional[MgmtNode]:
+    def get_mgmt_node_by_hostname(self, hostname) -> MgmtNode:
         nodes = self.get_mgmt_nodes()
         for node in nodes:
             if node.hostname == hostname:
                 return node
-        return None
+        raise KeyError(f'No management node found for hostname {hostname}')
 
     def get_lvol_stats(self, lvol, limit=20) -> List[LVolStatObject]:
         if isinstance(lvol, str):
