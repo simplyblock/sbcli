@@ -109,8 +109,12 @@ spec:
               echo "[INFO] Detected OS: $OS_ID"
 
               case "$OS_ID" in
-                  debian|ubuntu)
+                  debian)
                       apt update && apt install -y grep jq nvme-cli tuned
+                      ;;
+                  ubuntu)
+                      apt update && apt install -y grep jq nvme-cli tuned
+                      apt-get install -y linux-modules-extra-$(uname -r)
                       ;;
                   centos|rhel|rocky|almalinux)
                       export YUM_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
