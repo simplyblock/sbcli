@@ -95,10 +95,7 @@ def get_cluster_id(request):
 def get_aws_region():
     try:
         from ec2_metadata import ec2_metadata
-        import requests
-        session = requests.session()
-        session.timeout = 3
-        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
+        data = ec2_metadata.EC2Metadata().instance_identity_document
         return data["region"]
     except Exception:
         pass

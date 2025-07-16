@@ -22,11 +22,9 @@ class SNodeClient:
         self.timeout = timeout
         self.session = requests.session()
         self.session.verify = False
-        self.session.timeout = self.timeout
         self.session.headers['Content-Type'] = "application/json"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.session.timeout = self.timeout
 
     def _request(self, method, path, payload=None):
         try:
