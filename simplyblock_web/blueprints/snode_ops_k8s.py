@@ -566,7 +566,7 @@ def apply_config():
         return utils.get_response(False, "Config validation is incorrect")
 
     # Set Huge page memory
-    huge_page_memory_dict = {}
+    huge_page_memory_dict: dict = {}
     for node_config in nodes:
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
