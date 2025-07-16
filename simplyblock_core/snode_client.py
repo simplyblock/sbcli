@@ -50,14 +50,12 @@ class SNodeClient:
         error = None
         if ret_code == 200:
             try:
-                data = response.json()
+                decoded_data = response.json()
             except Exception:
                 return response.content, None
 
-            if 'results' in data:
-                result = data['results']
-            if 'error' in data:
-                error = data['error']
+            result = decoded_data.get('results')
+            error = decoded_data.get('error')
             if result is not None or error is not None:
                 return result, error
             else:
