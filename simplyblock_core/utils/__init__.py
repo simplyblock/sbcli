@@ -1264,24 +1264,25 @@ def detect_nvmes(pci_allowed, pci_blocked):
     return nvmes
 
 
-def calculate_unisolated_cores(cores):
+def calculate_unisolated_cores(cores, cores_percentage=0):
     # calculate the number if unused system cores (UnIsolated cores)
     total = len(cores)
+    if cores_percentage:
+        return math.ceil(total * (100 - cores_percentage) / 100)
     if total <= 10:
         return 1
-    elif total <= 20:
+    if total <= 20:
         return 2
-    elif total <= 28:
+    if total <= 28:
         return 3
-    else:
-        return math.ceil(total * 0.15)
+    return math.ceil(total * 0.15)
 
 
 def get_core_indexes(core_to_index, list_of_cores):
     return [core_to_index[core] for core in list_of_cores if core in core_to_index]
 
 
-def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
+def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage=0):
     node_distribution: dict = {}
     # Iterate over each NUMA node
     for numa_node in sockets_to_use:
@@ -1289,7 +1290,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
             continue
         all_cores = sorted(cores_by_numa[numa_node])
         total_cores = len(all_cores)
-        num_unisolated = calculate_unisolated_cores(all_cores)
+        num_unisolated = calculate_unisolated_cores(all_cores, cores_percentage)
 
         unisolated = []
         half = total_cores // 2
@@ -1439,7 +1440,7 @@ def regenerate_config(new_config, old_config, force=False):
     return old_config
 
 
-def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
+def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked, cores_percentage=0):
     system_info = {}
     nodes_config: dict = {"nodes": []}
 
@@ -1495,7 +1496,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     for i, nvme_name in enumerate(nvme_numa_neg1):
         all_nvmes_neg1_per_node[i % total_nodes].append(nvme_name)
 
-    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, )
+    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage)
 
     all_nodes = []
     node_index = 0

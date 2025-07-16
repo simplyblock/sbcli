@@ -1,5 +1,7 @@
 from simplyblock_core.storage_node_ops import generate_automated_deployment_config, upgrade_automated_deployment_config
 from simplyblock_core import utils
+from simplyblock_cli.clibase import range_type
+
 import argparse
 
 if __name__ == "__main__":
@@ -21,7 +23,10 @@ if __name__ == "__main__":
                                        type=str, default='', dest='pci_blocked', required=False)
     parser.add_argument('--upgrade',
                                        help='Upgrade', action='store_true', dest='upgrade', required=False)
+    parser.add_argument('--cores-percentage', help='The percentage of cores to be used for spdk',
+                                       type=range_type(0, 100), dest='cores_percentage', required=False, default=0)
     args = parser.parse_args()
+
 
     if args.upgrade:
         upgrade_automated_deployment_config()
@@ -29,7 +34,7 @@ if __name__ == "__main__":
         if not args.max_lvol:
             parser.error('--max-lvol required.')
         if not args.max_prov:
-            parser.error('--max-prov required.')
+            parser.error('--max-size required.')
 
         try:
             max_lvol = int(args.max_lvol)
@@ -67,7 +72,8 @@ if __name__ == "__main__":
             sockets_to_use=sockets_to_use,
             nodes_per_socket=nodes_per_socket,
             pci_allowed=pci_allowed,
-            pci_blocked=pci_blocked
+            pci_blocked=pci_blocked,
+            cores_percentage = args.cores_percentage
         )
         if not status:
             raise RuntimeError("Failed to generate automated deployment configuration.")
