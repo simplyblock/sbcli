@@ -40,7 +40,6 @@ class RPCClient:
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.session.timeout = self.timeout
 
     def _request(self, method, params=None):
         ret, _ = self._request2(method, params)
