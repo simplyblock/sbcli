@@ -2532,7 +2532,7 @@ def upgrade_automated_deployment_config():
             return False
         utils.store_config_file(updated_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
         # Set Huge page memory
-        huge_page_memory_dict = {}
+        huge_page_memory_dict: dict = {}
         for node_config in updated_config["nodes"]:
             numa = node_config["socket"]
             huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
@@ -2563,7 +2563,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
     if system_info:
         utils.store_config_file(system_info, constants.SYSTEM_INFO_FILE)
-    huge_page_memory_dict = {}
+    huge_page_memory_dict: dict = {}
 
     # Set Huge page memory
     for node_config in nodes_config["nodes"]:
@@ -3403,7 +3403,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    created_bdevs = []
+    created_bdevs: list = []
     if not lvstore_stack:
         # Restart case
         stack = snode.lvstore_stack
