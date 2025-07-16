@@ -112,7 +112,6 @@ spec:
                   debian|ubuntu)
                       apt update && apt install -y grep jq nvme-cli tuned
                       apt-get install -y linux-modules-extra-$(uname -r)
-                      depmod
                       ;;
                   centos|rhel|rocky|almalinux)
                       export YUM_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
