@@ -737,7 +737,7 @@ class CLIWrapper(CLIWrapperBase):
 
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
-        ret = ""
+        ret = False
         args_dict = args.__dict__
 
         try:
