@@ -182,17 +182,17 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'Snapshot {id} not found')
         return ret[0]
 
-    def get_lvol_by_id(self, id) -> Optional[LVol]:
+    def get_lvol_by_id(self, id) -> LVol:
         lvols = LVol().read_from_db(self.kv_store, id=id)
-        if lvols:
-            return lvols[0]
-        return None
+        if not lvols:
+            raise KeyError(f'LVol {id} not found')
+        return lvols[0]
 
-    def get_lvol_by_name(self, lvol_name) -> Optional[LVol]:
+    def get_lvol_by_name(self, lvol_name) -> LVol:
         for lvol in self.get_lvols():
             if lvol.lvol_name == lvol_name:
                 return lvol
-        return None
+        raise KeyError(f'LVol {lvol_name} not found')
 
     def get_mgmt_node_by_id(self, id) -> MgmtNode:
         ret = MgmtNode().read_from_db(self.kv_store, id)
