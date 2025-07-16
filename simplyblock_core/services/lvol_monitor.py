@@ -118,6 +118,12 @@ def process_lvol_delete_finish(lvol):
     post_lvol_delete_rebalance(lvol)
 
 
+def process_lvol_delete_try_again(lvol):
+    lvol = db.get_lvol_by_id(lvol.get_id())
+    lvol.deletion_status = ""
+    lvol.write_to_db()
+
+
 # get DB controller
 db = db_controller.DBController()
 
@@ -199,6 +205,10 @@ while True:
                         if not leader_node:
                             raise Exception("Failed to get leader node")
 
+                        if lvol.deletion_status == "":
+                            lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
+                            time.sleep(3)
+
                         try:
                             ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(
                                 f"{lvol.lvs_name}/{lvol.lvol_bdev}")
@@ -228,38 +238,53 @@ while True:
                         elif ret == -1: # Operation not permitted
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                             logger.error(f"Operation not permitted")
+                            lvol = db.get_lvol_by_id(lvol.get_id())
+                            lvol.io_error = True
+                            lvol.write_to_db()
+                            set_lvol_status(lvol, LVol.STATUS_OFFLINE)
 
                         elif ret == -2: # No such file or directory
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                             logger.error("No such file or directory")
+                            process_lvol_delete_finish(lvol)
 
                         elif ret == -5: # I/O error
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                             logger.error("I/O error")
+                            process_lvol_delete_try_again(lvol)
 
                         elif ret == -11: # Try again
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                             logger.error("Try again")
+                            process_lvol_delete_try_again(lvol)
 
                         elif ret == -12: # Out of memory
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                             logger.error("Out of memory")
+                            process_lvol_delete_try_again(lvol)
 
                         elif ret == -16: # Device or resource busy
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                             logger.error("Device or resource busy")
+                            process_lvol_delete_try_again(lvol)
 
                         elif ret == -19: # No such device
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                             logger.error("No such device")
+                            lvol = db.get_lvol_by_id(lvol.get_id())
+                            lvol.io_error = True
+                            lvol.write_to_db()
+                            set_lvol_status(lvol, LVol.STATUS_OFFLINE)
 
                         elif ret == -35: # Leadership changed
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                             logger.error("Leadership changed")
+                            process_lvol_delete_try_again(lvol)
 
                         elif ret == -36: # Failed to update lvol for deletion
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                             logger.error("Failed to update lvol for deletion")
+                            process_lvol_delete_try_again(lvol)
 
                         else: # Failed to update lvol for deletion
                             logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
