@@ -150,10 +150,10 @@ def _check_port_on_node(snode, port_id):
         for rules in iptables_command_output:
             result = jc.parse('iptables', rules)
             for chain in result:
-                if chain['chain'] in ["INPUT", "OUTPUT"]:
-                    for rule in chain['rules']:
-                        if str(port_id) in rule['options']:
-                            action = rule['target']
+                if chain['chain'] in ["INPUT", "OUTPUT"]:  # type: ignore
+                    for rule in chain['rules']:  # type: ignore
+                        if str(port_id) in rule['options']:  # type: ignore
+                            action = rule['target']  # type: ignore
                             if action in ["DROP", "REJECT"]:
                                 return False
         return True
