@@ -93,6 +93,7 @@ while True:
                 connected_devices = []
 
                 node_bdevs = rpc_client.get_bdevs()
+                logger.debug(node_bdevs)
                 if node_bdevs:
                     # node_bdev_names = [b['name'] for b in node_bdevs]
                     node_bdev_names = {}
@@ -189,11 +190,14 @@ while True:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
                     for remote_device in snode.remote_jm_devices:
                         if remote_device.remote_bdev:
-                            check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
-                            if check:
-                                connected_jms.append(remote_device.get_id())
-                            else:
-                                node_remote_devices_check = False
+                            remote_bdev = remote_device.remote_bdev
+                        else:
+                            remote_bdev = f"remote_{remote_device.jm_bdev}n1"
+                        check = health_controller.check_bdev(remote_bdev, bdev_names=node_bdev_names)
+                        if check:
+                            connected_jms.append(remote_device.get_id())
+                        else:
+                            node_remote_devices_check = False
 
                     for jm_id in snode.jm_ids:
                         if jm_id and jm_id not in connected_jms:
