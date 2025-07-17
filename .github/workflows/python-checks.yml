@@ -94,5 +94,5 @@ jobs:
     - name: Execute type checker
       run: |
         pip install -r requirements.txt
-        pip install kubernetes-typed types-docker types-boto3 types-urllib3
+        pip install -r type-requirements.txt
         mypy simplyblock_web simplyblock_cli simplyblock_core --install-types --non-interactive
