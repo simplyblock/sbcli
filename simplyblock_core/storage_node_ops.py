@@ -696,15 +696,19 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     remote_devices = []
     if jm_ids:
         for jm_id in jm_ids:
-            jm_dev = db_controller.get_jm_device_by_id(jm_id)
-            if jm_dev:
-                remote_devices.append(jm_dev)
+            try:
+                remote_devices.append(db_controller.get_jm_device_by_id(jm_id))
+            except KeyError:
+                pass
 
     if this_node.jm_ids:
         for jm_id in this_node.jm_ids:
-            jm_dev = db_controller.get_jm_device_by_id(jm_id)
-            if jm_dev and jm_dev not in remote_devices:
-                remote_devices.append(jm_dev)
+            try:
+                jm_dev = db_controller.get_jm_device_by_id(jm_id)
+                if jm_dev not in remote_devices:
+                    remote_devices.append(jm_dev)
+            except KeyError:
+                pass
 
     if this_node.lvstore_stack_secondary_1:
         org_node = db_controller.get_storage_node_by_id(this_node.lvstore_stack_secondary_1)
@@ -1984,9 +1988,11 @@ def list_storage_devices(node_id, is_json):
         })
 
     for jm_id in snode.jm_ids:
-        jm_device = db_controller.get_jm_device_by_id(jm_id)
-        if not jm_device:
+        try:
+            jm_device = db_controller.get_jm_device_by_id(jm_id)
+        except KeyError:
             continue
+
         jm_devices.append({
             "UUID": jm_device.uuid,
             "Name": jm_device.device_name,
