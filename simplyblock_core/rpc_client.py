@@ -70,14 +70,6 @@ _response_schema = {
 }
 
 
-def print_dict(d):
-    print(json.dumps(d, indent=2))
-
-
-def print_json(s):
-    print(json.dumps(s, indent=2).strip('"'))
-
-
 class RPCException(Exception):
     def __init__(self, message: str, code: Optional[int] = None, data: Any = None):
         self.code = code
