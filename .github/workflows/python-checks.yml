@@ -101,4 +101,4 @@ jobs:
         stubgen -m cpuinfo -o stubs
         stubgen -m cpuinfo.cpuinfo -o stubs
         stubgen -m fdb -o stubs
-        mypy simplyblock_web simplyblock_cli --install-types --non-interactive
+        mypy simplyblock_web simplyblock_cli simplyblock_core --install-types --non-interactive
