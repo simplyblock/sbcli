@@ -167,12 +167,16 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
 def delete_pool(uuid):
     db_controller = DBController()
     try:
+        pool = (
+                db_controller.get_pool_by_id(uuid)
+                if utils.UUID_PATTERN.match(uuid) is not None
+                else db_controller.get_pool_by_name(uuid)
+        )
         pool = db_controller.get_pool_by_id(uuid)
-    except KeyError:
-        pool = db_controller.get_pool_by_name(uuid)
-    if not pool:
-        logger.error(f"Pool not found {uuid}")
+    except KeyError as e:
+        logger.error(e)
         return False
+
     if pool.status == Pool.STATUS_INACTIVE:
         logger.error("Pool is disabled")
         return False
