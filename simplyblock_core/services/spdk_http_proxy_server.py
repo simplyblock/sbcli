@@ -137,10 +137,7 @@ def run_server(host, port, user, password, is_threading_enabled=False):
 
     try:
         ServerHandler.key = key
-        if is_threading_enabled:
-            httpd = ThreadingHTTPServer((host, port), ServerHandler)
-        else:
-            httpd = HTTPServer((host, port), ServerHandler)
+        httpd = (ThreadingHTTPServer if is_threading_enabled else HTTPServer)((host, port), ServerHandler)
         httpd.timeout = TIMEOUT
         logger.info('Started RPC http proxy server')
         httpd.serve_forever()
