@@ -292,9 +292,8 @@ def get_io_stats(pool_id, history, records_count=20):
     out = db_controller.get_pool_stats(pool, records_number)
     new_records = utils.process_records(out, records_count)
 
-    out = []
-    for record in new_records:
-        out.append({
+    return utils.print_table([
+        {
             "Date": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(record['date'])),
             "Read speed": utils.humanbytes(record['read_bytes_ps']),
             "Read IOPS": record["read_io_ps"],
@@ -302,8 +301,9 @@ def get_io_stats(pool_id, history, records_count=20):
             "Write speed": utils.humanbytes(record["write_bytes_ps"]),
             "Write IOPS": record["write_io_ps"],
             "Write lat": record["write_latency_ps"],
-        })
-    return utils.print_table(out)
+        }
+        for record in new_records
+    ])
 
 
 def get_pool_total_capacity(pool_id):

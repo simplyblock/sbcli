@@ -93,7 +93,7 @@ class BaseModel(object):
         return self
 
     def to_dict(self):
-        result = {}
+        result: dict = {}
         for attr in self.get_attrs_map():
             value = getattr(self, attr)
             if isinstance(value, list):
