@@ -1,15 +1,6 @@
-import unittest
-from unittest import mock
+from simplyblock_cli import cli
 
-
-class TestCLI(unittest.TestCase):
-
-    def test_main_called(self):
-        with mock.patch("simplyblock_cli.cli.CLIWrapper") as CLIWrapperMock:
-            from simplyblock_cli import cli
-            cli.main()
-            CLIWrapperMock.assert_called()
-
-
-if __name__ == '__main__':
-    unittest.main()
+def test_main_called(mocker):
+    mocker.patch('simplyblock_cli.cli.CLIWrapper')
+    cli.main()
+    cli.CLIWrapper.assert_called()
