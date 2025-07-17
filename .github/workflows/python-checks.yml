@@ -95,4 +95,4 @@ jobs:
       run: |
         pip install -r requirements.txt
         pip install -r type-requirements.txt
-        mypy simplyblock_web simplyblock_cli simplyblock_core --install-types --non-interactive
+        mypy simplyblock_web simplyblock_cli simplyblock_core
