@@ -389,7 +389,11 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     time.sleep(1)
     rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
     time.sleep(1)
-    rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+    try:
+        rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+    except RPCException as e:
+        logger.error('Failed to create device partitions: ' + str(e))
+        return False
     time.sleep(1)
     rpc_client.bdev_examine(nvme.nvme_bdev)
     time.sleep(1)
