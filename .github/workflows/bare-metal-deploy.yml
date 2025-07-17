@@ -122,7 +122,7 @@ jobs:
           echo "making sure the cluster is clean"
           helm uninstall sb-controller || true
           helm uninstall simplyblock-csi || true
-          kubectl get pods | grep snode-spdk-deployment | awk '{print $1}' | xargs kubectl delete pod || true
+          kubectl get pods | grep snode-spdk-pod | awk '{print $1}' | xargs kubectl delete pod || true
           eval $DEPLOY_CMD
         fi
         echo "mnodes=$MNODES" >> ${GITHUB_OUTPUT:-/dev/stdout}
@@ -156,7 +156,6 @@ jobs:
       if: ${{ inputs.k8s_snode == true }}
       run: |
         set -e
-        sudo rm -rf /var/lib/rancher/k3s/server/manifests/traefik.yaml
         mkdir -p $HOME/.kube
         KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
         scp -i "$KEY" -o StrictHostKeyChecking=no root@${MNODE}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
