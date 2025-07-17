@@ -39,7 +39,7 @@ on:
       k8s_snode:
         description: "Run snode on k8s"
         required: false
-        default: false
+        default: true
         type: boolean
 
     outputs:
@@ -169,20 +169,13 @@ jobs:
           --set logicalVolume.pool_name=testing1 \
           --set image.simplyblock.tag=${SBCLI_BRANCH} \
           --set image.csi.tag=latest \
-          --set logicalVolume.distr_ndcs=${NDCS} \
-          --set logicalVolume.distr_npcs=${NPCS} \
-          --set cachingnode.create=false \
-          --set logicalVolume.encryption=false \
-          --set storagenode.create=true
-
-          helm install sb-controller ./simplyblock-csi/charts/sb-controller/latest \
-            --set cachingnode.create=false \
-            --set storagenode.create=true \
-            --set storagenode.numPartitions=1 \
-            --set image.storageNode.tag=latest \
-            --set storagenode.ifname=eth0 \
-            --set storagenode.distr_ndcs=${NDCS} \
-            --set storagenode.distr_npcs=${NPCS}   
+          --set logicalVolume.numDataChunks=${NDCS} \
+          --set logicalVolume.numParityChunks=${NPCS} \
+          --set storagenode.create=true \
+          --set storagenode.numPartitions=1 \
+          --set image.storageNode.tag=latest \
+          --set autoClusterActivate=true
+   
       env:
         NDCS: ${{ inputs.ndcs }}
         NPCS: ${{ inputs.npcs }}
