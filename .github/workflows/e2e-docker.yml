@@ -67,7 +67,7 @@ jobs:
         timeout-minutes: 15
         run: |
           cd deploy/bare-metal
-          cluster="${{ inputs.cluster }}"
+          cluster="${{ github.event.inputs.cluster || 'c141' }}"
           cluster="${cluster:1}"
           echo "cleaning up cluster $cluster"
           KEY="~/.ssh/simplyblock-us-east-2.pem"
