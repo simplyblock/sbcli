@@ -21,3 +21,4 @@ ec2-metadata
 flask-swagger-ui
 sentry-sdk[flask]
 flask-openapi3
+jsonschema
