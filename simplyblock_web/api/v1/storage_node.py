@@ -105,7 +105,7 @@ def storage_node_port_io_stats(uuid):
                 nd = node
                 break
 
-    if not port:
+    if port is None or nd is None:
         return utils.get_response_error(f"Port not found: {uuid}", 404)
 
     data = db.get_port_stats(nd.get_id(), port.get_id())
