@@ -14,6 +14,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
+from simplyblock_core.controllers import device_controller
 
 logger = utils.get_logger(__name__)
 
@@ -773,16 +774,14 @@ def check_snap(snap_id):
 
 def check_jm_device(device_id):
     db_controller = DBController()
-    jm_device = None
-    snode = None
-    for node in db_controller.get_storage_nodes():
-        if node.jm_device.get_id() == device_id:
-            jm_device = node.jm_device
-            snode = node
-            break
-    if not jm_device:
+
+    try:
+        snode = device_controller.get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError:
         logger.error("device not found")
         return False
+
+    jm_device = snode.jm_device
 
     if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
         logger.info(f"Skipping ,node status is {snode.status}")

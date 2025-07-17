@@ -78,24 +78,6 @@ def get_equinix_cloud_info():
         pass
 
 
-def get_amazon_cloud_info():
-    try:
-        import ec2_metadata
-        import requests
-        session = requests.session()
-        session.timeout = 3
-        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
-        return {
-            "id": data["instanceId"],
-            "type": data["instanceType"],
-            "cloud": "amazon",
-            "ip": data["privateIp"],
-            "public_ip":  "",
-        }
-    except Exception:
-        pass
-
-
 @api.get('/scan_devices', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'object',
@@ -285,7 +267,7 @@ def delete_gpt_partitions_for_dev(body: _DeviceParams):
 CPU_INFO = cpuinfo.get_cpu_info()
 HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
 SYSTEM_ID = ""
-CLOUD_INFO = get_amazon_cloud_info()
+CLOUD_INFO = snode_ops.get_amazon_cloud_info()
 if not CLOUD_INFO:
     CLOUD_INFO = get_google_cloud_info()
 
@@ -566,7 +548,7 @@ def apply_config():
         return utils.get_response(False, "Config validation is incorrect")
 
     # Set Huge page memory
-    huge_page_memory_dict = {}
+    huge_page_memory_dict: dict = {}
     for node_config in nodes:
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]

@@ -6,7 +6,7 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import Tuple
+from typing import List, Tuple
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
@@ -194,7 +194,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     utils.print_table_dict(node_start_end)
     #############
 
-    selected_node_ids = []
+    selected_node_ids: List[str] = []
     while len(selected_node_ids) < min(len(node_stats), 3):
         r_index = random.randint(0, n_start)
         print(f"Random is {r_index}/{n_start}")

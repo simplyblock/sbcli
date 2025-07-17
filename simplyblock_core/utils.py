@@ -165,23 +165,22 @@ def get_docker_client(cluster_id=None):
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes()
     if not nodes:
-        logger.error("No mgmt nodes was found in the cluster!")
-        return False
+        raise RuntimeError("No mgmt nodes was found in the cluster!")
 
     docker_ips = [node.docker_ip_port for node in nodes]
 
     for ip in docker_ips:
         try:
-            c = docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
-            return c
+            return docker.DockerClient(base_url=f"tcp://{ip}", version="auto")
         except Exception as e:
             print(e)
             raise e
-    return False
+
+    raise RuntimeError("No docker client found for this IP")
 
 
 def dict_agg(data, mean=False, keys=None):
-    out = {}
+    out: dict = {}
     if not keys and data:
         keys = data[0].keys()
     for d in data:
@@ -224,7 +223,7 @@ def get_weights(node_stats, cluster_stats):
             #     w = (cluster_stats[key]/node_stats[node_id][key]) * 100
         return w
 
-    out = {}
+    out: dict = {}
     heavy_node_w = 0
     heavy_node_id = None
     for node_id in node_stats:
@@ -403,7 +402,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         return []
 
     def reserve_n(count):
-        vcpus = []
+        vcpus: list = []
         if count > 0:
             for v in sorted(remaining):
                 if (count - len(vcpus)) >= 2:
@@ -969,7 +968,7 @@ def init_sentry_sdk(name=None):
 
 
 def get_numa_cores():
-    cores_by_numa = {}
+    cores_by_numa: dict = {}
     try:
         output = get_system_cpus()
         for line in output.splitlines():
@@ -1289,7 +1288,7 @@ def get_core_indexes(core_to_index, list_of_cores):
 
 
 def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket):
-    node_distribution = {}
+    node_distribution: dict = {}
     # Iterate over each NUMA node
     for numa_node in sockets_to_use:
         if numa_node not in cores_by_numa:
@@ -1448,7 +1447,7 @@ def regenerate_config(new_config, old_config, force=False):
 
 def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
     system_info = {}
-    nodes_config = {"nodes": []}
+    nodes_config: dict = {"nodes": []}
 
     cores_by_numa = get_numa_cores()
     validate_sockets(sockets_to_use, cores_by_numa)
@@ -1479,7 +1478,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         else:
             system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nvmes"].append(pci)
 
-    nvme_by_numa = {nid: [] for nid in sockets_to_use}
+    nvme_by_numa: dict = {nid: [] for nid in sockets_to_use}
     nvme_numa_neg1 = []
     for nvme_name, val in nvmes.items():
         numa = int(val["numa_node"])
@@ -1489,7 +1488,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             nvme_numa_neg1.append(nvme_name)
 
     total_nodes = nodes_per_socket * len(sockets_to_use)
-    all_nvmes_per_node = [[] for _ in range(total_nodes)]
+    all_nvmes_per_node: list = [[] for _ in range(total_nodes)]
     all_nvmes = []
     for devs in nvme_by_numa.values():
         all_nvmes.extend(devs)
@@ -1498,7 +1497,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     for i, nvme_name in enumerate(all_nvmes):
         all_nvmes_per_node[i % total_nodes].append(nvme_name)
 
-    all_nvmes_neg1_per_node = [[] for _ in range(total_nodes)]
+    all_nvmes_neg1_per_node: list = [[] for _ in range(total_nodes)]
     for i, nvme_name in enumerate(nvme_numa_neg1):
         all_nvmes_neg1_per_node[i % total_nodes].append(nvme_name)
 
@@ -1509,7 +1508,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     for nid in sockets_to_use:
         nvme_list = nvme_by_numa.get(nid)
         logger.debug(f"NVME devices list {nvme_list}")
-        nvme_per_core_group = [[] for _ in range(nodes_per_socket)]
+        nvme_per_core_group: list = [[] for _ in range(nodes_per_socket)]
         for i, nvme in enumerate(nvme_list):
             nvme_per_core_group[i % nodes_per_socket].append(nvme)
 
@@ -1681,7 +1680,7 @@ def validate_config(config, upgrade=False):
     if "nodes" not in config:
         logger.error("Missing 'nodes' in config")
         return False
-    all_isolated_cores = set()
+    all_isolated_cores: set = set()
     for node in config["nodes"]:
         required_keys = [
             "socket", "cpu_mask", "isolated", "l-cores", "distribution",

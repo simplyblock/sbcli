@@ -68,7 +68,6 @@ def get_amazon_cloud_info():
         import ec2_metadata
         import requests
         session = requests.session()
-        session.timeout = 3
         data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
         return {
             "id": data["instanceId"],
@@ -596,7 +595,7 @@ def set_hugepages():
         return utils.get_response(False, "Config validation is incorrect")
 
     # Set Huge page memory
-    huge_page_memory_dict = {}
+    huge_page_memory_dict: dict = {}
     for node_config in nodes:
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
