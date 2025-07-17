@@ -72,6 +72,7 @@ _response_schema = {
 
 class RPCException(Exception):
     def __init__(self, message: str, code: Optional[int] = None, data: Any = None):
+        super().__init__(message, code, data)
         self.code = code
         self.message = message
         self.data = data
