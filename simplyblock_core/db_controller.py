@@ -42,7 +42,7 @@ class DBController(metaclass=Singleton):
             if not os.path.isfile(constants.KVD_DB_FILE_PATH):
                 return
             fdb.api_version(constants.KVD_DB_VERSION)
-            self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)
+            self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)  # type: ignore[func-returns-value]
             self.kv_store.options.set_transaction_timeout(constants.KVD_DB_TIMEOUT_MS)
         except Exception as e:
             print(e)
