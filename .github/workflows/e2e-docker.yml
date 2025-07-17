@@ -64,7 +64,7 @@ jobs:
           path: deploy
 
       - name: cleanup cluster
-        timeout-minutes: 5
+        timeout-minutes: 15
         run: |
           cd deploy/bare-metal
           cluster="${{ inputs.cluster }}"
