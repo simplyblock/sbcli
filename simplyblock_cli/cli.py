@@ -1046,11 +1046,10 @@ class CLIWrapper(CLIWrapperBase):
             else:
                 self.parser.print_help()
 
-        except Exception as e:
+        except Exception as exc:
+            print('Operation failed: ', exc)
             if args.debug:
-                traceback.print_exc()
-            else:
-                print('Operation failed: ', e)
+                traceback.print_exception(None, exc, exc.__traceback__)
             exit(1)
 
         if not ret:
