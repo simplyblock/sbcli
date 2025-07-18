@@ -61,7 +61,7 @@ if __name__ == "__main__":
         if args.pci_blocked:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
 
-        generate_automated_deployment_config(
+        status = generate_automated_deployment_config(
             max_lvol=max_lvol,
             max_prov=max_prov,
             sockets_to_use=sockets_to_use,
@@ -69,3 +69,5 @@ if __name__ == "__main__":
             pci_allowed=pci_allowed,
             pci_blocked=pci_blocked
         )
+        if not status:
+            raise RuntimeError("Failed to generate automated deployment configuration.")
