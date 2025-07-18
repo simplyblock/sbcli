@@ -389,7 +389,11 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     time.sleep(1)
     rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
     time.sleep(1)
-    rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+    try:
+        rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+    except RPCException as e:
+        logger.error('Failed to create device partitions: ' + str(e))
+        return False
     time.sleep(1)
     rpc_client.bdev_examine(nvme.nvme_bdev)
     time.sleep(1)
@@ -731,14 +735,16 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             org_dev.status = JMDevice.STATUS_UNAVAILABLE
         else:
             try:
-                org_dev.remote_bdev = connect_device(
+                remote_bdev = connect_device(
                         f"remote_{org_dev.jm_bdev}", org_dev, rpc_client,
                         bdev_names=node_bdev_names, reattach=True,
                 )
+                if remote_bdev:
+                    org_dev.remote_bdev = f"remote_{org_dev.jm_bdev}n1"
+                    new_devs.append(org_dev)
             except RuntimeError:
                 logger.error(f'Failed to connect to {org_dev.get_id()}')
                 org_dev.status = JMDevice.STATUS_UNAVAILABLE
-        new_devs.append(org_dev)
 
     return new_devs
 

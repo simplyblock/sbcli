@@ -148,9 +148,10 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
 
 
 def cancel_task(task_id):
-    task = db.get_task_by_id(task_id)
-    if not task:
-        logger.error("Task not found: %s", task_id)
+    try:
+        task = db.get_task_by_id(task_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if task.device_id:

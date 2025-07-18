@@ -40,6 +40,7 @@ class SNodeClient:
             response = self.session.request(method, self.url+path, data=data,
                                             timeout=self.timeout, params=params)
         except Exception as e:
+            logger.error("Request failed: %s", e)
             raise e
 
         logger.debug("Response: status_code: %s, content: %s",
@@ -51,7 +52,8 @@ class SNodeClient:
         if ret_code == 200:
             try:
                 decoded_data = response.json()
-            except Exception:
+            except Exception as e:
+                logger.error("Failed to decode JSON response: %s", e)
                 return response.content, None
 
             result = decoded_data.get('results')
@@ -59,7 +61,7 @@ class SNodeClient:
             if result is not None or error is not None:
                 return result, error
             else:
-                return data, None
+                return decoded_data, None
 
         if ret_code in [500, 400]:
             raise SNodeClientException("Invalid http status: %s" % ret_code)

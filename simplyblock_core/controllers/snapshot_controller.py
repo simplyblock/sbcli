@@ -20,11 +20,11 @@ db_controller = DBController()
 
 
 def add(lvol_id, snapshot_name):
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        msg = f"LVol not found: {lvol_id}"
-        logger.error(msg)
-        return False, msg
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
@@ -342,9 +342,12 @@ def delete(snapshot_uuid, force_delete=False):
 
     snap.remove(db_controller.kv_store)
 
-    base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
-    if base_lvol and base_lvol.deleted is True:
-        lvol_controller.delete_lvol(base_lvol.get_id())
+    try:
+        base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
+        if base_lvol.deleted is True:
+            lvol_controller.delete_lvol(base_lvol.get_id())
+    except KeyError:
+        pass
 
     logger.info("Done")
     snapshot_events.snapshot_delete(snap)

@@ -216,7 +216,7 @@ def cluster_activate(uuid):
 @bp.route('/cluster/allstats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/cluster/allstats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def cluster_allstats(uuid, history):
-    out = {}
+    out: dict = {}
     try:
         cluster = db.get_cluster_by_id(uuid)
     except KeyError:
@@ -247,35 +247,27 @@ def cluster_allstats(uuid, history):
 
     out["devices"] = list_devices
 
-    list_pools = []
-    for pool in db.get_pools(uuid):
-        records = db.get_pool_stats(pool, 1)
-        d = []
-        for r in records:
-            d.append(r.get_clean_dict())
-
-        ret = {
+    out["pools"] = [
+        {
             "object_data": pool.get_clean_dict(),
-            "stats": d or []
+            "stats": [
+                record.get_clean_dict()
+                for record in db.get_pool_stats(pool, 1)
+            ],
         }
-        list_pools.append(ret)
+        for pool in db.get_pools(uuid)
+    ]
 
-    out["pools"] = list_pools
-
-    list_lvols = []
-    for lvol in db.get_lvols():
-        records_list = db.get_lvol_stats(lvol, limit=1)
-        data = []
-        for r in records_list:
-            data.append(r.get_clean_dict())
-
-        ret = {
+    out["lvols"] = [
+        {
             "object_data": lvol.get_clean_dict(),
-            "stats": data
+            "stats": [
+                record.get_clean_dict()
+                for record in db.get_lvol_stats(lvol, limit=1)
+            ],
         }
-        list_lvols.append(ret)
-
-    out["lvols"] = list_lvols
+        for lvol in db.get_lvols()
+    ]
 
     return utils.get_response(out)
 

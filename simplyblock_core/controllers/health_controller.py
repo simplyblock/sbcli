@@ -150,10 +150,10 @@ def _check_port_on_node(snode, port_id):
         for rules in iptables_command_output:
             result = jc.parse('iptables', rules)
             for chain in result:
-                if chain['chain'] in ["INPUT", "OUTPUT"]:
-                    for rule in chain['rules']:
-                        if str(port_id) in rule['options']:
-                            action = rule['target']
+                if chain['chain'] in ["INPUT", "OUTPUT"]:  # type: ignore
+                    for rule in chain['rules']:  # type: ignore
+                        if str(port_id) in rule['options']:  # type: ignore
+                            action = rule['target']  # type: ignore
                             if action in ["DROP", "REJECT"]:
                                 return False
         return True
@@ -687,9 +687,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     logger.info(f"Checking lvol on node: {node_id}")
 
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     try:
@@ -735,9 +736,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
 def check_lvol(lvol_id):
     db_controller = DBController()
 
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if lvol.ha_type == 'single':

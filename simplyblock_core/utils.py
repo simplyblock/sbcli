@@ -1014,7 +1014,7 @@ def addNvmeDevices(rpc_client, snode, devs):
         else:
             pci_st = str(pcie).replace("0", "").replace(":", "").replace(".", "")
             nvme_controller = "nvme_%s" % pci_st
-            nvme_bdevs, err = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
+            nvme_bdevs = rpc_client.bdev_nvme_controller_attach(nvme_controller, pcie)
 
         for nvme_bdev in nvme_bdevs:
             rpc_client.bdev_examine(nvme_bdev)
