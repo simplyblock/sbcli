@@ -39,7 +39,7 @@ on:
       k8s_snode:
         description: "Run snode on k8s"
         required: false
-        default: false
+        default: true
         type: boolean
 
     outputs:
@@ -122,7 +122,7 @@ jobs:
           echo "making sure the cluster is clean"
           helm uninstall sb-controller || true
           helm uninstall simplyblock-csi || true
-          kubectl get pods | grep snode-spdk-deployment | awk '{print $1}' | xargs kubectl delete pod || true
+          kubectl get pods | grep snode-spdk-pod | awk '{print $1}' | xargs kubectl delete pod || true
           eval $DEPLOY_CMD
         fi
         echo "mnodes=$MNODES" >> ${GITHUB_OUTPUT:-/dev/stdout}
@@ -156,7 +156,6 @@ jobs:
       if: ${{ inputs.k8s_snode == true }}
       run: |
         set -e
-        sudo rm -rf /var/lib/rancher/k3s/server/manifests/traefik.yaml
         mkdir -p $HOME/.kube
         KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
         scp -i "$KEY" -o StrictHostKeyChecking=no root@${MNODE}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
@@ -169,20 +168,13 @@ jobs:
           --set logicalVolume.pool_name=testing1 \
           --set image.simplyblock.tag=${SBCLI_BRANCH} \
           --set image.csi.tag=latest \
-          --set logicalVolume.distr_ndcs=${NDCS} \
-          --set logicalVolume.distr_npcs=${NPCS} \
-          --set cachingnode.create=false \
-          --set logicalVolume.encryption=false \
-          --set storagenode.create=true
-
-          helm install sb-controller ./simplyblock-csi/charts/sb-controller/latest \
-            --set cachingnode.create=false \
-            --set storagenode.create=true \
-            --set storagenode.numPartitions=1 \
-            --set image.storageNode.tag=latest \
-            --set storagenode.ifname=eth0 \
-            --set storagenode.distr_ndcs=${NDCS} \
-            --set storagenode.distr_npcs=${NPCS}   
+          --set logicalVolume.numDataChunks=${NDCS} \
+          --set logicalVolume.numParityChunks=${NPCS} \
+          --set storagenode.create=true \
+          --set storagenode.numPartitions=1 \
+          --set image.storageNode.tag=latest \
+          --set autoClusterActivate=true
+   
       env:
         NDCS: ${{ inputs.ndcs }}
         NPCS: ${{ inputs.npcs }}
