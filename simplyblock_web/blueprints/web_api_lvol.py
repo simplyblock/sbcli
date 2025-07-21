@@ -153,6 +153,8 @@ def add_lvol():
     pvc_name = utils.get_value_or_default(cl_data, "pvc_name", None)
     max_namespace_per_subsys = utils.get_value_or_default(cl_data, "max_namespace_per_subsys", 1)
 
+    logger.info(f"max_namespace_per_subsys: {max_namespace_per_subsys}")
+    
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
         size=size,
