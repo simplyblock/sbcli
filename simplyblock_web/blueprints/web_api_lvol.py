@@ -151,7 +151,7 @@ def add_lvol():
     namespace = utils.get_value_or_default(cl_data, "namespace", None)
     uid = utils.get_value_or_default(cl_data, "uid", None)
     pvc_name = utils.get_value_or_default(cl_data, "pvc_name", None)
-    max_namespace_per_subsys = utils.get_value_or_default(cl_data, "nspv", 1)
+    max_namespace_per_subsys = utils.get_value_or_default(cl_data, "max_namespace_per_subsys", 1)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
