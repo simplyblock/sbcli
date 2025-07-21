@@ -177,7 +177,7 @@ def add_lvol():
         namespace=namespace,
         uid=uid,
         pvc_name=pvc_name,
-        max_namespace_per_subsys = max_namespace_per_subsys
+        max_namespace_per_subsys=max_namespace_per_subsys
     )
 
     return utils.get_response(ret, error, http_code=400)
