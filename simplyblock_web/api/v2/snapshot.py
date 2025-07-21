@@ -29,10 +29,10 @@ instance_api = APIRouter(prefix='/{snapshot_id}')
 
 
 def _lookup_snapshot(snapshot_id: UUID) -> SnapshotModel:
-    snapshot = db.get_snapshot_by_id(str(snapshot_id))
-    if snapshot is None:
-        raise HTTPException(404, 'Snapshot does not exist')
-    return snapshot
+    try:
+        return db.get_snapshot_by_id(str(snapshot_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
 Snapshot = Annotated[SnapshotModel, Depends(_lookup_snapshot)]

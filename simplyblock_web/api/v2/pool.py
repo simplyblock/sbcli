@@ -60,11 +60,10 @@ instance_api = APIRouter(prefix='/{pool_id}')
 
 
 def _lookup_storage_pool(pool_id: UUID) -> PoolModel:
-    pool = db.get_pool_by_id(str(pool_id))
-    if pool is None:
-        raise HTTPException(404, f'Pool {pool_id} not found')
-
-    return pool
+    try:
+        return db.get_pool_by_id(str(pool_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
 StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
