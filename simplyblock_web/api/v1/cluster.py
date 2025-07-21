@@ -83,6 +83,19 @@ def list_clusters(uuid):
     return utils.get_response(data)
 
 
+@bp.route('/cluster/<string:uuid>', methods=['PUT'], defaults={'uuid': None})
+def update_cluster(uuid):
+    cl_data = request.get_json()
+    if not cl_data or 'name' not in cl_data:
+        return utils.get_response_error("No cluster name provided", 400)
+
+    try:
+        return utils.get_response(cluster_ops.cluster_update(uuid, cl_data))
+
+    except KeyError:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+
 @bp.route('/cluster/capacity/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/cluster/capacity/<string:uuid>', methods=['GET'], defaults={'history': None})
 def cluster_capacity(uuid, history):

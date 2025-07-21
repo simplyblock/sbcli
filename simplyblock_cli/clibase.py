@@ -430,6 +430,12 @@ class CLIWrapperBase:
         cluster_ops.set(args.cluster_id, args.attr_name, args.attr_value)
         return True
 
+    def cluster__change_name(self, sub_command, args):
+        cluster_id = args.cluster_id
+        cluster_name = args.name
+        cluster_ops.change_cluster_name(cluster_id, cluster_name)
+        return True
+
     def cluster__complete_expand(self, sub_command, args):
         cluster_ops.cluster_expand(args.cluster_id)
         return True
