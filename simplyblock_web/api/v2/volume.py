@@ -55,8 +55,11 @@ def add(
         parameters: RootModel[Union[_CreateParams, _CloneParams]]
 ) -> Response:
     data = parameters.root
-    if db.get_lvol_by_name(data.name) is not None:
+    try:
+        db.get_lvol_by_name(data.name)
         raise HTTPException(409, f'Volume {data.name} exists')
+    except KeyError:
+        pass
 
     if isinstance(data, _CreateParams):
         volume_id_or_false, error = lvol_controller.add_lvol_ha(
