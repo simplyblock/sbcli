@@ -70,7 +70,6 @@ jobs:
           done
 
   deploy:
-    needs: cleanup
     uses: ./.github/workflows/bare-metal-deploy.yml
     with:
       runs_on: self-hosted
