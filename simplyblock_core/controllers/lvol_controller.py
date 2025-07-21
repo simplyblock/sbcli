@@ -261,7 +261,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -290,7 +290,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             if lv.namespace == namespace:
                 lvols_count += 1
 
-        if lvols_count >= constants.LVO_MAX_NAMESPACES_PER_SUBSYS:
+        if lvols_count >= master_lvol.max_namespace_per_subsys:
             msg = f"Max namespaces reached: {lvols_count}"
             logger.error(msg)
             return False, msg
@@ -424,6 +424,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.namespace = namespace or ""
     else:
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
+        lvol.max_namespace_per_subsys = max_namespace_per_subsys
 
     nodes = []
     if host_node:
