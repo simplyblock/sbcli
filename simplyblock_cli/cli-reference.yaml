@@ -799,6 +799,13 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--name"
+            help: >
+              Assigns a name to the newly created cluster.
+            dest: name
+            aliases:
+              - "-n"
+            type: str
       - name: add
         help: "Adds a new cluster"
         arguments:
@@ -899,6 +906,13 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--name"
+            help: >
+              Assigns a name to the newly created cluster.
+            dest: name
+            aliases:
+              - "-n"
+            type: str
       - name: activate
         help: >
           Activates a cluster.
