@@ -731,13 +731,11 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             org_dev.status = JMDevice.STATUS_UNAVAILABLE
         else:
             try:
-                remote_bdev = connect_device(
+                org_dev.remote_bdev = connect_device(
                         f"remote_{org_dev.jm_bdev}", org_dev, rpc_client,
                         bdev_names=node_bdev_names, reattach=True,
                 )
-                if remote_bdev:
-                    org_dev.remote_bdev = f"remote_{org_dev.jm_bdev}n1"
-                    new_devs.append(org_dev)
+                new_devs.append(org_dev)
             except RuntimeError:
                 logger.error(f'Failed to connect to {org_dev.get_id()}')
                 org_dev.status = JMDevice.STATUS_UNAVAILABLE
