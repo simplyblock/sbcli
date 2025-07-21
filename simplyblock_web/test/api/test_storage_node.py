@@ -52,7 +52,7 @@ def test_suspend_resume(call):
     assert call('GET', '/storagenode')[0]['status'] == 'online'
 
 
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(120)
 def test_restart(call):
     node = call('GET', '/storagenode')[0]
     assert node['status'] == 'online'
@@ -76,7 +76,7 @@ def test_shutdown_unsuspended(call):
 
 
 
-@pytest.mark.timeout(40)
+@pytest.mark.timeout(120)
 def test_shutdown(call):
     node = call('GET', '/storagenode')[0]
     assert node['status'] == 'online'

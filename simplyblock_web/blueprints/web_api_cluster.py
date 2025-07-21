@@ -45,6 +45,7 @@ def add_cluster():
     ha_type = cl_data.get('ha_type', 'single')
     enable_node_affinity = cl_data.get('enable_node_affinity', False)
     qpair_count = cl_data.get('qpair_count', 256)
+    name = cl_data.get('name', None)
 
     max_queue_size = cl_data.get('max_queue_size', 128)
     inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
@@ -54,7 +55,7 @@ def add_cluster():
     return utils.get_response(cluster_ops.add_cluster(
         blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
         distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-        qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity
+        qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, name
     ))
 
 
@@ -216,7 +217,7 @@ def cluster_activate(uuid):
 @bp.route('/cluster/allstats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/cluster/allstats/<string:uuid>', methods=['GET'], defaults={'history': None})
 def cluster_allstats(uuid, history):
-    out = {}
+    out: dict = {}
     try:
         cluster = db.get_cluster_by_id(uuid)
     except KeyError:
@@ -247,35 +248,27 @@ def cluster_allstats(uuid, history):
 
     out["devices"] = list_devices
 
-    list_pools = []
-    for pool in db.get_pools(uuid):
-        records = db.get_pool_stats(pool, 1)
-        d = []
-        for r in records:
-            d.append(r.get_clean_dict())
-
-        ret = {
+    out["pools"] = [
+        {
             "object_data": pool.get_clean_dict(),
-            "stats": d or []
+            "stats": [
+                record.get_clean_dict()
+                for record in db.get_pool_stats(pool, 1)
+            ],
         }
-        list_pools.append(ret)
+        for pool in db.get_pools(uuid)
+    ]
 
-    out["pools"] = list_pools
-
-    list_lvols = []
-    for lvol in db.get_lvols():
-        records_list = db.get_lvol_stats(lvol, limit=1)
-        data = []
-        for r in records_list:
-            data.append(r.get_clean_dict())
-
-        ret = {
+    out["lvols"] = [
+        {
             "object_data": lvol.get_clean_dict(),
-            "stats": data
+            "stats": [
+                record.get_clean_dict()
+                for record in db.get_lvol_stats(lvol, limit=1)
+            ],
         }
-        list_lvols.append(ret)
-
-    out["lvols"] = list_lvols
+        for lvol in db.get_lvols()
+    ]
 
     return utils.get_response(out)
 

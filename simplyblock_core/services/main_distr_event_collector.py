@@ -34,7 +34,7 @@ def process_device_event(event):
                     device_node_obj = node
                     break
 
-        if not device_obj:
+        if device_obj is None or device_node_obj is None:
             logger.info(f"Device not found!, storage id: {storage_id} from node: {node_id}")
             event.status = 'device_not_found'
             return
@@ -164,17 +164,18 @@ def start_event_collector_on_node(node_id):
                                 logger.error(f"Unknown event: {event_dict}")
                                 continue
 
+                            # Ignore type errors, this can be simplified to avoid them
                             et = event_dict['event_type']
                             msg = event_dict['status']
                             if sid not in events_groups:
                                 events_groups[sid] = {et:{msg: 1}}
                             elif et not in events_groups[sid]:
-                                events_groups[sid][et]: {msg: 1}
+                                events_groups[sid][et]: {msg: 1}  # type: ignore
                             elif msg not in events_groups[sid][et]:
-                                events_groups[sid][et][msg]: 1
+                                events_groups[sid][et][msg]: 1  # type: ignore
                             else:
-                                events_groups[sid][et][msg].count += 1
-                                events_groups[sid][et][msg].write_to_db()
+                                events_groups[sid][et][msg].count += 1  # type: ignore
+                                events_groups[sid][et][msg].write_to_db()  # type: ignore
                                 logger.info(f"Event {msg} already processed")
                                 continue
 

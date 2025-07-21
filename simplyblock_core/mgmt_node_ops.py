@@ -144,10 +144,12 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret):
 def add_mgmt_node(mgmt_ip, cluster_id=None):
     db_controller = DBController()
     hostname = utils.get_hostname()
-    node = db_controller.get_mgmt_node_by_hostname(hostname)
-    if node:
-        logger.error("Node already exists in the cluster")
+    try:
+        node = db_controller.get_mgmt_node_by_hostname(hostname)
+        logger.error('Node already exists in cluster')
         return False
+    except KeyError:
+        pass
 
     node = MgmtNode()
     node.uuid = str(uuid.uuid4())
@@ -193,9 +195,10 @@ def list_mgmt_nodes(is_json):
 
 def remove_mgmt_node(uuid):
     db_controller = DBController()
-    snode = db_controller.get_mgmt_node_by_id(uuid)
-    if not snode:
-        logger.error("can not find node")
+    try:
+        snode = db_controller.get_mgmt_node_by_id(uuid)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     logging.info("Removing mgmt node")

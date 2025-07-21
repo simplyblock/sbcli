@@ -22,11 +22,9 @@ class SNodeClient:
         self.timeout = timeout
         self.session = requests.session()
         self.session.verify = False
-        self.session.timeout = self.timeout
         self.session.headers['Content-Type'] = "application/json"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.session.timeout = self.timeout
 
     def _request(self, method, path, payload=None):
         try:
@@ -42,6 +40,7 @@ class SNodeClient:
             response = self.session.request(method, self.url+path, data=data,
                                             timeout=self.timeout, params=params)
         except Exception as e:
+            logger.error("Request failed: %s", e)
             raise e
 
         logger.debug("Response: status_code: %s, content: %s",
@@ -52,18 +51,17 @@ class SNodeClient:
         error = None
         if ret_code == 200:
             try:
-                data = response.json()
-            except Exception:
+                decoded_data = response.json()
+            except Exception as e:
+                logger.error("Failed to decode JSON response: %s", e)
                 return response.content, None
 
-            if 'results' in data:
-                result = data['results']
-            if 'error' in data:
-                error = data['error']
+            result = decoded_data.get('results')
+            error = decoded_data.get('error')
             if result is not None or error is not None:
                 return result, error
             else:
-                return data, None
+                return decoded_data, None
 
         if ret_code in [500, 400]:
             raise SNodeClientException("Invalid http status: %s" % ret_code)

@@ -389,7 +389,11 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     time.sleep(1)
     rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
     time.sleep(1)
-    rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+    try:
+        rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+    except RPCException as e:
+        logger.error('Failed to create device partitions: ' + str(e))
+        return False
     time.sleep(1)
     rpc_client.bdev_examine(nvme.nvme_bdev)
     time.sleep(1)
@@ -731,14 +735,16 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             org_dev.status = JMDevice.STATUS_UNAVAILABLE
         else:
             try:
-                org_dev.remote_bdev = connect_device(
+                remote_bdev = connect_device(
                         f"remote_{org_dev.jm_bdev}", org_dev, rpc_client,
                         bdev_names=node_bdev_names, reattach=True,
                 )
+                if remote_bdev:
+                    org_dev.remote_bdev = f"remote_{org_dev.jm_bdev}n1"
+                    new_devs.append(org_dev)
             except RuntimeError:
                 logger.error(f'Failed to connect to {org_dev.get_id()}')
                 org_dev.status = JMDevice.STATUS_UNAVAILABLE
-        new_devs.append(org_dev)
 
     return new_devs
 
@@ -2532,7 +2538,7 @@ def upgrade_automated_deployment_config():
             return False
         utils.store_config_file(updated_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
         # Set Huge page memory
-        huge_page_memory_dict = {}
+        huge_page_memory_dict: dict = {}
         for node_config in updated_config["nodes"]:
             numa = node_config["socket"]
             huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
@@ -2563,7 +2569,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
     if system_info:
         utils.store_config_file(system_info, constants.SYSTEM_INFO_FILE)
-    huge_page_memory_dict = {}
+    huge_page_memory_dict: dict = {}
 
     # Set Huge page memory
     for node_config in nodes_config["nodes"]:
@@ -2597,7 +2603,7 @@ def deploy(ifname, isolate_cores=False):
     logger.info("Config Validated successfully.")
 
     logger.info("NVMe SSD devices found on node:")
-    stream = os.popen(f"lspci -Dnn | grep -i '\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\]'")
+    stream = os.popen(f"lspci -Dnn | grep -i '\\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\\]'")
     for line in stream.readlines():
         logger.info(line.strip())
 
@@ -3002,7 +3008,7 @@ def recreate_lvstore(snode, force=False):
             sec_node.write_to_db()
             time.sleep(3)
 
-            fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
+            fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
 
             ### 3- block secondary port
             fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
@@ -3094,7 +3100,7 @@ def recreate_lvstore(snode, force=False):
                 # return False
             ### 8- allow secondary port
 
-            fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
+            fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 3- block secondary port
             fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
@@ -3403,7 +3409,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    created_bdevs = []
+    created_bdevs: list = []
     if not lvstore_stack:
         # Restart case
         stack = snode.lvstore_stack

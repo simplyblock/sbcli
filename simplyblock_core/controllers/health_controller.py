@@ -14,6 +14,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
+from simplyblock_core.controllers import device_controller
 
 logger = utils.get_logger(__name__)
 
@@ -144,15 +145,17 @@ def _check_port_on_node(snode, port_id):
     try:
         fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
         iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
-        result = jc.parse('iptables', iptables_command_output)
-        for chain in result:
-            if chain['chain'] in ["INPUT", "OUTPUT"]:
-                for rule in chain['rules']:
-                    if str(port_id) in rule['options']:
-                        action = rule['target']
-                        if action in ["DROP", "REJECT"]:
-                            return False
-
+        if type(iptables_command_output) is str:
+            iptables_command_output = [iptables_command_output]
+        for rules in iptables_command_output:
+            result = jc.parse('iptables', rules)
+            for chain in result:
+                if chain['chain'] in ["INPUT", "OUTPUT"]:  # type: ignore
+                    for rule in chain['rules']:  # type: ignore
+                        if str(port_id) in rule['options']:  # type: ignore
+                            action = rule['target']  # type: ignore
+                            if action in ["DROP", "REJECT"]:
+                                return False
         return True
     except Exception as e:
         logger.error(e)
@@ -684,9 +687,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     logger.info(f"Checking lvol on node: {node_id}")
 
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     try:
@@ -732,9 +736,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
 def check_lvol(lvol_id):
     db_controller = DBController()
 
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if lvol.ha_type == 'single':
@@ -754,8 +759,9 @@ def check_lvol(lvol_id):
 
 def check_snap(snap_id):
     db_controller = DBController()
-    snap = db_controller.get_snapshot_by_id(snap_id)
-    if not snap:
+    try:
+        snap = db_controller.get_snapshot_by_id(snap_id)
+    except KeyError:
         logger.error(f"snap not found: {snap_id}")
         return False
 
@@ -770,16 +776,14 @@ def check_snap(snap_id):
 
 def check_jm_device(device_id):
     db_controller = DBController()
-    jm_device = None
-    snode = None
-    for node in db_controller.get_storage_nodes():
-        if node.jm_device.get_id() == device_id:
-            jm_device = node.jm_device
-            snode = node
-            break
-    if not jm_device:
+
+    try:
+        snode = device_controller.get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError:
         logger.error("device not found")
         return False
+
+    jm_device = snode.jm_device
 
     if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
         logger.info(f"Skipping ,node status is {snode.status}")

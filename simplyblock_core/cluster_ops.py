@@ -124,7 +124,8 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity) -> str:
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring,
+                   strict_node_anti_affinity, name) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -181,6 +182,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Adding new cluster object")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
+    cluster.cluster_name = name
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -304,7 +306,7 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity) -> str:
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, name) -> str:
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -316,6 +318,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
+    cluster.cluster_name = name
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -618,6 +621,7 @@ def list() -> t.List[dict]:
             status = f"{status} - ReBalancing"
         data.append({
             "UUID": cl.get_id(),
+            "Name": cl.cluster_name if cl.cluster_name is not None else "-",
             "NQN": cl.nqn,
             "ha_type": cl.ha_type,
             "#mgmt": len(mt),

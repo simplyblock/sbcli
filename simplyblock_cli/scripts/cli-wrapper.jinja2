@@ -100,7 +100,7 @@ class CLIWrapper(CLIWrapperBase):
 
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
-        ret = ""
+        ret = False
         args_dict = args.__dict__
 
         try:
@@ -148,11 +148,10 @@ class CLIWrapper(CLIWrapperBase):
             else:
                 self.parser.print_help()
 
-        except Exception as e:
+        except Exception as exc:
+            print('Operation failed: ', exc)
             if args.debug:
-                traceback.print_exc()
-            else:
-                print('Operation failed: ', e)
+                traceback.print_exception(None, exc, exc.__traceback__)
             exit(1)
 
         if not ret:
