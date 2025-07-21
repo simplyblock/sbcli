@@ -1219,6 +1219,10 @@ commands:
             help: "Maximum Write Megabytes Per Second"
             dest: max_w_mbytes
             type: int
+          - name: "--max-namespace-per-subsys"
+            help: "Maximum Namespace per subsystem"
+            dest: max_namespace_per_subsys
+            type: int
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr_vuid
