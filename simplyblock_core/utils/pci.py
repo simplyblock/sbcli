@@ -29,7 +29,7 @@ def vendor_id(address: PCIAddress) -> int:
     return int((_device(address) / 'vendor').read_text(), 16)
 
 
-def class_id(address: PCIAddress) -> int:
+def device_id(address: PCIAddress) -> int:
     return int((_device(address) / 'vendor').read_text(), 16)
 
 
