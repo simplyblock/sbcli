@@ -17,6 +17,7 @@ from . import metrics
 
 
 api = Flask('API v1')
+api.url_map.strict_slashes = False
 api.logger.setLevel(logging.DEBUG)
 api.register_blueprint(cluster.bp)
 api.register_blueprint(mgmt_node.bp)
