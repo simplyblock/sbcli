@@ -5,9 +5,7 @@ import fdb
 from typing import List, Optional
 
 from simplyblock_core import constants
-from simplyblock_core.models.caching_node import CachingNode
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.deployer import Deployer
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -89,32 +87,6 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'StorageNode {id} not found')
         return ret[0]
 
-    # todo: change this function for multi cluster
-    def get_caching_nodes(self) -> List[CachingNode]:
-        ret = CachingNode().read_from_db(self.kv_store)
-        ret = sorted(ret, key=lambda x: x.create_dt)
-        return ret
-
-    def get_caching_node_by_id(self, id)  -> Optional[CachingNode]:
-        ret = CachingNode().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
-        return None
-
-    def get_caching_node_by_system_id(self, system_id)  -> Optional[CachingNode]:
-        nodes = CachingNode().read_from_db(self.kv_store)
-        for node in nodes:
-            if node.system_uuid == system_id:
-                return node
-        return None
-
-    def get_caching_node_by_hostname(self, hostname)  -> Optional[CachingNode]:
-        nodes = self.get_caching_nodes()
-        for node in nodes:
-            if node.hostname == hostname:
-                return node
-        return None
-
     def get_storage_node_by_hostname(self, hostname) -> Optional[StorageNode]:
         nodes = self.get_storage_nodes()
         for node in nodes:
@@ -145,11 +117,11 @@ class DBController(metaclass=Singleton):
             pools = Pool().read_from_db(self.kv_store)
         return pools
 
-    def get_pool_by_id(self, id) -> Optional[Pool]:
+    def get_pool_by_id(self, id) -> Pool:
         ret = Pool().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
-        return None
+        if not ret:
+            raise KeyError(f'Pool {id} not found')
+        return ret[0]
 
     def get_pool_by_name(self, name) -> Optional[Pool]:
         pools = Pool().read_from_db(self.kv_store)
@@ -204,29 +176,29 @@ class DBController(metaclass=Singleton):
         ret = SnapShot().read_from_db(self.kv_store)
         return ret
 
-    def get_snapshot_by_id(self, id) -> Optional[SnapShot]:
+    def get_snapshot_by_id(self, id) -> SnapShot:
         ret = SnapShot().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
-        return None
+        if not ret:
+            raise KeyError(f'Snapshot {id} not found')
+        return ret[0]
 
-    def get_lvol_by_id(self, id) -> Optional[LVol]:
+    def get_lvol_by_id(self, id) -> LVol:
         lvols = LVol().read_from_db(self.kv_store, id=id)
-        if lvols:
-            return lvols[0]
-        return None
+        if not lvols:
+            raise KeyError(f'LVol {id} not found')
+        return lvols[0]
 
-    def get_lvol_by_name(self, lvol_name) -> Optional[LVol]:
+    def get_lvol_by_name(self, lvol_name) -> LVol:
         for lvol in self.get_lvols():
             if lvol.lvol_name == lvol_name:
                 return lvol
-        return None
+        raise KeyError(f'LVol {lvol_name} not found')
 
-    def get_mgmt_node_by_id(self, id) -> Optional[MgmtNode]:
+    def get_mgmt_node_by_id(self, id) -> MgmtNode:
         ret = MgmtNode().read_from_db(self.kv_store, id)
-        if ret:
-            return ret[0]
-        return None
+        if not ret:
+            raise KeyError(f'ManagementNode {id} not found')
+        return ret[0]
 
     def get_mgmt_nodes(self, cluster_id=None) -> List[MgmtNode]:
         nodes = MgmtNode().read_from_db(self.kv_store)
@@ -234,12 +206,12 @@ class DBController(metaclass=Singleton):
             nodes = [n for n in nodes if n.cluster_id == cluster_id]
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_mgmt_node_by_hostname(self, hostname) -> Optional[MgmtNode]:
+    def get_mgmt_node_by_hostname(self, hostname) -> MgmtNode:
         nodes = self.get_mgmt_nodes()
         for node in nodes:
             if node.hostname == hostname:
                 return node
-        return None
+        raise KeyError(f'No management node found for hostname {hostname}')
 
     def get_lvol_stats(self, lvol, limit=20) -> List[LVolStatObject]:
         if isinstance(lvol, str):
@@ -291,15 +263,6 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'Cluster {cluster_id} not found')
         return ret[0]
 
-    def get_deployers(self) -> List[Deployer]:
-        return Deployer().read_from_db(self.kv_store)
-
-    def get_deployer_by_id(self, deployer_id) -> Optional[Deployer]:
-        ret = Deployer().read_from_db(self.kv_store, id=deployer_id)
-        if ret:
-            return ret[0]
-        return None
-
     def get_port_stats(self, node_id, port_id, limit=20) -> List[PortStat]:
         stats = PortStat().read_from_db(self.kv_store, id="%s/%s" % (node_id, port_id), limit=limit, reverse=True)
         return stats
@@ -310,11 +273,11 @@ class DBController(metaclass=Singleton):
     def get_job_tasks(self, cluster_id, reverse=True, limit=0) -> List[JobSchedule]:
         return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
 
-    def get_task_by_id(self, task_id) -> Optional[JobSchedule]:
+    def get_task_by_id(self, task_id) -> JobSchedule:
         for task in self.get_job_tasks(" "):
             if task.uuid == task_id:
                 return task
-        return None
+        raise KeyError(f'Task {task_id} not found')
 
     def get_snapshots_by_node_id(self, node_id) -> List[SnapShot]:
         ret = []

@@ -54,6 +54,7 @@ class Cluster(BaseModel):
     iscsi: str = ""
     max_queue_size: int = 128
     model_ids: List[str] = []
+    cluster_name: str = None # type: ignore[assignment]
     nqn: str = ""
     page_size_in_blocks: int = 2097152
     prov_cap_crit: int = 190

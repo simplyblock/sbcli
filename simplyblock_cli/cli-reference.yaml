@@ -325,6 +325,12 @@ commands:
             type: str
             nargs: +
             default: ""
+          - name: "--force-lvol-recreate"
+            help: "Force LVol recreate on node restart even if lvol bdev was not recovered"
+            dest: force_lvol_recreate
+            type: bool
+            action: store_true
+            default: False
       - name: shutdown
         help: "Initiates a storage node shutdown"
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
@@ -801,6 +807,13 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--name"
+            help: >
+              Assigns a name to the newly created cluster.
+            dest: name
+            aliases:
+              - "-n"
+            type: str
       - name: add
         help: "Adds a new cluster"
         arguments:
@@ -901,6 +914,13 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--name"
+            help: >
+              Assigns a name to the newly created cluster.
+            dest: name
+            aliases:
+              - "-n"
+            type: str
       - name: activate
         help: >
           Activates a cluster.
@@ -1553,12 +1573,6 @@ commands:
             help: "Maximum Write Megabytes Per Second"
             dest: max_w_mbytes
             type: int
-          - name: "--has-secret"
-            help: "Pool is created with a secret (all further API interactions with the pool and logical volumes in the pool require this secret)"
-            dest: has_secret
-            type: bool
-            action: store_true
-            private: true
       - name: set
         help: "Sets a storage pool's attributes"
         arguments:
@@ -1710,128 +1724,3 @@ commands:
             dest: resize
             type: size
             default: "0"
-  - name: "caching-node"
-    help: "Caching node commands"
-    aliases:
-      - cn
-    weight: 700
-    subcommands:
-      - name: deploy
-        help: "Deploys a caching node on this machine (local run)"
-        arguments:
-          - name: "--ifname"
-            help: "Management interface name, e.g. eth0"
-            dest: ifname
-            type: str
-      - name: add-node
-        help: "Adds a new caching node to the cluster"
-        arguments:
-          - name: "cluster_id"
-            help: "Cluster id"
-            dest: cluster_id
-            type: str
-          - name: "node_ip"
-            help: "Node IP address"
-            dest: node_ip
-            type: str
-          - name: "ifname"
-            help: "Management interface name"
-            dest: ifname
-            type: str
-          - name: "--vcpu-count"
-            help: >
-              Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
-              other workloads. The default on non-Kubernetes hosts is 80%.
-            dest: vcpu_count
-            type: int
-          - name: "--cpu-mask"
-            help: "SPDK app CPU mask, default is all cores found"
-            dest: spdk_cpu_mask
-            type:
-              regex: "^(0x|0X)?[a-fA-F0-9]+$"
-            private: true
-          - name: "--memory"
-            help: "SPDK huge memory allocation. By default it will acquire all available huge pages."
-            dest: spdk_mem
-            type:
-              size:
-                min: 1G
-            private: true
-          - name: "--spdk-image"
-            help: "SPDK image uri"
-            dest: spdk_image
-            type: str
-            private: true
-          - name: "--namespace"
-            help: "k8s namespace to deploy on"
-            dest: namespace
-            type: str
-          - name: "--multipathing"
-            help: "Enable multipathing for logical volume connection, default: on"
-            dest: multipathing
-            type: str
-            choices:
-              - "on"
-              - "off"
-            default: on
-      - name: list
-        help: "Lists all caching nodes"
-      - name: list-lvols
-        help: "Lists all connected logical volumes"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-      - name: remove
-        help: "Removes a caching node from the cluster"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-          - name: "--force"
-            help: "Force remove"
-            dest: force
-            type: bool
-            action: store_true
-      - name: connect
-        help: "Connects a logical volume to the caching node"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-          - name: "lvol_id"
-            help: "Logical volume id"
-            dest: lvol_id
-            type: str
-      - name: disconnect
-        help: "Disconnects a logical volume from the caching node"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-          - name: "lvol_id"
-            help: "Logical volume id"
-            dest: lvol_id
-            type: str
-      - name: recreate
-        help: "Recreate a caching node's bdevs"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-      - name: get-lvol-stats
-        help: "Gets a logical volume's statistics"
-        arguments:
-          - name: "lvol_id"
-            help: "Logical volume id"
-            dest: lvol_id
-            type: str
-          - name: "--history"
-            help: "(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total)."
-            dest: history
-            type: str

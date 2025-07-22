@@ -1,6 +1,11 @@
 import json
+from json import JSONDecodeError
+from typing import Any, Optional
 
 import requests
+from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
+import jsonschema
+from jsonschema.exceptions import ValidationError
 
 from simplyblock_core import constants, utils
 from requests.adapters import HTTPAdapter
@@ -9,17 +14,71 @@ from urllib3 import Retry
 logger = utils.get_logger()
 
 
-def print_dict(d):
-    print(json.dumps(d, indent=2))
-
-
-def print_json(s):
-    print(json.dumps(s, indent=2).strip('"'))
+_response_schema = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "JSON-RPC 2.0 Response",
+    "description": "A JSON-RPC 2.0 response object",
+    "type": "object",
+    "required": ["jsonrpc"],
+    "properties": {
+        "jsonrpc": {
+            "type": "string",
+            "enum": ["2.0"],
+            "description": "JSON-RPC version string",
+        },
+        "result": {
+            "description": "The result of the RPC call if successful",
+        },
+        "error": {
+            "description": "Error information if an error occurred",
+            "$ref": "#/definitions/error",
+        },
+        "id": {
+            "description": "Identifier matching the request",
+            "oneOf": [
+                { "type": "string" },
+                { "type": "number" },
+                { "type": "null" },
+            ],
+        },
+    },
+    "oneOf": [
+        { "required": ["result", "id"] },
+        { "required": ["error", "id"] },
+    ],
+    "additionalProperties": False,
+    "definitions": {
+        "error": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "description": "Error code",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Error message",
+                },
+                "data": {
+                    "description": "Additional error information",
+                },
+            },
+            "additionalProperties": False
+        },
+    },
+}
 
 
 class RPCException(Exception):
-    def __init__(self, message):
+    def __init__(self, message: str, code: Optional[int] = None, data: Any = None):
+        super().__init__(message, code, data)
+        self.code = code
         self.message = message
+        self.data = data
+
+
+_response_validator = jsonschema.validators.validator_for(_response_schema)(_response_schema)  # type: ignore[call-arg]
 
 
 class RPCClient:
@@ -40,7 +99,6 @@ class RPCClient:
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.session.timeout = self.timeout
 
     def _request(self, method, params=None):
         ret, _ = self._request2(method, params)
@@ -85,6 +143,30 @@ class RPCClient:
             logger.error("Invalid http status : %s", ret_code)
 
         return None, None
+
+    def _request3(self, method: str, **kwargs):
+        logger.debug("Requesting method: %s, params: %s", method, kwargs)
+        try:
+            response = self.session.post(self.url, data=json.dumps({
+                'id': 1,
+                'method': method,
+                'params': kwargs,
+            }), timeout=self.timeout)
+            response.raise_for_status()
+            data = response.json()
+            _response_validator.validate(data)
+        except (
+                ConnectionError, Timeout, TooManyRedirects, HTTPError,  # requests
+                JSONDecodeError,  # json
+                ValidationError,  # jsonschema
+        ) as e:
+            raise RPCException('Request failed') from e
+
+        if (error := data.get('error')) is not None:
+            raise RPCException(**error)
+
+        return data['result']
+
 
     def get_version(self):
         return self._request("spdk_get_version")
@@ -151,7 +233,7 @@ class RPCClient:
             "dif_insert_or_strip": False,
             "c2h_success": True,
             "sock_priority": 0,
-            "ack_timeout": 4096,
+            "ack_timeout": 8000,
         }
         return self._request("nvmf_create_transport", params)
 
@@ -199,8 +281,12 @@ class RPCClient:
         return self._request("bdev_nvme_get_controllers", params)
 
     def bdev_nvme_controller_attach(self, name, pci_addr):
-        params = {"name": name, "trtype": "pcie", "traddr": pci_addr}
-        return self._request2("bdev_nvme_attach_controller", params)
+        return self._request3(
+                "bdev_nvme_attach_controller", 
+                name=name,
+                trtype='pcie',
+                traddr=pci_addr,
+        )
 
     def alloc_bdev_controller_attach(self, name, pci_addr):
         params = {"traddr": pci_addr, "ns_id": 1, "label": name}
@@ -638,7 +724,7 @@ class RPCClient:
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec" : 0,
             "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 10000,
+            "keep_alive_timeout_ms": 30000,
             "timeout_us": constants.NVME_TIMEOUT_US,
             "transport_ack_timeout": 13,
         }

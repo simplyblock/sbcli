@@ -13,7 +13,7 @@ from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
     tasks_controller
-from simplyblock_core.controllers import caching_node_controller, health_controller
+from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster
 
@@ -188,7 +188,7 @@ class CLIWrapperBase:
             node_id, max_lvol, max_snap, max_prov,
             spdk_image, spdk_debug,
             small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
-            new_ssd_pcie=ssd_pcie)
+            new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
 
     def storage_node__shutdown(self, sub_command, args):
         return storage_ops.shutdown_storage_node(args.node_id, args.force)
@@ -554,9 +554,6 @@ class CLIWrapperBase:
         return mgmt_ops.remove_mgmt_node(args.node_id)
 
     def storage_pool__add(self, sub_command, args):
-        has_secret = args.has_secret
-        if has_secret is None:
-            has_secret = False
         return pool_controller.add_pool(
             args.name,
             args.pool_max,
@@ -565,7 +562,6 @@ class CLIWrapperBase:
             args.max_rw_mbytes,
             args.max_r_mbytes,
             args.max_w_mbytes,
-            has_secret,
             args.cluster_id
         )
 
@@ -598,12 +594,6 @@ class CLIWrapperBase:
     def storage_pool__disable(self, sub_command, args):
         return pool_controller.set_status(args.pool_id, Pool.STATUS_INACTIVE)
 
-    def storage_pool__get_secret(self, sub_command, args):
-        return pool_controller.get_secret(args.pool_id)
-
-    def storage_pool__update_secret(self, sub_command, args):
-        return pool_controller.set_secret(args.pool_id, args.secret)
-
     def storage_pool__get_capacity(self, sub_command, args):
         return pool_controller.get_capacity(args.pool_id)
 
@@ -626,48 +616,6 @@ class CLIWrapperBase:
         success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
         return details
 
-    def caching_node__deploy(self, sub_command, args):
-        return caching_node_controller.deploy(args.ifname)
-
-    def caching_node__add_node(self, sub_command, args):
-        cluster_id = args.cluster_id
-        node_ip = args.node_ip
-        ifname = args.ifname
-        data_nics = []
-        spdk_image = args.spdk_image
-        namespace = args.namespace
-        multipathing = args.multipathing == "on"
-        spdk_cpu_mask = args.spdk_cpu_mask
-        spdk_mem = args.spdk_mem
-
-        return caching_node_controller.add_node(
-            cluster_id, node_ip, ifname, data_nics, spdk_cpu_mask, spdk_mem, spdk_image, namespace, multipathing)
-
-    def caching_node__list(self, sub_command, args):
-        return caching_node_controller.list_nodes()
-
-    def caching_node__list_lvols(self, sub_command, args):
-        return caching_node_controller.list_lvols(args.node_id)
-
-    def caching_node__remove(self, sub_command, args):
-        return caching_node_controller.remove_node(args.node_id, args.force)
-
-    def caching_node__connect(self, sub_command, args):
-        return caching_node_controller.connect(args.node_id, args.lvol_id)
-
-    def caching_node__disconnect(self, sub_command, args):
-        return caching_node_controller.disconnect(args.node_id, args.lvol_id)
-
-    def caching_node__recreate(self, sub_command, args):
-        return caching_node_controller.recreate(args.node_id)
-
-    def caching_node__get_lvol_stats(self, sub_command, args):
-        data = caching_node_controller.get_io_stats(args.lvol_id, args.history)
-        if data:
-            return utils.print_table(data)
-        else:
-            return False
-
     def storage_node_list_devices(self, args):
         node_id = args.node_id
         is_json = args.json
@@ -686,6 +634,7 @@ class CLIWrapperBase:
         distr_bs = args.distr_bs
         distr_chunk_bs = args.distr_chunk_bs
         ha_type = args.ha_type
+        name = args.name
 
         enable_node_affinity = args.enable_node_affinity
         qpair_count = args.qpair_count
@@ -697,7 +646,7 @@ class CLIWrapperBase:
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, name)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -725,13 +674,14 @@ class CLIWrapperBase:
         enable_qos = args.enable_qos
         disable_monitoring = args.disable_monitoring
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        name = args.name
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

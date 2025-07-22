@@ -20,11 +20,11 @@ db_controller = DBController()
 
 
 def add(lvol_id, snapshot_name):
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        msg = f"LVol not found: {lvol_id}"
-        logger.error(msg)
-        return False, msg
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
@@ -228,8 +228,9 @@ def list(all=False):
 
 
 def delete(snapshot_uuid, force_delete=False):
-    snap = db_controller.get_snapshot_by_id(snapshot_uuid)
-    if not snap:
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+    except KeyError:
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
@@ -341,9 +342,12 @@ def delete(snapshot_uuid, force_delete=False):
 
     snap.remove(db_controller.kv_store)
 
-    base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
-    if base_lvol and base_lvol.deleted is True:
-        lvol_controller.delete_lvol(base_lvol.get_id())
+    try:
+        base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
+        if base_lvol.deleted is True:
+            lvol_controller.delete_lvol(base_lvol.get_id())
+    except KeyError:
+        pass
 
     logger.info("Done")
     snapshot_events.snapshot_delete(snap)
@@ -351,14 +355,15 @@ def delete(snapshot_uuid, force_delete=False):
 
 
 def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None):
-    snap = db_controller.get_snapshot_by_id(snapshot_id)
-    if not snap:
-        msg=f"Snapshot not found {snapshot_id}"
-        logger.error(msg)
-        return False, msg
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
 
-    pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
-    if not pool:
+    try:
+        pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
+    except KeyError:
         msg=f"Pool not found: {snap.lvol.pool_uuid}"
         logger.error(msg)
         return False, msg
@@ -450,7 +455,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if pvc_namespace:
         lvol.namespace = pvc_namespace
 
-    lvol.status = LVol.STATUS_ONLINE
+    lvol.status = LVol.STATUS_IN_CREATION
     lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
@@ -564,6 +569,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 lvol.remove(db_controller.kv_store)
                 return False, error
 
+    lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
 
     if snap.snap_ref_id:

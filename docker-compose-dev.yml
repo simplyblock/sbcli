@@ -1,6 +1,6 @@
 services:
   fdb-server:
-    image: foundationdb/foundationdb:7.3.42
+    image: foundationdb/foundationdb:7.3.63
     entrypoint: ["/bin/bash", "/var/fdb/scripts/fdb_single.bash"]
     environment:
       FDB_NETWORKING_MODE: 'container'
@@ -15,7 +15,7 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    command: "python simplyblock_web/app.py"
+    command: "python3 simplyblock_web/app.py"
     volumes:
       - "fdb-config:/etc/foundationdb"
     environment:
