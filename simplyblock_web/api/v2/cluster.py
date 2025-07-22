@@ -80,6 +80,18 @@ def get(cluster: Cluster) -> ClusterDTO:
     return ClusterDTO.from_model(cluster)
 
 
+class UpdatableClusterParameters(BaseModel):
+    name: Optional[str] = None
+
+
+@instance_api.get('/', name='clusters:update')
+def update(cluster: Cluster, parameters: UpdatableClusterParameters):
+    if parameters.name is not None:
+        cluster_ops.cluster_update(cluster.get_id(), parameters.name)
+
+    return Response(status_code=204)
+
+
 @instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster) -> Response:
     cluster_ops.delete_cluster(cluster.get_id())
@@ -144,7 +156,7 @@ def activate(cluster: Cluster) -> Response:
 
 
 @instance_api.post('/update', name='clusters:upgrade', status_code=204, responses={204: {"content": None}})
-def update( cluster: Cluster, parameters: _UpdateParams) -> Response:
+def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
     cluster_ops.update_cluster(
         cluster_id=cluster.get_id(),
         mgmt_image=parameters.management_image,
