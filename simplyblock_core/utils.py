@@ -846,10 +846,22 @@ def run_tuned():
             ["sudo", "tuned-adm", "profile", "realtime"],
             check=True
         )
-        print("Successfully run the tuned adm profile")
+        logger.info("Successfully run the tuned adm profile")
     except subprocess.CalledProcessError as e:
         logger.error(f"Error running the tuned adm profile: {e}")
 
+def run_grubby(core_list):
+    isolated_cores = ",".join(map(str, core_list))
+    core_args = f"isolcpus={isolated_cores} nohz_full={isolated_cores} rcu_nocbs={isolated_cores}"
+
+    try:
+        subprocess.run(
+            ["sudo", "grubby", "--update-kernel=All", f"--args={core_args}"],
+            check=True
+        )
+        logger.info("Successfully run the grubby command")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error running the grubby command: {e}")
 
 def parse_thread_siblings():
     """Parse the thread siblings from the sysfs topology."""
@@ -1834,3 +1846,10 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
         subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
         print(f"File moved to {prometheus_file_path} successfully.")
+
+def load_kernel_module(module):
+    try:
+        subprocess.run(["modprobe", module], check=True)
+        logger.info(f" {module} module loaded successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to load {module} module: {e}")
