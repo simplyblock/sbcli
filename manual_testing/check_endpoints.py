@@ -24,6 +24,7 @@ SECRET = utils.generate_string(20)
 c.uuid = CLUSTER_UUID
 c.secret = SECRET
 c.write_to_db(db_controller.kv_store)
+c.status = 'online'
 
 
 AUTH_HEADER = {
