@@ -60,9 +60,22 @@ on:
         value: ${{ jobs.deploy.outputs.storage_private_ips }}
 
 jobs:
+  
+  k8s:
+    runs-on: ${{ inputs.runs_on }}
+    if: ${{ inputs.k8s_snode == true }}
+    steps:
+    - name: Setup k8s
+      id: k8sdeployment
+      if: ${{ inputs.k8s_snode == true }}
+      run: |
+        set -e
+        cd deploy/bare-metal
+        eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
+        ./bootstrap-k3s.sh --k8s-snode
+
   deploy:
     runs-on: ${{ inputs.runs_on }}
-
     outputs:
       cluster_id: ${{ steps.deployment.outputs.cluster_id }}
       cluster_ip: ${{ steps.deployment.outputs.cluster_ip }}
@@ -136,22 +149,11 @@ jobs:
         SBCLI_BRANCH: ${{ inputs.sbcli_source }}
         SIMPLY_BLOCK_DOCKER_IMAGE: ${{ inputs.docker_image }}
 
-    - name: Setup k8s
-      id: k8sdeployment
-      if: ${{ inputs.k8s_snode == true }}
-      run: |
-        set -e
-        cd deploy/bare-metal
-        eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
-        ./bootstrap-k3s.sh --k8s-snode
-      env:
-        NDCS: ${{ inputs.ndcs }}
-        NPCS: ${{ inputs.npcs }}
-        CLUSTER_ID: ${{ steps.deployment.outputs.cluster_id }}
-        CLUSTER_IP: ${{ steps.deployment.outputs.cluster_ip }}
-        CLUSTER_SECRET: ${{ steps.deployment.outputs.cluster_secret }}
-        SBCLI_BRANCH: ${{ inputs.sbcli_source }}
-
+  k8s_snodes:
+    needs: [k8s, deploy]
+    runs-on: ${{ inputs.runs_on }}
+    if: ${{ inputs.k8s_snode == true }}
+    steps:  
     - name: Deploy Snode on K8s
       if: ${{ inputs.k8s_snode == true }}
       run: |
@@ -178,11 +180,11 @@ jobs:
       env:
         NDCS: ${{ inputs.ndcs }}
         NPCS: ${{ inputs.npcs }}
-        CLUSTER_ID: ${{ steps.deployment.outputs.cluster_id }}
-        CLUSTER_IP: ${{ steps.deployment.outputs.cluster_ip }}
-        CLUSTER_SECRET: ${{ steps.deployment.outputs.cluster_secret }}
+        CLUSTER_ID: ${{ needs.deploy.outputs.cluster_id }}
+        CLUSTER_IP: ${{ needs.deploy.outputs.cluster_ip }}
+        CLUSTER_SECRET: ${{ needs.deploy.outputs.cluster_secret }}
         SBCLI_BRANCH: ${{ inputs.sbcli_source }}
-        MNODE: ${{ steps.deployment.outputs.mnodes }}
+        MNODE: ${{ needs.deploy.outputs.mnodes }}
 
     - name: Check Cluster Status
       if: ${{ inputs.k8s_snode == true }}
@@ -208,6 +210,6 @@ jobs:
         echo "Cluster status is not active"
         exit 1
       env:
-        CLUSTER_API_GATEWAY_ENDPOINT: ${{ steps.deployment.outputs.cluster_ip }}/api/v2
-        CLUSTER_UUID: ${{ steps.deployment.outputs.cluster_id }}
-        CLUSTER_SECRET: ${{ steps.deployment.outputs.cluster_secret }}
+        CLUSTER_API_GATEWAY_ENDPOINT: ${{ needs.deploy.outputs.cluster_ip }}/api/v2
+        CLUSTER_UUID: ${{ needs.deploy.outputs.cluster_id }}
+        CLUSTER_SECRET: ${{ needs.deploy.outputs.cluster_secret }}
