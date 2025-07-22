@@ -90,7 +90,7 @@ def update_cluster(uuid):
         return utils.get_response_error("No cluster name provided", 400)
 
     try:
-        return utils.get_response(cluster_ops.set_name(uuid, cl_data))
+        return utils.get_response(cluster_ops.set_name(uuid, cl_data['name']))
 
     except KeyError:
         return utils.get_response_error(f"Cluster not found: {uuid}", 404)
