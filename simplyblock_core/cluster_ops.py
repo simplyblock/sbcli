@@ -359,7 +359,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     return cluster.get_id()
 
 
-def cluster_update(cl_id, name) -> Cluster:
+def set_name(cl_id, name) -> Cluster:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     old_name = cluster.cluster_name

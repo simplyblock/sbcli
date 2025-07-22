@@ -88,7 +88,7 @@ class UpdatableClusterParameters(BaseModel):
 @instance_api.put('/', name='clusters:update')
 def update(cluster: Cluster, parameters: UpdatableClusterParameters):
     if parameters.name is not None:
-        cluster_ops.cluster_update(cluster.get_id(), parameters.name)
+        cluster_ops.set_name(cluster.get_id(), parameters.name)
 
     return Response(status_code=204)
 
