@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ UBUNTU_JOBNAME }}
+  namespace: {{ NAMESPACE }}
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
+      hostNetwork: true
+      hostPID: true
+      serviceAccountName: simplyblock-storage-node-sa
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      volumes:
+        - name: rootfs
+          hostPath:
+            path: /
+      containers:
+        - name: init-setup
+          image: ubuntu:22.04
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: rootfs
+              mountPath: /
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              if [[ -f /etc/os-release ]]; then
+                  source /etc/os-release
+                  OS_ID=$ID
+              else
+                  echo "[ERROR] Unable to detect OS"
+                  exit 1
+              fi
+              echo "[INFO] Detected OS: $OS_ID"
+
+              case "$OS_ID" in
+                  ubuntu)
+                      apt-get install -y linux-modules-extra-$(uname -r)
+                      ;;
+                  *)
+                      echo "[WARN] OS $OS_ID not supported for automatic NVMe package installation"
+                      ;;
+              esac
+              
+              echo "--- Init setup complete ---"
