@@ -24,6 +24,7 @@ class _UpdateParams(BaseModel):
 
 
 class ClusterParams(BaseModel):
+    name: Optional[str] = None
     blk_size: Literal[512, 4096] = 512
     page_size_in_blocks: int = Field(2097152, gt=0)
     cap_warn: util.Percent = 0
@@ -84,7 +85,7 @@ class UpdatableClusterParameters(BaseModel):
     name: Optional[str] = None
 
 
-@instance_api.get('/', name='clusters:update')
+@instance_api.put('/', name='clusters:update')
 def update(cluster: Cluster, parameters: UpdatableClusterParameters):
     if parameters.name is not None:
         cluster_ops.cluster_update(cluster.get_id(), parameters.name)
