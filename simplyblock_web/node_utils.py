@@ -14,18 +14,18 @@ logger = logging.getLogger(__name__)
 
 
 def get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    return pci_utils.list(driver='uio_pci_generic') or pci_utils.list(driver='vfio-pci')
+    return pci_utils.list_devices(driver_name='uio_pci_generic') or pci_utils.list_devices(driver_name='vfio-pci')
 
 
 def get_nvme_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    return pci_utils.list(driver='nvme')
+    return pci_utils.list_devices(driver_name='nvme')
 
 
 def get_nvme_pcie():
     return [
             (address, (pci_utils.vendor_id(address), pci_utils.device_id(address)))
             for address
-            in pci_utils.list(device_class=pci_utils.NVME_CLASS)
+            in pci_utils.list_devices(device_class=pci_utils.NVME_CLASS)
     ]
 
 
