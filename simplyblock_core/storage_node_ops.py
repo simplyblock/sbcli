@@ -2,7 +2,7 @@
 import datetime
 import json
 import os
-from typing import List
+from typing import Any, List
 
 import threading
 
@@ -696,15 +696,19 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     remote_devices = []
     if jm_ids:
         for jm_id in jm_ids:
-            jm_dev = db_controller.get_jm_device_by_id(jm_id)
-            if jm_dev:
-                remote_devices.append(jm_dev)
+            try:
+                remote_devices.append(db_controller.get_jm_device_by_id(jm_id))
+            except KeyError:
+                pass
 
     if this_node.jm_ids:
         for jm_id in this_node.jm_ids:
-            jm_dev = db_controller.get_jm_device_by_id(jm_id)
-            if jm_dev and jm_dev not in remote_devices:
-                remote_devices.append(jm_dev)
+            try:
+                jm_dev = db_controller.get_jm_device_by_id(jm_id)
+                if jm_dev not in remote_devices:
+                    remote_devices.append(jm_dev)
+            except KeyError:
+                pass
 
     if this_node.lvstore_stack_secondary_1:
         org_node = db_controller.get_storage_node_by_id(this_node.lvstore_stack_secondary_1)
@@ -720,15 +724,15 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         if not jm_dev.jm_bdev:
             continue
 
-        org_dev = None
         org_dev_node = None
         for node in db_controller.get_storage_nodes():
             if node.jm_device and node.jm_device.get_id() == jm_dev.get_id():
-                org_dev = node.jm_device
                 org_dev_node = node
                 break
 
-        if not org_dev or org_dev in new_devs or org_dev_node.get_id() == this_node.get_id():
+        org_dev = node.jm_device
+
+        if not org_dev_node or org_dev in new_devs or org_dev_node.get_id() == this_node.get_id():
             continue
 
         if org_dev.status != NVMeDevice.STATUS_ONLINE or  org_dev_node.status != StorageNode.STATUS_ONLINE:
@@ -998,7 +1002,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.max_snap = max_snap
         snode.max_prov = max_prov
         snode.spdk_image = spdk_image or ""
-        snode.spdk_debug = spdk_debug or 0
+        snode.spdk_debug = spdk_debug or False
         snode.write_to_db(kv_store)
         snode.app_thread_mask = app_thread_mask or ""
         snode.pollers_mask = pollers_mask or ""
@@ -1984,9 +1988,11 @@ def list_storage_devices(node_id, is_json):
         })
 
     for jm_id in snode.jm_ids:
-        jm_device = db_controller.get_jm_device_by_id(jm_id)
-        if not jm_device:
+        try:
+            jm_device = db_controller.get_jm_device_by_id(jm_id)
+        except KeyError:
             continue
+
         jm_devices.append({
             "UUID": jm_device.uuid,
             "Name": jm_device.device_name,
@@ -2028,7 +2034,7 @@ def list_storage_devices(node_id, is_json):
             "Status": device.status,
         })
 
-    data = {
+    data: dict[str, List[Any]] = {
         "Storage Devices": storage_devices,
         "JM Devices": jm_devices,
         "Remote Devices": remote_devices,
@@ -2039,9 +2045,10 @@ def list_storage_devices(node_id, is_json):
     if is_json:
         return json.dumps(data, indent=2)
     else:
-        out = ""
-        for d in data:
-            out += f"{d}\n{utils.print_table(data[d])}\n\n"
+        out = "\n\n".join(
+            f'{key}\n{utils.print_table(value)}\n\n'
+            for key, value in data.items()
+        )
         return out
 
 
@@ -2500,7 +2507,7 @@ def get_node_port_iostats(port_id, history=None, records_count=20):
                 nd = node
                 break
 
-    if not port:
+    if port is None or nd is None:
         logger.error("Port not found")
         return False
 
@@ -2558,9 +2565,13 @@ def upgrade_automated_deployment_config():
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
 
     # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
-    total_cores = os.cpu_count()
+    total_cores = os.cpu_count() or 0
     if total_cores < 6:
         raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
+
+    # load vfio_pci and uio_pci_generic
+    utils.load_kernel_module("vfio_pci")
+    utils.load_kernel_module("uio_pci_generic")
 
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                        pci_allowed, pci_blocked)
@@ -2618,6 +2629,7 @@ def deploy(ifname, isolate_cores=False):
     if isolate_cores:
         utils.generate_realtime_variables_file(all_isolated_cores)
         utils.run_tuned()
+        utils.run_grubby(all_isolated_cores)
     return f"{dev_ip}:5000"
 
 
@@ -3259,7 +3271,7 @@ def get_secondary_nodes(current_node):
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
-    lvstore_stack = []
+    lvstore_stack: List[dict] = []
     distrib_list = []
     distrib_vuids = []
     size = max_size // snode.number_of_distribs
@@ -3329,7 +3341,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 },
                 "distribs_list": distrib_list,
                 "jm_ids": jm_ids,
-                "jm_vuid": jm_vuid
+                "jm_vuid": jm_vuid,
             }
         )
 

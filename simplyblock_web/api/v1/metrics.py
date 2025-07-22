@@ -157,9 +157,9 @@ def get_data():
 
             thread_busy_map = {t["id"]: t["busy"] for t in thread_data.get("threads", [])}    
 
-            records = db.get_node_stats(node, 1)
-            if records:
-                data = records[0].get_clean_dict()
+            node_records = db.get_node_stats(node, 1)
+            if node_records:
+                data = node_records[0].get_clean_dict()
                 ng = get_snode_metrics()
                 for g in ng:
                     v = g.replace("snode_", "")
@@ -204,9 +204,9 @@ def get_data():
                     logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
 
-                records= db.get_device_stats(device, 1)
-                if records:
-                    data = records[0].get_clean_dict()
+                device_records = db.get_device_stats(device, 1)
+                if device_records:
+                    data = device_records[0].get_clean_dict()
                     ng = get_device_metrics()
                     for g in ng:
                         v = g.replace("device_", "")
@@ -222,9 +222,9 @@ def get_data():
 
         for pool in db.get_pools():
 
-            records = db.get_pool_stats(pool, 1)
-            if records:
-                data = records[0].get_clean_dict()
+            pool_records = db.get_pool_stats(pool, 1)
+            if pool_records:
+                data = pool_records[0].get_clean_dict()
                 ng = get_pool_metrics()
                 for g in ng:
                     v = g.replace("pool_", "")
@@ -235,9 +235,9 @@ def get_data():
                             pool.get_status_code())
 
         for lvol in db.get_lvols(cl.get_id()):
-            records = db.get_lvol_stats(lvol, limit=1)
-            if records:
-                data = records[0].get_clean_dict()
+            lvol_records = db.get_lvol_stats(lvol, limit=1)
+            if lvol_records:
+                data = lvol_records[0].get_clean_dict()
                 ng = get_lvol_metrics()
                 for g in ng:
                     v = g.replace("lvol_", "")

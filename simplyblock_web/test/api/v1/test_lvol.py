@@ -3,7 +3,8 @@ import re
 import pytest
 from requests.exceptions import HTTPError
 
-import util
+from simplyblock_web.test import util
+from simplyblock_web.test.api.v1.util import list_ids
 
 
 
@@ -18,13 +19,13 @@ def test_lvol(call, cluster, pool):
     assert re.match(util.uuid_regex, lvol_uuid)
 
     assert call('GET', f'/lvol/{lvol_uuid}')[0]['uuid'] == lvol_uuid
-    assert lvol_uuid in util.list(call, 'lvol')
+    assert lvol_uuid in list_ids(call, 'lvol')
 
     call('DELETE', f'/lvol/{lvol_uuid}')
 
     util.await_deletion(call, f'/lvol/{lvol_uuid}')
 
-    assert lvol_uuid not in util.list(call, 'lvol')
+    assert lvol_uuid not in list_ids(call, 'lvol')
 
     with pytest.raises(HTTPError):
         call('GET', f'/lvol/{lvol_uuid}')

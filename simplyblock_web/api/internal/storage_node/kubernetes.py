@@ -11,14 +11,16 @@ import cpuinfo
 import requests
 from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException, V1DeleteOptions
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, PackageLoader
 import yaml
 from pydantic import BaseModel, Field
 
-from . import snode_ops
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
+
+from . import docker as snode_ops
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -232,36 +234,7 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
     return utils.get_response(True)
 
 
-class _DeviceParams(BaseModel):
-    device_pci: str
-
-
-@api.post('/delete_dev_gpt_partitions')
-def delete_gpt_partitions_for_dev(body: _DeviceParams):
-    cmd_list = [
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/uio_pci_generic/unbind",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/bind",
-    ]
-
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
-
-    device_name = os.popen(f"ls /sys/devices/pci0000:00/{body.device_pci}/nvme/nvme*/ | grep nvme").read().strip()
-    cmd_list = [
-        f"parted -fs /dev/{device_name} mklabel gpt",
-        f"echo -n \"{body.device_pci}\" > /sys/bus/pci/drivers/nvme/unbind",
-    ]
-
-    for cmd in cmd_list:
-        logger.debug(cmd)
-        ret = os.popen(cmd).read().strip()
-        logger.debug(ret)
-        time.sleep(1)
-
-    return utils.get_response(True)
+api.post('/delete_dev_gpt_partitions')(snode_ops.delete_gpt_partitions_for_dev)
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
@@ -319,14 +292,21 @@ def spdk_process_start(body: SPDKParams):
 
     node_prepration_job_name = "snode-spdk-job-"
     node_prepration_core_name = "snode-spdk-core-isolate-"
+    node_prepration_ubuntu_name = "snode-spdk-ubuntu-extra-"
+
     node_name = os.environ.get("HOSTNAME", "")
     core_isolate = os.environ.get("CORE_ISOLATION", False)
     if isinstance(core_isolate, str):
        core_isolate = core_isolate.strip().lower() in ("true")
-    
+
+    ubuntu_host = os.environ.get("UBUNTU_HOST", False)
+    if isinstance(ubuntu_host, str):
+       ubuntu_host = ubuntu_host.strip().lower() in ("true")
+
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
     core_name_length = len(node_prepration_core_name+node_name)
+    ubuntu_name_length = len(node_prepration_ubuntu_name+node_name)
     if k8s_job_name_length > 63:
         node_prepration_job_name += node_name[k8s_job_name_length-63:]
     else:
@@ -337,10 +317,15 @@ def spdk_process_start(body: SPDKParams):
     else:
          node_prepration_core_name += node_name
 
+    if ubuntu_name_length > 63:
+        node_prepration_ubuntu_name += node_name[ubuntu_name_length-63:]
+    else:
+         node_prepration_ubuntu_name += node_name
+
     logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
     try:
-        env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
+        env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         values = {
             'SPDK_IMAGE': body.spdk_image,
             "L_CORES": body.l_cores,
@@ -353,6 +338,7 @@ def spdk_process_start(body: SPDKParams):
             'RPC_PASSWORD': body.rpc_password,
             'HOSTNAME': node_name,
             'JOBNAME': node_prepration_job_name,
+            'UBUNTU_JOBNAME': node_prepration_ubuntu_name,
             'CORE_JOBNAME': node_prepration_core_name,
             'NAMESPACE': namespace,
             'FDB_CONNECTION': body.fdb_connection,
@@ -362,6 +348,28 @@ def spdk_process_start(body: SPDKParams):
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib
         }
+
+        if ubuntu_host:
+            ubuntu_template = env.get_template('ubuntu_kernel_extra.yaml.j2')
+            ubuntu_yaml = yaml.safe_load(ubuntu_template.render(values))
+            batch_v1 = core_utils.get_k8s_batch_client()
+            ubuntu_resp = batch_v1.create_namespaced_job(namespace=namespace, body=ubuntu_yaml)
+            msg = f"Job created: '{ubuntu_resp.metadata.name}' in namespace '{namespace}"
+            logger.info(msg)
+
+            node_utils_k8s.wait_for_job_completion(ubuntu_resp.metadata.name, namespace)
+            logger.info(f"Job '{ubuntu_resp.metadata.name}' completed successfully")
+
+            batch_v1.delete_namespaced_job(
+                name=ubuntu_resp.metadata.name,
+                namespace=namespace,
+                body=V1DeleteOptions(
+                    propagation_policy='Foreground',
+                    grace_period_seconds=0
+                )
+            )
+            logger.info(f"Job deleted: '{ubuntu_resp.metadata.name}' in namespace '{namespace}")
+
 
         job_template = env.get_template('storage_init_job.yaml.j2')
         job_yaml = yaml.safe_load(job_template.render(values))
@@ -404,7 +412,7 @@ def spdk_process_start(body: SPDKParams):
             )
             logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
 
-        env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
+        env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         dep = yaml.safe_load(template.render(values))
         logger.debug(dep)

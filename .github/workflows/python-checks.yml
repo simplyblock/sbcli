@@ -52,7 +52,7 @@ jobs:
       run: pip install .
 
     - name: Run tests
-      run: pytest -v
+      run: pytest --import-mode=importlib -v
 
 
   lint:
@@ -94,11 +94,5 @@ jobs:
     - name: Execute type checker
       run: |
         pip install -r requirements.txt
-        pip install kubernetes-typed types-docker types-boto3 types-urllib3
-        export MYPYPATH=./stubs
-        stubgen -m flask_swagger_ui -o stubs
-        stubgen -m flask_swagger_ui.flask_swagger_ui -o stubs
-        stubgen -m cpuinfo -o stubs
-        stubgen -m cpuinfo.cpuinfo -o stubs
-        stubgen -m fdb -o stubs
-        mypy simplyblock_web simplyblock_cli --install-types --non-interactive --exclude simplyblock_web/test
+        pip install -r type-requirements.txt
+        mypy simplyblock_web simplyblock_cli simplyblock_core

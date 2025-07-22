@@ -5,8 +5,9 @@ import argparse
 
 from flask_openapi3 import OpenAPI
 
-from simplyblock_web import utils
 from simplyblock_core import constants
+from simplyblock_web import utils
+from simplyblock_web.api import internal as internal_api
 
 logger = core_utils.get_logger(__name__)
 
@@ -36,11 +37,9 @@ if __name__ == '__main__':
 
     mode = args.mode
     if mode == "storage_node":
-        from simplyblock_web.blueprints import snode_ops
-        app.register_api(snode_ops.api)
+        app.register_api(internal_api.storage_node.docker.api)
 
     if mode == "storage_node_k8s":
-        from simplyblock_web.blueprints import snode_ops_k8s
-        app.register_api(snode_ops_k8s.api)
+        app.register_api(internal_api.storage_node.kubernetes.api)
 
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)

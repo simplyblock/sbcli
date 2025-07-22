@@ -43,7 +43,7 @@ def list_storage_devices(uuid):
         cluster_id = utils.get_cluster_id(request)
         nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
         for node in nodes:
-            devices.append(node.nvme_devices)
+            devices.extend(node.nvme_devices)
     data = []
     for dev in devices:
         data.append(dev.get_clean_dict())

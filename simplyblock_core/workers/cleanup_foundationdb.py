@@ -21,7 +21,7 @@ def PoolStatObject(lvols, st_date, end_date):
         start = index + str(st_date)
         end = index + str(end_date)
         try:
-            db_controller.kv_store.clear_range(start.encode('utf-8'), end.encode('utf-8'))
+            db_controller.kv_store.clear_range(start.encode('utf-8'), end.encode('utf-8'))  # type: ignore[union-attr]
             logger.info(f"Cleared PoolStatObject data from {start} to {end}")
         except Exception as e:
             logger.error(f"Failed to clear PoolStatObject for {lvol.pool_uuid}: {e}")

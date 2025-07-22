@@ -25,6 +25,8 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
+from . import pci as pci_utils
+
 CONFIG_KEYS = [
     "app_thread_core",
     "jm_cpu_core",
@@ -380,7 +382,7 @@ def hexa_to_cpu_list(cpu_mask):
 
 
 def pair_hyperthreads():
-    vcpus = list(range(os.cpu_count()))
+    vcpus = list(range(os.cpu_count() or 0))
     half = len(vcpus) // 2
     return {vcpus[i]: vcpus[i + half] for i in range(half)}
 
@@ -584,10 +586,9 @@ def get_logger(name=""):
     logg = logging.getLogger()
 
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
-    log_level = log_level.upper() if log_level else constants.LOG_LEVEL
 
     try:
-        logg.setLevel(log_level)
+        logg.setLevel(log_level.upper() if log_level else constants.LOG_LEVEL)
     except ValueError as e:
         logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
         logg.setLevel(constants.LOG_LEVEL)
@@ -842,10 +843,22 @@ def run_tuned():
             ["sudo", "tuned-adm", "profile", "realtime"],
             check=True
         )
-        print("Successfully run the tuned adm profile")
+        logger.info("Successfully run the tuned adm profile")
     except subprocess.CalledProcessError as e:
         logger.error(f"Error running the tuned adm profile: {e}")
 
+def run_grubby(core_list):
+    isolated_cores = ",".join(map(str, core_list))
+    core_args = f"isolcpus={isolated_cores} nohz_full={isolated_cores} rcu_nocbs={isolated_cores}"
+
+    try:
+        subprocess.run(
+            ["sudo", "grubby", "--update-kernel=All", f"--args={core_args}"],
+            check=True
+        )
+        logger.info("Successfully run the grubby command")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error running the grubby command: {e}")
 
 def parse_thread_siblings():
     """Parse the thread siblings from the sysfs topology."""
@@ -891,8 +904,9 @@ def load_core_distribution_from_file(file_path, number_of_cores):
                     key = key.strip()
                     value = value.strip()
                     if key in CONFIG_KEYS:
-                        config[key] = [int(core) for core in value.split(",")] if value else None
-                        if any(core > number_of_cores for core in config[key]):
+                        entry = [int(core) for core in value.split(",")] if value else None
+                        config[key] = entry
+                        if entry is not None and any(core > number_of_cores for core in entry):
                             raise ValueError(f"Invalid distribution, the index of the core {value}: "
                                              f"must be in range of number of cores {number_of_cores}")
 
@@ -979,8 +993,7 @@ def get_numa_cores():
             cpu_id = int(cpu_id)
             cores_by_numa.setdefault(node_id, []).append(cpu_id)
     except Exception:
-        total_cores = os.cpu_count()
-        cores_by_numa[0] = list(range(total_cores))
+        cores_by_numa[0] = list(range(os.cpu_count() or 0))
     return cores_by_numa
 
 
@@ -1168,45 +1181,6 @@ def get_nvme_pci_devices():
         return [], []
 
 
-def get_bound_driver(pci_address):
-    driver_path = f"/sys/bus/pci/devices/{pci_address}/driver"
-    if os.path.islink(driver_path):
-        return os.path.basename(os.readlink(driver_path))
-    return None
-
-
-def unbind_pci_driver(pci_address):
-    current_driver = get_bound_driver(pci_address)
-    if current_driver:
-        unbind_path = f"/sys/bus/pci/devices/{pci_address}/driver/unbind"
-        try:
-            cmd = f"echo {pci_address} | sudo tee {unbind_path}"
-            subprocess.run(cmd, shell=True, check=True)
-            logger.debug(f"Unbound {pci_address} from {current_driver}.")
-        except Exception as e:
-            logger.error(f"Failed to unbind {pci_address} from {current_driver}: {e}")
-
-
-def bind_to_nvme_driver(pci_address):
-    NVME_DRIVER = "nvme"
-    current_driver = get_bound_driver(pci_address)
-    if current_driver == NVME_DRIVER:
-        logger.info(f"{pci_address} is already bound to {NVME_DRIVER}.")
-        return
-
-    # Unbind from current driver if any
-    unbind_pci_driver(pci_address)
-
-    # Bind to nvme
-    new_id_path = f"/sys/bus/pci/drivers/{NVME_DRIVER}/bind"
-    try:
-        cmd = f"echo {pci_address} | sudo tee {new_id_path}"
-        subprocess.run(cmd, shell=True, check=True)
-        logger.debug(f"Bound {pci_address} to {NVME_DRIVER}.")
-    except Exception as e:
-        logger.error(f"Failed to bind {pci_address} to {NVME_DRIVER}: {e}")
-
-
 def detect_nvmes(pci_allowed, pci_blocked):
     pci_addresses, blocked_devices = get_nvme_pci_devices()
     ssd_pci_set = set(pci_addresses)
@@ -1234,7 +1208,7 @@ def detect_nvmes(pci_allowed, pci_blocked):
         pci_addresses = list(rest)
 
     for pci in pci_addresses:
-        bind_to_nvme_driver(pci)
+        pci_utils.ensure_driver(pci, 'nvme')
 
     nvme_base_path = '/sys/class/nvme/'
     nvme_devices = [dev for dev in os.listdir(nvme_base_path) if dev.startswith('nvme')]
@@ -1472,7 +1446,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     for nvme, val in nvmes.items():
         pci = val["pci_address"]
         numa = val["numa_node"]
-        unbind_pci_driver(pci)
+        pci_utils.unbind_driver(pci)
         if numa in sockets_to_use:
             system_info[numa]["nvmes"].append(pci)
         else:
@@ -1506,7 +1480,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     all_nodes = []
     node_index = 0
     for nid in sockets_to_use:
-        nvme_list = nvme_by_numa.get(nid)
+        nvme_list = nvme_by_numa[nid]
         logger.debug(f"NVME devices list {nvme_list}")
         nvme_per_core_group: list = [[] for _ in range(nodes_per_socket)]
         for i, nvme in enumerate(nvme_list):
@@ -1779,7 +1753,7 @@ def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
             raise
 
 def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):
-    TOP_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    TOP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
     alerts_template_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/alerting/")
     alert_resources_file = "alert_resources.yaml"
 
@@ -1829,3 +1803,10 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
         subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
         print(f"File moved to {prometheus_file_path} successfully.")
+
+def load_kernel_module(module):
+    try:
+        subprocess.run(["modprobe", module], check=True)
+        logger.info(f" {module} module loaded successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to load {module} module: {e}")

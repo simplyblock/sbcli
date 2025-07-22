@@ -22,3 +22,5 @@ flask-swagger-ui
 sentry-sdk[flask]
 flask-openapi3
 jsonschema
+fastapi
+uvicorn
