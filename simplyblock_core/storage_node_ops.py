@@ -2562,6 +2562,10 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     if total_cores < 6:
         raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
 
+    # load vfio_pci and uio_pci_generic
+    utils.load_kernel_module("vfio_pci")
+    utils.load_kernel_module("uio_pci_generic")
+
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                        pci_allowed, pci_blocked)
     if not nodes_config or not nodes_config.get("nodes"):
@@ -2618,6 +2622,7 @@ def deploy(ifname, isolate_cores=False):
     if isolate_cores:
         utils.generate_realtime_variables_file(all_isolated_cores)
         utils.run_tuned()
+        utils.run_grubby(all_isolated_cores)
     return f"{dev_ip}:5000"
 
 
