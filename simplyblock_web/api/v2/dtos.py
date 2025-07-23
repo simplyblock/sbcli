@@ -19,6 +19,7 @@ from . import util
 
 class ClusterDTO(BaseModel):
     id: UUID
+    name: Optional[str]
     nqn: str
     status: Literal['active', 'read_only', 'inactive', 'suspended', 'degraded', 'unready', 'in_activation', 'in_expansion']
     rebalancing: bool
@@ -36,6 +37,7 @@ class ClusterDTO(BaseModel):
     def from_model(model: Cluster):
         return ClusterDTO(
             id=UUID(model.get_id()),
+            name=model.cluster_name,
             nqn=model.nqn,
             status=model.status,  # type: ignore
             rebalancing=model.is_re_balancing,
