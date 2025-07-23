@@ -704,7 +704,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
 
     if this_node.lvstore_stack_secondary_1:
         org_node = db_controller.get_storage_node_by_id(this_node.lvstore_stack_secondary_1)
-        if org_node.jm_device and org_node.jm_device.status == JMDevice.STATUS_ONLINE:
+        if org_node.jm_device:
             remote_devices.append(org_node.jm_device)
         for jm_id in org_node.jm_ids:
             jm_dev = db_controller.get_jm_device_by_id(jm_id)
@@ -727,18 +727,14 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         if not org_dev or org_dev in new_devs or org_dev_node.get_id() == this_node.get_id():
             continue
 
-        if org_dev.status != NVMeDevice.STATUS_ONLINE or  org_dev_node.status != StorageNode.STATUS_ONLINE:
-            org_dev.status = JMDevice.STATUS_UNAVAILABLE
-        else:
-            try:
-                org_dev.remote_bdev = connect_device(
-                        f"remote_{org_dev.jm_bdev}", org_dev, rpc_client,
-                        bdev_names=node_bdev_names, reattach=True,
-                )
-                new_devs.append(org_dev)
-            except RuntimeError:
-                logger.error(f'Failed to connect to {org_dev.get_id()}')
-                org_dev.status = JMDevice.STATUS_UNAVAILABLE
+        try:
+            org_dev.remote_bdev = connect_device(
+                    f"remote_{org_dev.jm_bdev}", org_dev, rpc_client,
+                    bdev_names=node_bdev_names, reattach=True,
+            )
+        except RuntimeError:
+            logger.error(f'Failed to connect to {org_dev.get_id()}')
+        new_devs.append(org_dev)
 
     return new_devs
 

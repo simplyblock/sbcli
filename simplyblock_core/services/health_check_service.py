@@ -201,11 +201,8 @@ while True:
 
                     for jm_id in snode.jm_ids:
                         if jm_id and jm_id not in connected_jms:
-                            for nd in db.get_storage_nodes():
-                                if nd.jm_device and nd.jm_device.get_id() == jm_id:
-                                    if nd.status == StorageNode.STATUS_ONLINE:
-                                        node_remote_devices_check = False
-                                    break
+                            node_remote_devices_check = False
+                            break
 
                     if not node_remote_devices_check and cluster.status in [
                         Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
