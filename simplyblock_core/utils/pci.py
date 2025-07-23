@@ -88,3 +88,7 @@ def ensure_driver(address: PCIAddress, driver_name: str, *, override: bool = Fal
         (driver / 'unbind').write_text(address)
 
     (PCI_DRIVERS / driver_name / 'bind').write_text(address)
+
+
+def driver_loaded(driver_name: str) -> bool:
+    return (PCI_DRIVERS / driver_name).exists()
