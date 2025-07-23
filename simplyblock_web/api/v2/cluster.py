@@ -24,6 +24,7 @@ class _UpdateParams(BaseModel):
 
 
 class ClusterParams(BaseModel):
+    name: Optional[str] = None
     blk_size: Literal[512, 4096] = 512
     page_size_in_blocks: int = Field(2097152, gt=0)
     cap_warn: util.Percent = 0
@@ -78,6 +79,18 @@ Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
 @instance_api.get('/', name='clusters:detail')
 def get(cluster: Cluster) -> ClusterDTO:
     return ClusterDTO.from_model(cluster)
+
+
+class UpdatableClusterParameters(BaseModel):
+    name: Optional[str] = None
+
+
+@instance_api.put('/', name='clusters:update')
+def update(cluster: Cluster, parameters: UpdatableClusterParameters):
+    if parameters.name is not None:
+        cluster_ops.set_name(cluster.get_id(), parameters.name)
+
+    return Response(status_code=204)
 
 
 @instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
@@ -144,7 +157,7 @@ def activate(cluster: Cluster) -> Response:
 
 
 @instance_api.post('/update', name='clusters:upgrade', status_code=204, responses={204: {"content": None}})
-def update( cluster: Cluster, parameters: _UpdateParams) -> Response:
+def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
     cluster_ops.update_cluster(
         cluster_id=cluster.get_id(),
         mgmt_image=parameters.management_image,

@@ -54,6 +54,7 @@ def get_next_cluster_status(cluster_id):
     affected_nodes = 0
     online_devices = 0
     offline_devices = 0
+    jm_replication_tasks = False
 
     affected_physical_nodes = []
 
@@ -69,6 +70,14 @@ def get_next_cluster_status(cluster_id):
             if is_new_migrated_node(cluster_id, node):
                 continue
             online_nodes += 1
+            # check for jm rep tasks:
+            ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
+            if ret:
+                for jm in ret:
+                    if ret[jm] is False: # jm is not ready (has active replication task)
+                        jm_replication_tasks = True
+                        logger.warning("Replication task found!")
+                        break
         elif node.status == StorageNode.STATUS_REMOVED:
             pass
         else:
@@ -103,6 +112,8 @@ def get_next_cluster_status(cluster_id):
    
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
     if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n+k)):
+        return Cluster.STATUS_DEGRADED
+    elif jm_replication_tasks:
         return Cluster.STATUS_DEGRADED
     elif (affected_nodes > k or online_devices < (n + k) or (online_nodes < (n+k) and cluster.strict_node_anti_affinity)):
         return Cluster.STATUS_SUSPENDED
