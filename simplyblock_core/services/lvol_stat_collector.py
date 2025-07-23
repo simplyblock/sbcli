@@ -284,6 +284,10 @@ while True:
                             if lvol.lvol_uuid in all_node_lvols_stats[sec_node.get_id()]:
                                 stats.append(all_node_lvols_stats[sec_node.get_id()][lvol.lvol_uuid])
 
+                        if not capacity_dict and sec_node.get_id() in all_node_bdev_names \
+                                and lvol.lvol_uuid in all_node_bdev_names[sec_node.get_id()]:
+                            capacity_dict = all_node_bdev_names[sec_node.get_id()][lvol.lvol_uuid]
+
                     record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
                     if record:
                         if lvol.pool_uuid in pools_lvols_stats and pools_lvols_stats[lvol.pool_uuid]:
