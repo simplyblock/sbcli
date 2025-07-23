@@ -55,6 +55,7 @@ def get_next_cluster_status(cluster_id):
     online_devices = 0
     offline_devices = 0
     jm_replication_tasks = False
+    activa_temp_dev_migration_task_found = False
 
     affected_physical_nodes = []
 
@@ -99,12 +100,20 @@ def get_next_cluster_status(cluster_id):
         online_devices += node_online_devices
         offline_devices += node_offline_devices
 
+    # check migration tasks:
+    for task in db.get_job_tasks(cluster_id):
+        if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE \
+                and task.canceled is False:
+            activa_temp_dev_migration_task_found = True
+            break
+
     affected_nodes = len(affected_physical_nodes)
     logger.debug(f"online_nodes: {online_nodes}")
     logger.debug(f"offline_nodes: {offline_nodes}")
     logger.debug(f"affected_nodes: {affected_nodes}")
     logger.debug(f"online_devices: {online_devices}")
     logger.debug(f"offline_devices: {offline_devices}")
+    logger.debug(f"activa_temp_dev_migration_task_found: {activa_temp_dev_migration_task_found}")
     # ndcs n = 2
     # npcs k = 1
     n = cluster.distr_ndcs
@@ -113,7 +122,7 @@ def get_next_cluster_status(cluster_id):
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
     if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n+k)):
         return Cluster.STATUS_DEGRADED
-    elif jm_replication_tasks:
+    elif jm_replication_tasks or activa_temp_dev_migration_task_found:
         return Cluster.STATUS_DEGRADED
     elif (affected_nodes > k or online_devices < (n + k) or (online_nodes < (n+k) and cluster.strict_node_anti_affinity)):
         return Cluster.STATUS_SUSPENDED
