@@ -59,6 +59,8 @@ class K8sNodeBackend(NodeBackend):
 # ----- Backend Selection -----
 
 backend_type = os.getenv("BACKEND_TYPE", "docker").lower()
+backend: NodeBackend
+
 if backend_type == "docker":
     backend = DockerNodeBackend()
 elif backend_type == "k8s":
