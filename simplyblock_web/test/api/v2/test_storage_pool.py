@@ -23,8 +23,10 @@ def test_pool(call, cluster):
 
 
 def test_pool_duplicate(call, cluster, storage_pool):
-    with pytest.raises(HTTPError):
+    with pytest.raises(HTTPError) as exc:
         call('POST', f'/clusters/{cluster}/storage-pools', data={'name': 'poolX'})
+
+    assert str(exc.value).startswith('409 ')
 
 
 def test_pool_delete_missing(call, cluster):
