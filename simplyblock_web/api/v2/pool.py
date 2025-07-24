@@ -40,9 +40,12 @@ class StoragePoolParams(BaseModel):
 
 @api.post('/', name='clusters:storage-pools:create', status_code=201, responses={201: {"content": None}})
 def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Response:
-    for pool in db.get_pools():
-        if pool.cluster_id == cluster.get_id() and pool.name == parameters.name:
-            raise HTTPException(409, f'Pool {parameters.name} already exists')
+    try:
+        db.get_pool_by_name(parameters.name)
+        # FIXME: Names are deployment unique, this should be changed
+        raise HTTPException(409, f'Pool {parameters.name} already exists')
+    except KeyError:
+        pass
 
     id_or_false =  pool_controller.add_pool(
         parameters.name, parameters.pool_max, parameters.volume_max_size, parameters.max_rw_iops, parameters.max_rw_mbytes,
