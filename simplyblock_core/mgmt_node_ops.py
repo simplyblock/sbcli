@@ -295,7 +295,6 @@ def remove_mgmt_node(uuid):
 
     elif snode.mode == "kubernetes":
         config.load_kube_config()
-        v1 = k8s_client.CoreV1Api()
         
     mgmt_events.mgmt_remove(snode)
     logging.info("done")
