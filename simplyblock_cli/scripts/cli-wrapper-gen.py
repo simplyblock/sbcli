@@ -85,7 +85,7 @@ def default_value(item):
     elif isinstance(item_type, dict) and 'range' in item_type:
         return f"{value}"
     else:
-        raise "unknown data type %s" % item_type
+        raise TypeError("unknown data type %s" % item_type)
 
 
 def arg_value(item):

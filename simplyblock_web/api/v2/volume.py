@@ -107,10 +107,10 @@ instance_api = APIRouter(prefix='/{volume_id}')
 
 
 def _lookup_volume(volume_id: UUID) -> LVol:
-    volume = db.get_lvol_by_id(str(volume_id))
-    if volume is None:
-        raise HTTPException(404, f'Volume {volume_id} not found')
-    return volume
+    try:
+        return db.get_lvol_by_id(str(volume_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
 
 
 Volume = Annotated[LVol, Depends(_lookup_volume)]

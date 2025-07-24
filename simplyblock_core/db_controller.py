@@ -2,7 +2,7 @@
 import os.path
 
 import fdb
-from typing import List, Optional
+from typing import List
 
 from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
@@ -42,7 +42,7 @@ class DBController(metaclass=Singleton):
             if not os.path.isfile(constants.KVD_DB_FILE_PATH):
                 return
             fdb.api_version(constants.KVD_DB_VERSION)
-            self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)
+            self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)  # type: ignore[func-returns-value]
             self.kv_store.options.set_transaction_timeout(constants.KVD_DB_TIMEOUT_MS)
         except Exception as e:
             print(e)
@@ -59,13 +59,6 @@ class DBController(metaclass=Singleton):
             if n.cluster_id == cluster_id:
                 nodes.append(n)
         return sorted(nodes, key=lambda x: x.create_dt)
-
-    def get_storage_node_by_system_id(self, system_id) -> Optional[StorageNode]:
-        nodes = StorageNode().read_from_db(self.kv_store)
-        for node in nodes:
-            if node.system_uuid == system_id:
-                return node
-        return None
 
     def get_storage_nodes_by_system_id(self, system_id) -> List[StorageNode]:
         return [
@@ -86,13 +79,6 @@ class DBController(metaclass=Singleton):
         if len(ret) == 0:
             raise KeyError(f'StorageNode {id} not found')
         return ret[0]
-
-    def get_storage_node_by_hostname(self, hostname) -> Optional[StorageNode]:
-        nodes = self.get_storage_nodes()
-        for node in nodes:
-            if node.hostname == hostname:
-                return node
-        return None
 
     def get_storage_device_by_id(self, id) -> NVMeDevice:
         nodes = self.get_storage_nodes()
@@ -123,12 +109,12 @@ class DBController(metaclass=Singleton):
             raise KeyError(f'Pool {id} not found')
         return ret[0]
 
-    def get_pool_by_name(self, name) -> Optional[Pool]:
+    def get_pool_by_name(self, name) -> Pool:
         pools = Pool().read_from_db(self.kv_store)
         for pool in pools:
             if pool.pool_name == name:
                 return pool
-        return None
+        raise KeyError(f'Pool {name} not found')
 
     def get_lvols(self, cluster_id=None) -> List[LVol]:
         lvols = self.get_all_lvols()
@@ -291,11 +277,11 @@ class DBController(metaclass=Singleton):
         snode = self.get_storage_node_by_id(node_id)
         return sum(dev.size for dev in snode.nvme_devices)
 
-    def get_jm_device_by_id(self, jm_id) -> Optional[JMDevice]:
+    def get_jm_device_by_id(self, jm_id) -> JMDevice:
         for node in self.get_storage_nodes():
             if node.jm_device and node.jm_device.get_id() == jm_id:
                 return node.jm_device
-        return None
+        raise KeyError(f'JMDeviec {jm_id} not found')
 
     def get_primary_storage_nodes_by_cluster_id(self, cluster_id) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)

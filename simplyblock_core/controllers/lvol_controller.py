@@ -261,7 +261,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -290,7 +290,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             if lv.namespace == namespace:
                 lvols_count += 1
 
-        if lvols_count >= constants.LVO_MAX_NAMESPACES_PER_SUBSYS:
+        if lvols_count >= master_lvol.max_namespace_per_subsys:
             msg = f"Max namespaces reached: {lvols_count}"
             logger.error(msg)
             return False, msg
@@ -424,6 +424,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.namespace = namespace or ""
     else:
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
+        lvol.max_namespace_per_subsys = max_namespace_per_subsys
 
     nodes = []
     if host_node:
@@ -447,7 +448,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.error(error)
         return False, error
 
-    lvol_dict = {
+    lvol_dict: dict = {
         "type": "bdev_lvol",
         "name": lvol.lvol_bdev,
         "params": {
@@ -1094,12 +1095,15 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         lvols = db_controller.get_lvols(cluster_id)
     elif pool_id_or_name:
         try:
-            pool = db_controller.get_pool_by_id(pool_id_or_name)
+            pool = (
+                    db_controller.get_pool_by_id(pool_id_or_name)
+                    if utils.UUID_PATTERN.match(pool_id_or_name) is not None
+                    else db_controller.get_pool_by_name(pool_id_or_name)
+            )
+            for lv in db_controller.get_lvols_by_pool_id(pool.get_id()):
+                lvols.append(lv)
         except KeyError:
-            pool = db_controller.get_pool_by_name(pool_id_or_name)
-            if pool:
-                for lv in db_controller.get_lvols_by_pool_id(pool.get_id()):
-                    lvols.append(lv)
+            pass
     else:
         lvols = db_controller.get_all_lvols()
 

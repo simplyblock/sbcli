@@ -402,7 +402,7 @@ def hexa_to_cpu_list(cpu_mask):
 
 
 def pair_hyperthreads():
-    vcpus = list(range(os.cpu_count()))
+    vcpus = list(range(os.cpu_count() or 0))
     half = len(vcpus) // 2
     return {vcpus[i]: vcpus[i + half] for i in range(half)}
 
@@ -606,10 +606,9 @@ def get_logger(name=""):
     logg = logging.getLogger()
 
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
-    log_level = log_level.upper() if log_level else constants.LOG_LEVEL
 
     try:
-        logg.setLevel(log_level)
+        logg.setLevel(log_level.upper() if log_level else constants.LOG_LEVEL)
     except ValueError as e:
         logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
         logg.setLevel(constants.LOG_LEVEL)
@@ -864,10 +863,22 @@ def run_tuned():
             ["sudo", "tuned-adm", "profile", "realtime"],
             check=True
         )
-        print("Successfully run the tuned adm profile")
+        logger.info("Successfully run the tuned adm profile")
     except subprocess.CalledProcessError as e:
         logger.error(f"Error running the tuned adm profile: {e}")
 
+def run_grubby(core_list):
+    isolated_cores = ",".join(map(str, core_list))
+    core_args = f"isolcpus={isolated_cores} nohz_full={isolated_cores} rcu_nocbs={isolated_cores}"
+
+    try:
+        subprocess.run(
+            ["sudo", "grubby", "--update-kernel=All", f"--args={core_args}"],
+            check=True
+        )
+        logger.info("Successfully run the grubby command")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error running the grubby command: {e}")
 
 def parse_thread_siblings():
     """Parse the thread siblings from the sysfs topology."""
@@ -913,8 +924,9 @@ def load_core_distribution_from_file(file_path, number_of_cores):
                     key = key.strip()
                     value = value.strip()
                     if key in CONFIG_KEYS:
-                        config[key] = [int(core) for core in value.split(",")] if value else None
-                        if any(core > number_of_cores for core in config[key]):
+                        entry = [int(core) for core in value.split(",")] if value else None
+                        config[key] = entry
+                        if entry is not None and any(core > number_of_cores for core in entry):
                             raise ValueError(f"Invalid distribution, the index of the core {value}: "
                                              f"must be in range of number of cores {number_of_cores}")
 
@@ -1001,8 +1013,7 @@ def get_numa_cores():
             cpu_id = int(cpu_id)
             cores_by_numa.setdefault(node_id, []).append(cpu_id)
     except Exception:
-        total_cores = os.cpu_count()
-        cores_by_numa[0] = list(range(total_cores))
+        cores_by_numa[0] = list(range(os.cpu_count() or 0))
     return cores_by_numa
 
 
@@ -1489,7 +1500,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     all_nodes = []
     node_index = 0
     for nid in sockets_to_use:
-        nvme_list = nvme_by_numa.get(nid)
+        nvme_list = nvme_by_numa[nid]
         logger.debug(f"NVME devices list {nvme_list}")
         nvme_per_core_group: list = [[] for _ in range(nodes_per_socket)]
         for i, nvme in enumerate(nvme_list):
@@ -1827,3 +1838,10 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
         subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
         print(f"File moved to {prometheus_file_path} successfully.")
+
+def load_kernel_module(module):
+    try:
+        subprocess.run(["modprobe", module], check=True)
+        logger.info(f" {module} module loaded successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to load {module} module: {e}")

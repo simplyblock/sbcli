@@ -414,6 +414,16 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     return cluster.get_id()
 
 
+def set_name(cl_id, name) -> Cluster:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    old_name = cluster.cluster_name
+    cluster.cluster_name = name
+    cluster.write_to_db(db_controller.kv_store)
+    cluster_events.cluster_name_change(cluster, name, old_name)
+    return cluster
+
+
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
@@ -994,6 +1004,16 @@ def set_secret(cluster_id, secret) -> None:
 
     cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
+
+
+def change_cluster_name(cluster_id, new_name) -> None:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    old_name = cluster.cluster_name
+    cluster.cluster_name = new_name
+    cluster.write_to_db(db_controller.kv_store)
+    cluster_events.cluster_name_change(cluster, new_name, old_name)
+    logger.info(f"Cluster has been renamed: {old_name} -> {new_name}")
 
 
 def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:

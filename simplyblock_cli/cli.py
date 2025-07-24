@@ -327,6 +327,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__delete(subparser)
         if self.developer_mode:
             self.init_cluster__set(subparser)
+        self.init_cluster__change_name(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -489,6 +490,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('attr_name', help='attr_name', type=str)
         subcommand.add_argument('attr_value', help='attr_value', type=str)
 
+    def init_cluster__change_name(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'change-name', 'Assigns or changes a name to a cluster')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('name', help='Name', type=str)
+
 
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical volume commands', aliases=['lvol',])
@@ -526,6 +532,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
+        argument = subcommand.add_argument('--max-namespace-per-subsys', help='Maximum Namespace per subsystem', type=int, dest='max_namespace_per_subsys')
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='ha_type', choices=['single','default','ha',])
@@ -951,6 +958,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.cluster__set(sub_command, args)
+                elif sub_command in ['change-name']:
+                    ret = self.cluster__change_name(sub_command, args)
                 else:
                     self.parser.print_help()
 

@@ -29,19 +29,20 @@ def vendor_id(address: PCIAddress) -> int:
     return int((_device(address) / 'vendor').read_text(), 16)
 
 
-def class_id(address: PCIAddress) -> int:
+def device_id(address: PCIAddress) -> int:
     return int((_device(address) / 'vendor').read_text(), 16)
 
 
-def list(*, driver: Optional[str] = None, device_class: Optional[bytes] = None):
-    assert(sum(param is not None for param in [driver, device_class]) == 1)
-    if driver is not None:
+def list_devices(*, driver_name: Optional[str] = None, device_class: Optional[bytes] = None):
+    assert(sum(param is not None for param in [driver_name, device_class]) == 1)
+    if driver_name is not None:
+        driver = PCI_DRIVERS / driver_name
         return [
                 name
                 for path 
-                in (PCI_DRIVERS / driver).iterdir()
+                in driver.iterdir()
                 if PCI_ADDRESS_REGEX.match(name := path.name) is not None
-        ]
+        ] if driver.exists() else []
 
     if device_class is not None: 
         return [
@@ -88,3 +89,7 @@ def ensure_driver(address: PCIAddress, driver_name: str, *, override: bool = Fal
         (driver / 'unbind').write_text(address)
 
     (PCI_DRIVERS / driver_name / 'bind').write_text(address)
+
+
+def driver_loaded(driver_name: str) -> bool:
+    return (PCI_DRIVERS / driver_name).exists()
