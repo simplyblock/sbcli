@@ -59,52 +59,6 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 10
 
-  # cleanup:
-  #   runs-on: self-hosted
-  #   steps:
-  #     - name: Checkout deployment tooling
-  #       uses: actions/checkout@v4
-  #       with:
-  #         repository: simplyblock-io/simplyBlockDeploy
-  #         path: deploy
-
-  #     - name: cleanup cluster
-  #       timeout-minutes: 15
-  #       run: |
-  #         cd deploy/bare-metal
-  #         cluster="${{ vars.ci_cluster }}"
-  #         cluster="${cluster:1}"
-  #         echo "cleaning up cluster $cluster"
-  #         KEY="~/.ssh/simplyblock-us-east-2.pem"
-  #         eval $(python3 inventory.py inventory/c${cluster}.yml)
-
-  #         # restart all nodes
-  #         for node in $STORAGE_PRIVATE_IPS; do
-  #           echo "restart node $node"
-  #           ssh -i $KEY -o StrictHostKeyChecking=no root@$node "
-  #             (nohup bash -c 'sleep 1; reboot' >/dev/null 2>&1 &)
-  #             exit 0
-  #           "
-  #         done
-
-  #         # remove partions on each nodes
-  #         for node in $STORAGE_PRIVATE_IPS; do
-  #           sleep 5
-  #           echo "Waiting for $node to come online..."
-  #           until ssh -i $KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes root@$node "echo 'Node is up'" 2>/dev/null; do
-  #             sleep 5
-  #           done
-
-  #           ssh -i $KEY -o StrictHostKeyChecking=no root@$node "
-  #             for disk in nvme0n1 nvme1n1 nvme2n1 nvme3n1; do
-  #               for part in 1 2; do
-  #                 echo "Removing partition \$part from disk \$disk"
-  #                 sudo parted /dev/\$disk rm \$part || true
-  #               done
-  #             done
-  #           "
-  #         done
-
   integration:
     needs: [await-image, await-python-checks]
     if: ${{ vars.ci_cluster != '' }}
