@@ -195,12 +195,12 @@ while True:
         pools_lvols_stats: dict[str, list[LVolStatObject]] = {}
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
 
+            lvol_list = db.get_lvols_by_node_id(snode.get_id())
+
+            if not lvol_list:
+                continue
+
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-
-                lvol_list = db.get_lvols_by_node_id(snode.get_id())
-
-                if not lvol_list:
-                    continue
 
                 rpc_client = RPCClient(
                     snode.mgmt_ip, snode.rpc_port,
@@ -234,66 +234,66 @@ while True:
                             node_lvols_stats[st['name']] = st
                         all_node_lvols_stats[snode.get_id()] = node_lvols_stats
 
-                if snode.secondary_node_id:
+            if snode.secondary_node_id:
+                sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+                if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
+                    sec_rpc_client = RPCClient(
+                        sec_node.mgmt_ip, sec_node.rpc_port,
+                        sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
+
+                    if sec_node.get_id() not in all_node_bdev_names or not all_node_bdev_names[sec_node.get_id()]:
+                        ret = sec_rpc_client.get_bdevs()
+                        if ret:
+                            # node_bdev_names = {}
+                            node_bdev_names = {b['name']: b for b in ret}
+                            all_node_bdev_names[sec_node.get_id()] = node_bdev_names
+
+                    if sec_node.get_id() not in all_node_lvols_nqns or not all_node_lvols_nqns[sec_node.get_id()]:
+                        ret = sec_rpc_client.subsystem_list()
+                        if ret:
+                            node_lvols_nqns = {}
+                            for sub in ret:
+                                node_lvols_nqns[sub['nqn']] = sub
+                            all_node_lvols_nqns[sec_node.get_id()] = node_lvols_nqns
+
+                    if sec_node.get_id() not in all_node_lvols_stats or not all_node_lvols_stats[sec_node.get_id()]:
+                        ret = sec_rpc_client.get_lvol_stats()
+                        if ret:
+                            sec_node_lvols_stats = {}
+                            for st in ret['bdevs']:
+                                sec_node_lvols_stats[st['name']] = st
+                            all_node_lvols_stats[sec_node.get_id()] = sec_node_lvols_stats
+
+            for lvol in lvol_list:
+                if lvol.status in [LVol.STATUS_IN_CREATION, LVol.STATUS_IN_DELETION]:
+                    continue
+
+                capacity_dict = {}
+                stats = []
+                logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
+                if snode.get_id() in all_node_lvols_stats and lvol.lvol_uuid in all_node_lvols_stats[snode.get_id()]:
+                    stats.append(all_node_lvols_stats[snode.get_id()][lvol.lvol_uuid])
+
+                if snode.get_id() in all_node_bdev_names and lvol.lvol_uuid in all_node_bdev_names[snode.get_id()]:
+                    capacity_dict = all_node_bdev_names[snode.get_id()][lvol.lvol_uuid]
+
+                if lvol.ha_type == "ha":
                     sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-                    if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
-                        sec_rpc_client = RPCClient(
-                            sec_node.mgmt_ip, sec_node.rpc_port,
-                            sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
+                    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                        logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
+                        if lvol.lvol_uuid in all_node_lvols_stats[sec_node.get_id()]:
+                            stats.append(all_node_lvols_stats[sec_node.get_id()][lvol.lvol_uuid])
 
-                        if sec_node.get_id() not in all_node_bdev_names or not all_node_bdev_names[sec_node.get_id()]:
-                            ret = sec_rpc_client.get_bdevs()
-                            if ret:
-                                # node_bdev_names = {}
-                                node_bdev_names = {b['name']: b for b in ret}
-                                all_node_bdev_names[sec_node.get_id()] = node_bdev_names
+                    if not capacity_dict and sec_node.get_id() in all_node_bdev_names \
+                            and lvol.lvol_uuid in all_node_bdev_names[sec_node.get_id()]:
+                        capacity_dict = all_node_bdev_names[sec_node.get_id()][lvol.lvol_uuid]
 
-                        if sec_node.get_id() not in all_node_lvols_nqns or not all_node_lvols_nqns[sec_node.get_id()]:
-                            ret = sec_rpc_client.subsystem_list()
-                            if ret:
-                                node_lvols_nqns = {}
-                                for sub in ret:
-                                    node_lvols_nqns[sub['nqn']] = sub
-                                all_node_lvols_nqns[sec_node.get_id()] = node_lvols_nqns
-
-                        if sec_node.get_id() not in all_node_lvols_stats or not all_node_lvols_stats[sec_node.get_id()]:
-                            ret = sec_rpc_client.get_lvol_stats()
-                            if ret:
-                                sec_node_lvols_stats = {}
-                                for st in ret['bdevs']:
-                                    sec_node_lvols_stats[st['name']] = st
-                                all_node_lvols_stats[sec_node.get_id()] = sec_node_lvols_stats
-
-                for lvol in lvol_list:
-                    if lvol.status in [LVol.STATUS_IN_CREATION, LVol.STATUS_IN_DELETION]:
-                        continue
-
-                    capacity_dict = {}
-                    stats = []
-                    logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
-                    if snode.get_id() in all_node_lvols_stats and lvol.lvol_uuid in all_node_lvols_stats[snode.get_id()]:
-                        stats.append(all_node_lvols_stats[snode.get_id()][lvol.lvol_uuid])
-
-                    if snode.get_id() in all_node_bdev_names and lvol.lvol_uuid in all_node_bdev_names[snode.get_id()]:
-                        capacity_dict = all_node_bdev_names[snode.get_id()][lvol.lvol_uuid]
-
-                    if lvol.ha_type == "ha":
-                        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                            logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
-                            if lvol.lvol_uuid in all_node_lvols_stats[sec_node.get_id()]:
-                                stats.append(all_node_lvols_stats[sec_node.get_id()][lvol.lvol_uuid])
-
-                        if not capacity_dict and sec_node.get_id() in all_node_bdev_names \
-                                and lvol.lvol_uuid in all_node_bdev_names[sec_node.get_id()]:
-                            capacity_dict = all_node_bdev_names[sec_node.get_id()][lvol.lvol_uuid]
-
-                    record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
-                    if record:
-                        if lvol.pool_uuid in pools_lvols_stats and pools_lvols_stats[lvol.pool_uuid]:
-                            pools_lvols_stats[lvol.pool_uuid].append(record)
-                        else:
-                            pools_lvols_stats[lvol.pool_uuid] = [record]
+                record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
+                if record:
+                    if lvol.pool_uuid in pools_lvols_stats and pools_lvols_stats[lvol.pool_uuid]:
+                        pools_lvols_stats[lvol.pool_uuid].append(record)
+                    else:
+                        pools_lvols_stats[lvol.pool_uuid] = [record]
 
         for pool in db.get_pools(cluster_id=cluster.get_id()):
 
