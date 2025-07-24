@@ -32,6 +32,7 @@ class ClusterDTO(BaseModel):
     provisioned_cacacity_warning: util.Unsigned
     node_affinity: bool
     anti_affinity: bool
+    secret: str
 
     @staticmethod
     def from_model(model: Cluster):
@@ -50,6 +51,7 @@ class ClusterDTO(BaseModel):
             provisioned_cacacity_critical=model.prov_cap_crit,
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
+            secret=model.secret,
         )
 
 
