@@ -160,8 +160,13 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     if: ${{ inputs.k8s_snode == true }}
     steps:  
+    - name: Checkout spdk-csi
+      uses: actions/checkout@v4
+      with:
+        repository: simplyblock-io/simplyblock-csi
+        path: simplyblock-csi
+
     - name: Deploy Snode on K8s
-      if: ${{ inputs.k8s_snode == true }}
       run: |
         set -e
         mkdir -p $HOME/.kube
@@ -193,7 +198,6 @@ jobs:
         MNODE: ${{ needs.deploy.outputs.mnodes }}
 
     - name: Check Cluster Status
-      if: ${{ inputs.k8s_snode == true }}
       run: |
         n=0
         until [ "$n" -ge 100 ]
