@@ -19,6 +19,7 @@ from . import util
 
 class ClusterDTO(BaseModel):
     id: UUID
+    name: Optional[str]
     nqn: str
     status: Literal['active', 'read_only', 'inactive', 'suspended', 'degraded', 'unready', 'in_activation', 'in_expansion']
     rebalancing: bool
@@ -31,11 +32,13 @@ class ClusterDTO(BaseModel):
     provisioned_cacacity_warning: util.Unsigned
     node_affinity: bool
     anti_affinity: bool
+    secret: str
 
     @staticmethod
     def from_model(model: Cluster):
         return ClusterDTO(
             id=UUID(model.get_id()),
+            name=model.cluster_name,
             nqn=model.nqn,
             status=model.status,  # type: ignore
             rebalancing=model.is_re_balancing,
@@ -48,6 +51,7 @@ class ClusterDTO(BaseModel):
             provisioned_cacacity_critical=model.prov_cap_crit,
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
+            secret=model.secret,
         )
 
 

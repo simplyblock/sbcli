@@ -515,8 +515,12 @@ if not os.environ.get("WITHOUT_CLOUD_INFO"):
 
 @api.post('/bind_device_to_spdk')
 def bind_device_to_spdk(body: utils.DeviceParams):
-    pci_utils.ensure_driver(body.device_pci, 'uio_pci_generic', override=True)
-    return utils.get_response(True)
+    for driver_name in ['uio_pci_generic', 'vfio-pci']:
+        if pci_utils.driver_loaded(driver_name):
+            pci_utils.ensure_driver(body.device_pci, driver_name, override=True)
+            return utils.get_response(True)
+
+    return utils.get_response_error('SPDK PCI drivers are not loaded', 500)
 
 
 @api.post('/set_hugepages', responses={

@@ -1166,6 +1166,18 @@ commands:
             help: "attr_value"
             dest: attr_value
             type: str
+      - name: change-name
+        help: Assigns or changes a name to a cluster
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "name"
+            help: "Name"
+            dest: name
+            type: str
   - name: "volume"
     help: "Logical volume commands"
     aliases:
@@ -1232,6 +1244,10 @@ commands:
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
             dest: max_w_mbytes
+            type: int
+          - name: "--max-namespace-per-subsys"
+            help: "Maximum Namespace per subsystem"
+            dest: max_namespace_per_subsys
             type: int
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
