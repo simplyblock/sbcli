@@ -13,6 +13,7 @@ import docker
 from kubernetes import client as k8s_client, config as k8s_config
 import requests
 
+from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
 from simplyblock_core.controllers import cluster_events, device_controller
 from simplyblock_core.db_controller import DBController
