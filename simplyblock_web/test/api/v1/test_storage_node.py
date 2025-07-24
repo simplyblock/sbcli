@@ -52,8 +52,8 @@ def test_suspend_resume(call):
     assert call('GET', '/storagenode')[0]['status'] == 'online'
 
 
-@pytest.mark.timeout(30)
-def test_restart(call):
+@pytest.mark.timeout(180)
+def test_restart(call, cluster):
     node = call('GET', '/storagenode')[0]
     assert node['status'] == 'online'
     node_uuid = node['uuid']
@@ -62,6 +62,10 @@ def test_restart(call):
     _check_status_transition(
         ['online', 'in_restart', 'online'],
         lambda: call('GET', f'/storagenode/{node_uuid}')[0],
+    )
+    _check_status_transition(
+        ['active', 'degraded', 'active'],
+        lambda: call('GET', f'/cluster/{cluster}')[0],
     )
 
 
