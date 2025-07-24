@@ -2630,7 +2630,7 @@ def deploy(ifname, isolate_cores=False):
         logger.info(line.strip())
 
     logger.info("Installing dependencies...")
-    scripts.install_deps()
+    scripts.install_deps(mode="docker")
 
     logger.info(f"Node IP: {dev_ip}")
     scripts.configure_docker(dev_ip)
