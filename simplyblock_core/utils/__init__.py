@@ -11,7 +11,7 @@ import sys
 import uuid
 import time
 import socket
-from typing import Set, Union
+from typing import Union
 from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
