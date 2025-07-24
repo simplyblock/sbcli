@@ -3,4 +3,4 @@ SIMPLY_BLOCK_VERSION=19.0.4
 
 
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-PRE_lvol-del
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:lvol_delete-latest
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix_lvol-delete-latest
