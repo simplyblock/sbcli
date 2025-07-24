@@ -1146,9 +1146,9 @@ def next_free_hublvol_port(cluster_id):
 
 
 def validate_sockets(sockets_to_use, cores_by_numa):
-    for socket in sockets_to_use:
-        if socket not in cores_by_numa:
-            print(f"Error: Socket {socket} not in system sockets {cores_by_numa}")
+    for sock in sockets_to_use:
+        if sock not in cores_by_numa:
+            print(f"Error: Socket {sock} not in system sockets {cores_by_numa}")
 
 
 def detect_nics():
