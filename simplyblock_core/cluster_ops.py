@@ -13,7 +13,7 @@ import docker
 from kubernetes import client as k8s_client, config as k8s_config
 import requests
 
-from docker.errors import DockerException # noqa: F401
+from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
 from simplyblock_core.controllers import cluster_events, device_controller
 from simplyblock_core.db_controller import DBController
@@ -197,7 +197,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             c.swarm.leave(force=True)
             try:
                 c.volumes.get("monitoring_grafana_data").remove(force=True)
-            except docker.DockerException:
+            except DockerException:
                 pass
             time.sleep(3)
 
