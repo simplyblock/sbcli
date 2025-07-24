@@ -65,6 +65,12 @@ jobs:
     runs-on: ${{ inputs.runs_on }}
     if: ${{ inputs.k8s_snode == true }}
     steps:
+    - name: Checkout deployment tooling
+      uses: actions/checkout@v4
+      with:
+        repository: simplyblock-io/simplyBlockDeploy
+        path: deploy
+
     - name: Setup k8s
       id: k8sdeployment
       if: ${{ inputs.k8s_snode == true }}
