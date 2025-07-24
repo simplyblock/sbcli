@@ -1348,7 +1348,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             for node in cluster_docker.nodes.list():
                 if node.attrs["Status"] and snode.mgmt_ip in node.attrs["Status"]["Addr"]:
                     node.remove(force=True)
-        except:
+        except Exception:
             pass
 
     try:
