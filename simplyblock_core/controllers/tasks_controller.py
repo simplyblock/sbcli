@@ -39,7 +39,7 @@ def _validate_new_task_node_restart(cluster_id, node_id):
 
 
 def _add_task(function_name, cluster_id, node_id, device_id,
-              max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None):
+              max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None, send_to_cluster_log=True):
 
     if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_FAILED_DEV_MIG]:
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
@@ -73,20 +73,24 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     task_obj.max_retry = max_retry
     task_obj.status = JobSchedule.STATUS_NEW
     task_obj.write_to_db(db.kv_store)
-    tasks_events.task_create(task_obj)
+    if send_to_cluster_log:
+        tasks_events.task_create(task_obj)
     return task_obj.uuid
 
 
 def add_device_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
+    sub_tasks = []
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
             continue
 
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
-                _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
-                          max_retry=-1, function_params={'distr_name': bdev['name']})
+                task_id = _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
+                          max_retry=-1, function_params={'distr_name': bdev['name']}, send_to_cluster_log=False)
+                if task_id:
+                    sub_tasks.append(task_id)
     return True
 
 
