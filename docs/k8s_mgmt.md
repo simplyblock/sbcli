@@ -4,7 +4,7 @@ This guide explains how to deploy the SimplyBlock Management Node on a Kubernete
 
 ---
 
-## 🧰 Prerequisites
+## Prerequisites
 
 - A Linux host or VM with access to the required bootstrap scripts:
   - `./bootstrap-k3s.sh`
