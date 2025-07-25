@@ -2534,7 +2534,7 @@ def upgrade_automated_deployment_config():
         return False
 
 
-def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
+def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked, cores_percentage=0):
 
     # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
     total_cores = os.cpu_count()
@@ -2546,7 +2546,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     utils.load_kernel_module("uio_pci_generic")
 
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
-                                                       pci_allowed, pci_blocked)
+                                                       pci_allowed, pci_blocked, cores_percentage)
     if not nodes_config or not nodes_config.get("nodes"):
         return False
     utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
