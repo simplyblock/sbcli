@@ -10,3 +10,4 @@ class MgmtNode(BaseNodeObject):
     docker_ip_port: str = ""
     hostname: str = ""
     mgmt_ip: str = ""
+    mode: str = ""

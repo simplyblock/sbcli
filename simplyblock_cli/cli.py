@@ -352,6 +352,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster ha type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
+        argument = subcommand.add_argument('--mode', help='Environment to deploy management services, default: docker ', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
         if self.developer_mode:
@@ -631,6 +632,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         subcommand.add_argument('cluster_secret', help='Cluster secret', type=str)
         subcommand.add_argument('ifname', help='Management interface name', type=str)
+        argument = subcommand.add_argument('--mode', help='Environment to deploy management services, default: docker ', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
 
     def init_control_plane__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all control plane nodes')

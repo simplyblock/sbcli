@@ -46,6 +46,7 @@ class Cluster(BaseModel):
     enable_node_affinity: bool = False
     enable_qos: bool = False
     grafana_endpoint: str = ""
+    mode: str = ""
     grafana_secret: str = ""
     contact_point: str = ""
     ha_type: str = "single"
