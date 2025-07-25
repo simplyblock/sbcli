@@ -517,7 +517,7 @@ if not os.environ.get("WITHOUT_CLOUD_INFO"):
 @api.post('/bind_device_to_spdk')
 def bind_device_to_spdk(body: utils.DeviceParams):
     if (
-            (vfio_module := Path('/sys/modules/vfio')).exists() and
+            (vfio_module := Path('/sys/module/vfio')).exists() and
             pci_utils.driver_loaded(driver_name := 'vfio-pci')
     ):
         noiommu_parameter = vfio_module / 'parameters' / 'enable_unsafe_noiommu_mode'
