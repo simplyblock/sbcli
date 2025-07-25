@@ -1,6 +1,5 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=19.0.4
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre-upgrade
+SIMPLY_BLOCK_VERSION=1.1.7
 
-
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-PRE
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-latest
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-Hotfix-upgrade2
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-668b8c15
