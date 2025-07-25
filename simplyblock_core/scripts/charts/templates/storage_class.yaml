@@ -1,0 +1,10 @@
+{{- if .Values.monitoring.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: openebs-local-hostpath
+provisioner: openebs.io/local
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+{{- end }}

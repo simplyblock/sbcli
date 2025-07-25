@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-webappapi
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-webappapi
+  ports:
+  - name: http
+    port: 5000
+    targetPort: 5000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-haproxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-haproxy
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+  - name: graylog-gelf
+    port: 12202
+    targetPort: 12202
+  - name: opensearch
+    port: 9200
+    targetPort: 9200

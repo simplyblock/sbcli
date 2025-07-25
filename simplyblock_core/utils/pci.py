@@ -17,20 +17,20 @@ NVME_CLASS = bytes([0x01, 0x08, 0x02])
 PCIAddress = Annotated[str, StringConstraints(pattern=PCI_ADDRESS_REGEX)]
 
 
-def _device(address: PCIAddress) -> Path:
+def device(address: PCIAddress) -> Path:
     return PCI_DEVICES / address
 
 
-def _driver(address: PCIAddress) -> Path:
-    return _device(address) / 'driver'
+def device_driver(address: PCIAddress) -> Path:
+    return device(address) / 'driver'
 
 
 def vendor_id(address: PCIAddress) -> int:
-    return int((_device(address) / 'vendor').read_text(), 16)
+    return int((device(address) / 'vendor').read_text(), 16)
 
 
 def device_id(address: PCIAddress) -> int:
-    return int((_device(address) / 'vendor').read_text(), 16)
+    return int((device(address) / 'vendor').read_text(), 16)
 
 
 def list_devices(*, driver_name: Optional[str] = None, device_class: Optional[bytes] = None):
@@ -56,7 +56,7 @@ def list_devices(*, driver_name: Optional[str] = None, device_class: Optional[by
 
 
 def nvme_device_name(address: PCIAddress):
-    controller = single((_device(address) / 'nvme').iterdir())
+    controller = single((device(address) / 'nvme').iterdir())
     return single(
             name
             for path
@@ -66,12 +66,12 @@ def nvme_device_name(address: PCIAddress):
 
 
 def bound_driver_name(address: PCIAddress) -> Optional[str]:
-    driver = _driver(address)
+    driver = device_driver(address)
     return driver.readlink().name if driver.exists() else None
 
 
 def unbind_driver(address: PCIAddress):
-    driver = _driver(address)
+    driver = device_driver(address)
     if not driver.exists():
         return
 
@@ -79,9 +79,9 @@ def unbind_driver(address: PCIAddress):
 
 
 def ensure_driver(address: PCIAddress, driver_name: str, *, override: bool = False):
-    (_device(address) / 'driver_override').write_text(driver_name if override else '\n')
+    (device(address) / 'driver_override').write_text(driver_name if override else '\n')
 
-    driver = _driver(address)
+    driver = device_driver(address)
     if driver.exists():
         if driver.readlink().name == driver_name:
             return

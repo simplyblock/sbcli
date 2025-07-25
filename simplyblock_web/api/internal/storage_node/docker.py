@@ -3,6 +3,7 @@
 import json
 import math
 import os
+from pathlib import Path
 import subprocess
 import time
 from typing import List, Optional, Union
@@ -515,12 +516,23 @@ if not os.environ.get("WITHOUT_CLOUD_INFO"):
 
 @api.post('/bind_device_to_spdk')
 def bind_device_to_spdk(body: utils.DeviceParams):
-    for driver_name in ['uio_pci_generic', 'vfio-pci']:
-        if pci_utils.driver_loaded(driver_name):
-            pci_utils.ensure_driver(body.device_pci, driver_name, override=True)
-            return utils.get_response(True)
+    if (
+            (vfio_module := Path('/sys/modules/vfio')).exists() and
+            pci_utils.driver_loaded(driver_name := 'vfio-pci')
+    ):
+        noiommu_parameter = vfio_module / 'parameters' / 'enable_unsafe_noiommu_mode'
+        if (
+                not (pci_utils.device(body.device_pci) / 'iommu_group').exists() and
+                noiommu_parameter.read_text().strip() == 'N'
+        ):
+            noiommu_parameter.write_text('1')
+    elif pci_utils.driver_loaded(driver_name := 'uio_pci_generic'):
+        pass  # assignment done in check
+    else:
+        return utils.get_response_error('SPDK PCI drivers are not loaded', 500)
 
-    return utils.get_response_error('SPDK PCI drivers are not loaded', 500)
+    pci_utils.ensure_driver(body.device_pci, driver_name, override=True)
+    return utils.get_response(True)
 
 
 @api.post('/set_hugepages', responses={
