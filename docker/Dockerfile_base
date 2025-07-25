@@ -5,7 +5,7 @@ RUN apt-get update ; apt-get upgrade -y
 
 RUN apt-get install -y \
     wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi iptables \
-    iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl
+    iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl kmod
 
 
 RUN install -m 0755 -d /etc/apt/keyrings

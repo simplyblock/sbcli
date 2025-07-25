@@ -27,7 +27,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
-        self.init_caching_node()
         super().__init__()
 
     def init_storage_node(self):
@@ -169,6 +168,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--iobuf_large_bufsize', help='bdev_set_options param', type=int, default=0, dest='large_bufsize')
         argument = subcommand.add_argument('--force', help='Force restart', dest='force', action='store_true')
         argument = subcommand.add_argument('--ssd-pcie', help='New Nvme PCIe address to add to the storage node. Can be more than one.', type=str, default='', dest='ssd_pcie', required=False, nargs='+')
+        argument = subcommand.add_argument('--force-lvol-recreate', help='Force LVol recreate on node restart even if lvol bdev was not recovered', default=False, dest='force_lvol_recreate', action='store_true')
 
     def init_storage_node__shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'shutdown', 'Initiates a storage node shutdown')
@@ -327,6 +327,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__delete(subparser)
         if self.developer_mode:
             self.init_cluster__set(subparser)
+        self.init_cluster__change_name(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -351,6 +352,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster ha type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
+        argument = subcommand.add_argument('--mode', help='Environment to deploy management services, default: docker ', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
         if self.developer_mode:
@@ -362,6 +364,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default', dest='disable_monitoring', action='store_true')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
+        argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -387,6 +390,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, default: true', type=bool, default=False, dest='enable_qos')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
+        argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')
@@ -486,6 +490,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('attr_name', help='attr_name', type=str)
         subcommand.add_argument('attr_value', help='attr_value', type=str)
 
+    def init_cluster__change_name(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'change-name', 'Assigns or changes a name to a cluster')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('name', help='Name', type=str)
+
 
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical volume commands', aliases=['lvol',])
@@ -523,6 +532,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
+        argument = subcommand.add_argument('--max-namespace-per-subsys', help='Maximum Namespace per subsystem', type=int, dest='max_namespace_per_subsys')
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='ha_type', choices=['single','default','ha',])
@@ -622,6 +632,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         subcommand.add_argument('cluster_secret', help='Cluster secret', type=str)
         subcommand.add_argument('ifname', help='Management interface name', type=str)
+        argument = subcommand.add_argument('--mode', help='Environment to deploy management services, default: docker ', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
 
     def init_control_plane__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all control plane nodes')
@@ -655,8 +666,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--has-secret', help='Pool is created with a secret (all further API interactions with the pool and logical volumes in the pool require this secret)', dest='has_secret', action='store_true')
 
     def init_storage_pool__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'Sets a storage pool\'s attributes')
@@ -730,70 +739,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
 
 
-    def init_caching_node(self):
-        subparser = self.add_command('caching-node', 'Caching node commands', aliases=['cn',])
-        self.init_caching_node__deploy(subparser)
-        self.init_caching_node__add_node(subparser)
-        self.init_caching_node__list(subparser)
-        self.init_caching_node__list_lvols(subparser)
-        self.init_caching_node__remove(subparser)
-        self.init_caching_node__connect(subparser)
-        self.init_caching_node__disconnect(subparser)
-        self.init_caching_node__recreate(subparser)
-        self.init_caching_node__get_lvol_stats(subparser)
-
-
-    def init_caching_node__deploy(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'deploy', 'Deploys a caching node on this machine (local run)')
-        argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname')
-
-    def init_caching_node__add_node(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a new caching node to the cluster')
-        subcommand.add_argument('cluster_id', help='Cluster id', type=str)
-        subcommand.add_argument('node_ip', help='Node IP address', type=str)
-        subcommand.add_argument('ifname', help='Management interface name', type=str)
-        argument = subcommand.add_argument('--vcpu-count', help='Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and other workloads. The default on non-Kubernetes hosts is 80%%.', type=int, dest='vcpu_count')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--cpu-mask', help='SPDK app CPU mask, default is all cores found', type=regex_type(r'^(0x|0X)?[a-fA-F0-9]+$'), dest='spdk_cpu_mask')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--memory', help='SPDK huge memory allocation. By default it will acquire all available huge pages.', type=size_type(min=utils.parse_size('1G'), max=None), dest='spdk_mem')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--spdk-image', help='SPDK image uri', type=str, dest='spdk_image')
-        argument = subcommand.add_argument('--namespace', help='k8s namespace to deploy on', type=str, dest='namespace')
-        argument = subcommand.add_argument('--multipathing', help='Enable multipathing for logical volume connection, default: on', type=str, default='True', dest='multipathing', choices=['on','off',])
-
-    def init_caching_node__list(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'list', 'Lists all caching nodes')
-
-    def init_caching_node__list_lvols(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'list-lvols', 'Lists all connected logical volumes')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-
-    def init_caching_node__remove(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'remove', 'Removes a caching node from the cluster')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-        argument = subcommand.add_argument('--force', help='Force remove', dest='force', action='store_true')
-
-    def init_caching_node__connect(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'connect', 'Connects a logical volume to the caching node')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
-
-    def init_caching_node__disconnect(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'disconnect', 'Disconnects a logical volume from the caching node')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
-
-    def init_caching_node__recreate(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'recreate', 'Recreate a caching node\'s bdevs')
-        subcommand.add_argument('node_id', help='Caching node id', type=str)
-
-    def init_caching_node__get_lvol_stats(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'get-lvol-stats', 'Gets a logical volume\'s statistics')
-        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
-        argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
-
-
     def run(self):
         args = self.parser.parse_args()
         if args.debug:
@@ -803,7 +748,7 @@ class CLIWrapper(CLIWrapperBase):
 
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
-        ret = ""
+        ret = False
         args_dict = args.__dict__
 
         try:
@@ -1013,6 +958,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.cluster__set(sub_command, args)
+                elif sub_command in ['change-name']:
+                    ret = self.cluster__change_name(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1076,8 +1023,6 @@ class CLIWrapper(CLIWrapperBase):
             elif args.command in ['storage-pool', 'pool']:
                 sub_command = args_dict['storage-pool']
                 if sub_command in ['add']:
-                    if not self.developer_mode:
-                        args.has_secret = None
                     ret = self.storage_pool__add(sub_command, args)
                 elif sub_command in ['set']:
                     ret = self.storage_pool__set(sub_command, args)
@@ -1111,41 +1056,13 @@ class CLIWrapper(CLIWrapperBase):
                 else:
                     self.parser.print_help()
 
-            elif args.command in ['caching-node', 'cn']:
-                sub_command = args_dict['caching-node']
-                if sub_command in ['deploy']:
-                    ret = self.caching_node__deploy(sub_command, args)
-                elif sub_command in ['add-node']:
-                    if not self.developer_mode:
-                        args.spdk_cpu_mask = None
-                        args.spdk_mem = None
-                        args.spdk_image = None
-                    ret = self.caching_node__add_node(sub_command, args)
-                elif sub_command in ['list']:
-                    ret = self.caching_node__list(sub_command, args)
-                elif sub_command in ['list-lvols']:
-                    ret = self.caching_node__list_lvols(sub_command, args)
-                elif sub_command in ['remove']:
-                    ret = self.caching_node__remove(sub_command, args)
-                elif sub_command in ['connect']:
-                    ret = self.caching_node__connect(sub_command, args)
-                elif sub_command in ['disconnect']:
-                    ret = self.caching_node__disconnect(sub_command, args)
-                elif sub_command in ['recreate']:
-                    ret = self.caching_node__recreate(sub_command, args)
-                elif sub_command in ['get-lvol-stats']:
-                    ret = self.caching_node__get_lvol_stats(sub_command, args)
-                else:
-                    self.parser.print_help()
-
             else:
                 self.parser.print_help()
 
-        except Exception as e:
+        except Exception as exc:
+            print('Operation failed: ', exc)
             if args.debug:
-                traceback.print_exc()
-            else:
-                print('Operation failed: ', e)
+                traceback.print_exception(None, exc, exc.__traceback__)
             exit(1)
 
         if not ret:

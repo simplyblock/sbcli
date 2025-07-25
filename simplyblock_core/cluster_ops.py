@@ -10,6 +10,7 @@ import textwrap
 import typing as t
 
 import docker
+from kubernetes import client as k8s_client, config as k8s_config
 import requests
 
 from docker.errors import DockerException
@@ -79,58 +80,101 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
 
 def _add_graylog_input(cluster_ip, password):
     url = f"http://{cluster_ip}/graylog/api/system/inputs"
-    payload = json.dumps({
-        "title": "spdk log input",
-        "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
-        "configuration": {
-            "bind_address": "0.0.0.0",
-            "port": 12201,
-            "recv_buffer_size": 262144,
-            "number_worker_threads": 2,
-            "override_source": None,
-            "charset_name": "UTF-8",
-            "decompress_size_limit": 8388608
-        },
-        "global": True
-    })
-    headers = {
-        'X-Requested-By': '',
-        'Content-Type': 'application/json',
-    }
-    session = requests.session()
-    session.auth = ("admin", password)
-    response = session.request("POST", url, headers=headers, data=payload)
-    logger.debug(response.text)
+
+    retries = 30
+    reachable=False
+    while retries > 0:
+
+        payload = json.dumps({
+            "title": "spdk log input",
+            "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
+            "configuration": {
+                "bind_address": "0.0.0.0",
+                "port": 12201,
+                "recv_buffer_size": 262144,
+                "number_worker_threads": 2,
+                "override_source": None,
+                "charset_name": "UTF-8",
+                "decompress_size_limit": 8388608
+            },
+            "global": True
+        })
+        headers = {
+            'X-Requested-By': '',
+            'Content-Type': 'application/json',
+        }
+        session = requests.session()
+        session.auth = ("admin", password)
+        response = session.request("POST", url, headers=headers, data=payload)
+        if response.status_code == 201:
+            logger.info("Graylog input created...")
+            reachable=True
+            break
+
+        logger.debug(response.text)
+        retries -= 1
+        time.sleep(5)
+    if not reachable:
+        logger.error(f"Failed to create graylog input: {response.text}")
+        return False
+
     return response.status_code == 201
 
 def _set_max_result_window(cluster_ip, max_window=100000):
-    response = requests.put(
-        f"http://{cluster_ip}:9200/_all/_settings",
-        json={"settings": {"index.max_result_window": max_window}},
-    )
-    response.raise_for_status()
-    logger.info("Settings updated for existing indices.")
 
-    response_template = requests.put(
-        f"http://{cluster_ip}:9200/_template/all_indices_template",
-        json={
-            "index_patterns": ["*"],
-            "settings": {"index.max_result_window": max_window},
-        },
-    )
-    response_template.raise_for_status()
-    logger.info("Template created for future indices.")
+    url_existing_indices = f"http://{cluster_ip}:9200/_all/_settings"
 
+    retries = 30
+    reachable=False
+    while retries > 0:
+        payload_existing = json.dumps({
+            "settings": {
+                "index.max_result_window": max_window
+            }
+        })
+        headers = {
+            'Content-Type': 'application/json',
+        }
+        response = requests.put(url_existing_indices, headers=headers, data=payload_existing)
+        if response.status_code == 200:
+            logger.info("Settings updated for existing indices.")
+            reachable=True
+            break
+        logger.debug(response.status_code)
+        logger.debug("waiting for opensearch cluster to come up")
+        retries -= 1
+        time.sleep(5)
+
+    if not reachable:
+        logger.error(f"Failed to update settings for existing indices: {response.text}")
+        return False
+    
+    url_template = f"http://{cluster_ip}:9200/_template/all_indices_template"
+    payload_template = json.dumps({
+        "index_patterns": ["*"],
+        "settings": {
+            "index.max_result_window": max_window
+        }
+    })
+    response_template = requests.put(url_template, headers=headers, data=payload_template)
+    if response_template.status_code == 200:
+        logger.info("Template created for future indices.")
+        return True
+    else:
+        logger.error(f"Failed to create template for future indices: {response_template.text}")
+        return False
+
+   
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
-                   contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity) -> str:
+                   contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
     logger.info("Installing dependencies...")
-    scripts.install_deps()
+    scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
     if not ifname:
@@ -140,39 +184,39 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not dev_ip:
         raise ValueError(f"Error getting interface ip: {ifname}")
 
-    logger.info(f"Node IP: {dev_ip}")
-    scripts.configure_docker(dev_ip)
-
     db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
     scripts.set_db_config(db_connection)
 
-    logger.info("Configuring docker swarm...")
-    c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
-    if c.swarm.attrs and "ID" in c.swarm.attrs:
-        logger.info("Docker swarm found, leaving swarm now")
-        c.swarm.leave(force=True)
-        try:
-            c.volumes.get("monitoring_grafana_data").remove(force=True)
-        except DockerException:
-            pass
-        time.sleep(3)
+    if mode == "docker": 
+        logger.info(f"Node IP: {dev_ip}")
+        scripts.configure_docker(dev_ip)
+        logger.info("Configuring docker swarm...")
+        c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
+        if c.swarm.attrs and "ID" in c.swarm.attrs:
+            logger.info("Docker swarm found, leaving swarm now")
+            c.swarm.leave(force=True)
+            try:
+                c.volumes.get("monitoring_grafana_data").remove(force=True)
+            except DockerException:
+                pass
+            time.sleep(3)
 
-    c.swarm.init(dev_ip)
-    logger.info("Configuring docker swarm > Done")
-    
-    hostname = socket.gethostname()
-    current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
-    if current_node:
-        current_spec = current_node.attrs["Spec"]
-        current_labels = current_spec.get("Labels", {})
-        current_labels["app"] = "graylog"
-        current_spec["Labels"] = current_labels
-
-        current_node.update(current_spec)
+        c.swarm.init(dev_ip)
+        logger.info("Configuring docker swarm > Done")
         
-        logger.info(f"Labeled node '{hostname}' with app=graylog")
-    else:
-        logger.warning("Could not find current node for labeling")
+        hostname = socket.gethostname()
+        current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
+        if current_node:
+            current_spec = current_node.attrs["Spec"]
+            current_labels = current_spec.get("Labels", {})
+            current_labels["app"] = "graylog"
+            current_spec["Labels"] = current_labels
+
+            current_node.update(current_spec)
+            
+            logger.info(f"Labeled node '{hostname}' with app=graylog")
+        else:
+            logger.warning("Could not find current node for labeling")
 
     if not cli_pass:
         cli_pass = utils.generate_string(10)
@@ -181,6 +225,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info("Adding new cluster object")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
+    cluster.cluster_name = name
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -214,15 +259,27 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
+    cluster.mode = mode
 
-    if not disable_monitoring:
-        utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
+    if mode == "docker": 
+        if not disable_monitoring:
+            utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
 
-    logger.info("Deploying swarm stack ...")
-    log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-    scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                               log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
-    logger.info("Deploying swarm stack > Done")
+        logger.info("Deploying swarm stack ...")
+        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
+        scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
+                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
+        logger.info("Deploying swarm stack > Done")
+
+    elif mode == "kubernetes":
+        if not contact_point:
+            contact_point = 'https://hooks.slack.com/services/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' 
+
+        logger.info("Deploying helm stack ...")
+        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
+        scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
+                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE, str(disable_monitoring))
+        logger.info("Deploying helm stack > Done")
 
     logger.info("Configuring DB...")
     scripts.set_db_config_single()
@@ -304,7 +361,7 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity) -> str:
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, name) -> str:
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -316,6 +373,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
+    cluster.cluster_name = name
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -354,6 +412,16 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster_events.cluster_create(cluster)
 
     return cluster.get_id()
+
+
+def set_name(cl_id, name) -> Cluster:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    old_name = cluster.cluster_name
+    cluster.cluster_name = name
+    cluster.write_to_db(db_controller.kv_store)
+    cluster_events.cluster_name_change(cluster, name, old_name)
+    return cluster
 
 
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
@@ -506,7 +574,7 @@ def cluster_expand(cl_id) -> None:
             secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
             if not secondary_nodes:
                 set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to expand cluster, No enough secondary nodes")
+                raise ValueError("A minimum of 2 new nodes are required to expand cluster")
 
             snode = db_controller.get_storage_node_by_id(snode.get_id())
             snode.secondary_node_id = secondary_nodes[0]
@@ -618,6 +686,7 @@ def list() -> t.List[dict]:
             status = f"{status} - ReBalancing"
         data.append({
             "UUID": cl.get_id(),
+            "Name": cl.cluster_name if cl.cluster_name is not None else "-",
             "NQN": cl.nqn,
             "ha_type": cl.ha_type,
             "#mgmt": len(mt),
@@ -937,6 +1006,16 @@ def set_secret(cluster_id, secret) -> None:
     cluster.write_to_db(db_controller.kv_store)
 
 
+def change_cluster_name(cluster_id, new_name) -> None:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    old_name = cluster.cluster_name
+    cluster.cluster_name = new_name
+    cluster.write_to_db(db_controller.kv_store)
+    cluster_events.cluster_name_change(cluster, new_name, old_name)
+    logger.info(f"Cluster has been renamed: {old_name} -> {new_name}")
+
+
 def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
     db_controller = DBController()
     db_controller.get_cluster_by_id(cluster_id)  # ensure exists
@@ -979,39 +1058,85 @@ def get_cluster(cl_id) -> dict:
 
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
     db_controller = DBController()
-    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+    cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
     sbcli=constants.SIMPLY_BLOCK_CLI_NAME
     subprocess.check_call(f"pip install {sbcli} --upgrade".split(' '))
     logger.info(f"{sbcli} upgraded")
 
     logger.info("Updating mgmt cluster")
-    cluster_docker = utils.get_docker_client(cluster_id)
-    logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-    pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-    image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-    image_without_tag = image_without_tag.split("/")
-    image_parts = "/".join(image_without_tag[-2:])
-    service_image =  constants.SIMPLY_BLOCK_DOCKER_IMAGE
-    if mgmt_image:
-        service_image = mgmt_image
-    for service in cluster_docker.services.list():
-        if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
-        "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
-            logger.info(f"Updating service {service.name}")
-            service.update(image=service_image, force_update=True)
-    logger.info("Done updating mgmt cluster")
+    if cluster.mode == "docker": 
+        cluster_docker = utils.get_docker_client(cluster_id)
+        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
+        pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
+        image_without_tag = image_without_tag.split("/")
+        image_parts = "/".join(image_without_tag[-2:])
+        service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
+        if mgmt_image:
+            service_image = mgmt_image
+        for service in cluster_docker.services.list():
+            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
+            "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+                logger.info(f"Updating service {service.name}")
+                service.update(image=service_image, force_update=True)
+
+    elif cluster.mode == "kubernetes": 
+        k8s_config.load_kube_config()
+        apps_v1 = k8s_client.AppsV1Api()
+        
+        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
+        image_parts = "/".join(image_without_tag.split("/")[-2:])
+        service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
+
+        # Update Deployments
+        deployments = apps_v1.list_namespaced_deployment(namespace=constants.K8S_NAMESPACE)
+        for deploy in deployments.items:
+            for c in deploy.spec.template.spec.containers:
+                if image_parts in c.image:
+                    logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
+                    c.image = service_image
+                    annotations = deploy.spec.template.metadata.annotations or {}
+                    annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                    deploy.spec.template.metadata.annotations = annotations
+                    apps_v1.patch_namespaced_deployment(
+                        name=deploy.metadata.name,
+                        namespace=constants.K8S_NAMESPACE,
+                        body={"spec": {"template": deploy.spec.template}}
+                    )
+
+        # Update DaemonSets
+        daemonsets = apps_v1.list_namespaced_daemon_set(namespace=constants.K8S_NAMESPACE)
+        for ds in daemonsets.items:
+            for c in ds.spec.template.spec.containers:
+                if image_parts in c.image:
+                    logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
+                    c.image = service_image
+                    annotations = ds.spec.template.metadata.annotations or {}
+                    annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                    ds.spec.template.metadata.annotations = annotations
+                    apps_v1.patch_namespaced_daemon_set(
+                        name=ds.metadata.name,
+                        namespace=constants.K8S_NAMESPACE,
+                        body={"spec": {"template": ds.spec.template}}
+                        )
+
+        logger.info("Done updating mgmt cluster")
+
 
     if mgmt_only:
         return
 
-    logger.info("Updating spdk image on storage nodes")
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-            node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
-            img = spdk_image if spdk_image else constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
-            logger.info(f"Pulling image {img}")
-            pull_docker_image_with_retry(node_docker, img)
+    if cluster.mode == "docker": 
+        logger.info("Updating spdk image on storage nodes")
+        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto", timeout=60 * 5)
+                img = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+                if spdk_image:
+                    img = spdk_image
+                logger.info(f"Pulling image {img}")
+                pull_docker_image_with_retry(node_docker, img)
 
     if not restart:
         return

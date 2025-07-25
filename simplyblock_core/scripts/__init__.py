@@ -15,8 +15,8 @@ def __run_script(args: list):
         logger.debug(output.strip())
 
 
-def install_deps():
-    __run_script(['bash', '-x', os.path.join(DIR_PATH, 'install_deps.sh')])
+def install_deps(mode):
+    return __run_script(['bash', '-x', os.path.join(DIR_PATH, 'install_deps.sh'), mode])
 
 
 def configure_docker(docker_ip):
@@ -30,6 +30,12 @@ def deploy_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
         ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_stack.sh'), cli_pass, dev_ip, image_name, pass_hash,
          graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint, disable_monitoring])
 
+def deploy_k8s_stack(cli_pass, dev_ip, image_name, graylog_password, cluster_id,
+                 log_del_interval, metrics_retention_period, log_level, grafana_endpoint, contact_point, k8s_namespace, disable_monitoring):
+    pass_hash = hashlib.sha256(graylog_password.encode('utf-8')).hexdigest()
+    __run_script(
+        ['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'deploy_k8s_stack.sh'), cli_pass, dev_ip, image_name, pass_hash,
+         graylog_password, cluster_id, log_del_interval, metrics_retention_period, log_level, grafana_endpoint, contact_point, k8s_namespace, disable_monitoring])
 
 def deploy_cleaner():
     __run_script(['sudo', 'bash', '-x', os.path.join(DIR_PATH, 'clean_local_storage_deploy.sh')])

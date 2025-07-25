@@ -20,7 +20,7 @@ def sum_stats(stats_list):
     if len(stats_list) == 1:
         return stats_list[0]
 
-    ret = {}
+    ret: dict = {}
     for key in stats_list[0].keys():
         for stat_dict in stats_list:
             value = stat_dict[key]

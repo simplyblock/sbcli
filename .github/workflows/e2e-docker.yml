@@ -3,7 +3,9 @@ name: End-to-end test docker
 on:
   push:
     branches:
-      - main
+      # - main
+      - R*-PRE
+      - R*-Hotfix
 
   workflow_dispatch:
     inputs:
@@ -52,8 +54,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  cleanup:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout deployment tooling
+        uses: actions/checkout@v4
+        with:
+          repository: simplyblock-io/simplyBlockDeploy
+          path: deploy
+
+      - name: cleanup cluster
+        timeout-minutes: 15
+        run: |
+          cd deploy/bare-metal
+          cluster="${{ inputs.cluster }}"
+          cluster="${cluster:1}"
+          echo "cleaning up cluster $cluster"
+          KEY="~/.ssh/simplyblock-us-east-2.pem"
+          eval $(python3 inventory.py inventory/c${cluster}.yml)
+          ssh -i $KEY -o StrictHostKeyChecking=no root@192.168.10.1 "bash proxmox_script.sh cluster_${cluster}"
 
   deploy:
+    needs: cleanup
     uses: ./.github/workflows/bare-metal-deploy.yml
     with:
       runs_on: self-hosted

@@ -2,47 +2,31 @@
 # encoding: utf-8
 import json
 import logging
-import os
 import requests
 import boto3
 import re
 
-import jc
-
 from simplyblock_core import shell_utils
-
+import simplyblock_core.utils.pci as pci_utils
 
 
 logger = logging.getLogger(__name__)
 
 
 def get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
-    spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
-    if not spdk_pcie_list:
-        out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/vfio-pci")
-        spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
-    logger.debug(spdk_pcie_list)
-    return spdk_pcie_list
+    return pci_utils.list_devices(driver_name='uio_pci_generic') or pci_utils.list_devices(driver_name='vfio-pci')
 
 
 def get_nvme_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/nvme")
-    spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
-    logger.debug(spdk_pcie_list)
-    return spdk_pcie_list
+    return pci_utils.list_devices(driver_name='nvme')
 
 
 def get_nvme_pcie():
-    # Returns a list of nvme pci address and vendor IDs,
-    # each list item is a tuple [("PCI_ADDRESS", "VENDOR_ID:DEVICE_ID")]
-    stream = os.popen("lspci -Dnn | grep -i nvme")
-    ret = stream.readlines()
-    devs = []
-    for line in ret:
-        line_array = line.split()
-        devs.append((line_array[0], line_array[-1][1:-1]))
-    return devs
+    return [
+            (address, (pci_utils.vendor_id(address), pci_utils.device_id(address)))
+            for address
+            in pci_utils.list_devices(device_class=pci_utils.NVME_CLASS)
+    ]
 
 
 def get_nvme_devices():
@@ -233,48 +217,3 @@ def get_available_device_name(instance_id):
     except Exception as e:
         logger.error(f"Failed to get available device name: {str(e)}")
         return None
-
-def firewall_port(port_id=9090, port_type="tcp", block=True, rpc_port=None):
-    cmd_list = []
-    try:
-        iptables_command_output = firewall_get(rpc_port)
-        result = jc.parse('iptables', iptables_command_output)
-        for chain in result:
-            if chain['chain'] in ["INPUT", "OUTPUT"]:
-                for rule in chain['rules']:
-                    if str(port_id) in rule['options']:
-                        cmd_list.append(f"iptables -D {chain['chain']} -p {port_type} --dport {port_id} -j {rule['target']} -w")
-
-    except Exception as e:
-        logger.error(e)
-
-    if block:
-        cmd_list.extend([
-            f"iptables -A INPUT -p {port_type} --dport {port_id} -j DROP -w",
-            f"iptables -A OUTPUT -p {port_type} --dport {port_id} -j DROP -w",
-        ])
-
-    cmd_list.append("iptables -L -n -v -w")
-
-    out = ""
-    spk_name = "spdk"
-    if rpc_port:
-        spk_name = f"spdk_{rpc_port}"
-    for cmd in cmd_list:
-        stream = os.popen(f"docker exec {spk_name} {cmd}")
-        ret = stream.read()
-        if ret != "":
-            out += ret + "\n"
-            logger.info(ret)
-
-    return out
-
-
-def firewall_get(rpc_port=None):
-    spk_name = "spdk"
-    if rpc_port:
-        spk_name = f"spdk_{rpc_port}"
-    cmd = f"docker exec {spk_name} iptables -L -n -w"
-    stream = os.popen(cmd)
-    ret = stream.read()
-    return ret

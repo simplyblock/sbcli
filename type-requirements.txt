@@ -1,0 +1,4 @@
+kubernetes-typed
+types-docker
+types-boto3
+types-urllib3
