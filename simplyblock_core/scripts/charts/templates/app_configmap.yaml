@@ -55,8 +55,8 @@ data:
     [OUTPUT]
         Name          gelf
         Match         *
-        Host          simplyblock-graylog
-        Port          12201
+        Host          simplyblock-haproxy
+        Port          12202
         Mode          tcp
         Gelf_Short_Message_Key log
 
@@ -76,7 +76,22 @@ data:
         end
         return -1, record
     end
-
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simplyblock-controlcenter-config
+  namespace: {{ .Release.Namespace }}
+data:
+  CONTROL_PLANE_ADDR: "https://simplyblock-haproxy/"
+  CONTROL_PLANE_CLUSTER_ID: "{{ .Values.cluster.id }}"
+  CONTROL_PLANE_CLUSTER_SECRET: "{{ .Values.cluster.secret }}"
+  CONTROL_CENTER_LOGGER_LEVEL: "debug"
+  CONTROL_CENTER_SRV_TLS: "false"
+  CONTROL_CENTER_SRV_PORT: "80"
+  #DATABASE_URI: "mongodb://simplyblock-mongodb-headless:27017/controlcenter"
+  FDB_CLUSTER_FILE_CONTENT: {{ .Values.foundationdb.fdbClusterFileContent }}
+  FDB_CLUSTER_FILE_LOCATION: "{{ .Values.controlcenter.fdbClusterFileLocation }}/fdb.cluster"
 ---
 apiVersion: v1
 kind: ConfigMap

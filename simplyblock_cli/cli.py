@@ -366,6 +366,8 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default', dest='disable_monitoring', action='store_true')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
+        if self.developer_mode:
+            argument = subcommand.add_argument('--cc-refresh-token-secret', help='Sets a user-chosen secret used to sign and validate refresh tokens in the control center. A valid secret consists of 128 characters.', type=str, dest='refresh_token_secret')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -894,6 +896,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.inflight_io_threshold = 4
                         args.enable_qos = False
                         args.disable_monitoring = False
+                        args.refresh_token_secret = None
                     ret = self.cluster__create(sub_command, args)
                 elif sub_command in ['add']:
                     if not self.developer_mode:

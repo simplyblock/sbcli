@@ -206,7 +206,8 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name) -> str:
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring,
+                   strict_node_anti_affinity, name, refresh_token_secret) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -307,6 +308,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
 
+    if not refresh_token_secret:
+        refresh_token_secret = utils.generate_string(128)
+
+    if refresh_token_secret is not None and len(refresh_token_secret) != 128:
+        raise ValueError(f"Illegal refresh token secret given, required length=128, given {len(refresh_token_secret)}")
+
     if mode == "docker": 
         if not disable_monitoring:
             utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
@@ -324,7 +331,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, db_connection, constants.K8S_NAMESPACE, str(disable_monitoring))
+                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint,
+                                 contact_point, db_connection, constants.K8S_NAMESPACE, str(disable_monitoring),
+                                 refresh_token_secret)
         logger.info("Deploying helm stack > Done")
 
     logger.info("Configuring DB...")

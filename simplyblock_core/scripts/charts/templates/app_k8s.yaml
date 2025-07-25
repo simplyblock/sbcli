@@ -842,3 +842,58 @@ spec:
         - name: config
           configMap:
             name: simplyblock-fluent-bit-config
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-controlcenter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: simplyblock-controlcenter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-controlcenter
+  template:
+    metadata:
+      labels:
+        app: simplyblock-controlcenter
+    spec:
+      nodeSelector:
+        simplyblock.io/role: mgmt-plane
+      containers:
+        - name: simplyblock-controlcenter
+          image: "{{ .Values.image.controlcenter.repository }}:{{ .Values.image.controlcenter.tag }}"
+          imagePullPolicy: "{{ .Values.image.controlcenter.pullPolicy }}"
+          resources:
+            limits:
+              memory: 400Mi
+            requests:
+              cpu: 250m
+              memory: 200Mi
+          envFrom:
+            - configMapRef:
+                name: simplyblock-controlcenter-config
+          env:
+            - name: REFRESH_TOKEN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: simplyblock-controlcenter-secret
+                  key: REFRESH_TOKEN_SECRET
+          volumeMounts:
+            - name: simplyblock-controlcenter-fdb-cluster-file
+              mountPath: {{ .Values.controlcenter.fdbClusterFileLocation }}
+              readOnly: true
+          ports:
+            - containerPort: 443
+              name: controlcenter-https
+      volumes:
+        - name: simplyblock-controlcenter-fdb-cluster-file
+          configMap:
+            name: simplyblock-controlcenter-config
+            items:
+              - key: FDB_CLUSTER_FILE_CONTENT
+                path: fdb.cluster
