@@ -14,7 +14,7 @@ This guide explains how to deploy the SimplyBlock Management Node on a Kubernete
 
 ---
 
-## 🪜 Step-by-Step Guide
+## Step-by-Step Guide
 
 ### 1. Bootstrap the Kubernetes Cluster with Worker Node Support
 
