@@ -903,19 +903,23 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                             logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
                             return False
 
-        logger.info("Joining docker swarm...")
-        cluster_docker = utils.get_docker_client(cluster_id)
-        cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
         fdb_connection = cluster.db_connection
-        results, err = snode_api.join_swarm(
-            cluster_ip=cluster_ip,
-            join_token=cluster_docker.swarm.attrs['JoinTokens']['Worker'],
-            db_connection=cluster.db_connection,
-            cluster_id=cluster_id)
 
-        if not results:
-            logger.error(f"Failed to Join docker swarm: {err}")
-            return False
+        if cluster.mode == "docker":
+            logger.info("Joining docker swarm...")
+            cluster_docker = utils.get_docker_client(cluster_id)
+            cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+            results, err = snode_api.join_swarm(
+                cluster_ip=cluster_ip,
+                join_token=cluster_docker.swarm.attrs['JoinTokens']['Worker'],
+                db_connection=cluster.db_connection,
+                cluster_id=cluster_id)
+
+            if not results:
+                logger.error(f"Failed to Join docker swarm: {err}")
+                return False
+        else:
+            cluster_ip = utils.get_k8s_node_ip() 
 
         rpc_port = utils.get_next_rpc_port(cluster_id)
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
@@ -1349,15 +1353,18 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                                                                                    JMDevice.STATUS_UNAVAILABLE]:
         logger.info("Removing JM")
         device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
+    
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
-    logger.info("Leaving swarm...")
-    try:
-        cluster_docker = utils.get_docker_client(snode.cluster_id)
-        for node in cluster_docker.nodes.list():
-            if node.attrs["Status"] and snode.mgmt_ip in node.attrs["Status"]["Addr"]:
-                node.remove(force=True)
-    except Exception:
-        pass
+    if cluster.mode == "docker":
+        logger.info("Leaving swarm...")
+        try:
+            cluster_docker = utils.get_docker_client(snode.cluster_id)
+            for node in cluster_docker.nodes.list():
+                if node.attrs["Status"] and snode.mgmt_ip in node.attrs["Status"]["Addr"]:
+                    node.remove(force=True)
+        except Exception:
+            pass
 
     try:
         if health_controller._check_node_api(snode.mgmt_ip):
@@ -1550,10 +1557,15 @@ def restart_storage_node(
         spdk_debug = True
         snode.spdk_debug = spdk_debug
 
-    cluster_docker = utils.get_docker_client(snode.cluster_id)
-    cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
+    if cluster.mode == "docker":
+        cluster_docker = utils.get_docker_client(snode.cluster_id)
+        cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
+
+    else:
+        cluster_ip = utils.get_k8s_node_ip()
+    
     total_mem = 0
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if n.api_endpoint == snode.api_endpoint:
@@ -2626,7 +2638,7 @@ def deploy(ifname, isolate_cores=False):
         logger.info(line.strip())
 
     logger.info("Installing dependencies...")
-    scripts.install_deps()
+    scripts.install_deps(mode="docker")
 
     logger.info(f"Node IP: {dev_ip}")
     scripts.configure_docker(dev_ip)

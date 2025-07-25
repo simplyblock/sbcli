@@ -151,3 +151,87 @@ NODES_CONFIG_FILE = "/etc/simplyblock/sn_config_file"
 SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
+
+K8S_NAMESPACE = "simplyblock"
+OS_STATEFULSET_NAME = "simplyblock-opensearch"
+MONGODB_STATEFULSET_NAME = "simplyblock-mongodb"
+GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
+PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
+
+os_env_patch = [
+    {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},
+    {"name": "bootstrap.memory_lock", "value": "false"},
+    {"name": "action.auto_create_index", "value": "false"},
+    {"name": "plugins.security.ssl.http.enabled", "value": "false"},
+    {"name": "plugins.security.disabled", "value": "true"},
+    {"name": "discovery.type", "value": ""},
+    {"name": "discovery.seed_hosts", "value": ",".join([
+        "simplyblock-opensearch-0.opensearch-cluster-master-headless",
+        "simplyblock-opensearch-1.opensearch-cluster-master-headless",
+        "simplyblock-opensearch-2.opensearch-cluster-master-headless"
+    ])},
+    {"name": "cluster.initial_master_nodes", "value": ",".join([
+        "simplyblock-opensearch-0",
+        "simplyblock-opensearch-1",
+        "simplyblock-opensearch-2"
+    ])}
+]
+
+os_patch = {
+    "spec": {
+        "replicas": 3,
+        "template": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "opensearch",
+                        "env": os_env_patch
+                    }
+                ]
+            }
+        }
+    }
+}
+
+mongodb_command_patch = [
+    "mongod",
+    "--replSet", "rs0",
+    "--bind_ip_all",
+    "--dbpath", "/bitnami/mongodb"
+]
+
+mongodb_patch = {
+    "spec": {
+        "replicas": 3,
+    }
+}
+
+graylog_env_patch = [
+    {
+        "name": "GRAYLOG_MONGODB_URI",
+        "value": (
+            "mongodb://simplyblock-mongodb-headless:27017/graylog?replicaSet=rs0"
+        )
+    }
+]
+
+graylog_patch = {
+    "spec": {
+        "template": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "graylog",
+                        "env": graylog_env_patch
+                    }
+                ]
+            }
+        }
+    }
+}
+
+prometheus_patch = {
+    "spec": {
+        "replicas": 3,
+    }
+}

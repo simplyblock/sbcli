@@ -1050,6 +1050,14 @@ commands:
               - single
               - ha
             default: ha
+          - name: "--mode"
+            help: "Environment to deploy management services, default: docker "
+            dest: mode
+            type: str
+            choices:
+              - docker
+              - kubernetes
+            default: docker
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
             dest: enable_node_affinity
@@ -1784,6 +1792,14 @@ commands:
             help: "Management interface name"
             dest: ifname
             type: str
+          - name: "--mode"
+            help: "Environment to deploy management services, default: docker "
+            dest: mode
+            type: str
+            choices:
+              - docker
+              - kubernetes
+            default: docker
       - name: list
         help: "Lists all control plane nodes"
         arguments:

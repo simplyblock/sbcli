@@ -10,6 +10,7 @@ import subprocess
 import sys
 import uuid
 import time
+import socket
 from typing import Union
 from kubernetes import client, config
 import docker
@@ -179,6 +180,25 @@ def get_docker_client(cluster_id=None):
             raise e
     return False
 
+def get_k8s_node_ip():
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    nodes = db_controller.get_mgmt_nodes()
+
+    if not nodes:
+        logger.error("No mgmt nodes was found in the cluster!")
+        return False
+
+    mgmt_ips = [node.mgmt_ip for node in nodes]
+
+    for ip in mgmt_ips:
+        try:
+            with socket.create_connection((ip, 10250), timeout=2):
+                return ip
+        except Exception as e:
+            print(e)
+            raise e
+    return False
 
 def dict_agg(data, mean=False, keys=None):
     out = {}
@@ -1129,9 +1149,9 @@ def next_free_hublvol_port(cluster_id):
 
 
 def validate_sockets(sockets_to_use, cores_by_numa):
-    for socket in sockets_to_use:
-        if socket not in cores_by_numa:
-            print(f"Error: Socket {socket} not in system sockets {cores_by_numa}")
+    for sock in sockets_to_use:
+        if sock not in cores_by_numa:
+            print(f"Error: Socket {sock} not in system sockets {cores_by_numa}")
 
 
 def detect_nics():
@@ -1778,6 +1798,21 @@ def get_k8s_apps_client():
 def get_k8s_core_client():
     config.load_incluster_config()
     return client.CoreV1Api()
+
+def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
+    ready_pods = 0
+    pods = k8s_core_v1.list_namespaced_pod(
+        namespace=namespace,
+        label_selector="app.kubernetes.io/name=mongodb"
+    ).items
+
+    for pod in pods:
+        statuses = pod.status.container_statuses or []
+        for status in statuses:
+            if status.name == "mongodb" and status.ready:
+                ready_pods += 1
+
+    return ready_pods == expected_replicas
 
 def get_k8s_batch_client():
     config.load_incluster_config()
