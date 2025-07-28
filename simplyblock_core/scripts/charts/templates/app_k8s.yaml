@@ -42,8 +42,8 @@ spec:
             mountPath: /var/fdb/data
           - name: fdb-logs
             mountPath: /var/fdb/logs
-          # - name: cluster-file
-          #   mountPath: /etc/foundationdb
+          - name: cluster-file
+            mountPath: /etc/foundationdb
         resources:
           requests:
             cpu: "100m"
@@ -58,9 +58,9 @@ spec:
       - name: fdb-logs
         hostPath:
           path: /etc/foundationdb/logs
-      # - name: cluster-file
-      #   hostPath:
-      #     path: /etc/foundationdb
+      - name: cluster-file
+        configMap:
+          name: fdb-cluster-file
       hostNetwork: false
 
 ---
