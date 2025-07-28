@@ -80,6 +80,13 @@ def _add_task(function_name, cluster_id, node_id, device_id,
 
 def add_device_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
+    tasks = db.get_job_tasks(device.cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART :
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                logger.info(f"Task found, skip adding new task: {task.get_id()}")
+                return False
+
     sub_tasks = []
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
