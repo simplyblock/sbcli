@@ -19,14 +19,14 @@ export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
 export CONTACT_POINT=${11}
-export K8S_NAMESPACE=${12}
-export DISABLE_MONITORING=${13}
+export DB_CONNECTION=${12}
+export K8S_NAMESPACE=${13}
+export DISABLE_MONITORING=${14}
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
 then
-   FDB_CLUSTER_FILE_CONTENTS=$(tail /etc/foundationdb/fdb.cluster -n 1)
-   export FDB_CLUSTER_FILE_CONTENTS=$FDB_CLUSTER_FILE_CONTENTS
+   export FDB_CLUSTER_FILE_CONTENTS=$DB_CONNECTION
 fi
 
 if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then

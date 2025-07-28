@@ -185,9 +185,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         raise ValueError(f"Error getting interface ip: {ifname}")
 
     db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
-    scripts.set_db_config(db_connection)
 
     if mode == "docker": 
+        scripts.set_db_config(db_connection)
         logger.info(f"Node IP: {dev_ip}")
         scripts.configure_docker(dev_ip)
         logger.info("Configuring docker swarm...")
@@ -278,7 +278,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE, str(disable_monitoring))
+                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, db_connection, constants.K8S_NAMESPACE, str(disable_monitoring))
         logger.info("Deploying helm stack > Done")
 
     logger.info("Configuring DB...")
