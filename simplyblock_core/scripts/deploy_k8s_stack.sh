@@ -44,22 +44,22 @@ fi
 
 envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 
-HELM=$(which helm)
-KUBECTL=$(which kubectl)
-if [[ -z "$HELM" ]]; then
-  echo "helm not found in PATH"
-  exit 1
-fi
+# HELM=$(which helm)
+# KUBECTL=$(which kubectl)
+# if [[ -z "$HELM" ]]; then
+#   echo "helm not found in PATH"
+#   exit 1
+# fi
 
-if [[ -z "$KUBECTL" ]]; then
-  echo "kubectl not found in PATH"
-  exit 1
-fi
+# if [[ -z "$KUBECTL" ]]; then
+#   echo "kubectl not found in PATH"
+#   exit 1
+# fi
 
-$HELM dependency build "$DIR"/charts/
+helm dependency build "$DIR"/charts/
 
-$HELM upgrade --install sbcli "$DIR"/charts/ \
+helm upgrade --install sbcli "$DIR"/charts/ \
   --namespace $K8S_NAMESPACE \
   --create-namespace
 
-$KUBECTL wait --for=condition=Ready pod --all --namespace $K8S_NAMESPACE --timeout=300s
+kubectl wait --for=condition=Ready pod --all --namespace $K8S_NAMESPACE --timeout=300s

@@ -143,3 +143,12 @@ data:
         end
         return -1, record
     end
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tcp-services
+  namespace: {{ .Release.Namespace }}
+data:
+  "12201": "{{ .Release.Namespace }}/simplyblock-graylog:12201"

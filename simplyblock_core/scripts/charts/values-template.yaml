@@ -199,6 +199,9 @@ ingress:
     dnsPolicy: ClusterFirstWithHostNet
     service:
       type: "ClusterIP"  
+    extraArgs:
+      tcp-services-configmap: "simplyblock/tcp-services"
+
     # service:
     #   type: NodePort
     #   nodePorts:
