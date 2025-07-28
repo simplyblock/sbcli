@@ -195,9 +195,13 @@ prometheus:
 
 ingress:
   controller:
+    hostNetwork: true
+    dnsPolicy: ClusterFirstWithHostNet
     service:
-      type: NodePort
-      nodePorts:
-        http: 32080
-        https: 32443
+      type: "ClusterIP"  
+    # service:
+    #   type: NodePort
+    #   nodePorts:
+    #     http: 32080
+    #     https: 32443
         
