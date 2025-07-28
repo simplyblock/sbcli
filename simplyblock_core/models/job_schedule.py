@@ -18,6 +18,9 @@ class JobSchedule(BaseModel):
     FN_NEW_DEV_MIG = "new_device_migration"
     FN_NODE_ADD = "node_add"
     FN_PORT_ALLOW = "port_allow"
+    FN_BALANCING_AFTER_NODE_RESTART = "balancing_after_node_restart"
+    FN_BALANCING_AFTER_DEV_REMOVE = "balancing_after_dev_remove"
+    FN_BALANCING_AFTER_DEV_EXPANSION = "balancing_after_dev_expansion"
 
     canceled: bool = False
     cluster_id: str = ""
@@ -29,6 +32,7 @@ class JobSchedule(BaseModel):
     max_retry: int = -1
     node_id: str = ""
     retry: int = 0
+    sub_tasks: list = []
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
