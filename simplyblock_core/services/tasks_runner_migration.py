@@ -145,11 +145,11 @@ def update_master_task(task):
             sub_task = db.get_task_by_id(sub_task_id)
             status_map[sub_task.status] = status_map.get(sub_task.status, 0) + 1
 
-        if len(status_map[JobSchedule.STATUS_DONE]) == len(master_task.sub_tasks):  # all tasks done
+        if status_map[JobSchedule.STATUS_DONE] == len(master_task.sub_tasks):  # all tasks done
             _set_master_task_status(master_task, JobSchedule.STATUS_DONE)
-        elif len(status_map[JobSchedule.STATUS_NEW]) == len(master_task.sub_tasks):  # all tasks new
+        elif status_map[JobSchedule.STATUS_NEW] == len(master_task.sub_tasks):  # all tasks new
             _set_master_task_status(master_task, JobSchedule.STATUS_NEW)
-        elif len(status_map[JobSchedule.STATUS_SUSPENDED]) == len(master_task.sub_tasks):  # all tasks suspended
+        elif status_map[JobSchedule.STATUS_SUSPENDED] == len(master_task.sub_tasks):  # all tasks suspended
             _set_master_task_status(master_task, JobSchedule.STATUS_SUSPENDED)
         else:  # set running
             _set_master_task_status(master_task, JobSchedule.STATUS_RUNNING)
