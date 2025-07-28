@@ -58,10 +58,10 @@ envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 #   exit 1
 # fi
 
-helm dependency build "$DIR"/charts/
+/usr/local/bin/helm dependency build "$DIR"/charts/
 
-helm upgrade --install sbcli "$DIR"/charts/ \
+/usr/local/bin/helm upgrade --install sbcli "$DIR"/charts/ \
   --namespace $K8S_NAMESPACE \
   --create-namespace
 
-kubectl wait --for=condition=Ready pod --all --namespace $K8S_NAMESPACE --timeout=300s
+/usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace $K8S_NAMESPACE --timeout=300s
