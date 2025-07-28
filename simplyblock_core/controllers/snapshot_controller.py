@@ -315,37 +315,30 @@ def delete(snapshot_uuid, force_delete=False):
             logger.error(msg)
             return False
 
-        if primary_node:
+        if not primary_node:
+            msg = "Host nodes are not online"
+            logger.error(msg)
+            return False
 
-            rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
-                                       primary_node.rpc_password)
+        rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
+                                   primary_node.rpc_password)
 
-            ret = rpc_client.delete_lvol(snap.snap_bdev)
-            if not ret:
-                logger.error(f"Failed to delete snap from node: {snode.get_id()}")
-                if not force_delete:
-                    return False
+        ret = rpc_client.delete_lvol(snap.snap_bdev)
+        if not ret:
+            logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+            if not force_delete:
+                return False
 
-        if secondary_node:
-            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
-            if secondary_node.status == StorageNode.STATUS_ONLINE:
-                sec_rpc_client = RPCClient(secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username,
-                                           secondary_node.rpc_password)
-                ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
-                if not ret:
-                    logger.error(f"Failed to delete snap from node: {secondary_node.get_id()}")
-                    if not force_delete:
-                        return False
-
-
-    snap.remove(db_controller.kv_store)
+    snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+    snap.deletion_status = 'lvol_delete_sent'
+    snap.write_to_db(db_controller.kv_store)
+    snapshot_events.snapshot_delete(snap)
 
     base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
     if base_lvol and base_lvol.deleted is True:
         lvol_controller.delete_lvol(base_lvol.get_id())
 
     logger.info("Done")
-    snapshot_events.snapshot_delete(snap)
     return True
 
 
