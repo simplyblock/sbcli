@@ -6,7 +6,6 @@ metadata:
   name: simplyblock-graylog
   namespace: {{ .Release.Namespace }}
 spec:
-  clusterIP: None
   selector:
     app: simplyblock-graylog
   ports:

@@ -30,7 +30,6 @@ metadata:
   name: simplyblock-fdb-server
   namespace: {{ .Release.Namespace }}
 spec:
-  clusterIP: None
   selector:
     app: simplyblock-fdb-server
   ports:
