@@ -23,13 +23,6 @@ elif [[ "$1" == "kubernetes" ]]; then
   ./get_helm.sh
   rm -rf ./get_helm.sh
 
-  if [ $? -eq 0 ]; then
-    echo "Node $NODE_NAME labeled successfully."
-  else
-    echo "Failed to label node $NODE_NAME."
-    exit 1
-  fi
-
 fi
 
 if [[ 1 == $(yum info foundationdb-clients &> /dev/null ; echo $?) ]]
