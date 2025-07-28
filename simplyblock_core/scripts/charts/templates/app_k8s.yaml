@@ -59,8 +59,8 @@ spec:
         hostPath:
           path: /etc/foundationdb/logs
       - name: cluster-file
-        configMap:
-          name: fdb-cluster-file
+        hostPath:
+          path: /etc/foundationdb
       hostNetwork: false
 
 ---
