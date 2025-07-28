@@ -28,11 +28,11 @@ spec:
             configMapKeyRef:
               name: simplyblock-config
               key: LOG_LEVEL
-        - name: FDB_CLUSTER_FILE_CONTENTS
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: FDB_CLUSTER_FILE_CONTENTS
+        # - name: FDB_CLUSTER_FILE_CONTENTS
+        #   valueFrom:
+        #     configMapKeyRef:
+        #       name: simplyblock-config
+        #       key: FDB_CLUSTER_FILE_CONTENTS
         - name: FDB_CLUSTER_FILE
           value: "/etc/foundationdb/fdb.cluster"
         - name: FDB_NETWORKING_MODE
@@ -43,7 +43,8 @@ spec:
           - name: fdb-logs
             mountPath: /var/fdb/logs
           - name: cluster-file
-            mountPath: /etc/foundationdb
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
         resources:
           requests:
             cpu: "100m"
