@@ -31,8 +31,8 @@ spec:
                 name: simplyblock-graylog
                 port:
                   number: 9000
-          - path: /
-            pathType: Prefix
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: simplyblock-webappapi
