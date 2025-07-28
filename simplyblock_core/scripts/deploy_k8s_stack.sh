@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -ex -o pipefail
+
 export CLI_SSH_PASS=$1
 export CLUSTER_IP=$2
 export SIMPLYBLOCK_DOCKER_IMAGE=$3

@@ -238,44 +238,7 @@ spec:
         - name: foundationdb
           hostPath:
             path: /etc/foundationdb
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-caching-node-monitor
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-caching-node-monitor
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-      labels:
-        app: simplyblock-caching-node-monitor
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
-      containers:
-        - name: caching-node-monitor
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/caching_node_monitor.py"]
-          env:
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
-          volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
-      volumes:
-        - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -301,44 +264,6 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/lvol_stat_collector.py"]
-          env:
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
-          volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
-      volumes:
-        - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-cached-lvol-stats-collector
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-cached-lvol-stats-collector
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-      labels:
-        app: simplyblock-cached-lvol-stats-collector
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
-      containers:
-        - name: cached-lvol-stats-collector
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/cached_lvol_stat_collector.py"]
           env:
           - name: SIMPLYBLOCK_LOG_LEVEL
             valueFrom:
