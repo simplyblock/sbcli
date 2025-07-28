@@ -20,12 +20,6 @@ spec:
   selector:
     app: simplyblock-haproxy
   ports:
-  - name: http
-    port: 80
-    targetPort: 80
   - name: graylog-gelf
     port: 12202
     targetPort: 12202
-  - name: opensearch
-    port: 9200
-    targetPort: 9200

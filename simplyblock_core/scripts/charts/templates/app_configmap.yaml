@@ -57,20 +57,6 @@ data:
         stats hide-version
         stats auth admin:admin
 
-    backend wep_api_services
-        balance roundrobin
-        server-template webapi- 3 simplyblock-webappapi.{{ .Release.Namespace }}.svc.cluster.local:5000 check resolvers kube-dns init-addr libc,none
-
-    backend grafana_services
-        balance roundrobin
-        http-request set-path %[path,regsub(^/grafana/?,/)]
-        server-template grafana- 1 simplyblock-grafana.{{ .Release.Namespace }}.svc.cluster.local:3000 check resolvers kube-dns init-addr libc,none
-
-    backend graylog_services
-        balance roundrobin
-        http-request set-path %[path,regsub(^/graylog/?,/)]
-        server-template graylog- 1 simplyblock-graylog.{{ .Release.Namespace }}.svc.cluster.local:9000 check resolvers kube-dns init-addr libc,none
-
     backend haproxy_services
         http-request set-path %[path,regsub(^/haproxy/?,/)]
         stats enable
@@ -84,25 +70,12 @@ data:
         balance roundrobin
         server-template graylog_input- 1 simplyblock-graylog.{{ .Release.Namespace }}.svc.cluster.local:12201 check resolvers kube-dns init-addr libc,none
 
-    backend opensearch_services
-        balance roundrobin
-        server-template opensearch- 1 opensearch-cluster-master.{{ .Release.Namespace }}.svc.cluster.local:9200 check resolvers kube-dns init-addr libc,none
-
-    frontend web_api_front
-        bind *:80
-        use_backend grafana_services if { path /grafana } || { path_beg /grafana/ }
-        use_backend graylog_services if { path /graylog } || { path_beg /graylog/ }
-        use_backend haproxy_services if { path /haproxy } || { path_beg /haproxy/ }
-        default_backend wep_api_services
 
     frontend graylog_input_front
         bind *:12202
         mode tcp
         default_backend graylog_input_services
 
-    frontend opensearch_front
-        bind *:9200
-        default_backend opensearch_services
 
 ---
 

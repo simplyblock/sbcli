@@ -848,54 +848,52 @@ spec:
         - name: foundationdb
           hostPath:
             path: /etc/foundationdb
-# ---
-# apiVersion: apps/v1
-# kind: DaemonSet
-# metadata:
-#   name: simplyblock-haproxy
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   selector:
-#     matchLabels:
-#       app: simplyblock-haproxy
-#   template:
-#     metadata:
-#       labels:
-#         app: simplyblock-haproxy
-#     spec:
-#       nodeSelector:
-#         simplyblock.io/role: mgmt-plane
-#       containers:
-#       - name: haproxy
-#         image: haproxytech/haproxy-debian:latest
-#         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-#         ports:
-#         - containerPort: 80
-#         - containerPort: 12202
-#         - containerPort: 9200
-#         env:
-#           - name: SIMPLYBLOCK_LOG_LEVEL
-#             valueFrom:
-#               configMapKeyRef:
-#                 name: simplyblock-config
-#                 key: LOG_LEVEL
-#         volumeMounts:
-#         - name: haproxy-config
-#           mountPath: /usr/local/etc/haproxy/haproxy.cfg
-#           subPath: haproxy.cfg
-#         resources:
-#           requests:
-#             cpu: "100m"
-#             memory: "400Mi"
-#           limits:
-#             cpu: "350m"
-#             memory: "1Gi"
-#       volumes:
-#       - name: haproxy-config
-#         configMap:
-#           name: simplyblock-haproxy-config
-#       hostNetwork: true
-#       dnsPolicy: ClusterFirstWithHostNet
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: simplyblock-haproxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: simplyblock-haproxy
+  template:
+    metadata:
+      labels:
+        app: simplyblock-haproxy
+    spec:
+      nodeSelector:
+        simplyblock.io/role: mgmt-plane
+      containers:
+      - name: haproxy
+        image: haproxytech/haproxy-debian:latest
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        ports:
+        - containerPort: 12202
+        env:
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
+        volumeMounts:
+        - name: haproxy-config
+          mountPath: /usr/local/etc/haproxy/haproxy.cfg
+          subPath: haproxy.cfg
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "400Mi"
+          limits:
+            cpu: "350m"
+            memory: "1Gi"
+      volumes:
+      - name: haproxy-config
+        configMap:
+          name: simplyblock-haproxy-config
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
 
 ---
 
