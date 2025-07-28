@@ -10,6 +10,13 @@ spec:
   rules:
     - http:
         paths:
+          - path: /opensearch(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: opensearch-cluster-master
+                port:
+                  number: 9200
           - path: /grafana(/|$)(.*)
             pathType: ImplementationSpecific
             backend:

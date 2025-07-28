@@ -122,7 +122,7 @@ def _add_graylog_input(cluster_ip, password):
 
 def _set_max_result_window(cluster_ip, max_window=100000):
 
-    url_existing_indices = f"http://{cluster_ip}:9200/_all/_settings"
+    url_existing_indices = f"http://{cluster_ip}/opensearch/_all/_settings"
 
     retries = 30
     reachable=False
