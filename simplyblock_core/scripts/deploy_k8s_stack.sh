@@ -24,9 +24,9 @@ export K8S_NAMESPACE=${13}
 export DISABLE_MONITORING=${14}
 export DIR="$(dirname "$(realpath "$0")")"
 
-if [ -s "/etc/foundationdb/fdb.cluster" ]
+if [ -e "/etc/foundationdb/fdb.cluster" ]
 then
-   export FDB_CLUSTER_FILE_CONTENTS=$DB_CONNECTION
+   export FDB_CLUSTER_FILE_CONTENTS=${DB_CONNECTION}
 fi
 
 if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then
