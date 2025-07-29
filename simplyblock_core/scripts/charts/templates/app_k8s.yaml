@@ -20,6 +20,7 @@ spec:
       containers:
       - name: fdb-server
         image: foundationdb/foundationdb:7.3.42
+      #  entrypoint: ["/bin/bash", "/var/fdb/scripts/fdb.bash"]
         ports:
         - containerPort: 4500
         env:
@@ -44,6 +45,9 @@ spec:
             mountPath: /var/fdb/logs
           - name: cluster-file
             mountPath: /etc/foundationdb
+          - name: fdb-entrypoint                     
+            mountPath: /var/fdb/scripts
+            readOnly: true
         resources:
           requests:
             cpu: "100m"
@@ -61,6 +65,9 @@ spec:
       - name: cluster-file
         hostPath:
           path: /etc/foundationdb
+      - name: fdb-entrypoint                         
+        configMap:
+          name: simplyblock-fdb-entrypoint-script
       hostNetwork: false
 
 ---
