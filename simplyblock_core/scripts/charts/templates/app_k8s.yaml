@@ -46,9 +46,9 @@ spec:
             mountPath: /var/fdb/logs
           - name: cluster-file
             mountPath: /etc/foundationdb
-          - name: fdb-entrypoint                     
-            mountPath: /var/fdb/scripts
-            readOnly: true
+          # - name: fdb-entrypoint                     
+          #   mountPath: /var/fdb/scripts
+          #   readOnly: true
         resources:
           requests:
             cpu: "100m"
