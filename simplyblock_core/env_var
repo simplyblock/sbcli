@@ -1,6 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=19.0.4
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre-upgrade
+SIMPLY_BLOCK_VERSION=1.1.8
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-Hotfix
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-latest
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-Hotfix-xata-test-upgrade
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-03f280d2-amd64
