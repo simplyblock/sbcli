@@ -1846,3 +1846,4 @@ def load_kernel_module(module):
         logger.info(f" {module} module loaded successfully.")
     except subprocess.CalledProcessError as e:
         logger.warning(f"Failed to load {module} module: {e}")
+

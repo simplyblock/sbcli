@@ -66,10 +66,11 @@ spec:
       - name: cluster-file
         hostPath:
           path: /etc/foundationdb
-      - name: fdb-entrypoint                         
-        configMap:
-          name: simplyblock-fdb-entrypoint-script
-          defaultMode: 0777
+      # - name: fdb-entrypoint                         
+      #   configMap:
+      #     name: simplyblock-fdb-entrypoint-script
+      #     defaultMode: 0777
+      hostNetwork: true
 
 ---
 apiVersion: apps/v1
