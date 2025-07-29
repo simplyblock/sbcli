@@ -201,11 +201,5 @@ ingress:
     service:
       type: "ClusterIP"  
     extraArgs:
-      tcp-services-configmap: "${K8S_NAMESPACE}/tcp-services"
-
-    # service:
-    #   type: NodePort
-    #   nodePorts:
-    #     http: 32080
-    #     https: 32443
+      tcp-services-configmap: "${K8S_NAMESPACE}/simplyblock-tcp-services"
         
