@@ -5,6 +5,7 @@ graylog:
 cluster:
   secret: "${CLUSTER_SECRET}"
   id: "${CLUSTER_ID}"
+  ip: "${CLUSTER_IP}"
 
 monitoring:
   enabled: ${ENABLE_MONITORING}
