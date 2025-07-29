@@ -11,73 +11,6 @@ data:
   LOG_DELETION_INTERVAL: {{ .Values.log.deletionInterval }}
 
 ---
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: simplyblock-haproxy-config
-  namespace: {{ .Release.Namespace }}
-data:
-  haproxy.cfg: |
-    global
-        log          fd@2 local2
-        chroot       /var/lib/haproxy
-        pidfile      /var/run/haproxy.pid
-        maxconn      4000
-        user         haproxy
-        group        haproxy
-        stats socket /var/lib/haproxy/stats expose-fd listeners
-        master-worker
-
-    resolvers kube-dns
-        nameserver dns1 kube-dns.kube-system.svc.cluster.local:53
-        resolve_retries 3
-        timeout resolve 1s
-        timeout retry   1s
-        hold other      10s
-        hold refused    10s
-        hold nx         10s
-        hold timeout    10s
-        hold valid      10s
-        hold obsolete   10s
-
-    defaults
-        timeout connect 10s
-        timeout client 120s
-        timeout server 120s
-        log global
-        mode http
-        option httplog
-
-    backend stat
-        stats enable
-        stats uri /
-        stats refresh 10s
-        stats show-legends
-        stats show-node
-        stats hide-version
-        stats auth admin:admin
-
-    backend haproxy_services
-        http-request set-path %[path,regsub(^/haproxy/?,/)]
-        stats enable
-        stats uri /
-        stats refresh 10s
-        stats show-legends
-        stats show-node
-
-    backend graylog_input_services
-        mode tcp
-        balance roundrobin
-        server-template graylog_input- 1 simplyblock-graylog.{{ .Release.Namespace }}.svc.cluster.local:12201 check resolvers kube-dns init-addr libc,none
-
-
-    frontend graylog_input_front
-        bind *:12202
-        mode tcp
-        default_backend graylog_input_services
-
-
----
 
 apiVersion: v1
 kind: ConfigMap
@@ -122,8 +55,8 @@ data:
     [OUTPUT]
         Name          gelf
         Match         *
-        Host          simplyblock-haproxy
-        Port          12202
+        Host          simplyblock-graylog
+        Port          12201
         Mode          tcp
         Gelf_Short_Message_Key log
 
@@ -151,7 +84,7 @@ metadata:
   name: tcp-services
   namespace: {{ .Release.Namespace }}
 data:
-  "12201": "{{ .Release.Namespace }}/simplyblock-graylog:12201"
+  "12202": "{{ .Release.Namespace }}/simplyblock-graylog:12201"
   "4500": "{{ .Release.Namespace }}/simplyblock-fdb-server:4500"
 
 ---
