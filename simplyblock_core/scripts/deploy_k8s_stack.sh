@@ -2,6 +2,29 @@
 
 set -ex -o pipefail
 
+is_ip_address() {
+    local ip="$1"
+
+    if echo "$ip" | grep -E -q '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+        IFS='.' read -r -a parts <<< "$ip"
+        for part in "${parts[@]}"; do
+            if [ "$part" -lt 0 ] || [ "$part" -gt 255 ]; then
+                echo "false"
+                return
+            fi
+        done
+        echo "true"
+        return
+    fi
+
+    if echo "$ip" | grep -E -q '^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$'; then
+        echo "true"
+        return
+    fi
+
+    echo "false"
+}
+
 export CLI_SSH_PASS=$1
 export CLUSTER_IP=$2
 export SIMPLYBLOCK_DOCKER_IMAGE=$3
@@ -74,27 +97,3 @@ envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 
 /usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace $K8S_NAMESPACE --timeout=300s
 
-
-
-is_ip_address() {
-    local ip="$1"
-
-    if echo "$ip" | grep -E -q '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
-        IFS='.' read -r -a parts <<< "$ip"
-        for part in "${parts[@]}"; do
-            if [ "$part" -lt 0 ] || [ "$part" -gt 255 ]; then
-                echo "false"
-                return
-            fi
-        done
-        echo "true"
-        return
-    fi
-
-    if echo "$ip" | grep -E -q '^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$'; then
-        echo "true"
-        return
-    fi
-
-    echo "false"
-}
