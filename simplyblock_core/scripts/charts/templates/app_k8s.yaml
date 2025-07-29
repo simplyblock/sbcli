@@ -22,9 +22,9 @@ spec:
         image: foundationdb/foundationdb:7.3.42
         ports:
         - containerPort: 4500
-        env:
-        - name: PUBLIC_IP
-          value: {{ .Values.cluster.ip }}
+        # env:
+        # - name: PUBLIC_IP
+        #   value: {{ .Values.cluster.ip }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
