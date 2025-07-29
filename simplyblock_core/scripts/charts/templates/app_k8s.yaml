@@ -68,6 +68,7 @@ spec:
       - name: fdb-entrypoint                         
         configMap:
           name: simplyblock-fdb-entrypoint-script
+          defaultMode: 0777
       hostNetwork: false
 
 ---
