@@ -149,7 +149,7 @@ def _set_max_result_window(cluster_ip, max_window=100000):
         logger.error(f"Failed to update settings for existing indices: {response.text}")
         return False
     
-    url_template = f"http://{cluster_ip}:9200/_template/all_indices_template"
+    url_template = f"http://{cluster_ip}/opensearch/_template/all_indices_template"
     payload_template = json.dumps({
         "index_patterns": ["*"],
         "settings": {
