@@ -36,7 +36,7 @@ spec:
         - name: FDB_CLUSTER_FILE
           value: "/etc/foundationdb/fdb.cluster"
         - name: FDB_NETWORKING_MODE
-          value: "host"
+          value: "container"
         volumeMounts:
           - name: fdb-data
             mountPath: /var/fdb/data
