@@ -23,8 +23,10 @@ spec:
         ports:
         - containerPort: 4500
         env:
-        # - name: PUBLIC_IP
-        #   value: {{ .Values.cluster.ip }}
+        - name: PUBLIC_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -46,9 +48,9 @@ spec:
             mountPath: /var/fdb/logs
           - name: cluster-file
             mountPath: /etc/foundationdb
-          # - name: fdb-entrypoint                     
-          #   mountPath: /var/fdb/scripts
-          #   readOnly: true
+          - name: fdb-entrypoint                     
+            mountPath: /var/fdb/scripts
+            readOnly: true
         resources:
           requests:
             cpu: "100m"
@@ -66,10 +68,10 @@ spec:
       - name: cluster-file
         hostPath:
           path: /etc/foundationdb
-      # - name: fdb-entrypoint                         
-      #   configMap:
-      #     name: simplyblock-fdb-entrypoint-script
-      #     defaultMode: 0777
+      - name: fdb-entrypoint                         
+        configMap:
+          name: simplyblock-fdb-entrypoint-script
+          defaultMode: 0777
       hostNetwork: true
 
 ---
