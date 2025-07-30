@@ -198,11 +198,10 @@ ingress:
   enabled: true
   useHostPort: ${USE_HOST}   
   ingressClassName: nginx
-  host: "${CLUSTER_IP}" 
+  host: "${CLUSTER_IP}"
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /$2
-    nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    use-regex: "true"
+    ssl-redirect: "false"
   controller:
     hostNetwork: ${USE_HOST}  
     dnsPolicy: ClusterFirstWithHostNet
