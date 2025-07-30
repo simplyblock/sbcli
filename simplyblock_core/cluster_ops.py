@@ -166,7 +166,7 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 
    
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
-                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
+                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name) -> str:
 
@@ -177,16 +177,15 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    if not ifname:
-        ifname = "eth0"
-
-    dev_ip = utils.get_iface_ip(ifname)
-    if not dev_ip:
-        raise ValueError(f"Error getting interface ip: {ifname}")
-
-    db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
-
     if mode == "docker": 
+        if not ifname:
+            ifname = "eth0"
+
+        dev_ip = utils.get_iface_ip(ifname)
+        if not dev_ip:
+            raise ValueError(f"Error getting interface ip: {ifname}")
+
+        db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
         scripts.set_db_config(db_connection)
         logger.info(f"Node IP: {dev_ip}")
         scripts.configure_docker(dev_ip)
@@ -217,6 +216,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             logger.info(f"Labeled node '{hostname}' with app=graylog")
         else:
             logger.warning("Could not find current node for labeling")
+    elif mode == "kubernetes":
+        dev_ip = mgmt_ip
+        if not dev_ip:
+            raise ValueError("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
+
+        db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
 
     if not cli_pass:
         cli_pass = utils.generate_string(10)

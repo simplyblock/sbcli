@@ -19,7 +19,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 logger = logging.getLogger()
 
 
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode):
 
     try:
         headers = {'Authorization': f'{cluster_id} {cluster_secret}'}
@@ -37,32 +37,32 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    if not ifname:
-        ifname = "eth0"
+    if mode == "docker":
+        if not ifname:
+            ifname = "eth0"
 
-    DEV_IP = utils.get_iface_ip(ifname)
-    if not DEV_IP:
-        logger.error(f"Error getting interface ip: {ifname}")
-        return False
-
-    logger.info(f"Node IP: {DEV_IP}")
-    scripts.configure_docker(DEV_IP)
-
-    db_connection = cluster_data['db_connection']
-    scripts.set_db_config(db_connection)
-    time.sleep(1)
-    hostname = utils.get_hostname()
-    db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes()
-    if not nodes:
-        logger.error("No mgmt nodes was found in the cluster!")
-        return False
-    for node in nodes:
-        if node.hostname == hostname:
-            logger.error("Node already exists in the cluster")
+        DEV_IP = utils.get_iface_ip(ifname)
+        if not DEV_IP:
+            logger.error(f"Error getting interface ip: {ifname}")
             return False
 
-    if mode == "docker":
+        logger.info(f"Node IP: {DEV_IP}")
+        scripts.configure_docker(DEV_IP)
+
+        db_connection = cluster_data['db_connection']
+        scripts.set_db_config(db_connection)
+        time.sleep(1)
+        hostname = utils.get_hostname()
+        db_controller = DBController()
+        nodes = db_controller.get_mgmt_nodes()
+        if not nodes:
+            logger.error("No mgmt nodes was found in the cluster!")
+            return False
+        for node in nodes:
+            if node.hostname == hostname:
+                logger.error("Node already exists in the cluster")
+                return False
+
         if not cluster_data['disable_monitoring']:
             utils.render_and_deploy_alerting_configs(cluster_data['contact_point'], cluster_data['grafana_endpoint'],
                                                                         cluster_data['uuid'], cluster_data['secret'])
@@ -96,6 +96,25 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
 
         except Exception as e:
             raise e
+
+    elif mode == "kubernetes":
+        DEV_IP = mgmt_ip
+        if not DEV_IP:
+            logger.error("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
+            return False
+
+        logger.info(f"Node IP: {DEV_IP}")
+
+        db_connection = cluster_data['db_connection']
+        db_controller = DBController()
+        nodes = db_controller.get_mgmt_nodes()
+        if not nodes:
+            logger.error("No mgmt nodes was found in the cluster!")
+            return False
+        # for node in nodes:
+        #     if node.hostname == hostname:
+        #         logger.error("Node already exists in the cluster")
+        #         return False
 
     logger.info("Adding management node object")
     node_id = add_mgmt_node(DEV_IP, mode, cluster_id)
