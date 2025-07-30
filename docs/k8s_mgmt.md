@@ -9,8 +9,7 @@ This guide explains how to deploy the SimplyBlock Management Node on a Kubernete
 - A Linux host or VM with access to the required bootstrap scripts:
   - `./bootstrap-k3s.sh`
   - `./bootstrap-cluster.sh`
-- At least one Kubernetes master node (can also act as a worker node) and optionally one or more additional worker nodes for HA management.
-- Access to the kubernetes Cluster via kubeconfig
+- Access to the kubernetes Cluster
 
 ---
 
