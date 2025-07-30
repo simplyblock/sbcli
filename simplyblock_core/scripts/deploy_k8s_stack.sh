@@ -46,11 +46,8 @@ export DB_CONNECTION=${12}
 export K8S_NAMESPACE=${13}
 export DISABLE_MONITORING=${14}
 export DIR="$(dirname "$(realpath "$0")")"
+export FDB_CLUSTER_FILE_CONTENTS=${DB_CONNECTION}
 
-if [ -e "/etc/foundationdb/fdb.cluster" ]
-then
-   export FDB_CLUSTER_FILE_CONTENTS=${DB_CONNECTION}
-fi
 
 if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then
    export MAX_NUMBER_OF_INDICES=${LOG_DELETION_INTERVAL%d}
