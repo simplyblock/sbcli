@@ -632,7 +632,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_ip', help='Cluster IP address', type=str)
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         subcommand.add_argument('cluster_secret', help='Cluster secret', type=str)
-        subcommand.add_argument('ifname', help='Management interface name', type=str)
+        argument = subcommand.add_argument('--ifname', help='Management interface name', type=str, dest='ifname')
         argument = subcommand.add_argument('--mgmt-ip', help='Management IP address to use for the node (e.g., 192.168.1.10)', type=str, dest='mgmt_ip')
         argument = subcommand.add_argument('--mode', help='Environment to deploy management services, default: docker ', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
 

@@ -1523,7 +1523,7 @@ commands:
             help: "Cluster secret"
             dest: cluster_secret
             type: str
-          - name: "ifname"
+          - name: "--ifname"
             help: "Management interface name"
             dest: ifname
             type: str
