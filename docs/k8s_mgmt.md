@@ -10,7 +10,7 @@ This guide explains how to deploy the SimplyBlock Management Node on a Kubernete
   - `./bootstrap-k3s.sh`
   - `./bootstrap-cluster.sh`
 - At least one Kubernetes master node (can also act as a worker node) and optionally one or more additional worker nodes for HA management.
-- SSH access to all nodes.
+- Access to the kubernetes Cluster via kubeconfig
 
 ---
 
@@ -24,13 +24,29 @@ Run the following command to deploy a K3s-based Kubernetes cluster with support 
 ./bootstrap-k3s.sh --k8s-snode
 ```
 
-### 2. Copy Kubeconfig to Management Worker Nodes
+### 2. Prepare an Administrative Host
 
-Once the cluster is bootstrapped, copy the generated kubeconfig file ``(~/.kube/config or the one output by K3s)`` to the worker nodes that will run the Management Node and update the ip form 127.0.0.1 to ``<mgmt-worker-node-ip>``:
+Once the cluster is bootstrapped, copy the generated kubeconfig file (~/.kube/config or the one output by K3s) to a Linux host where you will perform SimplyBlock cluster administrative tasks. Also, update the IP in the kubeconfig file from 127.0.0.1 to ``<mgmt-worker-node-ip>``:
 
 ```bash
-scp /etc/rancher/k3s/k3s.yaml <mgmt-worker-node>:/home/<user>/.kube/config
+scp /etc/rancher/k3s/k3s.yaml <admin-host>:/home/<user>/.kube/config
 ```
+
+Install SimplyBlock CLI and FoundationDB Client
+On the administrative host, install the following tools:
+
+SimplyBlock CLI (sbctl):
+
+```bash
+pip install sbctl
+```
+
+FoundationDB Client (for RPM-based systems like CentOS/RHEL):
+
+```bash
+sudo yum install -y https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm
+```
+
 
 ### 3. Deploy the Cluster in Kubernetes Mode
 Now run the bootstrap cluster script
@@ -43,4 +59,10 @@ You can verify that the Management Node is running by checking the pods in the n
 
 ```bash
 kubectl get pods -n simplyblock
+```
+
+List the Bootstrapped cluster
+
+```bash
+sbctl cluster list
 ```
