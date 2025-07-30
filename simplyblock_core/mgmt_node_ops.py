@@ -5,7 +5,6 @@ import logging
 import uuid
 import time
 import requests
-import socket
 
 import docker
 from kubernetes import client as k8s_client, config
@@ -19,11 +18,11 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 logger = logging.getLogger()
 
 
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode):
 
     try:
         headers = {'Authorization': f'{cluster_id} {cluster_secret}'}
-        resp = requests.get(f"http://{cluster_ip}/cluster/{cluster_id}", headers=headers)
+        resp = requests.get(f"http://{cluster_ip}/api/v1/cluster/{cluster_id}", headers=headers)
         resp_json = resp.json()
         cluster_data = resp_json['results'][0]
         logger.info(f"Cluster found, NQN:{cluster_data['nqn']}")
@@ -37,32 +36,32 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    if not ifname:
-        ifname = "eth0"
+    if mode == "docker":
+        if not ifname:
+            ifname = "eth0"
 
-    DEV_IP = utils.get_iface_ip(ifname)
-    if not DEV_IP:
-        logger.error(f"Error getting interface ip: {ifname}")
-        return False
-
-    logger.info(f"Node IP: {DEV_IP}")
-    scripts.configure_docker(DEV_IP)
-
-    db_connection = cluster_data['db_connection']
-    scripts.set_db_config(db_connection)
-    time.sleep(1)
-    hostname = utils.get_hostname()
-    db_controller = DBController()
-    nodes = db_controller.get_mgmt_nodes()
-    if not nodes:
-        logger.error("No mgmt nodes was found in the cluster!")
-        return False
-    for node in nodes:
-        if node.hostname == hostname:
-            logger.error("Node already exists in the cluster")
+        DEV_IP = utils.get_iface_ip(ifname)
+        if not DEV_IP:
+            logger.error(f"Error getting interface ip: {ifname}")
             return False
 
-    if mode == "docker":
+        logger.info(f"Node IP: {DEV_IP}")
+        scripts.configure_docker(DEV_IP)
+
+        db_connection = cluster_data['db_connection']
+        scripts.set_db_config(db_connection)
+        time.sleep(1)
+        hostname = utils.get_hostname()
+        db_controller = DBController()
+        nodes = db_controller.get_mgmt_nodes()
+        if not nodes:
+            logger.error("No mgmt nodes was found in the cluster!")
+            return False
+        for node in nodes:
+            if node.hostname == hostname:
+                logger.error("Node already exists in the cluster")
+                return False
+
         if not cluster_data['disable_monitoring']:
             utils.render_and_deploy_alerting_configs(cluster_data['contact_point'], cluster_data['grafana_endpoint'],
                                                                         cluster_data['uuid'], cluster_data['secret'])
@@ -96,6 +95,27 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
 
         except Exception as e:
             raise e
+
+    elif mode == "kubernetes":
+        DEV_IP = mgmt_ip
+        if not DEV_IP:
+            logger.error("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
+            return False
+
+        logger.info(f"Node IP: {DEV_IP}")
+
+        hostname = utils.get_node_name_by_ip(DEV_IP)
+        utils.label_node_as_mgmt_plane(hostname)
+        db_connection = cluster_data['db_connection']
+        db_controller = DBController()
+        nodes = db_controller.get_mgmt_nodes()
+        if not nodes:
+            logger.error("No mgmt nodes was found in the cluster!")
+            return False
+        for node in nodes:
+            if node.hostname == hostname:
+                logger.error("Node already exists in the cluster")
+                return False
 
     logger.info("Adding management node object")
     node_id = add_mgmt_node(DEV_IP, mode, cluster_id)
@@ -185,7 +205,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
 
             logger.info(f"Patched StatefulSet {constants.PROMETHEUS_STATEFULSET_NAME}: {response.status.replicas} replicas")
 
-            current_node = socket.gethostname()
+            current_node = utils.get_node_name_by_ip(DEV_IP)
             logger.info(f"Waiting for FDB pod on this node: {current_node} to be active...")
             fdb_cont = None
             retries = 30
@@ -227,7 +247,10 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode):
 
 def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     db_controller = DBController()
-    hostname = utils.get_hostname()
+    if mode == "docker":
+        hostname = utils.get_hostname()
+    elif mode == "kubernetes":
+        hostname = utils.get_node_name_by_ip(mgmt_ip)
     try:
         node = db_controller.get_mgmt_node_by_hostname(hostname)
         logger.error('Node already exists in cluster')

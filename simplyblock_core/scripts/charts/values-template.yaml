@@ -5,6 +5,7 @@ graylog:
 cluster:
   secret: "${CLUSTER_SECRET}"
   id: "${CLUSTER_ID}"
+  ip: "${CLUSTER_IP}"
 
 monitoring:
   enabled: ${ENABLE_MONITORING}
@@ -192,3 +193,21 @@ prometheus:
 
   kube-state-metrics:
     enabled: false
+
+ingress:
+  enabled: true
+  useHostPort: ${USE_HOST}   
+  ingressClassName: nginx
+  host: "${CLUSTER_IP}"
+  annotations:
+    use-regex: "true"
+    ssl-redirect: "false"
+  controller:
+    hostNetwork: ${USE_HOST}  
+    dnsPolicy: ClusterFirstWithHostNet
+    service:
+      type: ${SERVICE_TYPE}  
+    extraArgs:
+      tcp-services-configmap: "${K8S_NAMESPACE}/simplyblock-tcp-services"
+    nodeSelector:
+      simplyblock.io/role: mgmt-plane

@@ -79,12 +79,19 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
 
 
 def _add_graylog_input(cluster_ip, password):
-    url = f"http://{cluster_ip}/graylog/api/system/inputs"
+    base_url = f"http://{cluster_ip}/graylog/api"
+    input_url = f"{base_url}/system/inputs"
 
     retries = 30
-    reachable=False
-    while retries > 0:
+    reachable = False
+    session = requests.session()
+    session.auth = ("admin", password)
+    headers = {
+        'X-Requested-By': 'setup-script',
+        'Content-Type': 'application/json',
+    }
 
+    while retries > 0:
         payload = json.dumps({
             "title": "spdk log input",
             "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
@@ -99,30 +106,61 @@ def _add_graylog_input(cluster_ip, password):
             },
             "global": True
         })
-        headers = {
-            'X-Requested-By': '',
-            'Content-Type': 'application/json',
-        }
-        session = requests.session()
-        session.auth = ("admin", password)
-        response = session.request("POST", url, headers=headers, data=payload)
+
+        response = session.post(input_url, headers=headers, data=payload)
         if response.status_code == 201:
             logger.info("Graylog input created...")
-            reachable=True
+            reachable = True
             break
 
         logger.debug(response.text)
         retries -= 1
         time.sleep(5)
+
     if not reachable:
         logger.error(f"Failed to create graylog input: {response.text}")
         return False
 
-    return response.status_code == 201
+    inputs_response = session.get(input_url, headers=headers)
+    if inputs_response.status_code != 200:
+        logger.error(f"Failed to retrieve inputs: {inputs_response.text}")
+        return False
+
+    input_id = None
+    for item in inputs_response.json()["inputs"]:
+        if item["title"] == "spdk log input":
+            input_id = item["id"]
+            break
+
+    if not input_id:
+        logger.error("Could not find created input to add extractor.")
+        return False
+
+    extractor_url = f"{input_url}/{input_id}/extractors"
+    extractor_payload = {
+        "title": "Extract Kubernetes JSON",
+        "type": "json",
+        "converters": [],
+        "order": 0,
+        "cursor_strategy": "copy",
+        "source_field": "message",
+        "target_field": "",
+        "extractor_config": {},
+        "condition_type": "none",
+        "condition_value": ""
+    }
+
+    extractor_response = session.post(extractor_url, headers=headers, data=json.dumps(extractor_payload))
+    if extractor_response.status_code != 201:
+        logger.error(f"Failed to add JSON extractor: {extractor_response.text}")
+        return False
+
+    logger.info("JSON extractor added successfully.")
+    return True
 
 def _set_max_result_window(cluster_ip, max_window=100000):
 
-    url_existing_indices = f"http://{cluster_ip}:9200/_all/_settings"
+    url_existing_indices = f"http://{cluster_ip}/opensearch/_all/_settings"
 
     retries = 30
     reachable=False
@@ -149,7 +187,7 @@ def _set_max_result_window(cluster_ip, max_window=100000):
         logger.error(f"Failed to update settings for existing indices: {response.text}")
         return False
     
-    url_template = f"http://{cluster_ip}:9200/_template/all_indices_template"
+    url_template = f"http://{cluster_ip}/opensearch/_template/all_indices_template"
     payload_template = json.dumps({
         "index_patterns": ["*"],
         "settings": {
@@ -166,7 +204,7 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 
    
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
-                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
+                   cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name) -> str:
 
@@ -177,17 +215,16 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    if not ifname:
-        ifname = "eth0"
-
-    dev_ip = utils.get_iface_ip(ifname)
-    if not dev_ip:
-        raise ValueError(f"Error getting interface ip: {ifname}")
-
-    db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
-    scripts.set_db_config(db_connection)
-
     if mode == "docker": 
+        if not ifname:
+            ifname = "eth0"
+
+        dev_ip = utils.get_iface_ip(ifname)
+        if not dev_ip:
+            raise ValueError(f"Error getting interface ip: {ifname}")
+
+        db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
+        scripts.set_db_config(db_connection)
         logger.info(f"Node IP: {dev_ip}")
         scripts.configure_docker(dev_ip)
         logger.info("Configuring docker swarm...")
@@ -217,6 +254,14 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             logger.info(f"Labeled node '{hostname}' with app=graylog")
         else:
             logger.warning("Could not find current node for labeling")
+    elif mode == "kubernetes":
+        dev_ip = mgmt_ip
+        if not dev_ip:
+            raise ValueError("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
+
+        current_node = utils.get_node_name_by_ip(dev_ip)
+        utils.label_node_as_mgmt_plane(current_node)
+        db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
 
     if not cli_pass:
         cli_pass = utils.generate_string(10)
@@ -278,7 +323,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE, str(disable_monitoring))
+                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, db_connection, constants.K8S_NAMESPACE, str(disable_monitoring))
         logger.info("Deploying helm stack > Done")
 
     logger.info("Configuring DB...")
@@ -299,7 +344,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     cluster_events.cluster_create(cluster)
 
-    mgmt_node_ops.add_mgmt_node(dev_ip, cluster.uuid)
+    mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
 
     logger.info("New Cluster has been created")
     logger.info(cluster.uuid)
