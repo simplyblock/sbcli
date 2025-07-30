@@ -79,12 +79,19 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
 
 
 def _add_graylog_input(cluster_ip, password):
-    url = f"http://{cluster_ip}/graylog/api/system/inputs"
+    base_url = f"http://{cluster_ip}/graylog/api"
+    input_url = f"{base_url}/system/inputs"
 
     retries = 30
-    reachable=False
-    while retries > 0:
+    reachable = False
+    session = requests.session()
+    session.auth = ("admin", password)
+    headers = {
+        'X-Requested-By': 'setup-script',
+        'Content-Type': 'application/json',
+    }
 
+    while retries > 0:
         payload = json.dumps({
             "title": "spdk log input",
             "type": "org.graylog2.inputs.gelf.tcp.GELFTCPInput",
@@ -99,26 +106,57 @@ def _add_graylog_input(cluster_ip, password):
             },
             "global": True
         })
-        headers = {
-            'X-Requested-By': '',
-            'Content-Type': 'application/json',
-        }
-        session = requests.session()
-        session.auth = ("admin", password)
-        response = session.request("POST", url, headers=headers, data=payload)
+
+        response = session.post(input_url, headers=headers, data=payload)
         if response.status_code == 201:
             logger.info("Graylog input created...")
-            reachable=True
+            reachable = True
             break
 
         logger.debug(response.text)
         retries -= 1
         time.sleep(5)
+
     if not reachable:
         logger.error(f"Failed to create graylog input: {response.text}")
         return False
 
-    return response.status_code == 201
+    inputs_response = session.get(input_url, headers=headers)
+    if inputs_response.status_code != 200:
+        logger.error(f"Failed to retrieve inputs: {inputs_response.text}")
+        return False
+
+    input_id = None
+    for item in inputs_response.json()["inputs"]:
+        if item["title"] == "spdk log input":
+            input_id = item["id"]
+            break
+
+    if not input_id:
+        logger.error("Could not find created input to add extractor.")
+        return False
+
+    extractor_url = f"{input_url}/{input_id}/extractors"
+    extractor_payload = {
+        "title": "Extract Kubernetes JSON",
+        "type": "json",
+        "converters": [],
+        "order": 0,
+        "cursor_strategy": "copy",
+        "source_field": "message",
+        "target_field": "",
+        "extractor_config": {},
+        "condition_type": "none",
+        "condition_value": ""
+    }
+
+    extractor_response = session.post(extractor_url, headers=headers, data=json.dumps(extractor_payload))
+    if extractor_response.status_code != 201:
+        logger.error(f"Failed to add JSON extractor: {extractor_response.text}")
+        return False
+
+    logger.info("JSON extractor added successfully.")
+    return True
 
 def _set_max_result_window(cluster_ip, max_window=100000):
 
