@@ -47,7 +47,7 @@ spec:
           - name: fdb-logs
             mountPath: /var/fdb/logs
           - name: cluster-file
-            mountPath: /etc/foundationdb
+            mountPath: /etc/foundationdb/fdb.cluster
           - name: fdb-entrypoint                     
             mountPath: /var/fdb/scripts
             readOnly: true
@@ -62,13 +62,15 @@ spec:
       - name: fdb-data
         hostPath:
           path: /etc/foundationdb/data
+          type: DirectoryOrCreate
       - name: fdb-logs
         hostPath:
           path: /etc/foundationdb/logs
+          type: DirectoryOrCreate
       - name: cluster-file
         hostPath:
-          path: /etc/foundationdb
-          type: DirectoryOrCreate
+          path: /etc/foundationdb/fdb.cluster
+          type: FileOrCreate
       - name: fdb-entrypoint                         
         configMap:
           name: simplyblock-fdb-entrypoint-script
