@@ -32,6 +32,15 @@ Once the cluster is bootstrapped, copy the generated kubeconfig file (~/.kube/co
 scp /etc/rancher/k3s/k3s.yaml <admin-host>:/home/<user>/.kube/config
 ```
 
+> **Important:** The administrative host must be a **Linux machine** that:
+>
+> - Has access to the Kubernetes `kubeconfig` file  
+> - Can reach the Kubernetes **worker nodes over the network**, including the following ports:
+>   - `6443` for Kubernetes API server  
+>   - `4500` for FoundationDB  
+>   - `80` and `443` for HTTP and HTTPS access (if applicable)  
+> - Is used for managing and operating the SimplyBlock cluster (not necessarily running the Management Node itself)
+
 Install SimplyBlock CLI and FoundationDB Client
 On the administrative host, install the following tools:
 
