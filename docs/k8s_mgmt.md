@@ -54,14 +54,36 @@ Now run the bootstrap cluster script
 ./bootstrap-cluster.sh --mode kubernetes
 ```
 
-### 4. Verification
+### 4. Add FDB Configuration file on Administrative Host
+
+Create foundationdb config directory
+
+```bash
+mkdir /etc/foundationdb
+```
+
+Retrieve the cluster config and write it to fdb.cluster
+
+```bash
+kubectl -n simplyblock get cm simplyblock-config \
+  -o jsonpath="{.data.FDB_CLUSTER_FILE_CONTENTS}" \
+  | sudo tee /etc/foundationdb/fdb.cluster > /dev/null
+```
+
+Optional: Verify the contents
+
+```bash
+cat /etc/foundationdb/fdb.cluster
+```
+
+### 5. Verification
 You can verify that the Management Node is running by checking the pods in the namespace (e.g., simplyblock):
 
 ```bash
 kubectl get pods -n simplyblock
 ```
 
-List the Bootstrapped cluster
+List the Bootstrapped cluster.
 
 ```bash
 sbctl cluster list
