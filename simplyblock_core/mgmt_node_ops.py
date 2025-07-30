@@ -105,6 +105,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
         logger.info(f"Node IP: {DEV_IP}")
 
         hostname = utils.get_node_name_by_ip(DEV_IP)
+        utils.label_node_as_mgmt_plane(hostname)
         db_connection = cluster_data['db_connection']
         db_controller = DBController()
         nodes = db_controller.get_mgmt_nodes()

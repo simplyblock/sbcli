@@ -210,3 +210,5 @@ ingress:
       type: ${SERVICE_TYPE}  
     extraArgs:
       tcp-services-configmap: "${K8S_NAMESPACE}/simplyblock-tcp-services"
+    nodeSelector:
+      simplyblock.io/role: mgmt-plane

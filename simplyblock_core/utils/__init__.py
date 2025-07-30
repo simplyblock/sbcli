@@ -13,6 +13,7 @@ import time
 import socket
 from typing import Union
 from kubernetes import client, config
+from kubernetes.client import ApiException
 import docker
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
@@ -1849,7 +1850,7 @@ def load_kernel_module(module):
 
 
 def get_node_name_by_ip(target_ip: str) -> str:
-    config.load_incluster_config()
+    config.load_kube_config()
     v1 = client.CoreV1Api()
     nodes = v1.list_node().items
 
@@ -1859,3 +1860,26 @@ def get_node_name_by_ip(target_ip: str) -> str:
                 return node.metadata.name
 
     raise ValueError(f"No node found with IP address: {target_ip}")
+
+def label_node_as_mgmt_plane(node_name: str):
+
+    config.load_kube_config()
+    v1 = client.CoreV1Api()
+
+    try:
+        node = v1.read_node(name=node_name)
+        
+        labels = node.metadata.labels or {}
+        labels["simplyblock.io/role"] = "mgmt-plane"
+
+        body = {
+            "metadata": {
+                "labels": labels
+            }
+        }
+
+        v1.patch_node(name=node_name, body=body)
+
+    except ApiException as e:
+        raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
+
