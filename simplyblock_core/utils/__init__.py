@@ -1847,3 +1847,15 @@ def load_kernel_module(module):
     except subprocess.CalledProcessError as e:
         logger.warning(f"Failed to load {module} module: {e}")
 
+
+def get_node_name_by_ip(target_ip: str) -> str:
+    config.load_incluster_config()
+    v1 = client.CoreV1Api()
+    nodes = v1.list_node().items
+
+    for node in nodes:
+        for addr in node.status.addresses:
+            if addr.type == "InternalIP" and addr.address == target_ip:
+                return node.metadata.name
+
+    raise ValueError(f"No node found with IP address: {target_ip}")

@@ -105,16 +105,17 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
         logger.info(f"Node IP: {DEV_IP}")
 
+        hostname = utils.get_node_name_by_ip(DEV_IP)
         db_connection = cluster_data['db_connection']
         db_controller = DBController()
         nodes = db_controller.get_mgmt_nodes()
         if not nodes:
             logger.error("No mgmt nodes was found in the cluster!")
             return False
-        # for node in nodes:
-        #     if node.hostname == hostname:
-        #         logger.error("Node already exists in the cluster")
-        #         return False
+        for node in nodes:
+            if node.hostname == hostname:
+                logger.error("Node already exists in the cluster")
+                return False
 
     logger.info("Adding management node object")
     node_id = add_mgmt_node(DEV_IP, mode, cluster_id)
@@ -204,7 +205,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
             logger.info(f"Patched StatefulSet {constants.PROMETHEUS_STATEFULSET_NAME}: {response.status.replicas} replicas")
 
-            current_node = socket.gethostname()
+            current_node = utils.get_node_name_by_ip(DEV_IP)
             logger.info(f"Waiting for FDB pod on this node: {current_node} to be active...")
             fdb_cont = None
             retries = 30
@@ -246,7 +247,10 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
 def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     db_controller = DBController()
-    hostname = utils.get_hostname()
+    if mode == "docker":
+        hostname = utils.get_hostname()
+    elif mode == "kubernetes":
+        hostname = utils.get_node_name_by_ip(mgmt_ip)
     try:
         node = db_controller.get_mgmt_node_by_hostname(hostname)
         logger.error('Node already exists in cluster')
