@@ -5,7 +5,6 @@ import logging
 import uuid
 import time
 import requests
-import socket
 
 import docker
 from kubernetes import client as k8s_client, config
