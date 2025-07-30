@@ -1,5 +1,30 @@
 #!/usr/bin/env bash
 
+set -ex -o pipefail
+
+is_ip_address() {
+    local ip="$1"
+
+    if echo "$ip" | grep -E -q '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+        IFS='.' read -r -a parts <<< "$ip"
+        for part in "${parts[@]}"; do
+            if [ "$part" -lt 0 ] || [ "$part" -gt 255 ]; then
+                echo "false"
+                return
+            fi
+        done
+        echo "true"
+        return
+    fi
+
+    if echo "$ip" | grep -E -q '^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$'; then
+        echo "true"
+        return
+    fi
+
+    echo "false"
+}
+
 export CLI_SSH_PASS=$1
 export CLUSTER_IP=$2
 export SIMPLYBLOCK_DOCKER_IMAGE=$3
@@ -17,15 +42,12 @@ export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
 export CONTACT_POINT=${11}
-export K8S_NAMESPACE=${12}
-export DISABLE_MONITORING=${13}
+export DB_CONNECTION=${12}
+export K8S_NAMESPACE=${13}
+export DISABLE_MONITORING=${14}
 export DIR="$(dirname "$(realpath "$0")")"
+export FDB_CLUSTER_FILE_CONTENTS=${DB_CONNECTION}
 
-if [ -s "/etc/foundationdb/fdb.cluster" ]
-then
-   FDB_CLUSTER_FILE_CONTENTS=$(tail /etc/foundationdb/fdb.cluster -n 1)
-   export FDB_CLUSTER_FILE_CONTENTS=$FDB_CLUSTER_FILE_CONTENTS
-fi
 
 if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then
    export MAX_NUMBER_OF_INDICES=${LOG_DELETION_INTERVAL%d}
@@ -42,7 +64,27 @@ else
   export ENABLE_MONITORING=false
 fi
 
+if is_ip_address "$CLUSTER_IP"; then
+  export USE_HOST=true
+  export SERVICE_TYPE="ClusterIP"
+else
+  export USE_HOST=false
+  export SERVICE_TYPE="LoadBalancer"
+fi
+
 envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
+
+# HELM=$(which helm)
+# KUBECTL=$(which kubectl)
+# if [[ -z "$HELM" ]]; then
+#   echo "helm not found in PATH"
+#   exit 1
+# fi
+
+# if [[ -z "$KUBECTL" ]]; then
+#   echo "kubectl not found in PATH"
+#   exit 1
+# fi
 
 /usr/local/bin/helm dependency build "$DIR"/charts/
 
@@ -51,3 +93,4 @@ envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
   --create-namespace
 
 /usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace $K8S_NAMESPACE --timeout=300s
+

@@ -550,8 +550,9 @@ class CLIWrapperBase:
         cluster_ip = args.cluster_ip
         cluster_secret = args.cluster_secret
         ifname = args.ifname
+        mgmt_ip = args.mgmt_ip
         mode = args.mode
-        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, cluster_secret, mode)
+        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode)
 
     def control_plane__list(self, sub_command, args):
         return mgmt_ops.list_mgmt_nodes(args.json)
@@ -807,6 +808,7 @@ class CLIWrapperBase:
         prov_cap_warn = args.prov_cap_warn
         prov_cap_crit = args.prov_cap_crit
         ifname = args.ifname
+        mgmt_ip = args.mgmt_ip
         distr_ndcs = args.distr_ndcs
         distr_npcs = args.distr_npcs
         distr_bs = args.distr_bs
@@ -828,7 +830,7 @@ class CLIWrapperBase:
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
+            ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity)
 
