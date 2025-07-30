@@ -22,7 +22,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
     try:
         headers = {'Authorization': f'{cluster_id} {cluster_secret}'}
-        resp = requests.get(f"http://{cluster_ip}/cluster/{cluster_id}", headers=headers)
+        resp = requests.get(f"http://{cluster_ip}/api/v1/cluster/{cluster_id}", headers=headers)
         resp_json = resp.json()
         cluster_data = resp_json['results'][0]
         logger.info(f"Cluster found, NQN:{cluster_data['nqn']}")
