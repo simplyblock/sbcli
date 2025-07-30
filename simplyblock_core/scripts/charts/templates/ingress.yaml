@@ -1,4 +1,4 @@
-{{- if and .Values.ingress.enabled .Values.ingress.useHostPort }}
+{{- if .Values.ingress.useHostPort }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -40,7 +40,7 @@ spec:
                 port:
                   number: 5000
 ---
-{{- else if and .Values.ingress.enabled (not .Values.ingress.useHostPort) }}
+{{- else if (not .Values.ingress.useHostPort) }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
