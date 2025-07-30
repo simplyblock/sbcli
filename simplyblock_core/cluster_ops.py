@@ -304,7 +304,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     cluster_events.cluster_create(cluster)
 
-    mgmt_node_ops.add_mgmt_node(dev_ip, cluster.uuid)
+    mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
 
     logger.info("New Cluster has been created")
     logger.info(cluster.uuid)
