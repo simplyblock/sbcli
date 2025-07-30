@@ -18,9 +18,9 @@ data:
 
       - job_name: 'cluster_metrics'
         static_configs:
-          - targets: ['simplyblock-haproxy:80']
+          - targets: ['simplyblock-webappapi:5000']
         honor_labels: true
-        metrics_path: '/cluster/metrics'
+        metrics_path: '/api/v1/cluster/metrics'
         basic_auth:
           username: '{{ .Values.cluster.id }}'
           password: '{{ .Values.cluster.secret }}'

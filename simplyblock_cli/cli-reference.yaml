@@ -701,6 +701,10 @@ commands:
             help: "Management interface name, e.g. eth0"
             dest: ifname
             type: str
+          - name: "--mgmt-ip"
+            help: "Management IP address to use for the node (e.g., 192.168.1.10)"
+            dest: mgmt_ip
+            type: str
           - name: "--log-del-interval"
             help: "Logging retention policy, default: 3d"
             dest: log_del_interval
@@ -1519,9 +1523,13 @@ commands:
             help: "Cluster secret"
             dest: cluster_secret
             type: str
-          - name: "ifname"
+          - name: "--ifname"
             help: "Management interface name"
             dest: ifname
+            type: str
+          - name: "--mgmt-ip"
+            help: "Management IP address to use for the node (e.g., 192.168.1.10)"
+            dest: mgmt_ip
             type: str
           - name: "--mode"
             help: "Environment to deploy management services, default: docker "

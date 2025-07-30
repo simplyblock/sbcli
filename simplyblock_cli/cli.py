@@ -341,6 +341,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--prov-cap-warn', help='Capacity warning level in percent, default: 250', type=int, default=250, dest='prov_cap_warn')
         argument = subcommand.add_argument('--prov-cap-crit', help='Capacity critical level in percent, default: 500', type=int, default=500, dest='prov_cap_crit')
         argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname')
+        argument = subcommand.add_argument('--mgmt-ip', help='Management IP address to use for the node (e.g., 192.168.1.10)', type=str, dest='mgmt_ip')
         argument = subcommand.add_argument('--log-del-interval', help='Logging retention policy, default: 3d', type=str, default='3d', dest='log_del_interval')
         argument = subcommand.add_argument('--metrics-retention-period', help='Retention period for I/O statistics (Prometheus), default: 7d', type=str, default='7d', dest='metrics_retention_period')
         argument = subcommand.add_argument('--contact-point', help='Email or slack webhook url to be used for alerting', type=str, default='', dest='contact_point')
@@ -631,7 +632,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_ip', help='Cluster IP address', type=str)
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         subcommand.add_argument('cluster_secret', help='Cluster secret', type=str)
-        subcommand.add_argument('ifname', help='Management interface name', type=str)
+        argument = subcommand.add_argument('--ifname', help='Management interface name', type=str, dest='ifname')
+        argument = subcommand.add_argument('--mgmt-ip', help='Management IP address to use for the node (e.g., 192.168.1.10)', type=str, dest='mgmt_ip')
         argument = subcommand.add_argument('--mode', help='Environment to deploy management services, default: docker ', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
 
     def init_control_plane__list(self, subparser):
