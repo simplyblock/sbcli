@@ -59,9 +59,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         # self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
         #                      "interface_partial_network_interrupt",
         #                      "partial_nw"]
-        # self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
-        #                      "interface_partial_network_interrupt"]
-        self.outage_types = ["partial_nw"]
+        self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
+                             "interface_partial_network_interrupt"]
+        # self.outage_types = ["partial_nw"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -408,6 +408,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             data_nics = node_details[0]["data_nics"]
             for data_nic in data_nics:
                 active_interfaces.append(data_nic["if_name"])
+            active_interfaces = ['eth1']
             
             self.disconnect_thread = threading.Thread(
                 target=self.ssh_obj.disconnect_all_active_interfaces,
