@@ -40,13 +40,13 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
         if not ifname:
             ifname = "eth0"
 
-        DEV_IP = utils.get_iface_ip(ifname)
-        if not DEV_IP:
+        dev_ip = utils.get_iface_ip(ifname)
+        if not dev_ip:
             logger.error(f"Error getting interface ip: {ifname}")
             return False
 
-        logger.info(f"Node IP: {DEV_IP}")
-        scripts.configure_docker(DEV_IP)
+        logger.info(f"Node IP: {dev_ip}")
+        scripts.configure_docker(dev_ip)
 
         db_connection = cluster_data['db_connection']
         scripts.set_db_config(db_connection)
@@ -71,7 +71,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             cluster_docker = utils.get_docker_client(cluster_id)
             docker_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
             join_token = cluster_docker.swarm.attrs['JoinTokens']['Manager']
-            node_docker = docker.DockerClient(base_url=f"tcp://{DEV_IP}:2375", version="auto")
+            node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
             if node_docker.info()["Swarm"]["LocalNodeState"] == "active":
                 logger.info("Node is part of another swarm, leaving swarm")
                 try:
@@ -97,14 +97,14 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             raise e
 
     elif mode == "kubernetes":
-        DEV_IP = mgmt_ip
-        if not DEV_IP:
+        dev_ip = mgmt_ip
+        if not dev_ip:
             logger.error("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
             return False
 
-        logger.info(f"Node IP: {DEV_IP}")
+        logger.info(f"Node IP: {dev_ip}")
 
-        hostname = utils.get_node_name_by_ip(DEV_IP)
+        hostname = utils.get_node_name_by_ip(dev_ip)
         utils.label_node_as_mgmt_plane(hostname)
         db_connection = cluster_data['db_connection']
         db_controller = DBController()
@@ -118,7 +118,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
                 return False
 
     logger.info("Adding management node object")
-    node_id = add_mgmt_node(DEV_IP, mode, cluster_id)
+    node_id = add_mgmt_node(dev_ip, mode, cluster_id)
 
     # check if ha setting is required
     nodes = db_controller.get_mgmt_nodes()
@@ -205,7 +205,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
             logger.info(f"Patched StatefulSet {constants.PROMETHEUS_STATEFULSET_NAME}: {response.status.replicas} replicas")
 
-            current_node = utils.get_node_name_by_ip(DEV_IP)
+            current_node = utils.get_node_name_by_ip(dev_ip)
             logger.info(f"Waiting for FDB pod on this node: {current_node} to be active...")
             fdb_cont = None
             retries = 30

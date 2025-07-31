@@ -64,13 +64,13 @@ Now run the bootstrap cluster script
 
 ### 4. Add FDB Configuration file on Administrative Host
 
-Create foundationdb config directory
+Create foundationdb config directory(if not already present)
 
 ```bash
 mkdir /etc/foundationdb
 ```
 
-Retrieve the cluster config and write it to fdb.cluster
+Retrieve the cluster config and write it to fdb.cluster(if not already present)
 
 ```bash
 kubectl -n simplyblock get cm simplyblock-config \

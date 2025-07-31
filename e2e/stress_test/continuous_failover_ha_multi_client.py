@@ -59,9 +59,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         # self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
         #                      "interface_partial_network_interrupt",
         #                      "partial_nw"]
-        # self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
-        #                      "interface_partial_network_interrupt"]
-        self.outage_types = ["partial_nw"]
+        self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
+                             "interface_partial_network_interrupt"]
+        # self.outage_types = ["partial_nw"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
@@ -408,6 +408,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             data_nics = node_details[0]["data_nics"]
             for data_nic in data_nics:
                 active_interfaces.append(data_nic["if_name"])
+            active_interfaces = ['eth1']
             
             self.disconnect_thread = threading.Thread(
                 target=self.ssh_obj.disconnect_all_active_interfaces,
@@ -766,6 +767,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
         skip_nodes.append(self.current_outage_node)
         skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
+        # skip_nodes = []
         self.logger.info(f"Skipping Nodes: {skip_nodes}")
         available_lvols = [
             lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes for lvol in lvols
