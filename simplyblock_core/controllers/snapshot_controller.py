@@ -188,6 +188,7 @@ def add(lvol_id, snapshot_name):
     snap.created_at = int(time.time())
     snap.lvol = lvol
     snap.vuid = snap_vuid
+    snap.status = SnapShot.STATUS_ONLINE
 
     snap.write_to_db(db_controller.kv_store)
 
@@ -265,7 +266,11 @@ def delete(snapshot_uuid, force_delete=False):
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 if not force_delete:
                     return False
-
+            snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+            snap.status = SnapShot.STATUS_IN_DELETION
+            snap.deletion_status = snode.get_id()
+            snap.write_to_db(db_controller.kv_store)
+            snapshot_events.snapshot_delete(snap)
         else:
             msg = f"Host node is not online {snode.get_id()}"
             logger.error(msg)
@@ -328,11 +333,10 @@ def delete(snapshot_uuid, force_delete=False):
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:
                 return False
-
-    snap = db_controller.get_snapshot_by_id(snapshot_uuid)
-    snap.deletion_status = 'lvol_delete_sent'
-    snap.write_to_db(db_controller.kv_store)
-    snapshot_events.snapshot_delete(snap)
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+        snap.deletion_status = primary_node.get_id()
+        snap.write_to_db(db_controller.kv_store)
+        snapshot_events.snapshot_delete(snap)
 
     base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
     if base_lvol and base_lvol.deleted is True:
