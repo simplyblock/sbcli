@@ -2947,7 +2947,7 @@ def recreate_lvstore(snode, force=False):
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
-            if lv.deletion_status != 'lvol_delete_sent':
+            if lv.deletion_status == '':
                 lvol_list.append(lv)
 
     prim_node_suspend = False

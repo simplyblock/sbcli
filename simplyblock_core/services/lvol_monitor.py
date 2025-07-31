@@ -205,7 +205,7 @@ while True:
                         if not leader_node:
                             raise Exception("Failed to get leader node")
 
-                        if lvol.deletion_status == "":
+                        if lvol.deletion_status == "" or  lvol.deletion_status != leader_node.get_id():
                             lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
                             time.sleep(3)
 

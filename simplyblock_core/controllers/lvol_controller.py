@@ -822,7 +822,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
     if not ret:
         return False
 
-    lvol.deletion_status = 'lvol_delete_sent'
+    lvol.deletion_status = node_id
     lvol.write_to_db(db_controller.kv_store)
     return True
 
