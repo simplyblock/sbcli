@@ -30,7 +30,7 @@ CLIENTNODES = os.getenv("CLIENTNODES", os.getenv("MNODES", "")).split()
 
 # Upload Folder
 UPLOAD_FOLDER = os.getenv("GITHUB_RUN_ID", time.strftime("%Y-%m-%d_%H-%M-%S"))
-HOME_DIR = os.path.expanduser("~")
+HOME_DIR = os.getenv("HOME_PATH", os.path.expanduser("~"))
 
 # Initialize MinIO Client
 s3_client = boto3.client(
