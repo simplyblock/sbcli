@@ -463,7 +463,7 @@ class SbcliUtils:
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 
-    def delete_lvol(self, lvol_name):
+    def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
         """Deletes lvol with given name
         """
         try:
@@ -493,8 +493,11 @@ class SbcliUtils:
                     self.logger.info(f"Lvol {lvol_name} in online state. Retrying Delete!")
                     data = self.delete_request(api_url=f"/lvol/{lvol_id}")
                     self.logger.info(f"Delete lvol resp: {data}")
-            if attempt > 120:
+            if attempt > max_attempt:
+                if skip_error:
+                    return
                 raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
+            
             attempt += 1
             self.logger.info(f"Lvol {lvol_name} is in_deletion. Checking again!")
             sleep_n_sec(5)
