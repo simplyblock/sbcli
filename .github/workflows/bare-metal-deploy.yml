@@ -146,7 +146,7 @@ jobs:
             --sbcli-cmd sbcli-dev --spdk-debug"
 
         if [ "${{ inputs.k8s_snode }}" == "true" ]; then
-          DEPLOY_CMD="$DEPLOY_CMD --k8s-snode"
+          DEPLOY_CMD="$DEPLOY_CMD --mode kubernetes --k8s-snode"
           echo "Setup k8s snodes"
           eval $DEPLOY_CMD
         else
