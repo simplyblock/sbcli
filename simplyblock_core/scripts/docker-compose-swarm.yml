@@ -236,6 +236,20 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
+  SnapshotMonitor:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/snapshot_monitor.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
   CleanupFDB:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
