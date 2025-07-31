@@ -466,10 +466,16 @@ class SbcliUtils:
     def delete_lvol(self, lvol_name):
         """Deletes lvol with given name
         """
-        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
+        try:
+            lvol_id = self.get_lvol_id(lvol_name=lvol_name)
+        except:
+            if skip_error:
+                self.logger.info(f"Lvol {lvol_name} not not found!! Continuing without Delete!!")
+                return
+            raise Exception(f"No such Lvol {lvol_name} found!!")
 
         if not lvol_id:
-            self.logger.info("Lvol does not exist. Exiting")
+            self.logger.info("Lvol does not exist. Exiting!!")
             return
 
         data = self.delete_request(api_url=f"/lvol/{lvol_id}")
