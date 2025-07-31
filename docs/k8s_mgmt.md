@@ -49,6 +49,12 @@ SimplyBlock CLI (sbctl):
 pip install sbctl
 ```
 
+FoundationDB Client (for RPM-based systems like CentOS/RHEL):
+
+```bash
+sudo yum install -y https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm
+```
+
 
 ### 3. Deploy the Cluster in Kubernetes Mode
 Now run the bootstrap cluster script
@@ -56,7 +62,29 @@ Now run the bootstrap cluster script
 ./bootstrap-cluster.sh --mode kubernetes
 ```
 
-### 4. Verification
+### 4. Add FDB Configuration file on Administrative Host
+
+Create foundationdb config directory(if not already present)
+
+```bash
+mkdir /etc/foundationdb
+```
+
+Retrieve the cluster config and write it to fdb.cluster(if not already present)
+
+```bash
+kubectl -n simplyblock get cm simplyblock-config \
+  -o jsonpath="{.data.FDB_CLUSTER_FILE_CONTENTS}" \
+  | sudo tee /etc/foundationdb/fdb.cluster > /dev/null
+```
+
+Optional: Verify the contents
+
+```bash
+cat /etc/foundationdb/fdb.cluster
+```
+
+### 5. Verification
 You can verify that the Management Node is running by checking the pods in the namespace (e.g., simplyblock):
 
 ```bash
