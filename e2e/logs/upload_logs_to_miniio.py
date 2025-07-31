@@ -8,6 +8,7 @@ import subprocess
 # Parse arguments
 parser = argparse.ArgumentParser(description="Fetch and upload logs from Docker and/or Kubernetes.")
 parser.add_argument("--k8s", action="store_true", help="Use Kubernetes logs for storage nodes instead of Docker.")
+parser.add_argument("--no_client", action="store_true", help="Do not get client logs.")
 args = parser.parse_args()
 
 # MinIO Configuration
@@ -18,13 +19,12 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "password")
 
 # SSH and Node Details
 BASTION_IP = os.getenv("BASTION_IP")
-KEY_PATH = os.path.expanduser("~/.ssh/simplyblock-us-east-2.pem")
+KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
 USER = os.getenv("USER", "root")
 
 
 # Node List
 STORAGE_PRIVATE_IPS = os.getenv("STORAGE_PRIVATE_IPS", "").split()
-SEC_STORAGE_PRIVATE_IPS = os.getenv("SEC_STORAGE_PRIVATE_IPS", "").split()
 MNODES = os.getenv("MNODES", "").split()
 CLIENTNODES = os.getenv("CLIENTNODES", os.getenv("MNODES", "")).split()
 
@@ -227,7 +227,7 @@ def upload_k8s_logs():
     os.makedirs(local_k8s_log_dir, exist_ok=True)
 
     # Get all namespaces
-    namespace = "spdk-csi"
+    namespace = "simplyblk"
 
     print(f"[INFO] Processing namespace: {namespace}")
 
@@ -369,7 +369,7 @@ def cleanup_local_logs():
     print(f"[INFO] Cleaning up local logs from {logs_dir}...")
     subprocess.run(f"rm -rf {logs_dir}/*.log", shell=True, check=True)
     subprocess.run(f"rm -rf {logs_dir}/*.txt", shell=True, check=True)
-    print(f"[SUCCESS] Local logs cleaned up.")
+    print("[SUCCESS] Local logs cleaned up.")
 
 
 # **Step 1: Process Management Node (Same for both Docker & Kubernetes mode)**
@@ -400,7 +400,7 @@ for node in MNODES:
         print(f"[ERROR] Error processing Management Node {node}: {e}")
 
 # **Step 2: Process Storage Node**
-for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
+for node in STORAGE_PRIVATE_IPS:
     try:
         ssh = connect_ssh(node, bastion_ip=BASTION_IP)
         print(f"[INFO] Processing Storage Node {node}...")
@@ -417,27 +417,27 @@ for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
 
             log_file = f"{HOME_DIR}/{container_name}_{container_id}_{node}.txt"
             exec_command(ssh, f"sudo docker logs {container_id} &> {log_file}")
-        if node in SEC_STORAGE_PRIVATE_IPS:
-            upload_from_remote(ssh, node, node_type="sec-storage")
-        else:
             upload_from_remote(ssh, node, node_type="storage")
         ssh.close()
         print(f"[SUCCESS] Successfully processed Storage Node {node}")
     except Exception as e:
         print(f"[ERROR] Error processing Storage Node {node}: {e}")
 
-for node in CLIENTNODES:
-    try:
-        ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-        print(f"[INFO] Processing Client Node {node}...")
+if not args.no_client:
+    for node in CLIENTNODES:
+        try:
+            ssh = connect_ssh(node, bastion_ip=BASTION_IP)
+            print(f"[INFO] Processing Client Node {node}...")
 
-        upload_from_remote(ssh, node, node_type="client")
+            upload_from_remote(ssh, node, node_type="client")
 
-        ssh.close()
-        print(f"[SUCCESS] Successfully processed Client Node {node}")
+            ssh.close()
+            print(f"[SUCCESS] Successfully processed Client Node {node}")
 
-    except Exception as e:
-        print(f"[ERROR] Error processing Client Node {node}: {e}")
+        except Exception as e:
+            print(f"[ERROR] Error processing Client Node {node}: {e}")
+else:
+    print("!! Skipping Clients as no client flag is set !!")
 
 # **Step 3: Process Kubernetes Nodes (Upload logs directly from runner)**
 if args.k8s:
@@ -448,17 +448,3 @@ if args.k8s:
     upload_local_logs(k8s=True)
 else:
     upload_local_logs()
-
-# for node in MNODES:
-#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-#     cleanup_remote_logs(ssh, node)
-
-# for node in CLIENTNODES:
-#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-#     cleanup_remote_logs(ssh, node)
-
-# for node in STORAGE_PRIVATE_IPS + SEC_STORAGE_PRIVATE_IPS:
-#     ssh = connect_ssh(node, bastion_ip=BASTION_IP)
-#     cleanup_remote_logs(ssh, node)
-
-# cleanup_local_logs()

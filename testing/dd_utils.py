@@ -12,7 +12,7 @@ def cp_blocks_to_file(disk_path, output_file, block_size=512, blocks_count=512):
     line = ''
     while True:
         out = process.stderr.read(1)
-        if out == '' and process.poll() != None:
+        if out == '' and process.poll() is not None:
             break
         if out != '':
             s = out.decode("utf-8")
@@ -21,4 +21,4 @@ def cp_blocks_to_file(disk_path, output_file, block_size=512, blocks_count=512):
                 line = ''
             else:
                 line = line + s
-    print line
+    print(line)

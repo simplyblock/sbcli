@@ -1,6 +1,4 @@
-from datetime import datetime
 import os
-import time
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
@@ -28,6 +26,7 @@ class TestMajorUpgrade(TestClusterBase):
     """
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
         self.base_version = kwargs.get("base_version")
         self.target_version = kwargs.get("target_version")
         self.snapshot_name = "upgrade_snap"
@@ -121,9 +120,64 @@ class TestMajorUpgrade(TestClusterBase):
         assert original_checksum == final_checksum, "Checksum mismatch between lvol and clone before upgrade!!"
 
         self.logger.info("Step 8: Perform Upgrade")
+
         package_name = f"{self.base_cmd}=={self.target_version}" if self.target_version != "latest" else self.base_cmd
+
         self.ssh_obj.exec_command(self.mgmt_nodes[0], f"pip install {package_name} --upgrade")
-        upgrade_cmd = f"{self.base_cmd} cluster update {self.cluster_id} --cp-only false --restart true"
+        sleep_n_sec(10)
+
+        self.logger.info("Step: Override Docker config to enable remote API and restart Docker")
+
+        for node in self.mgmt_nodes:
+            docker_override_cmds = [
+                "sudo mkdir -p /etc/systemd/system/docker.service.d/",
+                f"echo -e '[Service]\\nExecStart=\\nExecStart=-/usr/bin/dockerd --containerd=/run/containerd/containerd.sock "
+                f"-H tcp://{node}:2375 -H unix:///var/run/docker.sock -H fd://' | "
+                "sudo tee /etc/systemd/system/docker.service.d/override.conf",
+                "sudo systemctl daemon-reload",
+                "sudo systemctl restart docker"
+            ]
+
+            for cmd in docker_override_cmds:
+                self.ssh_obj.exec_command(node, cmd)
+
+            self.logger.info(f"Docker override configuration applied and Docker restarted on {node}")
+
+            # Health check: ensure Docker is running
+            self.logger.info(f"Checking Docker status on {node}...")
+            max_attempts = 50
+            attempt = 0
+            while attempt < max_attempts:
+                output, _ = self.ssh_obj.exec_command(node, "sudo systemctl is-active docker")
+                if output.strip() == "active":
+                    self.logger.info(f"Docker is active on {node}")
+                    break
+                attempt += 1
+                self.logger.info(f"Docker not active yet on {node}, retrying in 3s (attempt {attempt}/{max_attempts})...")
+                sleep_n_sec(3)
+            else:
+                raise RuntimeError(f"Docker failed to become active on {node} after {max_attempts} attempts!")
+        
+        sleep_n_sec(30)
+        cmd = f"{self.base_cmd} --dev -d cluster graceful-shutdown {self.cluster_id}"
+        self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+
+        node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
+        max_lvol = node_sample["max_lvol"]
+        max_prov = int(node_sample["max_prov"] / (1024**3))  # Convert bytes to GB
+        
+        for snode in self.storage_nodes:
+            cmd = f"pip install {package_name} --upgrade"
+            self.ssh_obj.exec_command(snode, cmd)
+            sleep_n_sec(10)
+            self.ssh_obj.deploy_storage_node(
+                node=snode,
+                max_lvol=max_lvol,
+                max_prov_gb=max_prov
+            )
+            sleep_n_sec(10)
+        
+        upgrade_cmd = f"{self.base_cmd} -d cluster update {self.cluster_id} --restart true --spdk-image simplyblock/spdk:main-latest"
         self.ssh_obj.exec_command(self.mgmt_nodes[0], upgrade_cmd)
         sleep_n_sec(180)
 
@@ -226,3 +280,4 @@ class TestMajorUpgrade(TestClusterBase):
                                f"{self.clone_name}_post")
 
         self.logger.info("TEST CASE PASSED !!!")
+        

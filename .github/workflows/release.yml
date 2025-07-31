@@ -3,6 +3,25 @@ on:
   release:
     types: [created]
 jobs:
+  get_spdk_hash:
+    runs-on: ubuntu-latest
+    outputs:
+      short_sha: ${{ steps.get_current_hash.outputs.short_sha }}
+    steps:
+    - name: Checkout repository at specified branch
+      uses: actions/checkout@v4
+      with:
+        repository: simplyblock-io/ultra
+        ref: R25.6-Hotfix
+        fetch-depth: 1
+        token: ${{ secrets.GH_ACCESS_KEY_ID_MANOHAR }}
+    - name: Get short commit hash
+      id: get_current_hash
+      run: |
+        SHORT_SHA=$(git rev-parse --short=8 HEAD)
+        echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+      shell: bash
+
   publish:
     runs-on: ubuntu-latest
     steps:
@@ -32,9 +51,21 @@ jobs:
       - name: Update simplyblock_core/env_var
         run: |
           sed -i 's/sbcli-dev/sbcli-pre/g' simplyblock_core/env_var
-          version="${{ github.event.release.tag_name }}"
+
           echo "Replacing SIMPLY_BLOCK_VERSION with $version"
-          sed -i "s/^SIMPLY_BLOCK_VERSION=.*/SIMPLY_BLOCK_VERSION=${version}/" simplyblock_core/env_var
+          sed -i "s|^SIMPLY_BLOCK_VERSION=.*|SIMPLY_BLOCK_VERSION=${version}|" simplyblock_core/env_var
+
+          echo "Replacing SIMPLY_BLOCK_DOCKER_IMAGE with $version"
+          sed -i "s|^SIMPLY_BLOCK_DOCKER_IMAGE=.*|SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:${version}|" simplyblock_core/env_var
+
+          echo "Replacing SIMPLY_BLOCK_SPDK_ULTRA_IMAGE with R25.6-Hotfix-$spdk_tag"
+          sed -i "s|^SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=.*|SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-${spdk_tag}|" simplyblock_core/env_var
+
+          echo "----- Updated env_var -----"
+          cat simplyblock_core/env_var
+        env:
+          version: ${{ github.event.release.tag_name }}
+          spdk_tag: ${{ needs.get_spdk_hash.outputs.short_sha }}
 
       - name: Build package
         run: python setup.py sdist

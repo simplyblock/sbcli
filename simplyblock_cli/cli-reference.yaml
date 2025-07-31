@@ -93,9 +93,9 @@ commands:
             help: "Cluster id"
             dest: cluster_id
             type: str
-          - name: "node_ip"
-            help: "IP of storage node to add"
-            dest: node_ip
+          - name: "node_addr"
+            help: "Address of storage node api to add, like <node-ip>:5000"
+            dest: node_addr
             type: str
           - name: "ifname"
             help: "Management interface name"
@@ -132,12 +132,6 @@ commands:
           - name: "--spdk-debug"
             help: "Enable spdk debug logs"
             dest: spdk_debug
-            type: bool
-            action: store_true
-            private: true
-          - name: "--full-page-unmap"
-            help: "Enable use_map_whole_page_on_1st_write flaf in bdev_distrib_create and bdev_alceml_create"
-            dest: full_page_unmap
             type: bool
             action: store_true
             private: true
@@ -331,6 +325,12 @@ commands:
             type: str
             nargs: +
             default: ""
+          - name: "--force-lvol-recreate"
+            help: "Force LVol recreate on node restart even if lvol bdev was not recovered"
+            dest: force_lvol_recreate
+            type: bool
+            action: store_true
+            default: False
       - name: shutdown
         help: "Initiates a storage node shutdown"
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
@@ -661,305 +661,6 @@ commands:
     help: "Cluster commands"
     weight: 200
     subcommands:
-      - name: deploy
-        help: "Deploys a storage nodes"
-        arguments:
-          - name: "--storage-nodes"
-            help: "comma separated ip addresses"
-            dest: storage_nodes
-            type: str
-          - name: "--test"
-            help: "Test Cluster"
-            dest: test
-            type: bool
-            action: store_true
-          - name: "--ha-type"
-            help: "Logical volume HA type (single, ha), default is cluster HA type"
-            dest: ha_type
-            type: str
-            choices:
-              - single
-              - ha
-            default: ha
-          - name: "--ha-jm-count"
-            help: "HA JM count"
-            dest: ha_jm_count
-            type: int
-            default: 3
-            private: true
-          - name: "--data-chunks-per-stripe"
-            help: "Erasure coding schema parameter k (distributed raid), default: 1"
-            dest: distr_ndcs
-            type: int
-            default: 1
-          - name: "--parity-chunks-per-stripe"
-            help: "Erasure coding schema parameter n (distributed raid), default: 1"
-            dest: distr_npcs
-            type: int
-            default: 1
-          - name: "--enable-qos"
-            help: "Enable qos bdev for storage nodes"
-            dest: enable_qos
-            type: bool
-            default: false
-            private: true
-          - name: "--ifname"
-            help: "Management interface name, e.g. eth0"
-            dest: ifname
-            type: str
-          - name: "--blk_size"
-            help: "The block size in bytes"
-            dest: blk_size
-            type: int
-            choices:
-              - 512
-              - 4096
-            default: 512
-            private: true
-          - name: "--page_size"
-            help: "The size of a data page in bytes"
-            dest: page_size
-            type: int
-            default: 2097152
-            private: true
-          - name: "--CLI_PASS"
-            help: "Password for CLI SSH connection"
-            dest: CLI_PASS
-            type: str
-            private: true
-          - name: "--cap-warn"
-            help: "Capacity warning level in percent, default: 89"
-            dest: cap_warn
-            type: int
-            default: 89
-          - name: "--cap-crit"
-            help: "Capacity critical level in percent, default: 99"
-            dest: cap_crit
-            type: int
-            default: 99
-          - name: "--prov-cap-warn"
-            help: "Capacity warning level in percent, default: 250"
-            dest: prov_cap_warn
-            type: int
-            default: 250
-          - name: "--prov-cap-crit"
-            help: "Capacity critical level in percent, default: 500"
-            dest: prov_cap_crit
-            type: int
-            default: 500
-          - name: "--log-del-interval"
-            help: "Logging retention period, default: 3d"
-            dest: log_del_interval
-            type: str
-            default: 3d
-          - name: "--metrics-retention-period"
-            help: "Retention period for I/O statistics (Prometheus), default: 7d"
-            dest: metrics_retention_period
-            type: str
-            default: 7d
-          - name: "--contact-point"
-            help: "Email or slack webhook url to be used for alerting"
-            dest: contact_point
-            type: str
-            default: ""
-          - name: "--distr-bs"
-            help: "(Dev) distrb bdev block size, default: 4096"
-            dest: distr_bs
-            type: int
-            default: 4096
-            private: true
-          - name: "--chunk-size-in-bytes"
-            help: "(Dev) distrb bdev chunk block size, default: 4096"
-            dest: distr_chunk_bs
-            type: int
-            default: 4096
-          - name: "--enable-node-affinity"
-            help: "Enable node affinity for storage nodes"
-            dest: enable_node_affinity
-            type: bool
-            action: store_true
-          - name: "--qpair-count"
-            help: "NVMe/TCP transport qpair count per logical volume"
-            usage: >
-              Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
-              of very small logical volumes.
-            dest: qpair_count
-            type:
-              range:
-                min: 1
-                max: 128
-            default: 3
-          - name: "--max-queue-size"
-            help: "The max size the queue will grow"
-            dest: max_queue_size
-            type: int
-            default: 128
-            private: true
-          - name: "--inflight-io-threshold"
-            help: "The number of inflight IOs allowed before the IO queuing starts"
-            dest: inflight_io_threshold
-            type: int
-            default: 4
-            private: true
-          - name: "--strict-node-anti-affinity"
-            help: >
-              Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
-              This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
-            dest: strict_node_anti_affinity
-            type: bool
-            action: store_true
-          - name: "--journal-partition"
-            help: >
-              1: auto-partition nvme devices for journal. 0: use a separate nvme device for journal.
-              The smallest NVMe device available on the host will be chosen as a journal. It should provide about 3% of
-              the entire node’s NVMe capacity. If set to false, partitions on other devices will be auto-created to
-              store the journal.
-            dest: partitions
-            type: str
-            default: true
-          - name: "--jm-percent"
-            help: "Number in percent to use for JM from each device"
-            dest: jm_percent
-            type: int
-            default: 3
-            private: true
-          - name: "--data-nics"
-            help: "Storage network interface name(s). Can be more than one."
-            description: >
-              Storage network interface name(s). Can be more than one. Comma-separated list: e.g. eth0,eth1
-            dest: data_nics
-            type: str
-            nargs: "+"
-          - name: "--max-lvol"
-            help: "Max logical volume per storage node"
-            dest: max_lvol
-            type: int
-          - name: "--max-snap"
-            help: "Max snapshot per storage node"
-            dest: max_snap
-            type: int
-            default: 5000
-            private: true
-          - name: "--max-size"
-            help: "Maximum amount of GB to be provisioned via all storage nodes"
-            dest: max_prov
-            type: str
-            default: ""
-          - name: "--size-of-device"
-            help: "Size of device per storage node"
-            dest: partition_size
-            type: str
-            private: true
-          - name: "--spdk-image"
-            help: "SPDK image uri"
-            dest: spdk_image
-            type: str
-            private: true
-          - name: "--spdk-debug"
-            help: "Enable spdk debug logs"
-            dest: spdk_debug
-            type: bool
-            action: store_true
-            private: true
-          - name: "--iobuf_small_bufsize"
-            help: "bdev_set_options param"
-            dest: small_bufsize
-            type: int
-            default: 0
-            private: true
-          - name: "--iobuf_large_bufsize"
-            help: "bdev_set_options param"
-            dest: large_bufsize
-            type: int
-            default: 0
-            private: true
-          - name: "--enable-test-device"
-            help: "Enable creation of test device"
-            dest: enable_test_device
-            type: bool
-            action: store_true
-            private: true
-          - name: "--disable-ha-jm"
-            help: "Disable HA JM for distrib creation"
-            dest: enable_ha_jm
-            type: bool
-            default: false
-            action: store_true
-            private: true
-          - name: "--namespace"
-            help: "k8s namespace to deploy on"
-            dest: namespace
-            type: str
-          - name: "--id-device-by-nqn"
-            help: "Use device nqn to identify it instead of serial number"
-            dest: id_device_by_nqn
-            type: bool
-            default: false
-            action: store_true
-          - name: "--lvol-name"
-            help: "Logical volume name or id"
-            dest: lvol_name
-            type: str
-            default: lvol01
-            private: true
-          - name: "--lvol-size"
-            help: "Logical volume size: 10M, 10G, 10(bytes)"
-            dest: lvol_size
-            type: size
-            default: 10G
-            private: true
-          - name: "--pool-name"
-            help: "Pool id or name"
-            dest: pool_name
-            type: str
-            default: pool01
-            private: true
-          - name: "--pool-max"
-            help: "Pool maximum size: 20M, 20G, 0(default)"
-            dest: pool_max
-            type: size
-            default: 25G
-            private: true
-          - name: "--snapshot"
-            aliases:
-              - "-s"
-            help: "Make logical volume with snapshot capability, default: false"
-            dest: snapshot
-            type: bool
-            action: store_true
-            default: false
-            private: true
-          - name: "--max-volume-size"
-            help: "Logical volume max size"
-            dest: max_size
-            type: size
-            default: 1000G
-            private: true
-          - name: "--host-id"
-            help: "Primary storage node id or hostname"
-            dest: host_id
-            type: str
-          - name: "--encrypt"
-            help: "Use inline data encryption and decryption on the logical volume"
-            dest: encrypt
-            type: bool
-            action: store_true
-            private: true
-          - name: "--distr-vuid"
-            help: "(Dev) set vuid manually, default: random (1-99999)"
-            dest: distr_vuid
-            type: int
-            private: true
-          - name: "--lvol-ha-type"
-            help: "Logical volume HA type (single, ha), default is cluster HA type"
-            dest: lvol_ha_type
-            type: str
-            choices:
-              - single
-              - default
-              - ha
-            default: ha
-            private: true
       - name: create
         help: "Creates a new cluster"
         usage: >
@@ -999,6 +700,10 @@ commands:
           - name: "--ifname"
             help: "Management interface name, e.g. eth0"
             dest: ifname
+            type: str
+          - name: "--mgmt-ip"
+            help: "Management IP address to use for the node (e.g., 192.168.1.10)"
+            dest: mgmt_ip
             type: str
           - name: "--log-del-interval"
             help: "Logging retention policy, default: 3d"
@@ -1050,6 +755,14 @@ commands:
               - single
               - ha
             default: ha
+          - name: "--mode"
+            help: "Environment to deploy management services, default: docker "
+            dest: mode
+            type: str
+            choices:
+              - docker
+              - kubernetes
+            default: docker
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
             dest: enable_node_affinity
@@ -1084,6 +797,13 @@ commands:
             type: bool
             default: false
             private: true
+          - name: "--disable-monitoring"
+            help: "Disable monitoring stack, false by default"
+            dest: disable_monitoring
+            type: bool
+            default: false
+            action: store_true
+            private: true
           - name: "--strict-node-anti-affinity"
             help: >
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This
@@ -1091,6 +811,13 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--name"
+            help: >
+              Assigns a name to the newly created cluster.
+            dest: name
+            aliases:
+              - "-n"
+            type: str
       - name: add
         help: "Adds a new cluster"
         arguments:
@@ -1191,6 +918,13 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--name"
+            help: >
+              Assigns a name to the newly created cluster.
+            dest: name
+            aliases:
+              - "-n"
+            type: str
       - name: activate
         help: >
           Activates a cluster.
@@ -1304,6 +1038,11 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Return JSON formatted logs"
+            dest: json
+            type: bool
+            action: store_true
           - name: "--limit"
             help: "show last number of logs, default 50"
             dest: limit
@@ -1439,6 +1178,18 @@ commands:
             help: "attr_value"
             dest: attr_value
             type: str
+      - name: change-name
+        help: Assigns or changes a name to a cluster
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "name"
+            help: "Name"
+            dest: name
+            type: str
   - name: "volume"
     help: "Logical volume commands"
     aliases:
@@ -1505,6 +1256,10 @@ commands:
           - name: "--max-w-mbytes"
             help: "Maximum Write Megabytes Per Second"
             dest: max_w_mbytes
+            type: int
+          - name: "--max-namespace-per-subsys"
+            help: "Maximum Namespace per subsystem"
+            dest: max_namespace_per_subsys
             type: int
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
@@ -1768,10 +1523,22 @@ commands:
             help: "Cluster secret"
             dest: cluster_secret
             type: str
-          - name: "ifname"
+          - name: "--ifname"
             help: "Management interface name"
             dest: ifname
             type: str
+          - name: "--mgmt-ip"
+            help: "Management IP address to use for the node (e.g., 192.168.1.10)"
+            dest: mgmt_ip
+            type: str
+          - name: "--mode"
+            help: "Environment to deploy management services, default: docker "
+            dest: mode
+            type: str
+            choices:
+              - docker
+              - kubernetes
+            default: docker
       - name: list
         help: "Lists all control plane nodes"
         arguments:
@@ -1830,12 +1597,6 @@ commands:
             help: "Maximum Write Megabytes Per Second"
             dest: max_w_mbytes
             type: int
-          - name: "--has-secret"
-            help: "Pool is created with a secret (all further API interactions with the pool and logical volumes in the pool require this secret)"
-            dest: has_secret
-            type: bool
-            action: store_true
-            private: true
       - name: set
         help: "Sets a storage pool's attributes"
         arguments:
@@ -1987,128 +1748,3 @@ commands:
             dest: resize
             type: size
             default: "0"
-  - name: "caching-node"
-    help: "Caching node commands"
-    aliases:
-      - cn
-    weight: 700
-    subcommands:
-      - name: deploy
-        help: "Deploys a caching node on this machine (local run)"
-        arguments:
-          - name: "--ifname"
-            help: "Management interface name, e.g. eth0"
-            dest: ifname
-            type: str
-      - name: add-node
-        help: "Adds a new caching node to the cluster"
-        arguments:
-          - name: "cluster_id"
-            help: "Cluster id"
-            dest: cluster_id
-            type: str
-          - name: "node_ip"
-            help: "Node IP address"
-            dest: node_ip
-            type: str
-          - name: "ifname"
-            help: "Management interface name"
-            dest: ifname
-            type: str
-          - name: "--vcpu-count"
-            help: >
-              Number of vCPUs used for SPDK. Remaining CPUs will be used for Linux system, TCP/IP processing, and
-              other workloads. The default on non-Kubernetes hosts is 80%.
-            dest: vcpu_count
-            type: int
-          - name: "--cpu-mask"
-            help: "SPDK app CPU mask, default is all cores found"
-            dest: spdk_cpu_mask
-            type:
-              regex: "^(0x|0X)?[a-fA-F0-9]+$"
-            private: true
-          - name: "--memory"
-            help: "SPDK huge memory allocation. By default it will acquire all available huge pages."
-            dest: spdk_mem
-            type:
-              size:
-                min: 1G
-            private: true
-          - name: "--spdk-image"
-            help: "SPDK image uri"
-            dest: spdk_image
-            type: str
-            private: true
-          - name: "--namespace"
-            help: "k8s namespace to deploy on"
-            dest: namespace
-            type: str
-          - name: "--multipathing"
-            help: "Enable multipathing for logical volume connection, default: on"
-            dest: multipathing
-            type: str
-            choices:
-              - "on"
-              - "off"
-            default: on
-      - name: list
-        help: "Lists all caching nodes"
-      - name: list-lvols
-        help: "Lists all connected logical volumes"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-      - name: remove
-        help: "Removes a caching node from the cluster"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-          - name: "--force"
-            help: "Force remove"
-            dest: force
-            type: bool
-            action: store_true
-      - name: connect
-        help: "Connects a logical volume to the caching node"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-          - name: "lvol_id"
-            help: "Logical volume id"
-            dest: lvol_id
-            type: str
-      - name: disconnect
-        help: "Disconnects a logical volume from the caching node"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-          - name: "lvol_id"
-            help: "Logical volume id"
-            dest: lvol_id
-            type: str
-      - name: recreate
-        help: "Recreate a caching node's bdevs"
-        arguments:
-          - name: "node_id"
-            help: "Caching node id"
-            dest: node_id
-            type: str
-      - name: get-lvol-stats
-        help: "Gets a logical volume's statistics"
-        arguments:
-          - name: "lvol_id"
-            help: "Logical volume id"
-            dest: lvol_id
-            type: str
-          - name: "--history"
-            help: "(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total)."
-            dest: history
-            type: str

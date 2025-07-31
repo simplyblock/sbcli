@@ -51,7 +51,7 @@ class StorageNode(BaseNodeObject):
     is_secondary_node: bool = False
     jc_singleton_mask: str = ""
     jm_cpu_mask: str = ""
-    jm_device: JMDevice = None
+    jm_device: JMDevice = None # type: ignore[assignment]
     jm_percent: int = 3
     jm_vuid: int = 0
     lvols: int = 0
@@ -99,8 +99,7 @@ class StorageNode(BaseNodeObject):
     lvstore_status: str = ""
     nvmf_port: int = 4420
     physical_label: int = 0
-    hublvol: HubLVol = None
-    full_page_unmap: bool = True
+    hublvol: HubLVol = None  # type: ignore[assignment]
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -146,7 +145,7 @@ class StorageNode(BaseNodeObject):
             #
             # raise
 
-    def create_hublvol(self, cluster_nqn):
+    def create_hublvol(self):
         """Create a hublvol for this node's lvstore
         """
         logger.info(f'Creating hublvol on {self.get_id()}')
@@ -159,7 +158,7 @@ class StorageNode(BaseNodeObject):
                 raise RPCException('Failed to create hublvol')
             self.hublvol = HubLVol({
                 'uuid': hublvol_uuid,
-                'nqn': f'{cluster_nqn}:lvol:{hublvol_uuid}',
+                'nqn': f'{self.host_nqn}:lvol:{hublvol_uuid}',
                 'bdev_name': f'{self.lvstore}/hublvol',
                 'model_number': str(uuid4()),
                 'nguid': utils.generate_hex_string(16),
@@ -180,7 +179,7 @@ class StorageNode(BaseNodeObject):
 
             if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
                 rpc_client.subsystem_delete(self.hublvol.nqn)
-                self.hublvol = None
+                self.hublvol = None  # type: ignore[assignment]
 
             raise
 
@@ -198,6 +197,8 @@ class StorageNode(BaseNodeObject):
             try:
                 if not rpc_client.get_bdevs(self.hublvol.bdev_name):
                     ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
+                    if not ret:
+                        logger.warning(f'Failed to recreate hublvol on {self.get_id()}')
                 else:
                     logger.info(f'Hublvol already exists {self.hublvol.bdev_name}')
 
@@ -212,6 +213,13 @@ class StorageNode(BaseNodeObject):
                 return True
             except RPCException:
                 pass
+        else:
+            try:
+                self.create_hublvol()
+                return True
+            except RPCException as e:
+                logger.error("Error establishing hublvol: %s", e.message)
+                # return False
 
         return self.hublvol
 
@@ -228,15 +236,15 @@ class StorageNode(BaseNodeObject):
         remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
 
         if not rpc_client.get_bdevs(remote_bdev):
-
+            ip_lst = []
             for ip in (iface.ip4_address for iface in primary_node.data_nics):
+                ip_lst.append(ip)
+            multipath = bool(len(ip_lst) > 1)
+            for ip in ip_lst:
                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
                         primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                        ip, primary_node.hublvol.nvmf_port)
-                if ret:
-                    remote_bdev = ret[0]
-                    break
-                else:
+                        ip, primary_node.hublvol.nvmf_port, multipath=multipath)
+                if not ret and not multipath:
                     logger.warning(f'Failed to connect to hublvol on {ip}')
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
@@ -251,3 +259,22 @@ class StorageNode(BaseNodeObject):
         if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
             pass
             # raise RPCException('Failed to connect secondary lvstore to primary')
+
+    def create_alceml(self, name, nvme_bdev, uuid, **kwargs):
+        logger.info(f"Adding {name}")
+        alceml_cpu_mask = ""
+        alceml_worker_cpu_mask = ""
+        if self.alceml_cpu_cores:
+            alceml_cpu_mask = utils.decimal_to_hex_power_of_2(self.alceml_cpu_cores[self.alceml_cpu_index])
+            self.alceml_cpu_index = (self.alceml_cpu_index + 1) % len(self.alceml_cpu_cores)
+        if self.alceml_worker_cpu_cores:
+            alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
+                self.alceml_worker_cpu_cores[self.alceml_worker_cpu_index])
+            self.alceml_worker_cpu_index = (self.alceml_worker_cpu_index + 1) % len(self.alceml_worker_cpu_cores)
+
+        return self.rpc_client().bdev_alceml_create(
+            name, nvme_bdev, uuid,
+            alceml_cpu_mask=alceml_cpu_mask,
+            alceml_worker_cpu_mask=alceml_worker_cpu_mask,
+            **kwargs,
+        )

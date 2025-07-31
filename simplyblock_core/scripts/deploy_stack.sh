@@ -13,6 +13,7 @@ export LOG_DELETION_INTERVAL=$7
 export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
+export DISABLE_MONITORING=${11}
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
@@ -32,7 +33,9 @@ fi
 
 docker network create monitoring-net -d overlay --attachable
 
-docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
+if [[ "${DISABLE_MONITORING,,}" == "false" ]]; then
+   docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
+fi
 
 # wait for the services to become online
 bash "$DIR"/stack_deploy_wait.sh monitoring

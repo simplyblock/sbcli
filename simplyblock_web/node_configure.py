@@ -1,14 +1,16 @@
 from simplyblock_core.storage_node_ops import generate_automated_deployment_config, upgrade_automated_deployment_config
 from simplyblock_core import utils
+from simplyblock_cli.clibase import range_type
+
 import argparse
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Automated Deployment Configuration Script")
     parser.add_argument('--max-lvol', help='Max logical volume per storage node', type=str,
-                                       dest='max_lvol', required=True)
+                                       dest='max_lvol', required=False)
     parser.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node',
-                                       type=str, dest='max_prov', required=True)
+                                       type=str, dest='max_prov', required=False)
     parser.add_argument('--nodes-per-socket', help='number of each node to be added per each socket.',
                                        type=str, dest='nodes_per_socket', required=False)
     parser.add_argument('--sockets-to-use',
@@ -21,11 +23,19 @@ if __name__ == "__main__":
                                        type=str, default='', dest='pci_blocked', required=False)
     parser.add_argument('--upgrade',
                                        help='Upgrade', action='store_true', dest='upgrade', required=False)
+    parser.add_argument('--cores-percentage', help='The percentage of cores to be used for spdk',
+                                       type=range_type(0, 100), dest='cores_percentage', required=False, default=0)
     args = parser.parse_args()
+
 
     if args.upgrade:
         upgrade_automated_deployment_config()
     else:
+        if not args.max_lvol:
+            parser.error('--max-lvol required.')
+        if not args.max_prov:
+            parser.error('--max-size required.')
+
         try:
             max_lvol = int(args.max_lvol)
         except ValueError:
@@ -46,6 +56,9 @@ if __name__ == "__main__":
         if args.pci_allowed and args.pci_blocked:
             parser.error("pci-allowed and pci-blocked cannot be both specified")
         max_prov = utils.parse_size(args.max_prov, assume_unit='G')
+        if max_prov == -1:
+            parser.error('--max-prov is not correct.')
+
         pci_allowed = []
         pci_blocked = []
         if args.pci_allowed:
@@ -53,11 +66,14 @@ if __name__ == "__main__":
         if args.pci_blocked:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
 
-        generate_automated_deployment_config(
+        status = generate_automated_deployment_config(
             max_lvol=max_lvol,
             max_prov=max_prov,
             sockets_to_use=sockets_to_use,
             nodes_per_socket=nodes_per_socket,
             pci_allowed=pci_allowed,
-            pci_blocked=pci_blocked
+            pci_blocked=pci_blocked,
+            cores_percentage = args.cores_percentage
         )
+        if not status:
+            raise RuntimeError("Failed to generate automated deployment configuration.")

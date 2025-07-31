@@ -25,9 +25,24 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
+    - name: Install dependencies
+      run: |
+        pip3 install -r test-requirements.txt
+
     - name: Run tests
       run: |
-        pytest simplyblock_web \
+        pytest -v --import-mode=importlib \
+          simplyblock_web/test/api/v1/test_base.py \
+          simplyblock_web/test/api/v2 \
           --entrypoint=${{ inputs.cluster_ip }} \
           --cluster=${{ inputs.cluster_id }} \
           --secret=${{ inputs.cluster_secret }}
+
+    - name: Retrieve API logs
+      if: ${{ always() }}
+      run: >-
+        curl \
+            -u admin:${{ inputs.cluster_secret }} \
+            -H "Accept: application/json" \
+            "${{ inputs.cluster_ip }}/graylog/api/search/universal/relative?query=container_name:app_WebAppAPI.*&limit=10000" \
+          | jq -r '.messages | map(.message) | map(.message) | reverse | join("\n")'

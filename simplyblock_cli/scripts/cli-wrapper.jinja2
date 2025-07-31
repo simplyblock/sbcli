@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 # PYTHON_ARGCOMPLETE_OK
 
-from simplyblock_cli.clibase import CLIWrapperBase, range_type, regex_type, size_type
-from simplyblock_core import utils
 import logging
 import sys
+import traceback
+
+from simplyblock_cli.clibase import CLIWrapperBase, range_type, regex_type, size_type
+from simplyblock_core import utils
 
 class CLIWrapper(CLIWrapperBase):
 
@@ -98,52 +100,59 @@ class CLIWrapper(CLIWrapperBase):
 
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
-        ret = ""
+        ret = False
         args_dict = args.__dict__
 
+        try:
 {%- for command in commands %}
 {%- if loop.index == 1 %}
-        if args.command in ['{{ command.name }}'{% if command.aliases is defined %}{% for alias in command.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+            if args.command in ['{{ command.name }}'{% if command.aliases is defined %}{% for alias in command.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
 {%- else %}
-        elif args.command in ['{{ command.name }}'{% if command.aliases is defined %}{% for alias in command.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+            elif args.command in ['{{ command.name }}'{% if command.aliases is defined %}{% for alias in command.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
 {%- endif %}
-            sub_command = args_dict['{{ command.name }}']
+                sub_command = args_dict['{{ command.name }}']
 {%- for subcommand in command.subcommands %}
 {%- if loop.index == 1 %}
-            if sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+                if sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
 {%- else %}
-            elif sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
+                elif sub_command in ['{{ subcommand.name }}'{% if subcommand.aliases is defined %}{% for alias in subcommand.aliases %}, '{{ alias }}'{% endfor %}{% endif %}]:
 {%- endif -%}
 {%- for argument in subcommand.arguments -%}
 {%- if argument.dest is defined and argument.dest != argument.name %}
-                args.{{ argument.dest }} = args.{{ argument.name }}
+                    args.{{ argument.dest }} = args.{{ argument.name }}
 {%- endif -%}
 {%- endfor %}
 {%- set ns = namespace(if_opened = False) %}
 {%- for parameter in subcommand.parameters -%}
 {%- if parameter.private is defined and parameter.private %}
 {%- if not ns.if_opened %}
-                if not self.developer_mode:
+                    if not self.developer_mode:
 {%- set ns.if_opened = True %}
 {%- endif %}
-                    args.{{ parameter.dest }} = {{ parameter | default_value }}
+                        args.{{ parameter.dest }} = {{ parameter | default_value }}
 {%- endif -%}
 {%- endfor -%}
 {%- if subcommand.private %}
-                if not self.developer_mode:
-                    print("This command is private.")
-                    ret = False
-                else:
-                    ret = self.{{ command.name | make_identifier }}__{{ subcommand.name | make_identifier }}(sub_command, args)
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.{{ command.name | make_identifier }}__{{ subcommand.name | make_identifier }}(sub_command, args)
 {%- else %}
-                ret = self.{{ command.name | make_identifier }}__{{ subcommand.name | make_identifier }}(sub_command, args)
+                    ret = self.{{ command.name | make_identifier }}__{{ subcommand.name | make_identifier }}(sub_command, args)
 {%- endif -%}
 {%- endfor %}
+                else:
+                    self.parser.print_help()
+{% endfor %}
             else:
                 self.parser.print_help()
-{% endfor %}
-        else:
-            self.parser.print_help()
+
+        except Exception as exc:
+            print('Operation failed: ', exc)
+            if args.debug:
+                traceback.print_exception(None, exc, exc.__traceback__)
+            exit(1)
 
         if not ret:
             exit(1)

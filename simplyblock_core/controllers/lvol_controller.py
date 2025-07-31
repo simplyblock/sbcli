@@ -1,24 +1,20 @@
 # coding=utf-8
 import logging as lg
 import json
-import string
 import random
 import sys
 import time
 import uuid
 from datetime import datetime
-from typing import Tuple
+from typing import List, Tuple
 
-from simplyblock_core import utils, constants, distr_controller
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, caching_node_controller, \
-    tasks_controller
+from simplyblock_core import utils, constants
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.snode_client import SNodeClient
 
 logger = lg.getLogger()
 
@@ -60,7 +56,7 @@ def ask_for_device_number(devices_list):
 
 
 def ask_for_lvol_vuid():
-    question = f"Enter VUID number: "
+    question = "Enter VUID number: "
     while True:
         sys.stdout.write(question)
         choice = str(input())
@@ -69,7 +65,7 @@ def ask_for_lvol_vuid():
             return ch
         except Exception as e:
             logger.debug(e)
-            sys.stdout.write(f"Please respond with numbers")
+            sys.stdout.write("Please respond with numbers")
 
 
 def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
@@ -198,7 +194,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     utils.print_table_dict(node_start_end)
     #############
 
-    selected_node_ids = []
+    selected_node_ids: List[str] = []
     while len(selected_node_ids) < min(len(node_stats), 3):
         r_index = random.randint(0, n_start)
         print(f"Random is {r_index}/{n_start}")
@@ -265,14 +261,15 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     host_node = None
     if host_id_or_name:
-        host_node = db_controller.get_storage_node_by_id(host_id_or_name)
-        if not host_node:
+        try:
+            host_node = db_controller.get_storage_node_by_id(host_id_or_name)
+        except KeyError:
             nodes = db_controller.get_storage_nodes_by_hostname(host_id_or_name)
             if len(nodes) > 0:
                 host_node = nodes[0]
@@ -280,9 +277,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 return False, f"Can not find storage node: {host_id_or_name}"
 
     if namespace:
-        master_lvol = db_controller.get_lvol_by_id(namespace)
-        if not master_lvol:
-            return False, f"LVol not found: {namespace}"
+        try:
+            master_lvol = db_controller.get_lvol_by_id(namespace)
+        except KeyError as e:
+            logger.error(e)
+            return False
 
         host_node = db_controller.get_storage_node_by_id(master_lvol.node_id)
 
@@ -291,7 +290,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             if lv.namespace == namespace:
                 lvols_count += 1
 
-        if lvols_count >= constants.LVO_MAX_NAMESPACES_PER_SUBSYS:
+        if lvols_count >= master_lvol.max_namespace_per_subsys:
             msg = f"Max namespaces reached: {lvols_count}"
             logger.error(msg)
             return False, msg
@@ -425,6 +424,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.namespace = namespace or ""
     else:
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
+        lvol.max_namespace_per_subsys = max_namespace_per_subsys
 
     nodes = []
     if host_node:
@@ -432,7 +432,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     else:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
-            return False, f"No nodes found with enough resources to create the LVol"
+            return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
 
     lvol.hostname = host_node.hostname
@@ -448,7 +448,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.error(error)
         return False, error
 
-    lvol_dict = {
+    lvol_dict: dict = {
         "type": "bdev_lvol",
         "name": lvol.lvol_bdev,
         "params": {
@@ -465,7 +465,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.bdev_stack = [lvol_dict]
 
     if use_crypto:
-        if crypto_key1 == None or crypto_key2 == None:
+        if crypto_key1 is None or crypto_key2 is None:
             return False, "encryption keys for lvol not provided"
         else:
             success, err = validate_aes_xts_keys(crypto_key1, crypto_key2)
@@ -516,7 +516,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not create lvol"
+                    msg = "Secondary node is in down status, can not create lvol"
                     logger.error(msg)
                     lvol.remove(db_controller.kv_store)
                     return False, msg
@@ -544,7 +544,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
         else:
             # both primary and secondary are not online
-            msg = f"Host nodes are not online"
+            msg = "Host nodes are not online"
             logger.error(msg)
             lvol.remove(db_controller.kv_store)
             return False, msg
@@ -741,9 +741,10 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
 def recreate_lvol(lvol_id):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if lvol.ha_type == 'single':
@@ -803,9 +804,10 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
 
 def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    snode = db_controller.get_storage_node_by_id(node_id)
-    if not lvol or not snode:
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
         return True
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
@@ -817,11 +819,11 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
         if len(subsystem[0]["namespaces"]) > 1:
             rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
         else:
-            logger.info(f"Removing subsystem")
+            logger.info("Removing subsystem")
             rpc_client.subsystem_delete(lvol.nqn)
 
     # 2- remove bdevs
-    logger.info(f"Removing bdev stack")
+    logger.info("Removing bdev stack")
     ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
     if not ret:
         return False
@@ -833,12 +835,15 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
 
 def delete_lvol(id_or_name, force_delete=False):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(id_or_name)
-    if not lvol:
-        lvol = db_controller.get_lvol_by_name(id_or_name)
-        if not lvol:
-            logger.error(f"lvol not found: {id_or_name}")
-            return False
+    try:
+        lvol = (
+                db_controller.get_lvol_by_id(id_or_name)
+                if utils.UUID_PATTERN.match(id_or_name) is not None
+                else db_controller.get_lvol_by_name(id_or_name)
+        )
+    except KeyError as e:
+        logger.error(e)
+        return False
 
     if lvol.status == LVol.STATUS_IN_DELETION:
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
@@ -847,13 +852,13 @@ def delete_lvol(id_or_name, force_delete=False):
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     logger.debug(lvol)
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-
-    if not snode:
+    try:
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    except KeyError:
         logger.error(f"lvol node id not found: {lvol.node_id}")
         if not force_delete:
             return False
@@ -861,24 +866,20 @@ def delete_lvol(id_or_name, force_delete=False):
 
         # if lvol is clone and snapshot is deleted, then delete snapshot
         if lvol.cloned_from_snap:
-            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
-            if snap and snap.deleted is True:
-                lvols_count = 0
-                for lvol in db_controller.get_lvols():  # pass
-                    if lvol.cloned_from_snap == snap.get_id():
-                        lvols_count += 1
-                if lvols_count == 0:
-                    snapshot_controller.delete(snap.get_id())
+            try:
+                snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+                if snap.deleted is True:
+                    lvols_count = 0
+                    for lvol in db_controller.get_lvols():  # pass
+                        if lvol.cloned_from_snap == snap.get_id():
+                            lvols_count += 1
+                    if lvols_count == 0:
+                        snapshot_controller.delete(snap.get_id())
+            except KeyError:
+                pass # already removed
 
         logger.info("Done")
         return True
-
-    # disconnect from caching nodes:
-    cnodes = db_controller.get_caching_nodes()
-    for cnode in cnodes:
-        for lv in cnode.lvols:
-            if lv.lvol_id == lvol.get_id():
-                caching_node_controller.disconnect(cnode.get_id(), lvol.get_id())
 
     if lvol.ha_type == 'single':
         if snode.status  != StorageNode.STATUS_ONLINE:
@@ -896,12 +897,6 @@ def delete_lvol(id_or_name, force_delete=False):
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
 
-        sec_rpc_client = RPCClient(
-            sec_node.mgmt_ip,
-            sec_node.rpc_port,
-            sec_node.rpc_username,
-            sec_node.rpc_password, timeout=5, retry=1)
-
         primary_node = None
         secondary_node = None
         if host_node.status == StorageNode.STATUS_ONLINE:
@@ -909,7 +904,7 @@ def delete_lvol(id_or_name, force_delete=False):
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not delete lvol"
+                    msg = "Secondary node is in down status, can not delete lvol"
                     logger.error(msg)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
@@ -938,10 +933,21 @@ def delete_lvol(id_or_name, force_delete=False):
 
         else:
             # both primary and secondary are not online
-            msg = f"Host nodes are not online"
+            msg = "Host nodes are not online"
             logger.error(msg)
             return False, msg
 
+        # 1- delete subsystem from secondary
+        if secondary_node:
+            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
+            if secondary_node.status == StorageNode.STATUS_ONLINE:
+                logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
+                secondary_rpc_client = secondary_node.rpc_client()
+                ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
+                if not ret:
+                    logger.warning(f"Failed to delete subsystem from node: {secondary_node.get_id()}")
+
+        # 2- delete subsystem and lvol bdev from primary
         if primary_node:
 
             ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
@@ -950,6 +956,7 @@ def delete_lvol(id_or_name, force_delete=False):
                 if not force_delete:
                     return False
 
+        # 3- delete lvol bdev from secondary
         if secondary_node:
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
@@ -969,22 +976,26 @@ def delete_lvol(id_or_name, force_delete=False):
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
     if lvol.cloned_from_snap:
-        snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
-        if snap and snap.deleted is True:
-            snapshot_controller.delete(snap.get_id())
+        try:
+            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            if snap.deleted is True:
+                snapshot_controller.delete(snap.get_id())
+        except KeyError:
+            pass # already deleted
 
     logger.info("Done")
     return True
 
 def connect_lvol_to_pool(uuid):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(uuid)
-    if not lvol:
-        logger.error(f"lvol not found: {uuid}")
+    try:
+        lvol = db_controller.get_lvol_by_id(uuid)
+    except KeyError as e:
+        logger.error(e)
         return False
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
@@ -1015,16 +1026,17 @@ def connect_lvol_to_pool(uuid):
 
 def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=None):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(uuid)
-    if not lvol:
-        logger.error(f"lvol not found: {uuid}")
+    try:
+        lvol = db_controller.get_lvol_by_id(uuid)
+    except KeyError as e:
+        logger.error(e)
         return False
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
     if pool.has_qos():
-        logger.error(f"Pool already has QOS settings")
+        logger.error("Pool already has QOS settings")
         return False
 
     if name:
@@ -1059,6 +1071,14 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     if not ret:
         return "Error setting qos limits"
 
+    if snode.secondary_node_id:
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node and sec_node.status == [StorageNode.STATUS_ONLINE,  StorageNode.STATUS_DOWN]:
+            ret = sec_node.rpc_client().bdev_set_qos_limit(
+                lvol.top_bdev, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec)
+            if not ret:
+                return "Error setting qos limits"
+
     lvol.rw_ios_per_sec = rw_ios_per_sec
     lvol.rw_mbytes_per_sec = rw_mbytes_per_sec
     lvol.r_mbytes_per_sec = r_mbytes_per_sec
@@ -1074,12 +1094,16 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
     if cluster_id:
         lvols = db_controller.get_lvols(cluster_id)
     elif pool_id_or_name:
-        pool = db_controller.get_pool_by_id(pool_id_or_name)
-        if not pool:
-            pool = db_controller.get_pool_by_name(pool_id_or_name)
-            if pool:
-                for lv in db_controller.get_lvols_by_pool_id(pool.get_id()):
-                    lvols.append(lv)
+        try:
+            pool = (
+                    db_controller.get_pool_by_id(pool_id_or_name)
+                    if utils.UUID_PATTERN.match(pool_id_or_name) is not None
+                    else db_controller.get_pool_by_name(pool_id_or_name)
+            )
+            for lv in db_controller.get_lvols_by_pool_id(pool.get_id()):
+                lvols.append(lv)
+        except KeyError:
+            pass
     else:
         lvols = db_controller.get_all_lvols()
 
@@ -1165,9 +1189,10 @@ def get_lvol(lvol_id_or_name, is_json):
 
 def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(uuid)
-    if not lvol:
-        logger.error(f"lvol not found: {uuid}")
+    try:
+        lvol = db_controller.get_lvol_by_id(uuid)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     out = []
@@ -1185,6 +1210,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
             ip = nic.ip4_address
             port = lvol.subsys_port
             out.append({
+                "ns_id": lvol.ns_id,
                 "transport": transport,
                 "ip": ip,
                 "port": port,
@@ -1204,11 +1230,11 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
 
 def resize_lvol(id, new_size):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(id)
-    if not lvol:
-        msg = f"LVol not found: {id}"
-        logger.error(msg)
-        return False, msg
+    try:
+        lvol = db_controller.get_lvol_by_id(id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
@@ -1267,7 +1293,7 @@ def resize_lvol(id, new_size):
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
                 if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = f"Secondary node is in down status, can not resize lvol"
+                    msg = "Secondary node is in down status, can not resize lvol"
                     logger.error(msg)
                     return False, msg
 
@@ -1297,7 +1323,7 @@ def resize_lvol(id, new_size):
 
         else:
             # both primary and secondary are not online
-            msg = f"Host nodes are not online"
+            msg = "Host nodes are not online"
             logger.error(msg)
             return False, msg
 
@@ -1339,14 +1365,15 @@ def resize_lvol(id, new_size):
 
 def set_read_only(id):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(id)
-    if not lvol:
-        logger.error(f"LVol not found: {id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     logger.info(f"Setting LVol: {lvol.get_id()} read only")
@@ -1379,9 +1406,10 @@ def create_snapshot(lvol_id, snapshot_name):
 
 def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_uuid)
-    if not lvol:
-        logger.error(f"LVol not found: {lvol_uuid}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_uuid)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if history:
@@ -1393,14 +1421,14 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
         records_number = 20
 
     records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
-    if not records_list:
-        return False
     cap_stats_keys = [
         "date",
         "size_total",
         "size_used",
         "size_free",
         "size_util",
+        "size_prov",
+        "size_prov_util"
     ]
     new_records = utils.process_records(records_list, records_count, keys=cap_stats_keys)
 
@@ -1421,9 +1449,10 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
 
 def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_sizes=False):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_uuid)
-    if not lvol:
-        logger.error(f"LVol not found: {lvol_uuid}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_uuid)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if history:
@@ -1435,8 +1464,6 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
         records_number = 20
 
     records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
-    if not records_list:
-        return False
     io_stats_keys = [
         "date",
         "read_bytes",
@@ -1548,9 +1575,10 @@ def migrate(lvol_id, node_id):
 
 def move(lvol_id, node_id, force=False):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"lvol not found: {lvol_id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     target_node = db_controller.get_storage_node_by_id(node_id)
@@ -1593,16 +1621,18 @@ def move(lvol_id, node_id, force=False):
 def inflate_lvol(lvol_id):
 
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    if not lvol:
-        logger.error(f"LVol not found: {lvol_id}")
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
         return False
+
     if not lvol.cloned_from_snap:
         logger.error(f"LVol: {lvol_id} must be cloned LVol not regular one")
         return False
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error(f"Pool is disabled")
+        logger.error("Pool is disabled")
         return False
 
     logger.info(f"Inflating LVol: {lvol.get_id()}")

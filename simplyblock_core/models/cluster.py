@@ -46,21 +46,26 @@ class Cluster(BaseModel):
     enable_node_affinity: bool = False
     enable_qos: bool = False
     grafana_endpoint: str = ""
+    mode: str = ""
     grafana_secret: str = ""
+    contact_point: str = ""
     ha_type: str = "single"
     inflight_io_threshold: int = 4
     iscsi: str = ""
     max_queue_size: int = 128
     model_ids: List[str] = []
+    cluster_name: str = None # type: ignore[assignment]
     nqn: str = ""
     page_size_in_blocks: int = 2097152
     prov_cap_crit: int = 190
     prov_cap_warn: int = 180
     qpair_count: int = 32
     secret: str = ""
+    disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
     tls: bool = False
     is_re_balancing: bool = False
+    full_page_unmap: bool = True
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

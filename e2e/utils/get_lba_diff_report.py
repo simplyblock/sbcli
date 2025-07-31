@@ -159,7 +159,6 @@ FIO Corruption Analysis Script
 
 import paramiko
 from scp import SCPClient
-import subprocess
 import os
 from pathlib import Path
 import posixpath

@@ -1,39 +1,51 @@
 name: Integration Tests
 
 on:
-  pull_request
+  workflow_dispatch:
+  pull_request:
+
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  mock-deploy:
+
+  await-python-checks:
+    name: Await Python checks
     runs-on: ubuntu-latest
-    services:
-      docker:
-        image: docker:24.0.5
-        options: --privileged
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    steps:  # `running-workflow-name` not working, await all checks individually
+      - name: Wait for cli.py check
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'Ensure cli.py is up to date'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
 
-      - name: Set up Docker Compose
-        uses: docker/setup-buildx-action@v2
+      - name: Wait for unittests
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'Unit tests'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
 
-      - name: Build and start containers
-        run: |
-          docker compose -f docker-compose-dev.yml up --build -d
+      - name: Wait for linter
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'Linter'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
 
-      - name: Run endpoint checks inside mgmt-server
-        run: |
-          docker compose -f docker-compose-dev.yml exec mgmt-server python manual_testing/check_endpoints.py
-
-      - name: Stop and clean up
-        if: always()
-        run: |
-          docker compose -f docker-compose-dev.yml logs
-          docker compose -f docker-compose-dev.yml down --volumes --remove-orphans
+      - name: Wait for type checker
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          check-name: 'Type checker'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
 
   await-image:
     name: Await docker image
@@ -47,21 +59,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           wait-interval: 10
 
-  deploy:
-    needs: [await-image, mock-deploy]
+  integration:
+    needs: [await-image, await-python-checks]
     if: ${{ vars.ci_cluster != '' }}
-    uses: ./.github/workflows/bare-metal-deploy.yml
+    uses: ./.github/workflows/cluster-deployment.yml
     with:
-      runs_on: self-hosted
       cluster: ${{ vars.ci_cluster }}
       docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
       sbcli_source: ${{ github.head_ref || github.ref_name }}
-
-  test:
-    needs: deploy
-    uses: ./.github/workflows/api-test.yml
-    with:
-      runs_on: self-hosted
-      cluster_id: ${{ needs.deploy.outputs.cluster_id }}
-      cluster_ip: ${{ needs.deploy.outputs.cluster_ip }}
-      cluster_secret: ${{ needs.deploy.outputs.cluster_secret }}

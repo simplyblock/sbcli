@@ -1,6 +1,5 @@
 # coding=utf-8
 import pprint
-import logging
 
 import json
 from inspect import ismethod
@@ -64,7 +63,7 @@ class BaseModel(object):
             return "%s/%s/%s" % (self.object_type, self.name, self.get_id())
 
     def from_dict(self, data):
-        for attr , value_dict in self.get_attrs_map().items():
+        for attr, value_dict in self.get_attrs_map().items():
             value = value_dict['default']
             if data is not None and attr in data:
                 dtype = value_dict['type']
@@ -72,12 +71,12 @@ class BaseModel(object):
                 if dtype in [int, float, str, bool]:
                     try:
                         value = dtype(value)
-                    except:
-                        if type(value) == list and dtype == int:
+                    except Exception:
+                        if type(value) is list and dtype is int:
                             value = len(value)
 
                 elif hasattr(dtype, '__origin__'):
-                    if dtype.__origin__ == list:
+                    if dtype.__origin__ is list:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
                             value = [dtype.__args__[0]().from_dict(item) for item in data[attr]]
                         else:
@@ -94,7 +93,7 @@ class BaseModel(object):
         return self
 
     def to_dict(self):
-        result = {}
+        result: dict = {}
         for attr in self.get_attrs_map():
             value = getattr(self, attr)
             if isinstance(value, list):

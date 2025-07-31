@@ -2,24 +2,23 @@
 import time
 from datetime import datetime, timezone
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-
-
-logger = utils.get_logger(__name__)
-
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
+
+logger = utils.get_logger(__name__)
 
 
 def task_runner(task):
 
     task = db.get_task_by_id(task.uuid)
-    snode = db.get_storage_node_by_id(task.node_id)
-    if not snode:
+    try:
+        snode = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
         task.status = JobSchedule.STATUS_DONE
         task.function_result = f"Node not found: {task.node_id}"
         task.write_to_db(db.kv_store)
@@ -79,15 +78,15 @@ def task_runner(task):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
     if "migration" not in task.function_params:
-
-        device = db.get_storage_device_by_id(task.device_id)
-        distr_name = task.function_params["distr_name"]
-
-        if not device:
+        try:
+            device = db.get_storage_device_by_id(task.device_id)
+        except KeyError:
             task.status = JobSchedule.STATUS_DONE
             task.function_result = "Device not found"
             task.write_to_db(db.kv_store)
             return True
+
+        distr_name = task.function_params["distr_name"]
 
         qos_high_priority = False
         if db.get_cluster_by_id(snode.cluster_id).enable_qos:
@@ -104,14 +103,19 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         # time.sleep(1)
 
-    if "migration" in task.function_params:
-        mig_info = task.function_params["migration"]
-        res = rpc_client.distr_migration_status(**mig_info)
-        return utils.handle_task_result(task, res)
-    else:
-        task.retry += 1
-        task.write_to_db(db.kv_store)
-        return False
+    try:
+        if "migration" in task.function_params:
+            mig_info = task.function_params["migration"]
+            res = rpc_client.distr_migration_status(**mig_info)
+            return utils.handle_task_result(task, res)
+    except Exception as e:
+        logger.error("Failed to get migration task status")
+        logger.exception(e)
+        task.function_result = "Failed to get migration status"
+
+    task.retry += 1
+    task.write_to_db(db.kv_store)
+    return False
 
 
 # get DB controller
@@ -129,7 +133,8 @@ while True:
                 if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE:
                     task = db.get_task_by_id(task.uuid)
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_active_node_mig_task(task.cluster_id, task.node_id)
+                        active_task = tasks_controller.get_active_node_mig_task(
+                            task.cluster_id, task.node_id,  task.function_params["distr_name"])
                         if active_task:
                             logger.info("task found on same node, retry")
                             continue

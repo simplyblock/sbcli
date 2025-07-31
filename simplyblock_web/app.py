@@ -2,52 +2,42 @@
 # encoding: utf-8
 
 import logging
-from flask import Flask
 
-from simplyblock_web import utils
-from simplyblock_web.blueprints import web_api_cluster, web_api_mgmt_node, web_api_device, \
-    web_api_lvol, web_api_storage_node, web_api_pool, web_api_caching_node, \
-    web_api_snapshot, web_api_deployer, swagger_ui_blueprint, web_api_metrics
-from simplyblock_web.auth_middleware import token_required
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.wsgi import WSGIMiddleware
+from fastapi.responses import RedirectResponse
+import uvicorn
+
+from simplyblock_web.api import public, v1
 from simplyblock_core import constants, utils as core_utils
 
 logger = core_utils.get_logger(__name__)
+logger.setLevel(constants.LOG_WEB_LEVEL)
+logging.getLogger().setLevel(constants.LOG_WEB_LEVEL)
 
 
 core_utils.init_sentry_sdk()
 
 
-app = Flask(__name__)
-app.logger.setLevel(constants.LOG_WEB_LEVEL)
-app.url_map.strict_slashes = False
-
-
-# Add routes
-app.register_blueprint(web_api_cluster.bp)
-app.register_blueprint(web_api_mgmt_node.bp)
-app.register_blueprint(web_api_device.bp)
-app.register_blueprint(web_api_lvol.bp)
-app.register_blueprint(web_api_snapshot.bp)
-app.register_blueprint(web_api_storage_node.bp)
-app.register_blueprint(web_api_pool.bp)
-app.register_blueprint(web_api_caching_node.bp)
-app.register_blueprint(web_api_deployer.bp)
-app.register_blueprint(swagger_ui_blueprint.bp, url_prefix=swagger_ui_blueprint.SWAGGER_URL)
-app.register_blueprint(web_api_metrics.bp)
-
-
-@app.before_request
-@token_required
-def before_request():
-    pass
+app = FastAPI()
+app.include_router(public, prefix='/api')
+app.mount('/api/v1', WSGIMiddleware(v1.api))  # For some reason this fails if done in `api/__init__.py`
 
 
 @app.route('/', methods=['GET'])
-def status():
-    return utils.get_response("Live")
+@app.route('/cluster/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/mgmtnode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/device/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/lvol/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/snapshot/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/storagenode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/pool/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def redirect_legacy(request: Request) -> Response:
+    redirect_url = f'/api/v1/{request.url.path}'
+    if (query_params := str(request.query_params)):
+        redirect_url += f'?{query_params}'
+    return RedirectResponse(url=redirect_url, status_code=308)
 
 
-app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 if __name__ == '__main__':
-    logging.getLogger('werkzeug').setLevel(constants.LOG_WEB_LEVEL)
-    app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)
+    uvicorn.run(app, host='0.0.0.0', port=5000, log_level='debug', forwarded_allow_ips='192.168.1.0/24')

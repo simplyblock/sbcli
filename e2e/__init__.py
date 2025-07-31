@@ -23,9 +23,13 @@ from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
 
 
-from e2e_tests.add_node_fio_run import TestAddNodesDuringFioRun
+from e2e_tests.add_node_fio_run import (
+    TestAddNodesDuringFioRun,
+    TestAddK8sNodesDuringFioRun
+)
 from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
 from e2e_tests.mgmt_restart_fio_run import TestMgmtNodeReboot
+from e2e_tests.single_node_vm_reboot import TestRebootNodeHost
 
 
 from stress_test.lvol_stress_fio_run import TestStressLvolCloneClusterFioRun
@@ -47,6 +51,9 @@ from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMul
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade
 
 
+from load_tests.lvol_outage_load import TestLvolOutageLoadTest
+
+
 ALL_TESTS = [
     TestLvolFioNpcsCustom,
     TestLvolFioNpcs0,
@@ -56,6 +63,7 @@ ALL_TESTS = [
     TestSingleNodeFailure,
     TestAddNodesDuringFioRun,
     TestRestartNodeOnAnotherHost,
+    TestRebootNodeHost,
     TestMgmtNodeReboot,
     FioWorkloadTest,
     TestMultiFioSnapshotDowntime,
@@ -67,7 +75,8 @@ ALL_TESTS = [
     TestSingleNodeReboot,
     TestHASingleNodeReboot,
     TestHASingleNodeOutage,
-    TestSingleNodeResizeLvolCone
+    TestSingleNodeResizeLvolCone,
+    TestAddK8sNodesDuringFioRun
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -76,12 +85,12 @@ def get_all_tests(custom=True, ha_test=False):
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
-        TestSingleNodeFailure,
-        TestHASingleNodeFailure,
         TestSingleNodeOutage,
         # TestSingleNodeReboot,
         # TestHASingleNodeReboot,
         TestHASingleNodeOutage,
+        TestSingleNodeFailure,
+        TestHASingleNodeFailure,
         # TestAddNodesDuringFioRun,
         # TestRestartNodeOnAnotherHost,
         TestSingleNodeResizeLvolCone,
@@ -128,5 +137,12 @@ def get_stress_tests():
 def get_upgrade_tests():
     tests = [
         TestMajorUpgrade
+    ]
+    return tests
+
+
+def get_load_tests():
+    tests = [
+        TestLvolOutageLoadTest
     ]
     return tests

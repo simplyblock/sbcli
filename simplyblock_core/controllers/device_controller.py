@@ -2,7 +2,7 @@ import time
 import logging
 
 from simplyblock_core import distr_controller, utils, storage_node_ops
-from simplyblock_core.controllers import device_events, lvol_controller, tasks_controller
+from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -12,16 +12,29 @@ from simplyblock_core.rpc_client import RPCClient
 logger = logging.getLogger()
 
 
+def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNode:
+    try:
+        return next(
+            node
+            for node in db_controller.get_storage_nodes()
+            if node.jm_device.get_id() == id
+        )
+    except StopIteration:
+        raise KeyError(f'No storage node with JM device {id}')
+
+
 def device_set_state(device_id, state):
     db_controller = DBController()
-    dev = db_controller.get_storage_device_by_id(device_id)
-    if not dev:
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+    except KeyError:
         logger.error("device not found")
         return False
 
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError:
+        logger.exception("node not found")
         return False
 
     device = None
@@ -65,23 +78,17 @@ def device_set_state(device_id, state):
 
 def device_set_io_error(device_id, is_error):
     db_controller = DBController()
-    dev = db_controller.get_storage_device_by_id(device_id)
-    if not dev:
-        logger.error("device not found")
-
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
-    device = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device = dev
             break
-
-    if not device:
-        logger.error("device not found")
 
     if device.io_error == is_error:
         return True
@@ -144,24 +151,14 @@ def _def_create_device_stack(device_obj, snode, force=False):
     alceml_name = get_alceml_name(alceml_id)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    write_protection = False
-    if cluster.distr_ndcs > 1:
-        write_protection = True
     if alceml_name not in bdev_names:
-        logger.info(f"adding {alceml_name}")
-        if snode.alceml_cpu_cores:
-            alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-            ret = rpc_client.bdev_alceml_create(
-                alceml_name, nvme_bdev, alceml_id, pba_init_mode=2, alceml_cpu_mask=alceml_cpu_mask,
-                pba_page_size=cluster.page_size_in_blocks, write_protection=write_protection,
-                full_page_unmap=snode.full_page_unmap
-            )
-            snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
-        else:
-            ret = rpc_client.bdev_alceml_create(
-                alceml_name, nvme_bdev, alceml_id, pba_init_mode=2, pba_page_size=cluster.page_size_in_blocks,
-                write_protection=write_protection, full_page_unmap=snode.full_page_unmap
-            )
+        ret = snode.create_alceml(
+            alceml_name, nvme_bdev, alceml_id,
+            pba_init_mode=2,
+            write_protection=cluster.distr_ndcs > 1,
+            pba_page_size=cluster.page_size_in_blocks,
+            full_page_unmap=cluster.full_page_unmap
+        )
 
         if not ret:
             logger.error(f"Failed to create alceml bdev: {alceml_name}")
@@ -221,9 +218,11 @@ def _def_create_device_stack(device_obj, snode, force=False):
 
 def restart_device(device_id, force=False):
     db_controller = DBController()
-    dev = db_controller.get_storage_device_by_id(device_id)
-    if not dev:
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+    except KeyError:
         logger.error("device not found")
+        return False
 
     if dev.status != NVMeDevice.STATUS_REMOVED:
         logger.error("Device must be in removed status")
@@ -286,15 +285,13 @@ def restart_device(device_id, force=False):
 
 def set_device_testing_mode(device_id, mode):
     db_controller = DBController()
-    device = db_controller.get_storage_device_by_id(device_id)
-    if not device:
-        logger.error("device not found")
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
-    snode = db_controller.get_storage_node_by_id(device.node_id)
-    if not snode:
-        logger.error("node not found")
-        return False
     if not snode.enable_test_device:
         logger.error("Test device is disabled on this storage node")
         return False
@@ -333,14 +330,11 @@ def set_device_testing_mode(device_id, mode):
 
 def device_remove(device_id, force=True):
     db_controller = DBController()
-    dev = db_controller.get_storage_device_by_id(device_id)
-    if not dev:
-        logger.error("device not found")
-        return False
-
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     for dev in snode.nvme_devices:
@@ -421,19 +415,23 @@ def device_remove(device_id, force=True):
 
 def get_device(device_id):
     db_controller = DBController()
-    device = db_controller.get_storage_device_by_id(device_id)
-    if not device:
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+    except KeyError:
         logger.error("device not found")
         return False
+
     out = [device.get_clean_dict()]
     return utils.print_table(out)
 
 
 def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    device = db_controller.get_storage_device_by_id(device_id)
-    if not device:
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+    except KeyError:
         logger.error("device not found")
+        return False
 
     if history:
         records_number = utils.parse_history_param(history)
@@ -470,9 +468,10 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
 
 def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
-    device = db_controller.get_storage_device_by_id(device_id)
-    if not device:
-        logger.error(f"Device not found: {device_id}")
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+    except KeyError:
+        logger.error("device not found")
         return False
 
     if history:
@@ -519,14 +518,11 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
 
 def reset_storage_device(dev_id):
     db_controller = DBController()
-    device = db_controller.get_storage_device_by_id(dev_id)
-    if not device:
-        logger.error(f"Device not found: {dev_id}")
-        return False
-
-    snode = db_controller.get_storage_node_by_id(device.node_id)
-    if not snode:
-        logger.error(f"Node not found {device.node_id}")
+    try:
+        device = db_controller.get_storage_device_by_id(dev_id)
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
@@ -540,7 +536,7 @@ def reset_storage_device(dev_id):
 
     logger.info("Setting devices to unavailable")
     device_set_unavailable(dev_id)
-    devs = []
+    # devs = []
     # for dev in snode.nvme_devices:
     #     if dev.get_id() == device.get_id():
     #         continue
@@ -571,42 +567,28 @@ def reset_storage_device(dev_id):
 
 def device_set_retries_exhausted(device_id, retries_exhausted):
     db_controller = DBController()
-    dev = db_controller.get_storage_device_by_id(device_id)
-    if not dev:
-        logger.error("device not found")
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
-        return False
-
-    device = None
-    for dev in snode.nvme_devices:
-        if dev.get_id() == device_id:
-            device = dev
-            break
-
-    if not device:
-        logger.error("device not found")
-
-    if device.retries_exhausted == retries_exhausted:
+    if dev.retries_exhausted == retries_exhausted:
         return True
 
-    device.retries_exhausted = retries_exhausted
+    dev.retries_exhausted = retries_exhausted
     snode.write_to_db(db_controller.kv_store)
     return True
 
 
 def device_set_failed(device_id):
     db_controller = DBController()
-    dev = db_controller.get_storage_device_by_id(device_id)
-    if not dev:
-        logger.error("device not found")
-
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
@@ -618,6 +600,8 @@ def device_set_failed(device_id):
         return True
 
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
+    if not ret:
+        logger.warning("Failed to set device state to failed")
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if node.status == StorageNode.STATUS_ONLINE:
             rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
@@ -628,20 +612,17 @@ def device_set_failed(device_id):
 
 def add_device(device_id):
     db_controller = DBController()
-    dev = db_controller.get_storage_device_by_id(device_id)
-    if not dev:
-        logger.error("device not found")
+    try:
+        dev = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(dev.node_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
 
     if dev.status != NVMeDevice.STATUS_NEW:
         logger.error("Device must be in new state")
         return False
 
-    snode = db_controller.get_storage_node_by_id(dev.node_id)
-    if not snode:
-        logger.error("node not found")
-        return False
-
-    device_obj = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device_obj = dev
@@ -665,7 +646,7 @@ def add_device(device_id):
     for node in snodes:
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
-        node.remote_devices = storage_node_ops._connect_to_remote_devs(node, force_conect_restarting_nodes=True)
+        node.remote_devices = storage_node_ops._connect_to_remote_devs(node, force_connect_restarting_nodes=True)
         node.write_to_db()
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -765,16 +746,14 @@ def device_set_failed_and_migrated(device_id):
 
 def set_jm_device_state(device_id, state):
     db_controller = DBController()
-    jm_device = None
-    snode = None
-    for node in db_controller.get_storage_nodes():
-        if node.jm_device.get_id() == device_id:
-            jm_device = node.jm_device
-            snode = node
-            break
-    if not jm_device:
-        logger.error("device not found")
+
+    try:
+        snode = get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError as e:
+        logger.error(e)
         return False
+
+    jm_device = snode.jm_device
 
     if jm_device.status != state:
         jm_device.status = state
@@ -806,15 +785,11 @@ def set_jm_device_state(device_id, state):
 
 def remove_jm_device(device_id, force=False):
     db_controller = DBController()
-    jm_device = None
-    snode = None
-    for node in db_controller.get_storage_nodes():
-        if node.jm_device.get_id() == device_id:
-            jm_device = node.jm_device
-            snode = node
-            break
-    if not jm_device:
-        logger.error("device not found")
+
+    try:
+        snode = get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
@@ -849,16 +824,14 @@ def remove_jm_device(device_id, force=False):
 
 def restart_jm_device(device_id, force=False, format_alceml=False):
     db_controller = DBController()
-    jm_device = None
-    snode = None
-    for node in db_controller.get_storage_nodes():
-        if node.jm_device.get_id() == device_id:
-            jm_device = node.jm_device
-            snode = node
-            break
-    if not jm_device:
-        logger.error("device not found")
+
+    try:
+        snode = get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError as e:
+        logger.error(e)
         return False
+
+    jm_device = snode.jm_device
 
     if jm_device.status == JMDevice.STATUS_ONLINE:
         logger.warning("device is online")
@@ -899,34 +872,26 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
             #         logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
             #         # return False
             #     nvme_bdev = jm_device.testing_bdev
-            alceml_cpu_mask = ""
-            alceml_worker_cpu_mask = ""
             #
-            if snode.alceml_cpu_cores:
-                alceml_cpu_mask = utils.decimal_to_hex_power_of_2(snode.alceml_cpu_cores[snode.alceml_cpu_index])
-                snode.alceml_cpu_index = (snode.alceml_cpu_index + 1) % len(snode.alceml_cpu_cores)
-
-            if snode.alceml_worker_cpu_cores:
-                alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
-                    snode.alceml_worker_cpu_cores[snode.alceml_worker_cpu_index])
-                snode.alceml_worker_cpu_index = (snode.alceml_worker_cpu_index + 1) % len(snode.alceml_worker_cpu_cores)
-
             cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-            ret = rpc_client.bdev_alceml_create(
-                jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(), pba_init_mode=1, alceml_cpu_mask=alceml_cpu_mask,
-                alceml_worker_cpu_mask=alceml_worker_cpu_mask, pba_page_size=cluster.page_size_in_blocks,
-                full_page_unmap=snode.full_page_unmap
+            ret = snode.create_alceml(
+                jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
+                pba_init_mode=1,
+                pba_page_size=cluster.page_size_in_blocks,
+                full_page_unmap=cluster.full_page_unmap
             )
 
             if not ret:
                 logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
-                return False
+                if not force:
+                    return False
 
             jm_bdev = f"jm_{snode.get_id()}"
             ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask)
             if not ret:
                 logger.error(f"Failed to create {jm_bdev}")
-                return False
+                if not force:
+                    return False
 
             if snode.enable_ha_jm:
                 # add pass through
@@ -934,24 +899,28 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
                 if not ret:
                     logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-                    return False
+                    if not force:
+                        return False
 
                 subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
                 logger.info("creating subsystem %s", subsystem_nqn)
                 ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
-                IP = None
+                if not ret:
+                    logger.warning(f"Failed to create subsystem: {subsystem_nqn}")
                 for iface in snode.data_nics:
                     if iface.ip4_address:
                         tr_type = iface.get_transport_type()
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                         ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
-                        IP = iface.ip4_address
+                        if not ret:
+                            logger.warning(f"Failed to create listener for {subsystem_nqn} on IP {iface.ip4_address}")
                         break
                 logger.info(f"add {pt_name} to subsystem")
                 ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
                 if not ret:
                     logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
-                    return False
+                    if not force:
+                        return False
 
                 set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 

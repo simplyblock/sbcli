@@ -4,7 +4,6 @@ import sys
 import re
 
 from jsonschema import validators
-from jsonschema.exceptions import ValidationError
 
 
 def is_parameter(item):
@@ -37,7 +36,7 @@ def argument_type(spec):
         return f"regex_type(r'{regex}')"
 
     if spec == 'size':
-        return f"size_type()"
+        return "size_type()"
 
     if isinstance(spec, dict) and ((size := spec.get('size')) is not None):
         min = "utils.parse_size('{}')".format(size['min']) if 'min' in size else None
@@ -71,22 +70,22 @@ def bool_value(value):
 
 
 def default_value(item):
-    type = item["type"]
-    if not "default" in item:
+    item_type = item["type"]
+    if "default" not in item:
         return "None"
     value = item["default"]
-    if type == "str":
+    if item_type == "str":
         return "'%s'" % value
-    elif type == "int":
+    elif item_type == "int":
         return value
-    elif type == "bool":
+    elif item_type == "bool":
         return value if isinstance(value, bool) else value.lower() == "true"
-    elif type == "size" or (isinstance(type, dict) and 'size' in type):
+    elif item_type == "size" or (isinstance(item_type, dict) and 'size' in item_type):
         return f"'{value}'"
-    elif isinstance(type, dict) and 'range' in type:
+    elif isinstance(item_type, dict) and 'range' in item_type:
         return f"{value}"
     else:
-        raise "unknown data type %s" % type
+        raise TypeError("unknown data type %s" % item_type)
 
 
 def arg_value(item):
@@ -123,9 +122,9 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         reference = yaml.safe_load(stream)
         # validate reference file against schema
         with open("%s/cli-reference-schema.yaml" % base_path) as schema:
-            schema = yaml.safe_load(schema)
-            validator_type = validators.validator_for(schema)
-            validator = validator_type(schema)
+            schema_content = yaml.safe_load(schema)
+            validator_type = validators.validator_for(schema_content)
+            validator = validator_type(schema_content)  # type: ignore
             errors = list(validator.iter_errors(reference))
             if errors:
                 print("Generator failed on schema validation. Found the following errors:", file=sys.stderr)

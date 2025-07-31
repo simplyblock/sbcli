@@ -22,7 +22,7 @@ def token_required(f):
             if len(au.split()) == 2:
                 cluster_id = au.split()[0]
                 cluster_secret = au.split()[1]
-            if cluster_id and cluster_id == "Basic":
+            if cluster_secret and cluster_id and cluster_id == "Basic":
                 try:
                     tkn = base64.b64decode(cluster_secret).decode('utf-8')
                     if tkn:
@@ -40,8 +40,9 @@ def token_required(f):
             }, 401, headers
         try:
             db_controller = DBController()
-            cluster = db_controller.get_cluster_by_id(cluster_id)
-            if not cluster:
+            try:
+                cluster = db_controller.get_cluster_by_id(cluster_id)
+            except KeyError:
                 return {
                     "message": "Invalid Cluster ID",
                     "data": None,

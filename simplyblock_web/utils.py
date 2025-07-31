@@ -2,8 +2,15 @@ import base64
 import random
 import re
 import string
+from typing import Literal, Optional
+import traceback
 
 from flask import jsonify
+from pydantic import BaseModel, Field, model_validator
+from werkzeug.exceptions import HTTPException
+
+from simplyblock_core import constants
+from simplyblock_core.utils.pci import PCIAddress
 
 
 IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
@@ -89,13 +96,57 @@ def get_cluster_id(request):
 
 def get_aws_region():
     try:
-        from ec2_metadata import ec2_metadata
-        import requests
-        session = requests.session()
-        session.timeout = 3
-        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
+        import ec2_metadata
+        data = ec2_metadata.EC2Metadata().instance_identity_document
         return data["region"]
-    except:
+    except Exception:
         pass
 
     return 'us-east-1'
+
+
+def error_handler(exception: Exception):
+    """Return JSON instead of HTML for any non-HTTP exception."""
+
+    if isinstance(exception, HTTPException):
+        return exception
+
+    traceback.print_exception(type(exception), exception, exception.__traceback__)
+
+    return {
+        'exception': str(exception),
+        'stacktrace': [
+            (frame.filename, frame.lineno, frame.name, frame.line)
+            for frame
+            in traceback.extract_tb(exception.__traceback__)
+        ]
+    }, 500
+
+
+class RPCPortParams(BaseModel):
+    rpc_port: int = Field(constants.RPC_HTTP_PROXY_PORT, ge=0, le=65536)
+
+
+class DeviceParams(BaseModel):
+    device_pci: PCIAddress
+
+
+class NVMEConnectParams(BaseModel):
+    ip: str = Field(pattern=IP_PATTERN)
+    port: int = Field(ge=0, le=65536)
+    nqn: str
+
+
+class DisconnectParams(BaseModel):
+    nqn: Optional[str]
+    device_path: Optional[str]
+    all: Optional[Literal[True]]
+
+    @model_validator(mode='after')
+    def verify_mutually_exclusive(self):
+        if sum(
+            getattr(self, attr) is not None
+            for attr in ['nqn', 'device_path', 'all']
+        ) != 1:
+            raise ValueError('Exactly one of the arguments must be set')
+        return self

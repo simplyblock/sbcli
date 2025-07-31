@@ -249,14 +249,27 @@ class SbcliUtils:
                 node_uuid = result['uuid']
                 break
         return node_uuid
+    
+    def get_all_node_without_lvols(self) -> str:
+        """
+        returns all nodeID which doesn't have any lvol attached
+        """
+        # a node which doesn't have any lvols attached
+        node_uuids = []
+        data = self.get_request(api_url="/storagenode")
+        for result in data['results']:
+            if result['lvols'] == 0 and result['is_secondary_node'] is False:
+                node_uuids.append(result['uuid'])
+        return node_uuids
 
-    def shutdown_node(self, node_uuid: str, expected_error_code=None):
+    def shutdown_node(self, node_uuid: str, expected_error_code=None, force=False):
         """
         given a node_UUID, shutdowns the node
         """
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
         self.logger.info(f"Shutting down node with uuid: {node_uuid}")
-        self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}", expected_error_code=expected_error_code)
+        force_str = "?force=true" if force else ""
+        self.get_request(api_url=f"/storagenode/shutdown/{node_uuid}{force_str}", expected_error_code=expected_error_code)
 
 
     def suspend_node(self, node_uuid: str, expected_error_code=None):
@@ -274,7 +287,7 @@ class SbcliUtils:
         # TODO: parse and display error accordingly: {'results': True, 'status': True}
         self.get_request(api_url=f"/storagenode/resume/{node_uuid}")
 
-    def restart_node(self, node_uuid: str, expected_error_code=None):
+    def restart_node(self, node_uuid: str, expected_error_code=None, force=False):
         """
         given a node_UUID, restarts the node
         """
@@ -282,6 +295,9 @@ class SbcliUtils:
         body = {
             "uuid": node_uuid
         }
+
+        if force:
+            body["force"] = True
 
         self.put_request(api_url="/storagenode/restart/", body=body, expected_error_code=expected_error_code)
 
@@ -447,7 +463,7 @@ class SbcliUtils:
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 
-    def delete_lvol(self, lvol_name):
+    def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
         """Deletes lvol with given name
         """
         lvol_id = self.get_lvol_id(lvol_name=lvol_name)
@@ -471,8 +487,11 @@ class SbcliUtils:
                     self.logger.info(f"Lvol {lvol_name} in online state. Retrying Delete!")
                     data = self.delete_request(api_url=f"/lvol/{lvol_id}")
                     self.logger.info(f"Delete lvol resp: {data}")
-            if attempt > 120:
+            if attempt > max_attempt:
+                if skip_error:
+                    return
                 raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
+            
             attempt += 1
             self.logger.info(f"Lvol {lvol_name} is in_deletion. Checking again!")
             sleep_n_sec(5)

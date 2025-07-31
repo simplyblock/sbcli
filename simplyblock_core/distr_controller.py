@@ -25,16 +25,30 @@ def send_node_status_event(node, node_status, target_node=None):
         "status": node_status}
     events = {"events": [node_status_event]}
     logger.debug(node_status_event)
+    skipped_nodes = []
     if target_node:
         snodes = [target_node]
     else:
         snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
+        for node in snodes:
+            if node.status == StorageNode.STATUS_SCHEDULABLE:
+                skipped_nodes.append(node)
+
     for node in snodes:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,  StorageNode.STATUS_DOWN]:
+            continue
+        node_found_same_host = False
+        for n in skipped_nodes:
+            if node.mgmt_ip == n.mgmt_ip:
+                node_found_same_host = True
+                break
+        if node_found_same_host:
             continue
         logger.info(f"Sending to: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
         ret = rpc_client.distr_status_events_update(events)
+        if not ret:
+            logger.warning("Failed to send event update")
 
 
 def send_dev_status_event(device, status, target_node=None):
@@ -42,14 +56,26 @@ def send_dev_status_event(device, status, target_node=None):
         return
     db_controller = DBController()
     storage_ID = device.cluster_device_order
+    skipped_nodes = []
+
     if target_node:
         snodes = [db_controller.get_storage_node_by_id(target_node.get_id())]
     else:
         snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
-    for node in snodes:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-            continue
+        for node in snodes:
+            if node.status == StorageNode.STATUS_SCHEDULABLE:
+                skipped_nodes.append(node)
 
+    for node in snodes:
+        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+            continue
+        node_found_same_host = False
+        for n in skipped_nodes:
+            if node.mgmt_ip == n.mgmt_ip:
+                node_found_same_host = True
+                break
+        if node_found_same_host:
+            continue
         dev_status = status
 
         if status == NVMeDevice.STATUS_ONLINE and node.get_id() != device.node_id:
@@ -184,8 +210,8 @@ def parse_distr_cluster_map(map_string):
                 "Desired Status": "",
                 "Results": "",
             }
-            nd = db_controller.get_storage_node_by_id(node_id)
-            if nd:
+            try:
+                nd = db_controller.get_storage_node_by_id(node_id)
                 node_status = nd.status
                 if node_status == StorageNode.STATUS_SCHEDULABLE:
                     node_status = StorageNode.STATUS_UNREACHABLE
@@ -195,7 +221,7 @@ def parse_distr_cluster_map(map_string):
                 else:
                     data["Results"] = "failed"
                     passed = False
-            else:
+            except KeyError:
                 data["Results"] = "not found"
                 passed = False
             results.append(data)
@@ -209,15 +235,15 @@ def parse_distr_cluster_map(map_string):
                 "Desired Status": "",
                 "Results": "",
             }
-            sd = db_controller.get_storage_device_by_id(device_id)
-            if sd:
+            try:
+                sd = db_controller.get_storage_device_by_id(device_id)
                 data["Desired Status"] = sd.status
                 if sd.status == status:
                     data["Results"] = "ok"
                 else:
                     data["Results"] = "failed"
                     passed = False
-            else:
+            except KeyError:
                 data["Results"] = "not found"
                 passed = False
             results.append(data)
@@ -301,9 +327,13 @@ def send_cluster_map_add_node(snode, target_node):
         }
 }
 """
-def send_cluster_map_add_device(device: NVMeDevice, target_node):
+def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
     db_controller = DBController()
-    dnode = db_controller.get_storage_node_by_id(device.node_id)
+    try:
+        dnode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError:
+        logger.exception("Node not found")
+        return False
     dev_w_gib = utils.convert_size(device.size, 'GiB') or 1
     if target_node.status == StorageNode.STATUS_ONLINE:
         rpc_client = RPCClient(

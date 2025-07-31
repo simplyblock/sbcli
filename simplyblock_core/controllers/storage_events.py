@@ -51,4 +51,13 @@ def snode_health_check_change(node, new_state, old_status, caused_by=ec.CAUSED_B
         node_id=node.get_id())
 
 
+def snode_restart_failed(node):
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=node,
+        caused_by=ec.CAUSED_BY_CLI,
+        message="Storage node LVStore recovery failed",
+        node_id=node.get_id())
 

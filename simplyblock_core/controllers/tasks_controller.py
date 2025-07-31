@@ -96,19 +96,20 @@ def add_device_to_auto_restart(device):
 
 def add_node_to_auto_restart(node):
     cluster = db.get_cluster_by_id(node.cluster_id)
-    if cluster.status != Cluster.STATUS_ACTIVE:
-        logger.info("Cluster is not active, skip node auto restart")
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
     for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-        if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE:
+        if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
             logger.info("Node found that is not online, skip node auto restart")
             return False
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "")
 
 
 def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
-    cluster = db.get_cluster_by_id(cluster_id)
-    if not cluster:
+    try:
+        db.get_cluster_by_id(cluster_id)
+    except KeyError:
         logger.error("Cluster not found: %s", cluster_id)
         return False
 
@@ -147,9 +148,10 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
 
 
 def cancel_task(task_id):
-    task = db.get_task_by_id(task_id)
-    if not task:
-        logger.error("Task not found: %s", task_id)
+    try:
+        task = db.get_task_by_id(task_id)
+    except KeyError as e:
+        logger.error(e)
         return False
 
     if task.device_id:
@@ -179,13 +181,17 @@ def get_active_dev_restart_task(cluster_id, device_id):
     return False
 
 
-def get_active_node_mig_task(cluster_id, node_id):
+def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
                                   JobSchedule.FN_NEW_DEV_MIG] and task.node_id == node_id:
             if task.status == JobSchedule.STATUS_RUNNING and task.canceled is False:
-                return task.uuid
+                if distr_name:
+                    if "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
+                        return task.uuid
+                else:
+                    return task.uuid
     return False
 
 
@@ -266,3 +272,7 @@ def get_failed_device_mig_task(cluster_id, device_id):
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
     return False
+
+
+def add_port_allow_task(cluster_id, node_id, port_number):
+    return _add_task(JobSchedule.FN_PORT_ALLOW, cluster_id, node_id, "", function_params={"port_number": port_number})

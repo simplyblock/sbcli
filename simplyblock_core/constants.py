@@ -3,13 +3,19 @@ import os
 SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
-def get_from_env_var_file(name, default=None):
+def get_config_var(name, default=None):
+    """
+    OS environment variable is checked first, if not found, check the env_var file.
+    """
     if not name:
         return False
-    with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
-        for line in fh.readlines():
-            if line.startswith(name):
-                return line.split("=", 1)[1].strip()
+    if os.getenv(name):
+        return os.getenv(name)
+    else:
+        with open(f"{SCRIPT_PATH}/env_var", "r", encoding="utf-8") as fh:
+            for line in fh.readlines():
+                if line.startswith(name):
+                    return line.split("=", 1)[1].strip()
     return default
 
 
@@ -70,11 +76,11 @@ TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
-SIMPLY_BLOCK_DOCKER_IMAGE = get_from_env_var_file(
+SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
         "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")
-SIMPLY_BLOCK_CLI_NAME = get_from_env_var_file(
+SIMPLY_BLOCK_CLI_NAME = get_config_var(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_from_env_var_file(
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_config_var(
         "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
 
 GELF_PORT = 12202
@@ -119,7 +125,7 @@ MAX_SNAP_COUNT = 100
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2
-LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60
+LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
 LVOL_NVME_CONNECT_NR_IO_QUEUES=6
 LVOL_NVME_KEEP_ALIVE_TO=5
 LVOL_NVMF_PORT_START=9100
@@ -145,3 +151,87 @@ NODES_CONFIG_FILE = "/etc/simplyblock/sn_config_file"
 SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
+
+K8S_NAMESPACE = "simplyblock"
+OS_STATEFULSET_NAME = "simplyblock-opensearch"
+MONGODB_STATEFULSET_NAME = "simplyblock-mongodb"
+GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
+PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
+
+os_env_patch = [
+    {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},
+    {"name": "bootstrap.memory_lock", "value": "false"},
+    {"name": "action.auto_create_index", "value": "false"},
+    {"name": "plugins.security.ssl.http.enabled", "value": "false"},
+    {"name": "plugins.security.disabled", "value": "true"},
+    {"name": "discovery.type", "value": ""},
+    {"name": "discovery.seed_hosts", "value": ",".join([
+        "simplyblock-opensearch-0.opensearch-cluster-master-headless",
+        "simplyblock-opensearch-1.opensearch-cluster-master-headless",
+        "simplyblock-opensearch-2.opensearch-cluster-master-headless"
+    ])},
+    {"name": "cluster.initial_master_nodes", "value": ",".join([
+        "simplyblock-opensearch-0",
+        "simplyblock-opensearch-1",
+        "simplyblock-opensearch-2"
+    ])}
+]
+
+os_patch = {
+    "spec": {
+        "replicas": 3,
+        "template": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "opensearch",
+                        "env": os_env_patch
+                    }
+                ]
+            }
+        }
+    }
+}
+
+mongodb_command_patch = [
+    "mongod",
+    "--replSet", "rs0",
+    "--bind_ip_all",
+    "--dbpath", "/bitnami/mongodb"
+]
+
+mongodb_patch = {
+    "spec": {
+        "replicas": 3,
+    }
+}
+
+graylog_env_patch = [
+    {
+        "name": "GRAYLOG_MONGODB_URI",
+        "value": (
+            "mongodb://simplyblock-mongodb-headless:27017/graylog?replicaSet=rs0"
+        )
+    }
+]
+
+graylog_patch = {
+    "spec": {
+        "template": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "graylog",
+                        "env": graylog_env_patch
+                    }
+                ]
+            }
+        }
+    }
+}
+
+prometheus_patch = {
+    "spec": {
+        "replicas": 3,
+    }
+}
