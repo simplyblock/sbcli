@@ -262,6 +262,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         current_node = utils.get_node_name_by_ip(dev_ip)
         utils.label_node_as_mgmt_plane(current_node)
         db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
+        scripts.set_db_config(db_connection)
 
     if not cli_pass:
         cli_pass = utils.generate_string(10)
