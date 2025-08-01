@@ -139,10 +139,10 @@ def _add_graylog_input(cluster_ip, password):
     extractor_url = f"{input_url}/{input_id}/extractors"
     extractor_payload = {
         "title": "Extract Kubernetes JSON",
-        "type": "json",
-        "converters": [],
+        "extractor_type": "json",
+        "converters": {},
         "order": 0,
-        "cursor_strategy": "copy",
+        "cut_or_copy": "copy",
         "source_field": "message",
         "target_field": "",
         "extractor_config": {},
