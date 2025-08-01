@@ -224,6 +224,7 @@ def list(all=False):
             "LVol ID": snap.lvol.get_id(),
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
             "Health": snap.health_check,
+            "Status": snap.status,
         })
     return utils.print_table(data)
 
