@@ -648,14 +648,43 @@ class SshUtils:
         output, error = self.exec_command(node=node, command=cmd)
         return output, error
 
-    def delete_snapshot(self, node, snapshot_id):
-        cmd = "%s snapshot list | grep -i '%s' | awk '{print $4}'" % (self.base_cmd, snapshot_id)
-        output, error = self.exec_command(node=node, command=cmd)
-        self.logger.info(f"Deleting snapshot: {output}")
-        cmd = f"{self.base_cmd} -d snapshot delete {snapshot_id} --force"
-        output, error = self.exec_command(node=node, command=cmd)
+    def delete_snapshot(self, node, snapshot_id, timeout=600, interval=30):
+        """
+        Deletes a snapshot and waits until it is removed from the snapshot list.
 
-        return output, error
+        :param node: Node to execute command on
+        :param snapshot_id: UUID of the snapshot
+        :param timeout: Total time in seconds to wait for deletion (default 600s)
+        :param interval: Time between each check (default 5s)
+        :return: Tuple (status message, last output from snapshot list)
+        """
+        # Pre-check if snapshot exists
+        check_cmd = f"{self.base_cmd} snapshot list | grep -i '{snapshot_id}'"
+        output, error = self.exec_command(node=node, command=check_cmd)
+        if not output.strip():
+            self.logger.warning(f"[Pre-check] Snapshot {snapshot_id} not found.")
+            return "Snapshot not found before deletion", None
+
+        self.logger.info(f"[Delete] Deleting snapshot {snapshot_id}")
+        del_cmd = f"{self.base_cmd} -d snapshot delete {snapshot_id} --force"
+        output, error = self.exec_command(node=node, command=del_cmd)
+        self.logger.info(f"[Delete] Command output: {output}")
+
+        # Polling for deletion confirmation
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            poll_cmd = f"{self.base_cmd} snapshot list | grep -i '{snapshot_id}'"
+            poll_output, poll_error = self.exec_command(node=node, command=poll_cmd)
+
+            if not poll_output.strip():
+                self.logger.info(f"[Check] Snapshot {snapshot_id} successfully deleted.")
+                return "Deleted", None
+
+            self.logger.debug(f"[Check] Snapshot still exists. Retrying in {interval} seconds...")
+            time.sleep(interval)
+
+        self.logger.error(f"[Failure] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
+        raise Exception(f"Snapshot {snapshot_id} deletion failed after {timeout} seconds.")
 
     def delete_all_snapshots(self, node):
         patterns = ["snap", "ss", "snapshot"]
@@ -1997,5 +2026,3 @@ class RunnerK8sLog:
             self._monitor_stop_flag.set()
             self._monitor_thread.join(timeout=10)
             print("K8s log monitor thread stopped.")
-
-
