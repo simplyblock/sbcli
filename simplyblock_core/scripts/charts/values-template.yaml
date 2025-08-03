@@ -7,6 +7,10 @@ cluster:
   id: "${CLUSTER_ID}"
   ip: "${CLUSTER_IP}"
 
+controlcenter:
+  refreshTokenSecret: "${CONTROLCENTER_REFRESH_TOKEN_SECRET}"
+  fdbClusterFileLocation: "/etc/foundationdb"
+
 monitoring:
   enabled: ${ENABLE_MONITORING}
 
@@ -27,6 +31,10 @@ image:
   simplyblock: 
     repository: "${SIMPLYBLOCK_REPOSITORY}"
     tag: "${SIMPLYBLOCK_TAG}"
+    pullPolicy: "Always"
+  controlcenter:
+    repository: "${CONTROLCENTER_REPOSITORY}"
+    tag: "${CONTROLCENTER_TAG}"
     pullPolicy: "Always"
 
 openebs:

@@ -818,6 +818,13 @@ commands:
             aliases:
               - "-n"
             type: str
+          - name: "--cc-refresh-token-secret"
+            help: >
+              Sets a user-chosen secret used to sign and validate refresh tokens in the control center. A valid secret
+              consists of 128 characters.
+            dest: refresh_token_secret
+            type: str
+            private: true
       - name: add
         help: "Adds a new cluster"
         arguments:
