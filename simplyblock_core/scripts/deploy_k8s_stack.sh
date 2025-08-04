@@ -45,7 +45,7 @@ export CONTACT_POINT=${11}
 export DB_CONNECTION=${12}
 export K8S_NAMESPACE=${13}
 export DISABLE_MONITORING=${14}
-export TLS_SECRET=${15:-}
+export TLS_SECRET=${15}
 export DIR="$(dirname "$(realpath "$0")")"
 export FDB_CLUSTER_FILE_CONTENTS=${DB_CONNECTION}
 

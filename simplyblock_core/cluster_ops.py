@@ -321,6 +321,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not contact_point:
             contact_point = 'https://hooks.slack.com/services/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' 
 
+        if not tls_secret:
+            tls_secret = ''
+            
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
