@@ -45,6 +45,7 @@ export CONTACT_POINT=${11}
 export DB_CONNECTION=${12}
 export K8S_NAMESPACE=${13}
 export DISABLE_MONITORING=${14}
+export TLS_SECRET=${15}
 export DIR="$(dirname "$(realpath "$0")")"
 export FDB_CLUSTER_FILE_CONTENTS=${DB_CONNECTION}
 
@@ -85,6 +86,8 @@ envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 #   echo "kubectl not found in PATH"
 #   exit 1
 # fi
+
+rm -rf "$DIR"/charts/charts "$DIR"/charts/Chart.lock "$DIR"/charts/requirements.lock
 
 /usr/local/bin/helm dependency build "$DIR"/charts/
 

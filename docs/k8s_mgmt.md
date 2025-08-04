@@ -57,9 +57,14 @@ sudo yum install -y https://github.com/apple/foundationdb/releases/download/7.3.
 
 
 ### 3. Deploy the Cluster in Kubernetes Mode
+
+> Optional: To enable HTTPS via Ingress, create a TLS secret before running the script:
+> kubectl create secret tls my-tls-secret --cert=fullchain.pem --key=privkey.pem -n simplyblock
+> Then pass --tls-secret-name my-tls-secret to the command below.
+
 Now run the bootstrap cluster script
 ```bash
-./bootstrap-cluster.sh --mode kubernetes
+./bootstrap-cluster.sh --mode kubernetes 
 ```
 
 ### 4. Add FDB Configuration file on Administrative Host

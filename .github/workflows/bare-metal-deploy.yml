@@ -56,6 +56,7 @@ on:
 
 jobs:
   deploy:
+    needs: [k8s]
     runs-on: ${{ inputs.runs_on }}
 
     outputs:

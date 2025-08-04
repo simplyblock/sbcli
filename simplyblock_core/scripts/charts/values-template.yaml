@@ -199,6 +199,7 @@ ingress:
   useHostPort: ${USE_HOST}   
   ingressClassName: nginx
   host: "${CLUSTER_IP}"
+  tlsSecret: ${TLS_SECRET}
   annotations:
     use-regex: "true"
     ssl-redirect: "false"

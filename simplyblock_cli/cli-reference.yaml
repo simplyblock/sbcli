@@ -1004,6 +1004,10 @@ commands:
             help: "Management IP address to use for the node (e.g., 192.168.1.10)"
             dest: mgmt_ip
             type: str
+          - name: "--tls-secret-name"
+            help: "Name of the Kubernetes TLS Secret to be used by the Ingress for HTTPS termination (e.g., my-tls-secret)"
+            dest: tls_secret
+            type: str
           - name: "--log-del-interval"
             help: "Logging retention policy, default: 3d"
             dest: log_del_interval
