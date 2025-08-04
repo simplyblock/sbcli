@@ -48,7 +48,7 @@ if [[ "${INGRESS_HOST_SOURCE}" == "hostip" ]]; then
   export USE_HOST=true
   export USE_DNS=false
   export SERVICE_TYPE="ClusterIP"
-else if [[ "${INGRESS_HOST_SOURCE}" == "loadbalancer" ]]; then
+elif [[ "${INGRESS_HOST_SOURCE}" == "loadbalancer" ]]; then
   export USE_HOST=false
   export USE_DNS=false
   export SERVICE_TYPE="LoadBalancer"
