@@ -87,6 +87,8 @@ envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 #   exit 1
 # fi
 
+rm -rf "$DIR"/charts/charts "$DIR"/charts/Chart.lock "$DIR"/charts/requirements.lock
+
 /usr/local/bin/helm dependency build "$DIR"/charts/
 
 /usr/local/bin/helm upgrade --install sbcli "$DIR"/charts/ \
