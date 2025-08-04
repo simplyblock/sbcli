@@ -125,7 +125,7 @@ def upload_from_remote(ssh, node, node_type):
     else:
         tar_path = f"{HOME_DIR}/container-logs.tar.gz"
         print(f"[INFO] Zipping {container_logs_path} on {node}...")
-        exec_command(ssh, f"tar -czf {tar_path} -C {HOME_DIR}/container-logs")
+        exec_command(ssh, f"tar -czf {tar_path} -C {HOME_DIR} container-logs")
 
         file_key = f"{UPLOAD_FOLDER}/{node}-{node_type}/container-logs.tar.gz"
         print(f"[INFO] Uploading {tar_path} → MinIO as {file_key}...")
