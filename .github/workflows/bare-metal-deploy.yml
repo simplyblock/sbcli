@@ -81,6 +81,7 @@ jobs:
         ./bootstrap-k3s.sh --k8s-snode
 
   deploy:
+    needs: [k8s]
     runs-on: ${{ inputs.runs_on }}
     outputs:
       cluster_id: ${{ steps.deployment.outputs.cluster_id }}
