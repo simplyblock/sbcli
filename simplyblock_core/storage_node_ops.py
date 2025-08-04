@@ -2535,15 +2535,19 @@ def upgrade_automated_deployment_config():
         return False
 
 
-def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
+def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked, cores_percentage=0):
 
     # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
     total_cores = os.cpu_count()
     if total_cores < 6:
         raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
 
+    # load vfio_pci and uio_pci_generic
+    utils.load_kernel_module("vfio_pci")
+    utils.load_kernel_module("uio_pci_generic")
+
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
-                                                       pci_allowed, pci_blocked)
+                                                       pci_allowed, pci_blocked, cores_percentage)
     if not nodes_config or not nodes_config.get("nodes"):
         return False
     utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
@@ -2598,6 +2602,7 @@ def deploy(ifname, isolate_cores=False):
     if isolate_cores:
         utils.generate_realtime_variables_file(all_isolated_cores)
         utils.run_tuned()
+        utils.run_grubby(all_isolated_cores)
     return f"{dev_ip}:5000"
 
 
@@ -2823,6 +2828,19 @@ def set_node_status(node_id, status, reconnect_on_online=True):
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
+        distr_controller.send_cluster_map_to_node(snode)
+
+        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+            if node.get_id() == snode.get_id():
+                continue
+            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                try:
+                    node.remote_devices = _connect_to_remote_devs(node)
+                    node.write_to_db()
+                    distr_controller.send_cluster_map_to_node(node)
+                except RuntimeError:
+                    logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
+                    continue
 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:

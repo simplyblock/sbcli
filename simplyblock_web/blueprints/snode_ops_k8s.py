@@ -335,14 +335,36 @@ def spdk_process_start(body: SPDKParams):
         spdk_process_kill(query)
 
     node_prepration_job_name = "snode-spdk-job-"
+    node_prepration_core_name = "snode-spdk-core-isolate-"
+    node_prepration_ubuntu_name = "snode-spdk-ubuntu-extra-"
+
     node_name = os.environ.get("HOSTNAME", "")
+    core_isolate = os.environ.get("CORE_ISOLATION", False)
+    if isinstance(core_isolate, str):
+       core_isolate = core_isolate.strip().lower() in ("true")
+
+    ubuntu_host = os.environ.get("UBUNTU_HOST", False)
+    if isinstance(ubuntu_host, str):
+       ubuntu_host = ubuntu_host.strip().lower() in ("true")
 
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
+    core_name_length = len(node_prepration_core_name+node_name)
+    ubuntu_name_length = len(node_prepration_ubuntu_name+node_name)
     if k8s_job_name_length > 63:
         node_prepration_job_name += node_name[k8s_job_name_length-63:]
     else:
         node_prepration_job_name += node_name
+        
+    if core_name_length > 63:
+        node_prepration_core_name += node_name[core_name_length-63:]
+    else:
+         node_prepration_core_name += node_name
+
+    if ubuntu_name_length > 63:
+        node_prepration_ubuntu_name += node_name[ubuntu_name_length-63:]
+    else:
+         node_prepration_ubuntu_name += node_name
 
     logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
@@ -360,6 +382,8 @@ def spdk_process_start(body: SPDKParams):
             'RPC_PASSWORD': body.rpc_password,
             'HOSTNAME': node_name,
             'JOBNAME': node_prepration_job_name,
+            'UBUNTU_JOBNAME': node_prepration_ubuntu_name,
+            'CORE_JOBNAME': node_prepration_core_name,
             'NAMESPACE': namespace,
             'FDB_CONNECTION': body.fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
@@ -368,6 +392,28 @@ def spdk_process_start(body: SPDKParams):
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib
         }
+
+        if ubuntu_host:
+            ubuntu_template = env.get_template('ubuntu_kernel_extra.yaml.j2')
+            ubuntu_yaml = yaml.safe_load(ubuntu_template.render(values))
+            batch_v1 = core_utils.get_k8s_batch_client()
+            ubuntu_resp = batch_v1.create_namespaced_job(namespace=namespace, body=ubuntu_yaml)
+            msg = f"Job created: '{ubuntu_resp.metadata.name}' in namespace '{namespace}"
+            logger.info(msg)
+
+            node_utils_k8s.wait_for_job_completion(ubuntu_resp.metadata.name, namespace)
+            logger.info(f"Job '{ubuntu_resp.metadata.name}' completed successfully")
+
+            batch_v1.delete_namespaced_job(
+                name=ubuntu_resp.metadata.name,
+                namespace=namespace,
+                body=V1DeleteOptions(
+                    propagation_policy='Foreground',
+                    grace_period_seconds=0
+                )
+            )
+            logger.info(f"Job deleted: '{ubuntu_resp.metadata.name}' in namespace '{namespace}")
+
 
         job_template = env.get_template('storage_init_job.yaml.j2')
         job_yaml = yaml.safe_load(job_template.render(values))
@@ -388,6 +434,27 @@ def spdk_process_start(body: SPDKParams):
             )
         )
         logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
+
+        if core_isolate:
+            core_template = env.get_template('storage_core_isolation.yaml.j2')
+            core_yaml = yaml.safe_load(core_template.render(values))
+            batch_v1 = core_utils.get_k8s_batch_client()
+            core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
+            msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
+            logger.info(msg)
+
+            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
+            logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
+
+            batch_v1.delete_namespaced_job(
+                name=core_resp.metadata.name,
+                namespace=namespace,
+                body=V1DeleteOptions(
+                    propagation_policy='Foreground',
+                    grace_period_seconds=0
+                )
+            )
+            logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
 
         env = Environment(loader=FileSystemLoader(os.path.join(TOP_DIR, 'templates')), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')

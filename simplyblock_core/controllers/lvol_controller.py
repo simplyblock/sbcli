@@ -936,12 +936,19 @@ def delete_lvol(id_or_name, force_delete=False):
         if secondary_node:
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
-                logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
                 secondary_rpc_client = secondary_node.rpc_client()
-                ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
-                if not ret:
-                    logger.warning(f"Failed to delete subsystem from node: {secondary_node.get_id()}")
-
+                subsys = secondary_rpc_client.subsystem_list(lvol.nqn)
+                if subsys:
+                    if len(subsys[0]['namespaces']) <= 1:
+                        logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
+                        ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
+                        if not ret:
+                            logger.warning(f"Failed to delete subsystem from node: {secondary_node.get_id()}")
+                    else:
+                        logger.info(f"Deleting namespace for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
+                        ret = secondary_rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
+                        if not ret:
+                            logger.warning(f"Failed to delete namespace from node: {secondary_node.get_id()}")
         # 2- delete subsystem and lvol bdev from primary
         if primary_node:
 
