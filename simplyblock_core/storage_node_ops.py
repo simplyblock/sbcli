@@ -23,6 +23,7 @@ from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient, RPCException
@@ -3089,6 +3090,12 @@ def recreate_lvstore(snode, force=False):
             ret = recreate_lvstore_on_sec(snode)
             if not ret:
                 logger.error(f"Failed to recreate secondary on node: {snode.get_id()}")
+
+    # reset snapshot delete status
+    for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
+        if snap.status == SnapShot.STATUS_IN_DELETION:
+            snap.deletion_status = ''
+            snap.write_to_db()
 
     return True
 
