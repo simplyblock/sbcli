@@ -685,13 +685,15 @@ class CLIWrapperBase:
         strict_node_anti_affinity = args.strict_node_anti_affinity
         name = args.name
         tls_secret = args.tls_secret
+        ingress_host_source = args.ingress_host_source
+        dns_name = args.dns_name
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name, tls_secret)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
