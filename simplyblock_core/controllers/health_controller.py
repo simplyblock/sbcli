@@ -60,7 +60,7 @@ def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None):
         for listener in listeners:
             logger.info(f"Checking listener {listener['traddr']}:{listener['trsvcid']} ... ok")
 
-    return listeners and namespaces
+    return bool(listeners) and namespaces
 
 
 def check_cluster(cluster_id):
