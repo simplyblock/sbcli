@@ -29,6 +29,12 @@ metadata:
     {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.ingressClassName | default "nginx" }}
+  {{- if .Values.ingress.tlsSecret }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tlsSecret | quote }}
+  {{- end }}
   rules:
     - host: {{ .Values.ingress.host | quote }}
       http:
