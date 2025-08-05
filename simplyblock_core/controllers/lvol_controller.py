@@ -760,7 +760,7 @@ def recreate_lvol(lvol_id):
     return lvol
 
 
-def _remove_bdev_stack(bdev_stack, rpc_client):
+def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
     for bdev in bdev_stack:
         # if 'status' in bdev and bdev['status'] == 'deleted':
         #     continue
@@ -783,9 +783,9 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_lvol":
             name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
-            ret = rpc_client.delete_lvol(name)
+            ret = rpc_client.delete_lvol(name, del_async=del_async)
         elif type == "bdev_lvol_clone":
-            ret = rpc_client.delete_lvol(name)
+            ret = rpc_client.delete_lvol(name,  del_async=del_async)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
@@ -797,7 +797,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
     return True
 
 
-def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
     snode = db_controller.get_storage_node_by_id(node_id)
@@ -818,11 +818,11 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
 
     # 2- remove bdevs
     logger.info("Removing bdev stack")
-    ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+    ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, del_async)
     if not ret:
         return False
 
-    lvol.deletion_status = 'bdevs_deleted'
+    lvol.deletion_status = node_id
     lvol.write_to_db(db_controller.kv_store)
     return True
 
@@ -957,17 +957,6 @@ def delete_lvol(id_or_name, force_delete=False):
                 logger.error(f"Failed to delete lvol from node: {primary_node.get_id()}")
                 if not force_delete:
                     return False
-
-        # 3- delete lvol bdev from secondary
-        if secondary_node:
-            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
-            if secondary_node.status == StorageNode.STATUS_ONLINE:
-
-                ret = delete_lvol_from_node(lvol.get_id(), secondary_node.get_id())
-                if not ret:
-                    logger.error(f"Failed to delete lvol from node: {secondary_node.get_id()}")
-                    if not force_delete:
-                        return False
 
     lvol = db_controller.get_lvol_by_id(lvol.get_id())
     # set status
