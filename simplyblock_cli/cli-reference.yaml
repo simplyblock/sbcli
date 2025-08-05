@@ -1065,6 +1065,7 @@ commands:
             choices:
               - docker
               - kubernetes
+            default: docker
           - name: "--ingress-host-source"
             help: "Ingress host source: 'hostip' for node IP, 'loadbalancer' for external LB, or 'dns' for custom domain"
             dest: ingress_host_source
