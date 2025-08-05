@@ -492,13 +492,13 @@ class TestClusterBase:
         if isinstance(node_status, list):
             if node_details[0]["status"] in ["down"]:
                 self.logger.info("Waiting for node to come online!")
-                sleep_n_sec(60)
+                sleep_n_sec(120)
             assert node_details[0]["status"] in node_status, \
                 f"Node {node_uuid} is not in {node_status} state. Actual: {node_details[0]['status']}"
         else:
             if node_details[0]["status"] == "down":
                 self.logger.info("Waiting for node to come online!")
-                sleep_n_sec(60)
+                sleep_n_sec(120)
             assert node_details[0]["status"] == node_status, \
                 f"Node {node_uuid} is not in {node_status} state. Actual: {node_details[0]['status']}"
         
