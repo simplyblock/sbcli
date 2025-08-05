@@ -1,6 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre-lvol-del
-SIMPLY_BLOCK_VERSION=19.0.8
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
+SIMPLY_BLOCK_VERSION=19.0.4
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-PRE_lvol-del
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-PRE
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-latest
