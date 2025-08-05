@@ -354,7 +354,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster ha type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
-        argument = subcommand.add_argument('--mode', help='Environment to deploy management services, default: docker', type=str, dest='mode', choices=['docker','kubernetes',])
+        argument = subcommand.add_argument('--mode', help='Environment to deploy management services, default: docker', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
         argument = subcommand.add_argument('--ingress-host-source', help='Ingress host source: \'hostip\' for node IP, \'loadbalancer\' for external LB, or \'dns\' for custom domain', type=str, default='hostip', dest='ingress_host_source', choices=['hostip','loadbalancer','dns',])
         argument = subcommand.add_argument('--dns-name', help='Fully qualified DNS name to use as the Ingress host (required if --ingress-host-source=dns)', type=str, default='', dest='dns_name')
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
