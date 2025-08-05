@@ -196,13 +196,10 @@ prometheus:
 
 ingress:
   enabled: true
-  useHostPort: ${USE_HOST}   
   ingressClassName: nginx
-  host: "${CLUSTER_IP}"
+  useDNS: ${USE_DNS}
+  host: "${DNS_NAME}"
   tlsSecret: ${TLS_SECRET}
-  annotations:
-    use-regex: "true"
-    ssl-redirect: "false"
   controller:
     hostNetwork: ${USE_HOST}  
     dnsPolicy: ClusterFirstWithHostNet
