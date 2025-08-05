@@ -46,6 +46,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.outage_start_time = None
         self.outage_end_time = None
         self.node_vs_lvol = {}
+        self.snap_vs_node = {}
         self.sn_nodes_with_sec = []
         self.sn_primary_secondary_map = {}
         self.lvol_node = ""
@@ -625,6 +626,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     continue
                 
             self.snapshot_names.append(snapshot_name)
+            lvol_node_id = self.sbcli_utils.get_lvol_details(
+                lvol_id=self.lvol_mount_details[lvol]["ID"])[0]["node_id"]
+            self.snap_vs_node[snapshot_name] = lvol_node_id
             self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
             clone_name = f"clone_{generate_random_sequence(15)}"
             if clone_name in list(self.clone_mount_details):
@@ -767,10 +771,10 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
         skip_nodes.append(self.current_outage_node)
         skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
-        # skip_nodes = []
-        self.logger.info(f"Skipping Nodes: {skip_nodes}")
+        skip_nodes_lvol = []
+        self.logger.info(f"Skipping Nodes: {skip_nodes_lvol}")
         available_lvols = [
-            lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes for lvol in lvols
+            lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes_lvol for lvol in lvols
         ]
         self.logger.info(f"Available Lvols: {available_lvols}")
         if len(available_lvols) < count:
@@ -816,7 +820,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 del self.clone_mount_details[del_key]
             for snapshot in snapshots:
                 snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot)
-                self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id)
+                snapshot_node = self.snap_vs_node[snapshot]
+                if snapshot_node not in skip_nodes:
+                    self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id)
                 self.snapshot_names.remove(snapshot)
 
             self.common_utils.validate_fio_test(self.lvol_mount_details[lvol]["Client"],
