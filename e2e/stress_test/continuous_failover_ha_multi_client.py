@@ -759,11 +759,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
 
-            # self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
-            # sleep_n_sec(10)
-            # self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
+            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
+            sleep_n_sec(10)
+            self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
             
 
     def delete_random_lvols(self, count):
@@ -820,9 +820,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 del self.clone_mount_details[del_key]
             for snapshot in snapshots:
                 snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot)
-                snapshot_node = self.snap_vs_node[snapshot]
-                if snapshot_node not in skip_nodes:
-                    self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id)
+                # snapshot_node = self.snap_vs_node[snapshot]
+                # if snapshot_node not in skip_nodes:
+                self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id)
                 self.snapshot_names.remove(snapshot)
 
             self.common_utils.validate_fio_test(self.lvol_mount_details[lvol]["Client"],
