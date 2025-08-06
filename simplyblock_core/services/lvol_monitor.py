@@ -189,7 +189,7 @@ while True:
                             leader_node = snode
 
                     if not leader_node and sec_node:
-                        ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
+                        ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
                         if not ret:
                             raise Exception("Failed to get LVol info")
                         lvs_info = ret[0]
