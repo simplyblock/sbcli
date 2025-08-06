@@ -165,11 +165,38 @@ class SNodeClient:
             "action": action,
             "rpc_port": rpc_port,
         }
-        return self._request("POST", "firewall_set_port", params)
+        try:
+            result = self._request("POST", "firewall_set_port", params)
+        except Exception as e:
+            logger.error(e)
+            try:
+                from simplyblock_core.fw_api_client import FirewallClient
+                mgmt_ip = self.ip_address.split(":")[0]
+                fw_api = FirewallClient(f"{mgmt_ip}:5001", timeout=5, retry=2)
+                result = fw_api.firewall_set_port(port_id, port_type, action, rpc_port)
+            except Exception as e:
+                logger.error(e)
+                result = False
+        return result
+
+
 
     def get_firewall(self,rpc_port=None):
         params = {"rpc_port": rpc_port}
-        return self._request("GET", "get_firewall", params)
+        try:
+            out, err = self._request("GET", "get_firewall", params)
+            return out, err
+        except Exception as e:
+            logger.error(e)
+            try:
+                from simplyblock_core.fw_api_client import FirewallClient
+                mgmt_ip = self.ip_address.split(":")[0]
+                fw_api = FirewallClient(f"{mgmt_ip}:5001", timeout=5, retry=2)
+                out, err = fw_api.get_firewall(rpc_port)
+                return out, err
+            except Exception as e:
+                logger.error(e)
+                return False, None
 
     def spdk_proxy_restart(self,rpc_port=None):
         params = {"rpc_port": rpc_port}
