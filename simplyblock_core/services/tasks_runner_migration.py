@@ -139,10 +139,10 @@ while True:
                             if t.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
                                                       JobSchedule.FN_NEW_DEV_MIG] and t.node_id == task.node_id:
                                 if "distr_name" in t.function_params and t.function_params[
-                                    "distr_name"] == task.function_params["distr_name"]:
-                                    if t.status == JobSchedule.STATUS_RUNNING and t.canceled is False:
+                                    "distr_name"] == task.function_params["distr_name"] and t.canceled is False:
+                                    if t.status == JobSchedule.STATUS_RUNNING:
                                         active_task = True
-                                    elif t.status == JobSchedule.STATUS_SUSPENDED and t.canceled is False:
+                                    elif t.status == JobSchedule.STATUS_SUSPENDED and t.function_name == JobSchedule.FN_NEW_DEV_MIG:
                                         suspended_task = True
                             if active_task and suspended_task:
                                 break
