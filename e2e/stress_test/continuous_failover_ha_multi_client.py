@@ -89,7 +89,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         """Create lvols and start FIO with random configurations."""
         for i in range(count):
             fs_type = random.choice(["ext4", "xfs"])
-            is_crypto = random.choice([False, False])
+            is_crypto = random.choice([True, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             while lvol_name in self.lvol_mount_details:
                 self.lvol_name = f"lvl{generate_random_sequence(15)}"
