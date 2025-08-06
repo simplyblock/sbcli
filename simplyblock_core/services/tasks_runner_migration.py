@@ -94,8 +94,9 @@ def task_runner(task):
         rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name, qos_high_priority)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
-            task.function_result = "Failed to start device migration task"
-            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "Failed to start device migration task, retry later"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.retry += 1
             task.write_to_db(db.kv_store)
             return True
         task.function_params['migration'] = {
