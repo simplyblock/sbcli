@@ -100,17 +100,32 @@ while True:
                                         bdev_names=[], reattach=False)
 
                                     remote_devices.append(dev)
-                            if remote_devices:
-                                node = db.get_storage_node_by_id(task.node_id)
-                                node.remote_devices = remote_devices
-                                node.write_to_db()
-                            else:
+                            if not remote_devices:
                                 msg = "Node unable to connect to remote devs, retry task"
                                 logger.info(msg)
                                 task.function_result = msg
                                 task.status = JobSchedule.STATUS_SUSPENDED
                                 task.write_to_db(db.kv_store)
                                 continue
+                            else:
+                                node = db.get_storage_node_by_id(task.node_id)
+                                node.remote_devices = remote_devices
+                                node.write_to_db()
+
+                            logger.info("connect to remote JM devices")
+                            remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+                            if not remote_jm_devices or len(remote_jm_devices) < 2:
+                                msg = "Node unable to connect to remote JMs, retry task"
+                                logger.info(msg)
+                                task.function_result = msg
+                                task.status = JobSchedule.STATUS_SUSPENDED
+                                task.write_to_db(db.kv_store)
+                                continue
+                            else:
+                                node = db.get_storage_node_by_id(task.node_id)
+                                node.remote_jm_devices = remote_jm_devices
+                                node.write_to_db()
+
 
                         except Exception as e:
                             logger.error(e)
