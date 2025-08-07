@@ -1299,6 +1299,24 @@ class SshUtils:
             return
 
         # Step 2: Get bdev_get_bdevs output
+        # bdev_cmd = f"sudo docker exec {container_name} bash -c 'python spdk/scripts/rpc.py bdev_get_bdevs'"
+        # bdev_output, error = self.exec_command(storage_node_ip, bdev_cmd)
+
+        # if error:
+        #     self.logger.error(f"Error running bdev_get_bdevs: {error}")
+        #     return
+
+        # # Step 3: Save full output to local file
+        # timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
+        # raw_output_path = f"{Path.home()}/bdev_output_{storage_node_ip}_{timestamp}.json"
+        # with open(raw_output_path, "w") as f:
+        #     f.write(bdev_output)
+        # self.logger.info(f"Saved raw bdev_get_bdevs output to {raw_output_path}")
+
+        timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
+        remote_output_path = f"{Path.home()}/bdev_output_{storage_node_ip}_{timestamp}.json"
+
+        # 1. Run to capture output into a variable (for parsing)
         bdev_cmd = f"sudo docker exec {container_name} bash -c 'python spdk/scripts/rpc.py bdev_get_bdevs'"
         bdev_output, error = self.exec_command(storage_node_ip, bdev_cmd)
 
@@ -1306,12 +1324,13 @@ class SshUtils:
             self.logger.error(f"Error running bdev_get_bdevs: {error}")
             return
 
-        # Step 3: Save full output to local file
-        timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
-        raw_output_path = f"{Path.home()}/bdev_output_{storage_node_ip}_{timestamp}.json"
-        with open(raw_output_path, "w") as f:
-            f.write(bdev_output)
-        self.logger.info(f"Saved raw bdev_get_bdevs output to {raw_output_path}")
+        # 2. Run again to save output on host machine (audit trail)
+        bdev_save_cmd = (
+            f"sudo bash -c \"docker exec {container_name} python spdk/scripts/rpc.py bdev_get_bdevs > {remote_output_path}\"")
+
+        self.exec_command(storage_node_ip, bdev_save_cmd)
+        self.logger.info(f"Saved bdev_get_bdevs output to {remote_output_path} on {storage_node_ip}")
+
 
         # Step 4: Extract unique distrib names
         try:
