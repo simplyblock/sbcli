@@ -1280,41 +1280,56 @@ class SshUtils:
         
     def fetch_distrib_logs(self, storage_node_ip, storage_node_id):
         """
-        Fetch distrib names, generate and execute RPC JSON, and copy logs from SPDK container.
+        Fetch distrib names using bdev_get_bdevs RPC, generate and execute RPC JSON,
+        and copy logs from SPDK container.
 
         Args:
             storage_node_ip (str): IP of the storage node
             storage_node_id (str): ID of the storage node
         """
         self.logger.info(f"Fetching distrib logs for Storage Node ID: {storage_node_id} on {storage_node_ip}")
-        
-        # Fetch lvstore_stack JSON output
-        command = f"{self.base_cmd} sn get {storage_node_id} | jq .lvstore_stack"
-        output, error = self.exec_command(storage_node_ip, command)
-        
+
+        # Step 1: Find the SPDK container
+        find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
+        container_name_output, _ = self.exec_command(storage_node_ip, find_container_cmd)
+        container_name = container_name_output.strip()
+
+        if not container_name:
+            self.logger.warning(f"No SPDK container found on {storage_node_ip}")
+            return
+
+        # Step 2: Get bdev_get_bdevs output
+        bdev_cmd = f"sudo docker exec {container_name} bash -c 'python spdk/scripts/rpc.py bdev_get_bdevs'"
+        bdev_output, error = self.exec_command(storage_node_ip, bdev_cmd)
+
         if error:
-            self.logger.error(f"Error fetching lvstore stack: {error}")
+            self.logger.error(f"Error running bdev_get_bdevs: {error}")
             return
-        
-        # Parse JSON output
+
+        # Step 3: Save full output to local file
+        timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
+        raw_output_path = f"{Path.home()}/bdev_output_{storage_node_ip}_{timestamp}.json"
+        with open(raw_output_path, "w") as f:
+            f.write(bdev_output)
+        self.logger.info(f"Saved raw bdev_get_bdevs output to {raw_output_path}")
+
+        # Step 4: Extract unique distrib names
         try:
-            lvstore_stack = json.loads(output)
-            distribs = [entry["distribs_list"] for entry in lvstore_stack if "distribs_list" in entry]
-            distribs = distribs[0] if distribs else []
+            bdevs = json.loads(bdev_output)
+            distribs = list({bdev['name'] for bdev in bdevs if bdev['name'].startswith('distrib_')})
         except json.JSONDecodeError as e:
-            self.logger.error(f"JSON Parsing Error: {e}")
+            self.logger.error(f"JSON parsing failed: {e}")
             return
-        
+
         if not distribs:
-            self.logger.warning("No distrib names found.")
+            self.logger.warning("No distrib names found in bdev_get_bdevs output.")
             return
-        
+
         self.logger.info(f"Distributions found: {distribs}")
-        
+
+        # Step 5: Process each distrib
         for distrib in distribs:
             self.logger.info(f"Processing distrib: {distrib}")
-
-            # Create JSON for the RPC call
             rpc_json = {
                 "subsystems": [
                     {
@@ -1329,55 +1344,42 @@ class SshUtils:
                 ]
             }
 
-            # Convert JSON object to string and escape quotes for bash command
-            # rpc_json_str = json.dumps(rpc_json).replace('"', '\\"')
             rpc_json_str = json.dumps(rpc_json)
             remote_json_path = "/tmp/stack.json"
 
-            # Create JSON file on the storage node
-            create_json_command = f"sudo echo '{rpc_json_str}' > {remote_json_path}"
+            # Save JSON file remotely
+            create_json_command = f"echo '{rpc_json_str}' | sudo tee {remote_json_path}"
             self.exec_command(storage_node_ip, create_json_command)
 
-            find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
-            container_name_output, _ = self.exec_command(storage_node_ip, find_container_cmd)
-            if container_name_output:
-                container_name = container_name_output.strip()
-                # Save JSON inside SPDK container
-                rpc_script_path = "/tmp/stack.json"
-                create_json_command = f"sudo docker cp {remote_json_path} {container_name}:{rpc_script_path}"
-                self.exec_command(storage_node_ip, create_json_command)
+            # Copy into container
+            copy_json_command = f"sudo docker cp {remote_json_path} {container_name}:{remote_json_path}"
+            self.exec_command(storage_node_ip, copy_json_command)
 
-                # Execute RPC call inside SPDK Docker container
-                rpc_command = f"sudo docker exec {container_name} bash -c 'python scripts/rpc_sock.py {rpc_script_path}'"
-                self.exec_command(storage_node_ip, rpc_command)
+            # Run RPC inside container
+            rpc_command = f"sudo docker exec {container_name} bash -c 'python scripts/rpc_sock.py {remote_json_path}'"
+            self.exec_command(storage_node_ip, rpc_command)
 
-                # Find log file name dynamically
-                find_log_command = f"sudo docker exec {container_name} ls /tmp/ | grep distrib"
-                log_file_name, _ = self.exec_command(storage_node_ip, find_log_command)
-                log_file_name = log_file_name.strip().replace("\r", "").replace("\n", "")
+            # Find and copy log
+            find_log_command = f"sudo docker exec {container_name} ls /tmp/ | grep {distrib}"
+            log_file_name, _ = self.exec_command(storage_node_ip, find_log_command)
+            log_file_name = log_file_name.strip().replace("\r", "").replace("\n", "")
 
-                if not log_file_name:
-                    self.logger.error(f"No log file found for distrib {distrib} in /tmp/.")
-                    continue
+            if not log_file_name:
+                self.logger.error(f"No log file found for distrib {distrib}.")
+                continue
 
-                log_file_path = f"/tmp/{log_file_name}"
-                timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
-                destination_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}_{timestamp}"
+            log_file_path = f"/tmp/{log_file_name}"
+            local_log_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}_{timestamp}"
+            copy_log_cmd = f"sudo docker cp {container_name}:{log_file_path} {local_log_path}"
+            self.exec_command(storage_node_ip, copy_log_cmd)
 
-                # Copy log file from inside container to host machine
-                copy_command = f"sudo docker cp {container_name}:{log_file_path} {destination_path}"
-                self.exec_command(storage_node_ip, copy_command)
+            self.logger.info(f"Fetched log for {distrib}: {local_log_path}")
 
-                self.logger.info(f"Processed {distrib}: Logs copied to {destination_path}")
+            # Clean up
+            delete_log_cmd = f"sudo docker exec {container_name} rm -f {log_file_path}"
+            self.exec_command(storage_node_ip, delete_log_cmd)
 
-                # Remove log file from container
-                delete_command = f"sudo docker exec {container_name} rm -f {log_file_path}"
-                self.exec_command(storage_node_ip, delete_command)
-                self.logger.info(f"Processed {distrib}: Logs copied to {destination_path} and deleted from container.")
-            else:
-                self.logger.warning(f"No SPDK container found on {storage_node_ip}")
-
-        self.logger.info("All logs retrieved successfully!")
+        self.logger.info("All distrib logs retrieved successfully.")
 
     def clone_mount_gen_uuid(self, node, device):
         """Repair the XFS filesystem and generate a new UUID.

@@ -238,6 +238,8 @@ class TestClusterBase:
                                                log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                      log_dir=self.docker_logs_path)
+        
+        self.fetch_all_nodes_distrib_log()
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
