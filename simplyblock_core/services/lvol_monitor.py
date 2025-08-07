@@ -93,7 +93,7 @@ def process_lvol_delete_finish(lvol):
     # 3-2 async delete lvol bdev from secondary
     if snode.secondary_node_id:
         sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+        if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), sec_node.get_id(), del_async=True)
             if not ret:
                 logger.error(f"Failed to delete lvol from sec node: {sec_node.get_id()}")
