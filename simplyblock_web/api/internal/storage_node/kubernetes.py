@@ -285,7 +285,7 @@ def spdk_process_start(body: SPDKParams):
 
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MB') if body.total_mem else ""
 
-    if _is_pod_up(body.rpc_port):
+    if _is_pod_up(body.rpc_port) or _is_pod_present(body.rpc_port):
         logger.info("SPDK pod found, removing...")
         query = utils.RPCPortParams(rpc_port=body.rpc_port)
         spdk_process_kill(query)
@@ -471,6 +471,22 @@ def _is_pod_up(rpc_port):
         return False
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
+        return False
+    return False
+
+def _is_pod_present(rpc_port):
+    k8s_core_v1 = core_utils.get_k8s_core_client()
+    pod_name = f"snode-spdk-pod-{rpc_port}"
+    try:
+        resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
+        for pod in resp.items:
+            if pod.metadata.name.startswith(pod_name):
+                return True
+    except ApiException as e:
+        logger.error(f"API error while checking pod presence: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error while checking pod presence: {e}")
         return False
     return False
 
