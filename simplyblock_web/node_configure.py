@@ -6,7 +6,7 @@ import logging
 from simplyblock_core.storage_node_ops import generate_automated_deployment_config, upgrade_automated_deployment_config
 from simplyblock_core import constants, utils
 from simplyblock_cli.clibase import range_type
-from simplyblock_web import utils, node_utils_k8s
+from simplyblock_web import node_utils_k8s
 
 import argparse
 
