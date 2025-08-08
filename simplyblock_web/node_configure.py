@@ -10,7 +10,8 @@ from simplyblock_web import utils, node_utils_k8s
 
 import argparse
 
-from kubernetes.client.rest import ApiException
+from kubernetes.client import ApiException
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
