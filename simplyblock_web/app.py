@@ -40,4 +40,4 @@ def redirect_legacy(request: Request) -> Response:
 
 
 if __name__ == '__main__':
-    uvicorn.run(app, host='0.0.0.0', port=5000, log_level='debug', forwarded_allow_ips='192.168.1.0/24')
+    uvicorn.run(app, host='0.0.0.0', port=5000, log_level='debug', proxy_headers=True, forwarded_allow_ips='192.168.1.0/24')
