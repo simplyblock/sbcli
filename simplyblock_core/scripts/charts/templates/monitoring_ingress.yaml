@@ -1,4 +1,4 @@
-{{- if .Values.ingress.useHostPort }}
+{{- if (not .Values.ingress.useDNS) }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -34,7 +34,7 @@ spec:
                   number: 9000
 
 ---
-{{- else if (not .Values.ingress.useHostPort) }}
+{{- else if .Values.ingress.useDNS }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -42,9 +42,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /$2
-    {{- range $key, $value := .Values.ingress.annotations }}
-    nginx.ingress.kubernetes.io/{{ $key }}: "{{ $value }}"
-    {{- end }}
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: {{ .Values.ingress.ingressClassName | default "nginx" }}
   {{- if .Values.ingress.tlsSecret }}

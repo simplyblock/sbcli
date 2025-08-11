@@ -760,13 +760,27 @@ commands:
               - ha
             default: ha
           - name: "--mode"
-            help: "Environment to deploy management services, default: docker "
+            help: "Environment to deploy management services, default: docker"
             dest: mode
             type: str
             choices:
               - docker
               - kubernetes
             default: docker
+          - name: "--ingress-host-source"
+            help: "Ingress host source: 'hostip' for node IP, 'loadbalancer' for external LB, or 'dns' for custom domain"
+            dest: ingress_host_source
+            type: str
+            choices:
+              - hostip
+              - loadbalancer
+              - dns
+            default: hostip
+          - name: "--dns-name"
+            help: "Fully qualified DNS name to use as the Ingress host (required if --ingress-host-source=dns)"
+            dest: dns_name
+            type: str
+            default: ""
           - name: "--enable-node-affinity"
             help: "Enable node affinity for storage nodes"
             dest: enable_node_affinity

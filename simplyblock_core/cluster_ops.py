@@ -140,9 +140,9 @@ def _add_graylog_input(cluster_ip, password):
     extractor_payload = {
         "title": "Extract Kubernetes JSON",
         "extractor_type": "json",
-        "converters": {},
+        "converters": [],
         "order": 0,
-        "cut_or_copy": "copy",
+        "cursor_strategy": "copy",
         "source_field": "message",
         "target_field": "",
         "extractor_config": {},
@@ -206,10 +206,15 @@ def _set_max_result_window(cluster_ip, max_window=100000):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name, tls_secret) -> str:
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name, 
+                   tls_secret, ingress_host_source, dns_name) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+        
+    if ingress_host_source == "dns":
+        if not dns_name:
+            raise ValueError("--dns-name is required when --ingress-host-source is dns")
 
     logger.info("Installing dependencies...")
     scripts.install_deps(mode)
@@ -323,11 +328,15 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
         if not tls_secret:
             tls_secret = ''
+        
+        if not dns_name:
+            dns_name= ''
             
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, db_connection, constants.K8S_NAMESPACE, str(disable_monitoring), tls_secret)
+                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, db_connection, constants.K8S_NAMESPACE, 
+                                str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
         logger.info("Deploying helm stack > Done")
 
     logger.info("Configuring DB...")
