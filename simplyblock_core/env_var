@@ -1,6 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre-upgrade
 SIMPLY_BLOCK_VERSION=1.1.11
 
-
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-Hotfix-group-wb-test-upgrade2
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-668b8c15
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:25.7.1
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-b82e1bb9

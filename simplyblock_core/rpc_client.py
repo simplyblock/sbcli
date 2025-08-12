@@ -274,7 +274,7 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=50):
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
@@ -295,8 +295,9 @@ class RPCClient:
         }
         return self._request("bdev_lvol_create", params)
 
-    def delete_lvol(self, name):
-        params = {"name": name}
+    def delete_lvol(self, name, del_async=False):
+        params = {"name": name,
+                  "sync": del_async}
         return self._request("bdev_lvol_delete", params)
 
     def get_bdevs(self, name=None):
@@ -1020,11 +1021,7 @@ class RPCClient:
 
     def bdev_lvol_get_lvol_delete_status(self, name):
         """
-        Returns :-
-            0: lvol is deleted.
-            1: lvole deletion is in progress.
-            2: No delete action on lvol or the delete requets is queued or previous delete request
-               failed due to error.
+            https://docs.google.com/spreadsheets/d/1cQ1MkCRVRJUTXeO35erFaQc7CF0mV5t52jTIzZsARyY/edit?gid=0#gid=0
         """
         params = {
             "name": name
