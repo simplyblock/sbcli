@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre-upgrade
-SIMPLY_BLOCK_VERSION=1.1.12
+SIMPLY_BLOCK_VERSION=1.1.14
 
 
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-Hotfix-group-wb-test-upgrade-sfam-2258
