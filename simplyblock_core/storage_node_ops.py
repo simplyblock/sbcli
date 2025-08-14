@@ -927,7 +927,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 logger.error(f"Failed to Join docker swarm: {err}")
                 return False
         else:
-            cluster_ip = utils.get_k8s_node_ip() 
+            cluster_ip = utils.get_k8s_node_ip()
 
         rpc_port = utils.get_next_rpc_port(cluster_id)
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
@@ -1360,7 +1360,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                                                                                    JMDevice.STATUS_UNAVAILABLE]:
         logger.info("Removing JM")
         device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
-    
+
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
     if cluster.mode == "docker":
@@ -1567,7 +1567,7 @@ def restart_storage_node(
 
     else:
         cluster_ip = utils.get_k8s_node_ip()
-    
+
     total_mem = 0
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if n.api_endpoint == snode.api_endpoint:
