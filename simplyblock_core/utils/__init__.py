@@ -28,6 +28,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
 from . import pci as pci_utils
+from .helpers import parse_thread_siblings_list
 
 CONFIG_KEYS = [
     "app_thread_core",
@@ -888,9 +889,7 @@ def parse_thread_siblings():
             cpu_id = int(cpu[3:])
             try:
                 with open(f"/sys/devices/system/cpu/{cpu}/topology/thread_siblings_list") as f:
-                    siblings[cpu_id] = [
-                        int(x) for x in f.read().strip().split(",")
-                    ]
+                    siblings[cpu_id] = parse_thread_siblings_list(f.read().strip())
             except FileNotFoundError:
                 siblings[cpu_id] = [cpu_id]  # No siblings for this CPU
     return siblings
