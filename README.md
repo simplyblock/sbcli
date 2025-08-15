@@ -1,7 +1,7 @@
 
-# SBCLI (SimplyBlock CLI)
+# SBCLI (simplyblock CLI)
 
-Simplyblock provides a feature-rich CLI (command line interface) to deploy SimplyBlock Cluster and to manage the SimplyBlock Control plane
+Simplyblock provides a feature-rich CLI (command line interface) to deploy simplyblock Cluster and to manage the simplyblock Control plane
 
 ## Install
 
@@ -13,13 +13,13 @@ pip install --upgrade sbctl
 
 # Components
 
-## Simply Block Core
+## Simplyblock Core
 Contains core logic and controllers for the simplyblock cluster
 
-## Simply Block CLI
+## Simplyblock CLI
 The list of all the available CLI options can be here [CLI docs](./simplyblock_cli/README.md)
 
-## SimplyBlock Web API
+## Simplyblock Web API
 
 Web app that provides API to manage the cluster. More about this in [README.md](./simplyblock_web/README.md)
 
