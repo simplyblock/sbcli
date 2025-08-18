@@ -3032,6 +3032,7 @@ def recreate_lvstore(snode, force=False):
                     time.sleep(0.1)
                 else:
                     logger.info("Inflight IO NOT found, continuing")
+                    break
             else:
                 logger.error(f"Timeout while checking for inflight IO after 10 seconds on node {snode.secondary_node_id}")
 
