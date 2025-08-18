@@ -6,6 +6,10 @@ from simplyblock_core.models.lvol_model import LVol
 
 class SnapShot(BaseModel):
 
+    STATUS_ONLINE = 'online'
+    STATUS_OFFLINE = 'offline'
+    STATUS_IN_DELETION = 'in_deletion'
+
     base_bdev: str = ""
     blobid: int = 0
     cluster_id: str = ""
@@ -22,3 +26,5 @@ class SnapShot(BaseModel):
     snap_ref_id: str = ""
     snap_uuid: str = ""
     vuid: int = 0
+    deletion_status: str = ""
+    status: str = ""

@@ -689,8 +689,9 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     if not node_lvols_nqns:
         node_lvols_nqns = {}
         ret = rpc_client.subsystem_list()
-        for sub in ret:
-            node_lvols_nqns[sub['nqn']] = sub
+        if ret:
+            for sub in ret:
+                node_lvols_nqns[sub['nqn']] = sub
 
     passed = True
     try:

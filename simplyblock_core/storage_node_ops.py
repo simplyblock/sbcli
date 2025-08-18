@@ -23,6 +23,7 @@ from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient, RPCException
@@ -2827,6 +2828,19 @@ def set_node_status(node_id, status, reconnect_on_online=True):
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
+        distr_controller.send_cluster_map_to_node(snode)
+
+        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+            if node.get_id() == snode.get_id():
+                continue
+            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                try:
+                    node.remote_devices = _connect_to_remote_devs(node)
+                    node.write_to_db()
+                    distr_controller.send_cluster_map_to_node(node)
+                except RuntimeError:
+                    logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
+                    continue
 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
@@ -2951,8 +2965,12 @@ def recreate_lvstore(snode, force=False):
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
-        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
-            lvol_list.append(lv)
+        if lv.status == LVol.STATUS_IN_DELETION:
+            lv.deletion_status = ''
+            lv.write_to_db()
+        elif lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]:
+            if lv.deletion_status == '':
+                lvol_list.append(lv)
 
     prim_node_suspend = False
     if sec_node:
@@ -3090,6 +3108,12 @@ def recreate_lvstore(snode, force=False):
             ret = recreate_lvstore_on_sec(snode)
             if not ret:
                 logger.error(f"Failed to recreate secondary on node: {snode.get_id()}")
+
+    # reset snapshot delete status
+    for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
+        if snap.status == SnapShot.STATUS_IN_DELETION:
+            snap.deletion_status = ''
+            snap.write_to_db()
 
     return True
 
@@ -3310,7 +3334,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 "bdev_name": raid_device,
                 "cluster_sz": cluster_sz,
                 "clear_method": "none",
-                "num_md_pages_per_cluster_ratio": 1,
+                "num_md_pages_per_cluster_ratio": 50,
             }
         }
     )
