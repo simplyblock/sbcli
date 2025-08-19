@@ -5,9 +5,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.controllers import health_controller, lvol_events, tasks_controller, lvol_controller
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -159,7 +157,7 @@ while True:
 
                         try:
                             ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(snap.snap_bdev)
-                        except Exception as e:
+                        except:
                             # timeout detected, check other node
                             break
 
@@ -172,16 +170,16 @@ while True:
                         elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
                             logger.error(
-                                f"Async deletion is done, but leadership has changed (sync deletion is now blocked)")
+                                "Async deletion is done, but leadership has changed (sync deletion is now blocked)")
 
                         elif ret == 4:  # No async delete request exists for this Snap
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error(f"No async delete request exists for this snap")
+                            logger.error("No async delete request exists for this snap")
                             set_snap_offline(snap)
 
                         elif ret == -1:  # Operation not permitted
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error(f"Operation not permitted")
+                            logger.error("Operation not permitted")
                             set_snap_offline(snap)
 
                         elif ret == -2:  # No such file or directory
