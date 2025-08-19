@@ -44,7 +44,7 @@ def set_snapshot_health_check(snap, health_check_status):
     snap.write_to_db()
 
 
-lvol_del_start_time = 0.
+lvol_del_start_time = 0.0
 def pre_lvol_delete_rebalance():
     global lvol_del_start_time
     if lvol_del_start_time == 0:
@@ -207,6 +207,7 @@ while True:
                         ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(
                             f"{lvol.lvs_name}/{lvol.lvol_bdev}")
                     except Exception as e:
+                        logger.error(e)
                         # timeout detected, check other node
                         break
 
@@ -219,11 +220,11 @@ while True:
 
                     elif ret == 3: # Async deletion is done, but leadership has changed (sync deletion is now blocked)
                         logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                        logger.error(f"Async deletion is done, but leadership has changed (sync deletion is now blocked)")
+                        logger.error("Async deletion is done, but leadership has changed (sync deletion is now blocked)")
 
                     elif ret == 4: # No async delete request exists for this lvol
                         logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                        logger.error(f"No async delete request exists for this lvol")
+                        logger.error("No async delete request exists for this lvol")
                         lvol = db.get_lvol_by_id(lvol.get_id())
                         lvol.io_error = True
                         lvol.write_to_db()
@@ -231,7 +232,7 @@ while True:
 
                     elif ret == -1: # Operation not permitted
                         logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                        logger.error(f"Operation not permitted")
+                        logger.error("Operation not permitted")
                         lvol = db.get_lvol_by_id(lvol.get_id())
                         lvol.io_error = True
                         lvol.write_to_db()

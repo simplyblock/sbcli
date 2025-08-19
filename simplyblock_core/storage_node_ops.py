@@ -64,7 +64,7 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
         ret = rpc_client.bdev_nvme_attach_controller_tcp(
                 name, device.nvmf_nqn, ip, device.nvmf_port,
                 multipath=device.nvmf_multipath)
-        if not bdev_name and ret and type(ret) == list:
+        if not bdev_name and ret and isinstance(ret, list):
             bdev_name = ret[0]
 
         if device.nvmf_multipath:
@@ -927,7 +927,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 logger.error(f"Failed to Join docker swarm: {err}")
                 return False
         else:
-            cluster_ip = utils.get_k8s_node_ip() 
+            cluster_ip = utils.get_k8s_node_ip()
 
         rpc_port = utils.get_next_rpc_port(cluster_id)
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
@@ -1360,7 +1360,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                                                                                    JMDevice.STATUS_UNAVAILABLE]:
         logger.info("Removing JM")
         device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
-    
+
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
     if cluster.mode == "docker":
@@ -1567,7 +1567,7 @@ def restart_storage_node(
 
     else:
         cluster_ip = utils.get_k8s_node_ip()
-    
+
     total_mem = 0
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if n.api_endpoint == snode.api_endpoint:
@@ -3067,6 +3067,18 @@ def recreate_lvstore(snode, force=False):
             ### 4- set leadership to false
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+            ### 4-1 check for inflight IO. retry every 100ms up to 10 seconds
+            logger.info(f"Checking for inflight IO from node: {snode.secondary_node_id}")
+            for i in range(100):
+                is_inflight = sec_rpc_client.bdev_distrib_check_inflight_io(snode.jm_vuid)
+                if is_inflight:
+                    logger.info("Inflight IO found, retry in 100ms")
+                    time.sleep(0.1)
+                else:
+                    logger.info("Inflight IO NOT found, continuing")
+                    break
+            else:
+                logger.error(f"Timeout while checking for inflight IO after 10 seconds on node {snode.secondary_node_id}")
 
         if sec_node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN]:
             logger.info(f"Secondary node is not online, forcing journal replication on node: {snode.get_id()}")

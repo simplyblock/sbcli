@@ -294,7 +294,6 @@ def delete(snapshot_uuid, force_delete=False):
 
     else:
 
-        secondary_node = None
         primary_node = None
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -306,28 +305,19 @@ def delete(snapshot_uuid, force_delete=False):
                     logger.error(msg)
                     return False
 
-                elif sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_node = sec_node
-                else:
-                    secondary_node = None
-
             elif sec_node.status == StorageNode.STATUS_ONLINE:
                 if lvol_controller.is_node_leader(sec_node, snap.lvol.lvs_name):
                     primary_node = sec_node
-                    secondary_node = host_node
                 else:
                     # both nodes are non leaders and online, set primary as leader
                     primary_node = host_node
-                    secondary_node = sec_node
 
             else:
                 # sec node is not online, set primary as leader
                 primary_node = host_node
-                secondary_node = None
 
         elif sec_node.status == StorageNode.STATUS_ONLINE:
             # primary is not online but secondary is, create on secondary and set leader if needed,
-            secondary_node = None
             primary_node = sec_node
 
         else:
