@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre-upgrade
-SIMPLY_BLOCK_VERSION=1.1.8
+SIMPLY_BLOCK_VERSION=1.1.18
 
 
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-Hotfix-xata-test-upgrade
