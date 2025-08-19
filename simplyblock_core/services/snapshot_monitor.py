@@ -157,7 +157,8 @@ while True:
 
                         try:
                             ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(snap.snap_bdev)
-                        except:
+                        except Exception as e:
+                            logger.error(e)
                             # timeout detected, check other node
                             break
 
