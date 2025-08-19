@@ -3030,6 +3030,18 @@ def recreate_lvstore(snode, force=False):
             ### 4- set leadership to false
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+            ### 4-1 check for inflight IO. retry every 100ms up to 10 seconds
+            logger.info(f"Checking for inflight IO from node: {snode.secondary_node_id}")
+            for i in range(100):
+                is_inflight = sec_rpc_client.bdev_distrib_check_inflight_io(snode.jm_vuid)
+                if is_inflight:
+                    logger.info("Inflight IO found, retry in 100ms")
+                    time.sleep(0.1)
+                else:
+                    logger.info("Inflight IO NOT found, continuing")
+                    break
+            else:
+                logger.error(f"Timeout while checking for inflight IO after 10 seconds on node {snode.secondary_node_id}")
 
         if sec_node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN]:
             logger.info(f"Secondary node is not online, forcing journal replication on node: {snode.get_id()}")
