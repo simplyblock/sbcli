@@ -46,10 +46,10 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
     """
 
     logger.info(f'Connecting to {name}')
-    bdev_name = f"{name}n1"
-    if bdev_name in bdev_names:
-        logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev_name}")
-        return bdev_name
+    for bdev in bdev_names:
+        if bdev.startswith(name):
+            logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
+            return bdev
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
@@ -59,14 +59,21 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
             rpc_client.bdev_nvme_detach_controller(name)
             time.sleep(1)
 
+    bdev_name = None
     for ip in device.nvmf_ip.split(","):
-        rpc_client.bdev_nvme_attach_controller_tcp(
+        ret = rpc_client.bdev_nvme_attach_controller_tcp(
                 name, device.nvmf_nqn, ip, device.nvmf_port,
-                multipath=device.nvmf_multipath,
-        )
+                multipath=device.nvmf_multipath)
+        if not bdev_name and ret and type(ret) == list:
+            bdev_name = ret[0]
+
         if device.nvmf_multipath:
             rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
+    if not bdev_name:
+        msg = "Bdev name not returned from controller attach"
+        logger.error(msg)
+        raise RuntimeError(msg)
     bdev_found = False
     for i in range(5):
         ret = rpc_client.get_bdevs(bdev_name)
