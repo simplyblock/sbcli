@@ -44,7 +44,7 @@ def set_snapshot_health_check(snap, health_check_status):
     snap.write_to_db()
 
 
-lvol_del_start_time = 0
+lvol_del_start_time = 0.0
 def pre_lvol_delete_rebalance():
     global lvol_del_start_time
     if lvol_del_start_time == 0:
