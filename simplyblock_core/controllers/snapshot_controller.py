@@ -116,15 +116,28 @@ def add(lvol_id, snapshot_name):
         lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
 
         if host_node.status == StorageNode.STATUS_ONLINE:
-            primary_node = host_node
-            if sec_node.status == StorageNode.STATUS_ONLINE:
-                secondary_node = sec_node
-            elif sec_node.status == StorageNode.STATUS_DOWN:
-                msg = "Secondary node is in down status, can not create snapshot"
-                logger.error(msg)
-                return False, msg
+            if lvol_controller.is_node_leader(host_node, lvol.lvs_name):
+                primary_node = host_node
+                if sec_node.status == StorageNode.STATUS_DOWN:
+                    msg = "Secondary node is in down status, can not create snapshot"
+                    logger.error(msg)
+                    lvol.remove(db_controller.kv_store)
+                    return False, msg
+                elif sec_node.status == StorageNode.STATUS_ONLINE:
+                    secondary_node = sec_node
+
+            elif sec_node.status == StorageNode.STATUS_ONLINE:
+                if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
+                    primary_node = sec_node
+                    secondary_node = host_node
+                else:
+                    # both nodes are non leaders and online, set primary as leader
+                    primary_node = host_node
+                    secondary_node = sec_node
+
             else:
                 # sec node is not online, set primary as leader
+                primary_node = host_node
                 secondary_node = None
 
         elif sec_node.status == StorageNode.STATUS_ONLINE:
