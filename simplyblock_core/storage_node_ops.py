@@ -53,8 +53,12 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
-        logger.info(f"Controller found: {name}")
-        logger.info(ret)
+        for controller in ret[0]["ctrlrs"]:
+            controller_state = controller["state"]
+            logger.info(f"Controller found: {name}, status: {controller_state}")
+            if controller_state == "deleting":
+                raise RuntimeError(f"Controller: {name}, status is {controller_state}")
+
         if reattach:
             rpc_client.bdev_nvme_detach_controller(name)
             time.sleep(1)
@@ -694,12 +698,15 @@ def _connect_to_remote_devs(
             if not dev.alceml_bdev:
                 raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
 
-            dev.remote_bdev = connect_device(
-                    f"remote_{dev.alceml_bdev}", dev, rpc_client,
-                    bdev_names=node_bdev_names, reattach=reattach,
-            )
-            remote_devices.append(dev)
-
+            try:
+                dev.remote_bdev = connect_device(
+                        f"remote_{dev.alceml_bdev}", dev, rpc_client,
+                        bdev_names=node_bdev_names, reattach=reattach,
+                )
+                remote_devices.append(dev)
+            except Exception as e:
+                logger.error(f"Failed to connect to {dev.get_id()}: {e}")
+                continue
     return remote_devices
 
 
