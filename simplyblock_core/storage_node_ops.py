@@ -23,6 +23,7 @@ from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient, RPCException
@@ -45,24 +46,49 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
     """
 
     logger.info(f'Connecting to {name}')
-    bdev_name = f"{name}n1"
-    if bdev_name in bdev_names:
-        logger.debug("Already connected")
-        return bdev_name
+    for bdev in bdev_names:
+        if bdev.startswith(name):
+            logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
+            return bdev
 
-    if reattach and rpc_client.bdev_nvme_controller_list(name):
-        rpc_client.bdev_nvme_detach_controller(name)
-        time.sleep(1)
+    ret = rpc_client.bdev_nvme_controller_list(name)
+    if ret:
+        for controller in ret[0]["ctrlrs"]:
+            controller_state = controller["state"]
+            logger.info(f"Controller found: {name}, status: {controller_state}")
+            if controller_state == "deleting":
+                raise RuntimeError(f"Controller: {name}, status is {controller_state}")
 
+        if reattach:
+            rpc_client.bdev_nvme_detach_controller(name)
+            time.sleep(1)
+
+    bdev_name = None
     for ip in device.nvmf_ip.split(","):
-        rpc_client.bdev_nvme_attach_controller_tcp(
+        ret = rpc_client.bdev_nvme_attach_controller_tcp(
                 name, device.nvmf_nqn, ip, device.nvmf_port,
-                multipath=device.nvmf_multipath,
-        )
+                multipath=device.nvmf_multipath)
+        if not bdev_name and ret and type(ret) == list:
+            bdev_name = ret[0]
+
         if device.nvmf_multipath:
             rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
-    if not rpc_client.get_bdevs(bdev_name):
+    if not bdev_name:
+        msg = "Bdev name not returned from controller attach"
+        logger.error(msg)
+        raise RuntimeError(msg)
+    bdev_found = False
+    for i in range(5):
+        ret = rpc_client.get_bdevs(bdev_name)
+        if ret:
+            bdev_found = True
+            break
+        else:
+            time.sleep(1)
+
+    if not bdev_found:
+        logger.error("Bdev not found after 5 attempts")
         raise RuntimeError(f"Failed to connect to device: {device.get_id()}")
 
     return bdev_name
@@ -668,12 +694,15 @@ def _connect_to_remote_devs(
             if not dev.alceml_bdev:
                 raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
 
-            dev.remote_bdev = connect_device(
-                    f"remote_{dev.alceml_bdev}", dev, rpc_client,
-                    bdev_names=node_bdev_names, reattach=reattach,
-            )
-            remote_devices.append(dev)
-
+            try:
+                dev.remote_bdev = connect_device(
+                        f"remote_{dev.alceml_bdev}", dev, rpc_client,
+                        bdev_names=node_bdev_names, reattach=reattach,
+                )
+                remote_devices.append(dev)
+            except Exception as e:
+                logger.error(f"Failed to connect to {dev.get_id()}: {e}")
+                continue
     return remote_devices
 
 
@@ -2534,7 +2563,7 @@ def upgrade_automated_deployment_config():
         return False
 
 
-def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked):
+def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked, cores_percentage=0):
 
     # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
     total_cores = os.cpu_count()
@@ -2546,7 +2575,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     utils.load_kernel_module("uio_pci_generic")
 
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
-                                                       pci_allowed, pci_blocked)
+                                                       pci_allowed, pci_blocked, cores_percentage)
     if not nodes_config or not nodes_config.get("nodes"):
         return False
     utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
@@ -2827,6 +2856,19 @@ def set_node_status(node_id, status, reconnect_on_online=True):
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
+        distr_controller.send_cluster_map_to_node(snode)
+
+        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+            if node.get_id() == snode.get_id():
+                continue
+            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                try:
+                    node.remote_devices = _connect_to_remote_devs(node)
+                    node.write_to_db()
+                    distr_controller.send_cluster_map_to_node(node)
+                except RuntimeError:
+                    logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
+                    continue
 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
@@ -2915,9 +2957,8 @@ def recreate_lvstore_on_sec(secondary_node):
             tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
 
         ### 7- add lvols to subsystems
-        executor = ThreadPoolExecutor(max_workers=50)
         for lvol in lvol_list:
-            executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state="non_optimized")
+            add_lvol_thread(lvol, secondary_node, lvol_ana_state="non_optimized")
 
         primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
         primary_node.lvstore_status = "ready"
@@ -2951,8 +2992,12 @@ def recreate_lvstore(snode, force=False):
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
-        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
-            lvol_list.append(lv)
+        if lv.status == LVol.STATUS_IN_DELETION:
+            lv.deletion_status = ''
+            lv.write_to_db()
+        elif lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]:
+            if lv.deletion_status == '':
+                lvol_list.append(lv)
 
     prim_node_suspend = False
     if sec_node:
@@ -2991,6 +3036,18 @@ def recreate_lvstore(snode, force=False):
             ### 4- set leadership to false
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+            ### 4-1 check for inflight IO. retry every 100ms up to 10 seconds
+            logger.info(f"Checking for inflight IO from node: {snode.secondary_node_id}")
+            for i in range(100):
+                is_inflight = sec_rpc_client.bdev_distrib_check_inflight_io(snode.jm_vuid)
+                if is_inflight:
+                    logger.info("Inflight IO found, retry in 100ms")
+                    time.sleep(0.1)
+                else:
+                    logger.info("Inflight IO NOT found, continuing")
+                    break
+            else:
+                logger.error(f"Timeout while checking for inflight IO after 10 seconds on node {snode.secondary_node_id}")
 
         if sec_node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN]:
             logger.info(f"Secondary node is not online, forcing journal replication on node: {snode.get_id()}")
@@ -3054,9 +3111,8 @@ def recreate_lvstore(snode, force=False):
             # return False
 
     ### 9- add lvols to subsystems
-    executor = ThreadPoolExecutor(max_workers=50)
     for lvol in lvol_list:
-        executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+        add_lvol_thread(lvol, snode, lvol_ana_state)
 
     if sec_node:
         if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -3090,6 +3146,12 @@ def recreate_lvstore(snode, force=False):
             ret = recreate_lvstore_on_sec(snode)
             if not ret:
                 logger.error(f"Failed to recreate secondary on node: {snode.get_id()}")
+
+    # reset snapshot delete status
+    for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
+        if snap.status == SnapShot.STATUS_IN_DELETION:
+            snap.deletion_status = ''
+            snap.write_to_db()
 
     return True
 
@@ -3310,7 +3372,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 "bdev_name": raid_device,
                 "cluster_sz": cluster_sz,
                 "clear_method": "none",
-                "num_md_pages_per_cluster_ratio": 1,
+                "num_md_pages_per_cluster_ratio": 50,
             }
         }
     )

@@ -7,14 +7,3 @@ datasources:
   access: proxy
   uid: PBFA97CFB590B2093
   editable: true
-- name: GRAYLOG
-  type: elasticsearch
-  url: http://opensearch:9200
-  isDefault: false
-  access: proxy
-  uid: graylog_uid
-  editable: true
-  jsonData:
-    index: '*'
-    interval: Hourly
-    timeField: 'timestamp'
