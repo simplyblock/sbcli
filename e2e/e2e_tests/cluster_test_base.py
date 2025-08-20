@@ -238,6 +238,8 @@ class TestClusterBase:
                                                log_dir=self.docker_logs_path)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
                                                      log_dir=self.docker_logs_path)
+        
+        self.fetch_all_nodes_distrib_log()
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
@@ -492,13 +494,13 @@ class TestClusterBase:
         if isinstance(node_status, list):
             if node_details[0]["status"] in ["down"]:
                 self.logger.info("Waiting for node to come online!")
-                sleep_n_sec(60)
+                sleep_n_sec(120)
             assert node_details[0]["status"] in node_status, \
                 f"Node {node_uuid} is not in {node_status} state. Actual: {node_details[0]['status']}"
         else:
             if node_details[0]["status"] == "down":
                 self.logger.info("Waiting for node to come online!")
-                sleep_n_sec(60)
+                sleep_n_sec(120)
             assert node_details[0]["status"] == node_status, \
                 f"Node {node_uuid} is not in {node_status} state. Actual: {node_details[0]['status']}"
         

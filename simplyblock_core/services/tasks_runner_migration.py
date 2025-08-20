@@ -93,8 +93,9 @@ def task_runner(task):
         rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name, qos_high_priority)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
-            task.function_result = "Failed to start device migration task"
-            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "Failed to start device migration task, retry later"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.retry += 1
             task.write_to_db(db.kv_store)
             return True
         task.function_params['migration'] = {
@@ -132,9 +133,20 @@ while True:
                 if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE:
                     task = db.get_task_by_id(task.uuid)
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_active_node_mig_task(
-                            task.cluster_id, task.node_id,  task.function_params["distr_name"])
-                        if active_task:
+                        active_task = False
+                        suspended_task= False
+                        for t in db.get_job_tasks(task.cluster_id):
+                            if t.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
+                                                      JobSchedule.FN_NEW_DEV_MIG] and t.node_id == task.node_id:
+                                if "distr_name" in t.function_params and t.function_params[
+                                    "distr_name"] == task.function_params["distr_name"] and t.canceled is False:
+                                    if t.status == JobSchedule.STATUS_RUNNING:
+                                        active_task = True
+                                    elif t.status == JobSchedule.STATUS_SUSPENDED and t.function_name == JobSchedule.FN_NEW_DEV_MIG:
+                                        suspended_task = True
+                            if active_task and suspended_task:
+                                break
+                        if active_task or suspended_task:
                             logger.info("task found on same node, retry")
                             continue
                     elif task.status == JobSchedule.STATUS_RUNNING:
