@@ -141,7 +141,12 @@ def update_master_task(task):
             master_task.write_to_db(db.kv_store)
             tasks_events.task_updated(master_task)
 
-    status_map = {}
+    status_map = {
+        JobSchedule.STATUS_DONE: 0,
+        JobSchedule.STATUS_NEW: 0,
+        JobSchedule.STATUS_SUSPENDED: 0,
+        JobSchedule.STATUS_RUNNING: 0,
+    }
     if master_task:
         for sub_task_id in master_task.sub_tasks:
             sub_task = db.get_task_by_id(sub_task_id)
