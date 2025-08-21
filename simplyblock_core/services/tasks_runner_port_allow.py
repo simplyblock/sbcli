@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
-from simplyblock_core.controllers import tasks_events, tcp_ports_events, health_controller
+from simplyblock_core.controllers import tcp_ports_events, health_controller
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster

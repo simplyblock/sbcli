@@ -3,7 +3,6 @@ import time
 
 
 from simplyblock_core import db_controller, storage_node_ops, utils
-from simplyblock_core.controllers import tasks_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 

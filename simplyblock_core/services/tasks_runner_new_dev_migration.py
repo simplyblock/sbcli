@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import tasks_events, tasks_controller
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 
