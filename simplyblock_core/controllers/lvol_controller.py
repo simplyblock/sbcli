@@ -20,6 +20,10 @@ logger = lg.getLogger()
 
 
 def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
+    ret = rpc_client.get_bdevs(base_name)
+    if not ret:
+        logger.error(f"Failed to find LVol bdev {base_name}")
+        return False
     key_name = f'key_{name}'
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
     if not ret:
