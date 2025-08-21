@@ -5,9 +5,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.controllers import health_controller, lvol_events, tasks_controller, lvol_controller
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -26,23 +24,29 @@ def set_snapshot_health_check(snap, health_check_status):
     snap.write_to_db()
 
 
-def process_snap_delete_finish(snap):
+def process_snap_delete_finish(snap, leader_node):
     logger.info(f"Snapshot deleted successfully, id: {snap.get_id()}")
 
+    snode = db.get_storage_node_by_id(snap.lvol.node_id)
     # 3-1 async delete snap bdev from primary
-    primary_node = db.get_storage_node_by_id(snap.lvol.node_id)
+    if snode.get_id() == leader_node.get_id():
+        primary_node = snode
+        secondary_node = db.get_storage_node_by_id(snode.secondary_node_id)
+    else:
+        primary_node = db.get_storage_node_by_id(snode.secondary_node_id)
+        secondary_node = snode
+
     if primary_node.status == StorageNode.STATUS_ONLINE:
-        ret = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
+        ret = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
         if not ret:
             logger.error(f"Failed to delete snap from primary_node node: {primary_node.get_id()}")
 
     # 3-2 async delete lvol bdev from secondary
-    if snode.secondary_node_id:
-        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-            ret = sec_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
+    if secondary_node:
+        if secondary_node.status == StorageNode.STATUS_ONLINE:
+            ret = secondary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
             if not ret:
-                logger.error(f"Failed to delete lvol from sec node: {sec_node.get_id()}")
+                logger.error(f"Failed to delete lvol from sec node: {secondary_node.get_id()}")
                 # what to do here ?
 
     snap.remove(db.kv_store)
@@ -160,11 +164,12 @@ while True:
                         try:
                             ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(snap.snap_bdev)
                         except Exception as e:
+                            logger.error(e)
                             # timeout detected, check other node
                             break
 
                         if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-                            process_snap_delete_finish(snap)
+                            process_snap_delete_finish(snap, leader_node)
 
                         elif ret == 1:  # Async lvol deletion is in progress or queued
                             logger.info(f"Snap deletion in progress, id: {snap.get_id()}")
@@ -172,22 +177,22 @@ while True:
                         elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
                             logger.error(
-                                f"Async deletion is done, but leadership has changed (sync deletion is now blocked)")
+                                "Async deletion is done, but leadership has changed (sync deletion is now blocked)")
 
                         elif ret == 4:  # No async delete request exists for this Snap
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error(f"No async delete request exists for this snap")
+                            logger.error("No async delete request exists for this snap")
                             set_snap_offline(snap)
 
                         elif ret == -1:  # Operation not permitted
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error(f"Operation not permitted")
+                            logger.error("Operation not permitted")
                             set_snap_offline(snap)
 
                         elif ret == -2:  # No such file or directory
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
                             logger.error("No such file or directory")
-                            process_snap_delete_finish(snap)
+                            process_snap_delete_finish(snap, leader_node)
 
                         elif ret == -5:  # I/O error
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")

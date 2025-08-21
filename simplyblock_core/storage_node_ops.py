@@ -8,7 +8,6 @@ import threading
 
 import time
 import uuid
-from concurrent.futures.thread import ThreadPoolExecutor
 
 import docker
 
@@ -68,7 +67,7 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
         ret = rpc_client.bdev_nvme_attach_controller_tcp(
                 name, device.nvmf_nqn, ip, device.nvmf_port,
                 multipath=device.nvmf_multipath)
-        if not bdev_name and ret and type(ret) == list:
+        if not bdev_name and ret and isinstance(ret, list):
             bdev_name = ret[0]
 
         if device.nvmf_multipath:
