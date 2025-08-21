@@ -230,7 +230,6 @@ while True:
                         res = task_runner(task)
                         if res:
                             if task.status == JobSchedule.STATUS_DONE:
-                                tasks_events.task_updated(task)
                                 break
                         else:
                             if task.retry <= 3:

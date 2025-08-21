@@ -175,6 +175,5 @@ while True:
                         task.function_result = f"Port {port_number} allowed on node"
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db.kv_store)
-                        tasks_events.task_updated(task)
 
     time.sleep(5)

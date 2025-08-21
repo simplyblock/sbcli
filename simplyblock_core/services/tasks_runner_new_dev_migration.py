@@ -156,7 +156,5 @@ while True:
                         # get new task object because it could be changed from cancel task
                         task = db.get_task_by_id(task.uuid)
                         res = task_runner(task)
-                        if res:
-                            tasks_events.task_updated(task)
-                        else:
+                        if not res:
                             time.sleep(2)

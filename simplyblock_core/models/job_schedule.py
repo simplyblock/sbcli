@@ -18,9 +18,9 @@ class JobSchedule(BaseModel):
     FN_NEW_DEV_MIG = "new_device_migration"
     FN_NODE_ADD = "node_add"
     FN_PORT_ALLOW = "port_allow"
-    FN_BALANCING_AFTER_NODE_RESTART = "balancing_after_node_restart"
-    FN_BALANCING_AFTER_DEV_REMOVE = "balancing_after_dev_remove"
-    FN_BALANCING_AFTER_DEV_EXPANSION = "balancing_after_dev_expansion"
+    FN_BALANCING_AFTER_NODE_RESTART = "balancing_on_restart"
+    FN_BALANCING_AFTER_DEV_REMOVE = "balancing_on_dev_rem"
+    FN_BALANCING_AFTER_DEV_EXPANSION = "balancing_on_dev_add"
 
     canceled: bool = False
     cluster_id: str = ""

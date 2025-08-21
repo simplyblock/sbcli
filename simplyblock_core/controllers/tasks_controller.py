@@ -160,9 +160,17 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             except Exception as e:
                 logger.error(e)
 
+        if task.sub_tasks:
+            target_id = f"Master task for {len(task.sub_tasks)} subtasks"
+
+        else:
+            target_id = f"NodeID:{task.node_id}"
+            if task.device_id:
+                target_id += f"\nDeviceID:{task.device_id}"
+
         data.append({
             "Task ID": task.uuid,
-            "Node ID / Device ID": f"{task.node_id}\n{task.device_id}".strip(),
+            "Target ID": target_id,
             "Function": task.function_name,
             "Retry": retry,
             "Status": task.status,

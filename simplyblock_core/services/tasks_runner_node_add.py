@@ -55,6 +55,5 @@ while True:
                         task.function_result = str(res)
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db.kv_store)
-                        tasks_events.task_updated(task)
 
     time.sleep(5)
