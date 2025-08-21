@@ -128,12 +128,12 @@ def update_master_task(task):
     master_task = None
     tasks = db.get_job_tasks(cl.get_id(), reverse=False)
     for t in tasks:
-        if task.get_id() in t.sub_tasks:
+        if task.uuid in t.sub_tasks:
             master_task = t
             break
 
     def _set_master_task_status(master_task, status):
-        master_task = db.get_task_by_id(master_task.get_id())
+        master_task = db.get_task_by_id(master_task.uuid)
         if master_task.status != status:
             master_task.status = status
             master_task.function_result = status

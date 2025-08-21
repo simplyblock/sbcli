@@ -162,7 +162,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
 
         data.append({
             "Task ID": task.uuid,
-            "Node ID / Device ID": f"{task.node_id}\n{task.device_id}",
+            "Node ID / Device ID": f"{task.node_id}\n{task.device_id}".strip(),
             "Function": task.function_name,
             "Retry": retry,
             "Status": task.status,
