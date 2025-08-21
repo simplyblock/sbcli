@@ -186,6 +186,10 @@ def cancel_task(task_id):
         logger.error("Task not found: %s", task_id)
         return False
 
+    if task.sub_tasks:
+        logger.error("Can not cancel master task")
+        return False
+
     if task.device_id:
         device_controller.device_set_retries_exhausted(task.device_id, True)
 
