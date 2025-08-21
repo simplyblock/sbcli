@@ -8,7 +8,6 @@ import threading
 
 import time
 import uuid
-from concurrent.futures.thread import ThreadPoolExecutor
 
 import docker
 

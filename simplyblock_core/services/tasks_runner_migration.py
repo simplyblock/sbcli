@@ -123,6 +123,50 @@ def task_runner(task):
 db = db_controller.DBController()
 
 logger.info("Starting Tasks runner...")
+
+
+def update_master_task(task):
+    master_task = None
+    tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+    for t in tasks:
+        if task.uuid in t.sub_tasks:
+            master_task = t
+            break
+
+    def _set_master_task_status(master_task, status):
+        master_task = db.get_task_by_id(master_task.uuid)
+        if master_task.status != status:
+            logger.info(f"_set_master_task_status: {status}")
+            master_task.status = status
+            master_task.function_result = status
+            master_task.write_to_db(db.kv_store)
+            tasks_events.task_updated(master_task)
+
+    status_map = {
+        JobSchedule.STATUS_DONE: 0,
+        JobSchedule.STATUS_NEW: 0,
+        JobSchedule.STATUS_SUSPENDED: 0,
+        JobSchedule.STATUS_RUNNING: 0,
+    }
+    if master_task:
+        for sub_task_id in master_task.sub_tasks:
+            sub_task = db.get_task_by_id(sub_task_id)
+            status_map[sub_task.status] = status_map.get(sub_task.status, 0) + 1
+
+        logger.info(f"master_task.sub_tasks: {len(master_task.sub_tasks)}")
+        logger.info(f"status_map: {status_map}")
+
+        if status_map[JobSchedule.STATUS_DONE] == len(master_task.sub_tasks):  # all tasks done
+            _set_master_task_status(master_task, JobSchedule.STATUS_DONE)
+        elif status_map[JobSchedule.STATUS_NEW] == len(master_task.sub_tasks):  # all tasks new
+            _set_master_task_status(master_task, JobSchedule.STATUS_NEW)
+        elif status_map[JobSchedule.STATUS_SUSPENDED] == len(master_task.sub_tasks):  # all tasks suspended
+            _set_master_task_status(master_task, JobSchedule.STATUS_SUSPENDED)
+        else:  # set running
+            _set_master_task_status(master_task, JobSchedule.STATUS_RUNNING)
+        return True
+
+
 while True:
     clusters = db.get_clusters()
     if not clusters:
@@ -154,9 +198,8 @@ while True:
                         pass
 
                     res = task_runner(task)
+                    update_master_task(task)
                     if res:
-                        tasks_events.task_updated(task)
-
                         node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
                         if not node_task:
                             logger.info("no task found on same node, resuming compression")

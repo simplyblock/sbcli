@@ -2,7 +2,7 @@
 import time
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
-from simplyblock_core.controllers import device_controller, tasks_events, health_controller, tasks_controller
+from simplyblock_core.controllers import device_controller, health_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -230,7 +230,6 @@ while True:
                         res = task_runner(task)
                         if res:
                             if task.status == JobSchedule.STATUS_DONE:
-                                tasks_events.task_updated(task)
                                 break
                         else:
                             if task.retry <= 3:

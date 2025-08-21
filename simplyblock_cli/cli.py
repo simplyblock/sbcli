@@ -324,6 +324,7 @@ class CLIWrapper(CLIWrapperBase):
             self.init_cluster__graceful_startup(subparser)
         self.init_cluster__list_tasks(subparser)
         self.init_cluster__cancel_task(subparser)
+        self.init_cluster__get_subtasks(subparser)
         self.init_cluster__delete(subparser)
         if self.developer_mode:
             self.init_cluster__set(subparser)
@@ -482,6 +483,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__cancel_task(self, subparser):
         subcommand = self.add_sub_command(subparser, 'cancel-task', 'Cancels task by task id')
+        subcommand.add_argument('task_id', help='Task id', type=str)
+
+    def init_cluster__get_subtasks(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-subtasks', 'Get rebalancing subtasks list')
         subcommand.add_argument('task_id', help='Task id', type=str)
 
     def init_cluster__delete(self, subparser):
@@ -955,6 +960,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__list_tasks(sub_command, args)
                 elif sub_command in ['cancel-task']:
                     ret = self.cluster__cancel_task(sub_command, args)
+                elif sub_command in ['get-subtasks']:
+                    ret = self.cluster__get_subtasks(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.cluster__delete(sub_command, args)
                 elif sub_command in ['set']:

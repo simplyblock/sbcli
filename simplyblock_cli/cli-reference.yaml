@@ -1171,6 +1171,13 @@ commands:
             help: "Task id"
             dest: task_id
             type: str
+      - name: get-subtasks
+        help: "Get rebalancing subtasks list"
+        arguments:
+          - name: "task_id"
+            help: "Task id"
+            dest: task_id
+            type: str
       - name: delete
         help: "Deletes a cluster"
         usage: This is only possible, if no storage nodes and pools are attached to the cluster
