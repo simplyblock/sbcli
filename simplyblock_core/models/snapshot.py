@@ -5,25 +5,26 @@ from simplyblock_core.models.lvol_model import LVol
 
 
 class SnapShot(BaseModel):
-    attributes = {
-        "uuid": {"type": str, 'default': ""},
-        "snap_name": {"type": str, 'default': ""},
-        "base_bdev": {"type": str, 'default': ""},
-        "snap_bdev": {"type": str, 'default': ""},
-        "lvol": {"type": LVol, 'default': None},
-        "created_at": {"type": int, 'default': 0},
-        "snap_ref_id": {"type": str, 'default': ""},
-        "ref_count": {"type": int, 'default': 0},
-        "mem_diff": {"type": dict, 'default': {}},
-        "health_check": {"type": bool, 'default': True},
-        "cluster_id": {"type": str, 'default': ""},
-        "pool_uuid": {"type": str, 'default': ""},
-    }
 
-    def __init__(self, data=None):
-        super(SnapShot, self).__init__()
-        self.set_attrs(self.attributes, data)
-        self.object_type = "object"
+    STATUS_ONLINE = 'online'
+    STATUS_OFFLINE = 'offline'
+    STATUS_IN_DELETION = 'in_deletion'
 
-    def get_id(self):
-        return self.uuid
+    base_bdev: str = ""
+    blobid: int = 0
+    cluster_id: str = ""
+    created_at: int = 0
+    health_check: bool = True
+    lvol: LVol = None # type: ignore[assignment]
+    mem_diff: dict = {}
+    pool_uuid: str = ""
+    ref_count: int = 0
+    size: int = 0
+    used_size: int = 0
+    snap_bdev: str = ""
+    snap_name: str = ""
+    snap_ref_id: str = ""
+    snap_uuid: str = ""
+    vuid: int = 0
+    deletion_status: str = ""
+    status: str = ""

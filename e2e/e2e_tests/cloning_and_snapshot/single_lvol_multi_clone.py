@@ -1,6 +1,4 @@
 import time
-import os
-import random
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
@@ -72,13 +70,14 @@ class TestManyClonesFromSameSnapshot(TestClusterBase):
 
     def connect_and_mount_lvol(self, lvol_name, lvol_id):
         """Connects and mounts a logical volume"""
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
         # Connect LVOL
         self.logger.info(f"Connecting logical volume: {lvol_id}")
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
         start_time = time.time()
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
         end_time = time.time()
 
         time_taken = end_time - start_time

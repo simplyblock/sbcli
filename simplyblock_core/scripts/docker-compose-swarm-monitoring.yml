@@ -8,7 +8,9 @@ services:
       - "mongodb_data:/data/db"
     deploy:
       placement:
-        constraints: [node.role == manager]
+        constraints:
+          - node.role == manager
+          - node.labels.app == graylog
     networks:
       - monitoring-net
 
@@ -25,7 +27,9 @@ services:
       - "os_data:/usr/share/opensearch/data"
     deploy:
       placement:
-        constraints: [node.role == manager]
+        constraints:
+          - node.role == manager
+          - node.labels.app == graylog
     networks:
       - monitoring-net
 
@@ -48,6 +52,7 @@ services:
       GRAYLOG_ELASTICSEARCH_MAX_TIME_PER_INDEX: "1d"
       GRAYLOG_RING_SIZE: "4096"
       GRAYLOG_INPUTBUFFER_RING_SIZE: "8192"
+      GRAYLOG_VERSIONCHECKS: "false"
     ports:
     - "5044:5044/tcp"   # Beats
     - "5140:5140/udp"   # Syslog
@@ -63,29 +68,9 @@ services:
       - "graylog_journal:/usr/share/graylog/data/journal"
     deploy:
       placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
-
-  promagent:
-    image: simplyblock/promagent
-    environment:
-      ClusterID: "${CLUSTER_ID}"
-      ClusterIP: "HAProxy"
-      ClusterSecret: "${CLUSTER_SECRET}"
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
-    networks:
-      - monitoring-net
-
-  pushgateway:
-    image: prom/pushgateway
-    deploy:
-      mode: global
-      placement:
-        constraints: [node.role == manager]
+        constraints:
+          - node.role == manager
+          - node.labels.app == graylog
     networks:
       - monitoring-net
 
@@ -206,8 +191,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: "${CLUSTER_SECRET}"
       GF_ALERTING_ENABLED: "true"
       GF_PATHS_PROVISIONING: "/etc/grafana/provisioning"
-      GF_INSTALL_PLUGINS: "grafana-opensearch-datasource"
-      GF_SERVER_ROOT_URL: "http://localhost/grafana/"
+      GF_SERVER_ROOT_URL: "${GRAFANA_ENDPOINT}"
     volumes:
       - ./datasource.yml:/etc/grafana/provisioning/datasources/datasource.yaml
       - grafana_data:/var/lib/grafana

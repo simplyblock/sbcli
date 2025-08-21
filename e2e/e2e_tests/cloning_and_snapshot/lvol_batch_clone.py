@@ -1,4 +1,3 @@
-import time
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
@@ -50,10 +49,9 @@ class TestSnapshotBatchCloneLVOLs(TestClusterBase):
 
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
-
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         disk_use = None
@@ -132,7 +130,6 @@ class TestSnapshotBatchCloneLVOLs(TestClusterBase):
 
     def connect_and_test_clone(self, clone_name):
         """Connects the clone, mounts it, lists files, runs FIO, and then disconnects it."""
-        connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
         clone_id = self.sbcli_utils.get_lvol_id(lvol_name=clone_name)
         self.clone_details[clone_name] = {
             "id": clone_id,
@@ -141,7 +138,9 @@ class TestSnapshotBatchCloneLVOLs(TestClusterBase):
         }
 
         initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
 
         final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
         clone_device = None
@@ -157,7 +156,7 @@ class TestSnapshotBatchCloneLVOLs(TestClusterBase):
             self.logger.info(f"Run command (before mounting dev formatted in xfs: {cmd}")
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=cmd)
             self.logger.info(f"Mounting clone device: {clone_device} at {mount_point}")
-            cmd = f"sudo mount {clone_device} {clone_mount_point} -o nouuid"
+            cmd = f"sudo mount {clone_device} {mount_point} -o nouuid"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=cmd)
         else:
             self.logger.info(f"Mounting clone {clone_name} at {mount_point}")

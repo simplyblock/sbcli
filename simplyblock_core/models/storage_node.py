@@ -1,142 +1,280 @@
 # coding=utf-8
 
-from datetime import datetime
 from typing import List
+from uuid import uuid4
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core import utils
+from simplyblock_core.models.base_model import BaseNodeObject
+from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.rpc_client import RPCClient, RPCException
+
+logger = utils.get_logger(__name__)
 
 
-class StorageNode(BaseModel):
+class StorageNode(BaseNodeObject):
 
-    STATUS_ONLINE = 'online'
-    STATUS_OFFLINE = 'offline'
-    STATUS_SUSPENDED = 'suspended'
-    STATUS_IN_SHUTDOWN = 'in_shutdown'
-    STATUS_REMOVED = 'removed'
-    STATUS_RESTARTING = 'in_restart'
+    alceml_cpu_cores: List[int] = []
+    alceml_cpu_index: int = 0
+    alceml_worker_cpu_cores: List[int] = []
+    alceml_worker_cpu_index: int = 0
+    api_endpoint: str = ""
+    app_thread_mask: str = ""
+    baseboard_sn: str = ""
+    cloud_instance_id: str = ""
+    cloud_instance_public_ip: str = ""
+    cloud_instance_type: str = ""
+    cloud_name: str = ""
+    cluster_id: str = ""
+    cpu: int = 0
+    cpu_hz: int = 0
+    ctrl_secret: str = ""
+    data_nics: List[IFace] = []
+    distrib_cpu_cores: List[int] = []
+    distrib_cpu_index: int = 0
+    distrib_cpu_mask: str = ""
+    enable_ha_jm: bool = False
+    ha_jm_count: int = 3
+    enable_test_device: bool = False
+    health_check: bool = True
+    host_nqn: str = ""
+    host_secret: str = ""
+    hostname: str = ""
+    hugepages: int = 0
+    ib_devices: List[IFace] = []
+    id_device_by_nqn: bool = False
+    iobuf_large_bufsize: int = 0
+    iobuf_large_pool_count: int = 0
+    iobuf_small_bufsize: int = 0
+    iobuf_small_pool_count: int = 0
+    is_secondary_node: bool = False
+    jc_singleton_mask: str = ""
+    jm_cpu_mask: str = ""
+    jm_device: JMDevice = None # type: ignore[assignment]
+    jm_percent: int = 3
+    jm_vuid: int = 0
+    lvols: int = 0
+    lvstore: str = ""
+    lvstore_stack: List[dict] = []
+    lvstore_stack_secondary_1: List[dict] = []
+    lvstore_stack_secondary_2: List[dict] = []
+    lvol_subsys_port: int = 9090
+    max_lvol: int = 0
+    max_prov: int = 0
+    max_snap: int = 0
+    memory: int = 0
+    mgmt_ip: str = ""
+    namespace: str = ""
+    node_lvs: str = "lvs"
+    num_partitions_per_dev: int = 1
+    number_of_devices: int = 0
+    number_of_distribs: int = 4
+    number_of_alceml_devices: int = 0
+    nvme_devices: List[NVMeDevice] = []
+    online_since: str = ""
+    partitions_count: int = 0  # Unused
+    poller_cpu_cores: List[int] = []
+    ssd_pcie: List = []
+    pollers_mask: str = ""
+    primary_ip: str = ""
+    raid: str = ""
+    remote_devices: List[NVMeDevice] = []
+    remote_jm_devices: List[JMDevice] = []
+    rpc_password: str = ""
+    rpc_port: int = -1
+    rpc_username: str = ""
+    secondary_node_id: str = ""
+    sequential_number: int = 0  # Unused
+    jm_ids: List[str] = []
+    spdk_cpu_mask: str = ""
+    l_cores: str = ""
+    spdk_debug: bool = False
+    spdk_image: str = ""
+    spdk_mem: int = 0
+    minimum_sys_memory: int = 0
+    partition_size: int = 0
+    subsystem: str = ""
+    system_uuid: str = ""
+    lvstore_status: str = ""
+    nvmf_port: int = 4420
+    physical_label: int = 0
+    hublvol: HubLVol = None  # type: ignore[assignment]
 
-    STATUS_IN_CREATION = 'in_creation'
-    STATUS_UNREACHABLE = 'unreachable'
-    STATUS_SCHEDULABLE = 'schedulable'
+    def rpc_client(self, **kwargs):
+        """Return rpc client to this node
+        """
+        return RPCClient(
+            self.mgmt_ip, self.rpc_port,
+            self.rpc_username, self.rpc_password, **kwargs)
 
-    STATUS_CODE_MAP = {
-        STATUS_ONLINE: 0,
-        STATUS_OFFLINE: 1,
-        STATUS_SUSPENDED: 2,
-        STATUS_REMOVED: 3,
+    def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port):
+        rpc_client = self.rpc_client()
 
-        STATUS_IN_CREATION: 10,
-        STATUS_IN_SHUTDOWN: 11,
-        STATUS_RESTARTING: 12,
+        try:
+            subsys =  rpc_client.subsystem_list(nqn)
+            if not subsys:
+                if not rpc_client.subsystem_create(
+                        nqn=nqn,
+                        serial_number='sbcli-cn',
+                        model_number=model_number,
+                ):
+                    logger.error("fFailed to create subsystem for {nqn}")
+                    raise RPCException(f'Failed to create subsystem for {nqn}')
 
-        STATUS_UNREACHABLE: 20,
+            for ip in (iface.ip4_address for iface in self.data_nics):
+                rpc_client.listeners_create(
+                        nqn=nqn,
+                        trtype='TCP',
+                        traddr=ip,
+                        trsvcid=port,
+                )
 
-        STATUS_SCHEDULABLE: 30,
-    }
+            rpc_client.nvmf_subsystem_add_ns(
+                    nqn=nqn,
+                    dev_name=bdev_name,
+                    uuid=uuid,
+                    nguid=nguid,
+            )
+                # logger.error(f'Failed to add namespace to subsytem {nqn}')
+                # raise RPCException(f'Failed to add namespace to subsytem {nqn}')
+        except RPCException as e:
+            logger.exception(e)
+            # if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
+            #     rpc_client.subsystem_delete(self.hublvol.nqn)
+            #
+            # raise
 
-    attributes = {
-        "uuid": {"type": str, 'default': ""},
-        "baseboard_sn": {"type": str, 'default': ""},
-        "system_uuid": {"type": str, 'default': ""},
-        "hostname": {"type": str, 'default': ""},
-        "host_nqn": {"type": str, 'default': ""},
-        "subsystem": {"type": str, 'default': ""},
-        "nvme_devices": {"type": List[NVMeDevice], 'default': []},
-        "sequential_number": {"type": int, 'default': 0},
-        "partitions_count": {"type": int, 'default': 0},
-        "ib_devices": {"type": List[IFace], 'default': []},
-        "status": {"type": str, 'default': "in_creation"},
-        "updated_at": {"type": str, 'default': str(datetime.now())},
-        "create_dt": {"type": str, 'default': str(datetime.now())},
-        "remove_dt": {"type": str, 'default': str(datetime.now())},
-        "mgmt_ip": {"type": str, 'default': ""},
-        "primary_ip": {"type": str, 'default': ""},
-        "rpc_port": {"type": int, 'default': -1},
-        "rpc_username": {"type": str, 'default': ""},
-        "rpc_password": {"type": str, 'default': ""},
-        "data_nics": {"type": List[IFace], 'default': []},
-        "lvols": {"type": List[str], 'default': []},
-        "node_lvs": {"type": str, 'default': "lvs"},
-        "services": {"type": List[str], 'default': []},
-        "cluster_id": {"type": str, 'default': ""},
-        "api_endpoint": {"type": str, 'default': ""},
-        "remote_devices": {"type": List[NVMeDevice], 'default': []},
-        "host_secret": {"type": str, "default": ""},
-        "ctrl_secret": {"type": str, "default": ""},
-        "max_lvol": {"type": int, "default": 0},
-        "max_snap": {"type": int, "default": 0},
-        "max_prov": {"type": int, "default": 0},
-        "number_of_devices": {"type": int, "default": 0},
-        "cpu": {"type": int, "default": 0},
-        "cpu_hz": {"type": int, "default": 0},
-        "memory": {"type": int, "default": 0},
-        "hugepages": {"type": int, "default": 0},
-        "health_check": {"type": bool, "default": True},
-        "enable_test_device": {"type": bool, "default": False},
-        "number_of_distribs": {"type": int, "default": 4},
-        "lvstore": {"type": str, 'default': ""},
-        "raid": {"type": str, 'default': ""},
-        "lvstore_stack": {"type": List[dict], 'default': []},
-        "jm_vuid": {"type": int, "default": 0},
+    def create_hublvol(self):
+        """Create a hublvol for this node's lvstore
+        """
+        logger.info(f'Creating hublvol on {self.get_id()}')
+        rpc_client = self.rpc_client()
 
-        # spdk params
-        "spdk_cpu_mask": {"type": str, "default": ""},
-        "app_thread_mask": {"type": str, "default": ""},
-        "pollers_mask": {"type": str, "default": ""},
-        "poller_cpu_cores": {"type": List[int], "default": []},
-        "jm_cpu_mask": {"type": str, "default": ""},
-        "alceml_cpu_cores": {"type": List[int], "default": []},
-        "alceml_worker_cpu_cores": {"type": List[int], "default": []},
-        "distrib_cpu_cores": {"type": List[int], "default": []},
-        "alceml_cpu_index": {"type": int, "default": 0},
-        "alceml_worker_cpu_index": {"type": int, "default": 0},
-        "distrib_cpu_index": {"type": int, "default": 0},
-        "jc_singleton_mask": {"type": str, "default": ""},
+        hublvol_uuid = None
+        try:
+            hublvol_uuid = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
+            if not hublvol_uuid:
+                raise RPCException('Failed to create hublvol')
+            self.hublvol = HubLVol({
+                'uuid': hublvol_uuid,
+                'nqn': f'{self.host_nqn}:lvol:{hublvol_uuid}',
+                'bdev_name': f'{self.lvstore}/hublvol',
+                'model_number': str(uuid4()),
+                'nguid': utils.generate_hex_string(16),
+                'nvmf_port': utils.next_free_hublvol_port(self.cluster_id),
+            })
 
+            self.expose_bdev(
+                    nqn=self.hublvol.nqn,
+                    bdev_name=self.hublvol.bdev_name,
+                    model_number=self.hublvol.model_number,
+                    uuid=self.hublvol.uuid,
+                    nguid=self.hublvol.nguid,
+                    port=self.hublvol.nvmf_port,
+            )
+        except RPCException:
+            if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
+                rpc_client.bdev_lvol_delete_hublvol(self.hublvol.nqn)
 
-        "distrib_cpu_mask": {"type": str, "default": ""},
+            if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
+                rpc_client.subsystem_delete(self.hublvol.nqn)
+                self.hublvol = None  # type: ignore[assignment]
 
-        "spdk_mem": {"type": int, "default": 0},
-        "spdk_image": {"type": str, "default": ""},
-        "spdk_debug": {"type": bool, "default": False},
+            raise
 
-        "cloud_instance_id": {"type": str, "default": ""},
-        "cloud_instance_type": {"type": str, "default": ""},
-        "cloud_instance_public_ip": {"type": str, "default": ""},
+        self.write_to_db()
+        return self.hublvol
 
-        # IO buffer options
-        "iobuf_small_pool_count": {"type": int, "default": 0},
-        "iobuf_large_pool_count": {"type": int, "default": 0},
-        "iobuf_small_bufsize": {"type": int, "default": 0},
-        "iobuf_large_bufsize": {"type": int, "default": 0},
+    def recreate_hublvol(self):
+        """reCreate a hublvol for this node's lvstore
+        """
 
-        "num_partitions_per_dev": {"type": int, "default": 1},
-        "jm_percent": {"type": int, "default": 3},
-        "jm_device": {"type": JMDevice, "default": None},
-        "remote_jm_devices": {"type": List[JMDevice], 'default': []},
-        "enable_ha_jm": {"type": bool, "default": False},
+        if self.hublvol and self.hublvol.uuid:
+            logger.info(f'Recreating hublvol on {self.get_id()}')
+            rpc_client = self.rpc_client()
 
-        "namespace": {"type": str, "default": ""},
+            try:
+                if not rpc_client.get_bdevs(self.hublvol.bdev_name):
+                    ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
+                    if not ret:
+                        logger.warning(f'Failed to recreate hublvol on {self.get_id()}')
+                else:
+                    logger.info(f'Hublvol already exists {self.hublvol.bdev_name}')
 
-    }
-
-    def __init__(self, data=None):
-        super(StorageNode, self).__init__()
-        self.set_attrs(self.attributes, data)
-        self.object_type = "object"
-
-    def get_id(self):
-        return self.uuid
-
-    def get_status_code(self):
-        if self.status in self.STATUS_CODE_MAP:
-            return self.STATUS_CODE_MAP[self.status]
+                self.expose_bdev(
+                        nqn=self.hublvol.nqn,
+                        bdev_name=self.hublvol.bdev_name,
+                        model_number=self.hublvol.model_number,
+                        uuid=self.hublvol.uuid,
+                        nguid=self.hublvol.nguid,
+                        port=self.hublvol.nvmf_port
+                )
+                return True
+            except RPCException:
+                pass
         else:
-            return -1
+            try:
+                self.create_hublvol()
+                return True
+            except RPCException as e:
+                logger.error("Error establishing hublvol: %s", e.message)
+                # return False
 
-    def get_clean_dict(self):
-        data = super(StorageNode, self).get_clean_dict()
-        data['status_code'] = self.get_status_code()
-        return data
+        return self.hublvol
+
+    def connect_to_hublvol(self, primary_node):
+        """Connect to a primary node's hublvol
+        """
+        logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}')
+
+        if primary_node.hublvol is None:
+            raise ValueError(f"HubLVol of primary node {primary_node.get_id()} is not present")
+
+        rpc_client = self.rpc_client()
+
+        remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
+
+        if not rpc_client.get_bdevs(remote_bdev):
+            ip_lst = []
+            for ip in (iface.ip4_address for iface in primary_node.data_nics):
+                ip_lst.append(ip)
+            multipath = bool(len(ip_lst) > 1)
+            for ip in ip_lst:
+                ret = rpc_client.bdev_nvme_attach_controller_tcp(
+                        primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
+                        ip, primary_node.hublvol.nvmf_port, multipath=multipath)
+                if not ret and not multipath:
+                    logger.warning(f'Failed to connect to hublvol on {ip}')
+
+        if not rpc_client.bdev_lvol_set_lvs_opts(
+                primary_node.lvstore,
+                groupid=primary_node.jm_vuid,
+                subsystem_port=primary_node.lvol_subsys_port,
+                secondary=True,
+        ):
+            pass
+            # raise RPCException('Failed to set secondary lvstore options')
+
+        if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
+            pass
+            # raise RPCException('Failed to connect secondary lvstore to primary')
+
+    def create_alceml(self, name, nvme_bdev, uuid, **kwargs):
+        logger.info(f"Adding {name}")
+        alceml_cpu_mask = ""
+        alceml_worker_cpu_mask = ""
+        if self.alceml_cpu_cores:
+            alceml_cpu_mask = utils.decimal_to_hex_power_of_2(self.alceml_cpu_cores[self.alceml_cpu_index])
+            self.alceml_cpu_index = (self.alceml_cpu_index + 1) % len(self.alceml_cpu_cores)
+        if self.alceml_worker_cpu_cores:
+            alceml_worker_cpu_mask = utils.decimal_to_hex_power_of_2(
+                self.alceml_worker_cpu_cores[self.alceml_worker_cpu_index])
+            self.alceml_worker_cpu_index = (self.alceml_worker_cpu_index + 1) % len(self.alceml_worker_cpu_cores)
+
+        return self.rpc_client().bdev_alceml_create(
+            name, nvme_bdev, uuid,
+            alceml_cpu_mask=alceml_cpu_mask,
+            alceml_worker_cpu_mask=alceml_worker_cpu_mask,
+            **kwargs,
+        )

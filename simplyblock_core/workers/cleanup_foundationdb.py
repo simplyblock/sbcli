@@ -1,22 +1,12 @@
 # coding=utf-8
 import time
 import os
-import logging
-import sys
 
-from simplyblock_core import cluster_ops, constants
-from simplyblock_core.kv_store import KVStore, DBController
+from simplyblock_core import constants, utils
+from simplyblock_core.db_controller import DBController
 
-from graypy import GELFTCPHandler
 
-# Configure logging
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-logger = logging.getLogger()
-logger.addHandler(gelf_handler)
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = utils.get_logger(__name__)
 
 logger.info("Starting FDB cleanup script...")
 
@@ -31,8 +21,7 @@ def PoolStatObject(lvols, st_date, end_date):
         start = index + str(st_date)
         end = index + str(end_date)
         try:
-            fdb = KVStore()
-            fdb.db.clear_range(start.encode('utf-8'), end.encode('utf-8'))
+            db_controller.kv_store.clear_range(start.encode('utf-8'), end.encode('utf-8'))  # type: ignore[union-attr]
             logger.info(f"Cleared PoolStatObject data from {start} to {end}")
         except Exception as e:
             logger.error(f"Failed to clear PoolStatObject for {lvol.pool_uuid}: {e}")
@@ -43,8 +32,7 @@ def LVolStatObject(lvols, st_date, end_date):
         start = index + str(st_date)
         end = index + str(end_date)
         try:
-            fdb = KVStore()
-            fdb.db.clear_range(start.encode('utf-8'), end.encode('utf-8'))
+            db_controller.kv_store.clear_range(start.encode('utf-8'), end.encode('utf-8'))  # type: ignore[union-attr]
             logger.info(f"Cleared LVolStatObject data from {start} to {end}")
         except Exception as e:
             logger.error(f"Failed to clear LVolStatObject for {lvol.uuid}: {e}")
@@ -60,8 +48,7 @@ def DeviceStatObject(clusters, st_date, end_date):
                 start = index + str(st_date)
                 end = index + str(end_date)
                 try:
-                    fdb = KVStore()
-                    fdb.db.clear_range(start.encode('utf-8'), end.encode('utf-8'))
+                    db_controller.kv_store.clear_range(start.encode('utf-8'), end.encode('utf-8'))  # type: ignore[union-attr]
                     logger.info(f"Cleared DeviceStatObject data from {start} to {end}")
                 except Exception as e:
                     logger.error(f"Failed to clear DeviceStatObject for {device_id}: {e}")
@@ -76,8 +63,7 @@ def NodeStatObject(clusters, st_date, end_date):
             start = index + str(st_date)
             end = index + str(end_date)
             try:
-                fdb = KVStore()
-                fdb.db.clear_range(start.encode('utf-8'), end.encode('utf-8'))
+                db_controller.kv_store.clear_range(start.encode('utf-8'), end.encode('utf-8'))  # type: ignore[union-attr]
                 logger.info(f"Cleared NodeStatObject data from {start} to {end}")
             except Exception as e:
                 logger.error(f"Failed to clear NodeStatObject for {node_id}: {e}")
@@ -89,8 +75,7 @@ def ClusterStatObject(clusters, st_date, end_date):
         start = index + str(st_date)
         end = index + str(end_date)
         try:
-            fdb = KVStore()
-            fdb.db.clear_range(start.encode('utf-8'), end.encode('utf-8'))
+            db_controller.kv_store.clear_range(start.encode('utf-8'), end.encode('utf-8'))  # type: ignore[union-attr]
             logger.info(f"Cleared ClusterStatObject data from {start} to {end}")
         except Exception as e:
             logger.error(f"Failed to clear ClusterStatObject for {cluster_id}: {e}")
@@ -111,6 +96,9 @@ def convert_to_seconds(time_string):
 while True:
     try:
         clusters = db_controller.get_clusters()
+        if db_controller.kv_store is None:
+            raise RuntimeError('Database not initialized')
+
         lvols = db_controller.get_lvols()  # pass
         logger.info("Clusters and logical volumes successfully retrieved for cleanup.")
         

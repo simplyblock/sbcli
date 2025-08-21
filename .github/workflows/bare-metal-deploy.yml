@@ -1,0 +1,239 @@
+name: Deploy cluster
+
+on:
+  workflow_call:
+    inputs:
+      runs_on:  # Has to be an input
+        description: Platform to execute on
+        type: string
+        default: ubuntu-latest
+      cluster:
+        required: true
+        type: string
+      docker_image:
+        required: true
+        type: string
+      sbcli_source:
+        required: true
+        type: string
+      ndcs:
+        required: false
+        type: string
+        default: 1
+      npcs:
+        required: false
+        type: string
+        default: 1
+      bs:
+        required: false
+        type: string
+        default: 4096
+      chunk_bs:
+        required: false
+        type: string
+        default: 4096
+      nr_hugepages:
+        required: false
+        type: string
+        default: 2048
+      k8s_snode:
+        description: "Run snode on k8s"
+        required: false
+        default: true
+        type: boolean
+
+    outputs:
+      cluster_ip:
+        description: "The cluster's IP"
+        value: ${{ jobs.deploy.outputs.cluster_ip }}
+      cluster_id:
+        description: "The cluster's ID"
+        value: ${{ jobs.deploy.outputs.cluster_id }}
+      cluster_secret:
+        description: "The cluster secret"
+        value: ${{ jobs.deploy.outputs.cluster_secret }}
+      mnodes:
+        description: "The IP of management nodes"
+        value: ${{ jobs.deploy.outputs.mnodes }}
+      storage_private_ips:
+        description: "The private IPs of the storage nodes"
+        value: ${{ jobs.deploy.outputs.storage_private_ips }}
+
+jobs:
+  
+  k8s:
+    runs-on: ${{ inputs.runs_on }}
+    if: ${{ inputs.k8s_snode == true }}
+    steps:
+    - name: Checkout deployment tooling
+      uses: actions/checkout@v4
+      with:
+        repository: simplyblock-io/simplyBlockDeploy
+        path: deploy
+
+    - name: Setup k8s
+      id: k8sdeployment
+      if: ${{ inputs.k8s_snode == true }}
+      run: |
+        set -e
+        cd deploy/bare-metal
+        eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
+        ./bootstrap-k3s.sh --k8s-snode
+
+  deploy:
+    needs: [k8s]
+    runs-on: ${{ inputs.runs_on }}
+    outputs:
+      cluster_id: ${{ steps.deployment.outputs.cluster_id }}
+      cluster_ip: ${{ steps.deployment.outputs.cluster_ip }}
+      cluster_secret: ${{ steps.deployment.outputs.cluster_secret }}
+      mnodes: ${{ steps.deployment.outputs.mnodes }}
+      storage_private_ips: ${{ steps.deployment.outputs.storage_private_ips }}
+
+    steps:
+    - name: Checkout sbcli
+      uses: actions/checkout@v4
+      with:
+        path: sbcli
+
+    - name: Checkout deployment tooling
+      uses: actions/checkout@v4
+      with:
+        repository: simplyblock-io/simplyBlockDeploy
+        path: deploy
+
+    - name: Checkout spdk-csi
+      if: ${{ inputs.k8s_snode == true }}
+      uses: actions/checkout@v4
+      with:
+        repository: simplyblock-io/simplyblock-csi
+        path: simplyblock-csi
+
+    - name: Install Helm
+      if: ${{ inputs.k8s_snode == true }}
+      run: |
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        chmod 700 get_helm.sh
+        ./get_helm.sh
+
+    - name: Install kubectl
+      if: ${{ inputs.k8s_snode == true }}
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+    - name: Deploy cluster 
+      id: deployment
+      run: |
+        cd deploy/bare-metal
+        eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
+
+        # Reset device partitions
+        KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
+        for node in $STORAGE_PRIVATE_IPS; do
+          echo "restart node $node"
+          ssh -i $KEY -o StrictHostKeyChecking=no root@$node "
+            dd if=/dev/zero of=/dev/nvme0n1 bs=4096 count=1
+            dd if=/dev/zero of=/dev/nvme1n1 bs=4096 count=1
+            dd if=/dev/zero of=/dev/nvme2n1 bs=4096 count=1
+            dd if=/dev/zero of=/dev/nvme3n1 bs=4096 count=1
+          "
+        done
+
+        # If the cluster is running on k8s, we need to set the environment variable
+        DEPLOY_CMD="./bootstrap-cluster.sh \
+            --max-lvol 10 --max-snap 10 
+            --max-size 400G --number-of-devices 1 
+            --sbcli-cmd sbcli-dev --spdk-debug"
+
+        if [ "${{ inputs.k8s_snode }}" == "true" ]; then
+          DEPLOY_CMD="$DEPLOY_CMD --mode kubernetes --k8s-snode"
+          echo "Setup k8s snodes"
+          eval $DEPLOY_CMD
+        else
+          echo "Setup docker snodes"
+          echo "making sure the cluster is clean"
+          helm uninstall sb-controller || true
+          helm uninstall simplyblock-csi || true
+          kubectl get pods | grep snode-spdk-pod | awk '{print $1}' | xargs kubectl delete pod || true
+          eval $DEPLOY_CMD
+        fi
+        echo "mnodes=$MNODES" >> ${GITHUB_OUTPUT:-/dev/stdout}
+        echo "storage_private_ips=${STORAGE_PRIVATE_IPS}" >> ${GITHUB_OUTPUT:-/dev/stdout}
+      env:
+        NDCS: ${{ inputs.ndcs }}
+        NPCS: ${{ inputs.npcs }}
+        BS: ${{ inputs.bs }}
+        CHUNK_BS: ${{ inputs.chunk_bs }}
+        NR_HUGEPAGES: ${{ inputs.nr_hugepages }}
+        SBCLI_BRANCH: ${{ inputs.sbcli_source }}
+        SIMPLY_BLOCK_DOCKER_IMAGE: ${{ inputs.docker_image }}
+
+  k8s_snodes:
+    needs: [k8s, deploy]
+    runs-on: ${{ inputs.runs_on }}
+    if: ${{ inputs.k8s_snode == true }}
+    steps:  
+    - name: Checkout spdk-csi
+      uses: actions/checkout@v4
+      with:
+        repository: simplyblock-io/simplyblock-csi
+        path: simplyblock-csi
+
+    - name: Deploy Snode on K8s
+      run: |
+        set -e
+        mkdir -p $HOME/.kube
+        KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
+        scp -i "$KEY" -o StrictHostKeyChecking=no root@${MNODE}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+        sed -i "s/127.0.0.1/${MNODE}/g" $HOME/.kube/config
+
+        helm install simplyblock-csi ./simplyblock-csi/charts/spdk-csi/latest/spdk-csi \
+          --set csiConfig.simplybk.uuid=${CLUSTER_ID} \
+          --set csiConfig.simplybk.ip=${CLUSTER_IP} \
+          --set csiSecret.simplybk.secret=${CLUSTER_SECRET} \
+          --set logicalVolume.pool_name=testing1 \
+          --set image.simplyblock.tag=${SBCLI_BRANCH} \
+          --set image.csi.tag=latest \
+          --set logicalVolume.numDataChunks=${NDCS} \
+          --set logicalVolume.numParityChunks=${NPCS} \
+          --set storagenode.create=true \
+          --set storagenode.numPartitions=1 \
+          --set image.storageNode.tag=latest \
+          --set autoClusterActivate=true
+   
+      env:
+        NDCS: ${{ inputs.ndcs }}
+        NPCS: ${{ inputs.npcs }}
+        CLUSTER_ID: ${{ needs.deploy.outputs.cluster_id }}
+        CLUSTER_IP: ${{ needs.deploy.outputs.cluster_ip }}
+        CLUSTER_SECRET: ${{ needs.deploy.outputs.cluster_secret }}
+        SBCLI_BRANCH: ${{ inputs.sbcli_source }}
+        MNODE: ${{ needs.deploy.outputs.mnodes }}
+
+    - name: Check Cluster Status
+      run: |
+        n=0
+        until [ "$n" -ge 100 ]
+        do
+          response=$(curl -s "${CLUSTER_API_GATEWAY_ENDPOINT}/clusters/${CLUSTER_UUID}/" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${CLUSTER_SECRET}")
+
+          status=$(echo $response | jq -r '.status')
+
+          if [ "$status" != "active" ]; then
+              echo "Cluster status is not active, current status: $status, retrying"
+              n=$((n+1)) 
+              sleep 10
+          else
+              echo "Cluster status is active"
+              exit 0
+          fi
+        done
+        echo "Cluster status is not active"
+        exit 1
+      env:
+        CLUSTER_API_GATEWAY_ENDPOINT: ${{ needs.deploy.outputs.cluster_ip }}/api/v2
+        CLUSTER_UUID: ${{ needs.deploy.outputs.cluster_id }}
+        CLUSTER_SECRET: ${{ needs.deploy.outputs.cluster_secret }}

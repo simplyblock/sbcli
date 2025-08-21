@@ -1,11 +1,9 @@
+from pathlib import Path
 import threading
-import json
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec, convert_bytes_to_gb_tb
 from logger_config import setup_logger
-from datetime import datetime, timedelta
-import traceback
-from requests.exceptions import HTTPError
+from datetime import datetime
 import random
 
 
@@ -63,8 +61,9 @@ class FioWorkloadTest(TestClusterBase):
             for lvol in lvol_list:
                 initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
             
-                connect_str = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)
-                self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol)
+                for connect_str in connect_ls:
+                    self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
                 sleep_n_sec(5)
 
                 # Step 3: Check for new device after connecting the lvol
@@ -99,6 +98,8 @@ class FioWorkloadTest(TestClusterBase):
         # Step 5: Run fio workloads with different configurations
         fio_threads = self.run_fio(lvol_fio_path)
 
+        # SCE-1: Graceful Shutdown
+
         # Step 6: Continue with node shutdown, restart, and migration task validation
         affected_node = list(sn_lvol_data.keys())[0]
         self.logger.info(f"Shutting down node {affected_node}.")
@@ -114,7 +115,7 @@ class FioWorkloadTest(TestClusterBase):
         self.logger.info(f"Fetching migration tasks for cluster {self.cluster_id}.")
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 1000, None)
 
         sleep_n_sec(30)
 
@@ -150,6 +151,7 @@ class FioWorkloadTest(TestClusterBase):
 
         sleep_n_sec(120)
 
+        # SCE-2: Node crash
         # # Step 7: Stop container on another node
         affected_node = list(sn_lvol_data.keys())[1]
         timestamp = int(datetime.now().timestamp())
@@ -160,7 +162,7 @@ class FioWorkloadTest(TestClusterBase):
         sleep_n_sec(300)
 
         self.logger.info(f"Validating migration tasks for node {affected_node}.")
-        self.validate_migration_for_node(timestamp, 5000, None)
+        self.validate_migration_for_node(timestamp, 1000, None)
 
         sleep_n_sec(30)
 
@@ -199,6 +201,8 @@ class FioWorkloadTest(TestClusterBase):
         )
         self.logger.info(f"Output for sn list: {output}")
 
+        
+        # SCE-3: Instance terminate and new add
         # # Step 8: Stop instance
         timestamp = int(datetime.now().timestamp())
         affected_node = list(sn_lvol_data.keys())[2]
@@ -246,20 +250,18 @@ class FioWorkloadTest(TestClusterBase):
         #     spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
         # )
 
-        self.ssh_obj.deploy_storage_node(node=new_node_ip)
+        self.ssh_obj.deploy_storage_node(node=new_node_ip,
+                                         max_lvol=affected_node_details[0]["max_lvol"],
+                                         max_prov_gb=convert_bytes_to_gb_tb(affected_node_details[0]["max_prov"]),
+
+)
 
         self.ssh_obj.add_storage_node(
             node=self.mgmt_nodes[0],
             cluster_id=self.cluster_id,
             node_ip=new_node_ip,
             ifname="eth0",
-            max_lvol=affected_node_details[0]["max_lvol"],
-            max_snap=affected_node_details[0]["max_snap"],
-            max_prov=convert_bytes_to_gb_tb(affected_node_details[0]["max_prov"]),
-            number_of_distribs=affected_node_details[0]["number_of_distribs"],
-            number_of_devices=affected_node_details[0]["number_of_devices"],
             partitions=affected_node_details[0]["num_partitions_per_dev"],
-            jm_percent=affected_node_details[0]["jm_percent"],
             disable_ha_jm=not affected_node_details[0]["enable_ha_jm"],
             enable_test_device=affected_node_details[0]["enable_test_device"],
             # iobuf_small_pool_count=affected_node_details[0]["iobuf_small_pool_count"],
@@ -349,12 +351,12 @@ class FioWorkloadTest(TestClusterBase):
                                     "name": f"fio_{lvol}",
                                     "rw": fio_run[0],
                                     "ioengine": "libaio",
-                                    "iodepth": 64,
+                                    "iodepth": 1,
                                     "bs": fio_run[1],
                                     "size": "300M",
                                     "time_based": True,
                                     "runtime": 2000,
-                                    "output_file": f"/home/ec2-user/{lvol}.log",
+                                    "output_file": f"{Path.home()}/{lvol}.log",
                                     "numjobs": 2,
                                     "debug": self.fio_debug
                                 }
@@ -367,12 +369,12 @@ class FioWorkloadTest(TestClusterBase):
                                     "name": f"fio_{lvol}",
                                     "rw": "trimwrite",
                                     "ioengine": "libaio",
-                                    "iodepth": 64,
+                                    "iodepth": 1,
                                     "bs": "16K",
                                     "size": "300M",
                                     "time_based": True,
                                     "runtime": 2000,
-                                    "output_file": f"/home/ec2-user/{lvol}.log",
+                                    "output_file": f"{Path.home()}/{lvol}.log",
                                     "nrfiles": 2,
                                     "debug": self.fio_debug
                                 }
@@ -466,7 +468,7 @@ class FioWorkloadTest(TestClusterBase):
         
         node_details = self.sbcli_utils.get_storage_node_details(node_id)
         node_ip = node_details[0]["mgmt_ip"]
-        self.ssh_obj.stop_spdk_process(node_ip)
+        self.ssh_obj.stop_spdk_process(node_ip, node_details[0]["rpc_port"])
 
         self.logger.info(f"Docker container on node {node_id} stopped successfully.")
 
@@ -502,82 +504,3 @@ class FioWorkloadTest(TestClusterBase):
         #     for running_fio in fio_process: 
         #         assert fio not in running_fio, "FIO Process running on crashed node"
         self.logger.info("FIO process is running uninterrupted.")
-
-    def filter_migration_tasks(self, tasks, node_id, timestamp):
-        """
-        Filters `device_migration` tasks for a specific node and timestamp.
-
-        Args:
-            tasks (list): List of task dictionaries from the API response.
-            node_id (str): The UUID of the node to check for migration tasks.
-            timestamp (int): The timestamp to filter tasks created after this time.
-
-        Returns:
-            list: List of `device_migration` tasks for the specific node created after the given timestamp.
-        """
-        filtered_tasks = [
-            task for task in tasks
-            if task['function_name'] == 'device_migration' and task['date'] > timestamp
-            and (node_id is None or task['node_id'] == node_id)
-        ]
-        return filtered_tasks
-
-    def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60):
-        """
-        Validate that all `device_migration` tasks for a specific node have completed successfully 
-        and check for stuck tasks until the timeout is reached.
-
-        Args:
-            timestamp (int): The timestamp to filter tasks created after this time.
-            timeout (int): Maximum time in seconds to keep checking for task completion.
-            node_id (str): The UUID of the node to check for migration tasks (or None for all nodes).
-            check_interval (int): Time interval in seconds to wait between checks.
-
-        Raises:
-            RuntimeError: If any migration task failed, is incomplete, is stuck, or if the timeout is reached.
-        """
-        start_time = datetime.now()
-        end_time = start_time + timedelta(seconds=timeout)
-
-        output, _ = self.ssh_obj.exec_command(node=self.mgmt_nodes[0], 
-                                              command=f"{self.base_cmd} cluster list-tasks {self.cluster_id}")
-        self.logger.info(f"Data migration output: {output}")
-
-        while datetime.now() < end_time:
-            tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
-            filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
-            
-            if not filtered_tasks:
-                raise RuntimeError(f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} after the specified timestamp.")
-
-            self.logger.info(f"Checking migration tasks: {filtered_tasks}")
-            all_done = True
-            completed_count = 0
-
-            for task in filtered_tasks:
-                # Check if the task is stuck (updated_at is more than 15 minutes old)
-                updated_at = datetime.fromtimestamp(task['updated_at'])
-                if datetime.now() - updated_at > timedelta(minutes=60):
-                    raise RuntimeError(f"Migration task {task['id']} is stuck (last updated at {updated_at}).")
-
-                # Check if task is completed
-                if task['status'] == 'done' and task['function_result'] == 'Done':
-                    completed_count += 1
-                else:
-                    all_done = False
-
-            # Logging the counts after each check
-            total_tasks = len(filtered_tasks)
-            remaining_tasks = total_tasks - completed_count
-            self.logger.info(f"Total migration tasks: {total_tasks}, Completed: {completed_count}, Remaining: {remaining_tasks}")
-
-            # If all tasks are done, break out of the loop
-            if all_done:
-                self.logger.info(f"All migration tasks for {'node ' + node_id if node_id else 'the cluster'} completed successfully without any stuck tasks.")
-                return
-
-            # Wait for the next check
-            sleep_n_sec(check_interval)
-
-        # If the loop exits without completing all tasks, raise a timeout error
-        raise RuntimeError(f"Timeout reached: Not all migration tasks completed within the specified timeout of {timeout} seconds.")

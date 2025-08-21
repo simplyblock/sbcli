@@ -1,0 +1,41 @@
+name: Deploy and test cluster
+
+on:
+  workflow_call:
+    inputs:
+      cluster:
+        description: 'Cluster identifier'
+        required: true
+        type: string
+      docker_image:
+        description: 'Docker image'
+        type: string
+        required: true
+      sbcli_source:
+        description: 'Docker image'
+        type: string
+        required: true
+
+concurrency:
+  group: ${{ inputs.cluster }}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/bare-metal-deploy.yml
+    with:
+      runs_on: self-hosted
+      cluster: ${{ inputs.cluster }}
+      docker_image: ${{ inputs.docker_image }}
+      sbcli_source: ${{ inputs.sbcli_source }}
+
+  test:
+    needs: deploy
+    uses: ./.github/workflows/api-test.yml
+    with:
+      runs_on: self-hosted
+      cluster_id: ${{ needs.deploy.outputs.cluster_id }}
+      cluster_ip: ${{ needs.deploy.outputs.cluster_ip }}
+      cluster_secret: ${{ needs.deploy.outputs.cluster_secret }}

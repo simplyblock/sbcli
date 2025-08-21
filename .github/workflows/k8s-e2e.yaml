@@ -97,7 +97,7 @@ jobs:
           repository: simplyblock-io/simplyBlockDeploy
           ref: refs/heads/${{ github.event.inputs.simplyBlockDeploy_branch || 'main'}}
           path: 'simplyBlockDeploy'
-          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+          token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
 
       - uses: actions/checkout@master
         name: Checkout code simplyblock_csi_branch
@@ -105,7 +105,7 @@ jobs:
           repository: simplyblock-io/simplyblock-csi
           ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'master'}}
           path: 'simplyblock-csi'
-          token: ${{ secrets.GH_ACCESS_KEY_ID_HAMDI }}
+          token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -159,12 +159,13 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform plan \
-            -var "mgmt_nodes=1" -var "storage_nodes=5" -var "volumes_per_storage_nodes=1" \
+            -var "mgmt_nodes=1" -var "storage_nodes=4" -var "volumes_per_storage_nodes=1" \
             -var storage_nodes_instance_type="m6g.2xlarge" \
             -var "storage_nodes_arch=arm64" -var "snode_deploy_on_k8s=true" \
+            -var "sec_storage_nodes_instance_type=m6g.2xlarge" \
             -var "extra_nodes=1" -var "extra_nodes_instance_type=m6gd.xlarge" \
             -var storage_nodes_ebs_size2=100 -var "region=us-east-2" \
-            -var "extra_nodes_arch=arm64" \
+            -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -196,7 +197,7 @@ jobs:
             --distr-npcs $NPCS \
             --distr-bs $BS \
             --distr-chunk-bs $CHUNK_BS \
-            --k8s-snode
+            --k8s-snode --ha-type ha
         id: bootstrap_cluster
         env:
           SBCLI_CMD: ${{ env.SBCLI_CMD }}
@@ -207,8 +208,6 @@ jobs:
 
       - name: Bootstrap k3s
         run: |
-          echo "Sleeping for 30 seconds before bootstrap-k3s"
-          sleep 30
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           ./bootstrap-k3s.sh --k8s-snode
         id: bootstrap_k3s
@@ -223,7 +222,6 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyblock-csi/charts/latest/spdk-csi/
           echo "Sleeping for 30 seconds before helm install"
-          sleep 30
           helm install spdk-csi ./ \
             --namespace spdk-csi \
             --create-namespace \
@@ -232,78 +230,43 @@ jobs:
             --set csiSecret.simplybk.secret="${{ steps.bootstrap_cluster.outputs.cluster_secret }}" \
             --set logicalVolume.pool_name="testing1" \
             --set logicalVolume.snapshot="True" \
-            --set image.spdkcsi.tag=master-arm64 \
+            --set image.spdkcsi.tag=latest \
             --set image.simplyblock.tag=main \
-            --set storagenode.spdkImage=simplyblock/spdk:main-latest \
             --set logicalVolume.distr_ndcs="${NDCS}" \
             --set logicalVolume.distr_npcs="${NPCS}" \
             --set storagenode.create=true \
-            --set cachingnode.create=false
+            --set cachingnode.create=false \
+            --set logicalVolume.encryption=true
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
 
-      # - name: Wait for Storage Nodes to Become Online
-      #   run: |
-      #     echo "Sleeping for 120 seconds before helm install"
-      #     sleep 120
-      #     while true; do
-      #       echo "Checking storage node status..."
-            
-      #       NODE_STATUS=$(ssh -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" \
-      #         -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
-      #         -o ProxyCommand="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}\" -W %h:%p ec2-user@${{ steps.terraform_outputs.outputs.bastion_public_ip }}" \
-      #         ec2-user@${{ steps.terraform_outputs.outputs.mgmt_private_ip }} \
-      #         "sbcli-dev sn list | grep -Eo 'online|offline'" || echo "SSH command failed")
-
-      #       SSH_EXIT_CODE=$?
-      #       if [ $SSH_EXIT_CODE -ne 0 ]; then
-      #         echo "SSH command failed with exit code $SSH_EXIT_CODE. Retrying..."
-      #         sleep 30
-      #         continue
-      #       fi
-
-      #       if [ -z "$NODE_STATUS" ]; then
-      #         echo "No output from sbcli-dev sn list. Retrying..."
-      #         sleep 30
-      #         continue
-      #       fi
-
-      #       echo "Node Status: $NODE_STATUS"
-      #       ONLINE_NODES=$(echo "$NODE_STATUS" | grep -c "online")
-            
-      #       if [ "$ONLINE_NODES" -ge 3 ]; then
-      #         echo "All 3 storage nodes are online."
-      #         break
-      #       else
-      #         echo "$ONLINE_NODES nodes online. Waiting for more nodes to come online..."
-      #         sleep 30
-      #       fi
-      #     done
-      #   shell: /usr/bin/bash -e {0}
-      
-      - name: Sleep after Helm Installation
-        run: sleep 500
 
       - name: Check Cluster Status
         run: |
           CLUSTER_API_GATEWAY_ENDPOINT=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           CLUSTER_UUID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
           CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
-   
-          response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: $CLUSTER_UUID $CLUSTER_SECRET")
-     
-          status=$(echo $response | jq -r '.results[0].status')
-       
-          if [ "$status" != "active" ]; then
-              echo "Cluster status is not active, current status: $status"
-              exit 1
-          else
-              echo "Cluster status is active"
-              exit 0
-          fi
+          n=0
+          until [ "$n" -ge 60 ]
+          do
+            response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: $CLUSTER_UUID $CLUSTER_SECRET")
+            
+            status=$(echo $response | jq -r '.results[0].status')
+            
+            if [ "$status" != "active" ]; then
+                echo "Cluster status is not active, current status: $status, retrying"
+                n=$((n+1)) 
+                sleep 10
+            else
+                echo "Cluster status is active"
+                exit 0
+            fi
+          done
+          echo "Cluster status is not active"
+          exit 1
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -464,7 +427,7 @@ jobs:
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
-            OVERALL_STATUS=":x: Overall Status: FAILURE"
+            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
           fi
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"

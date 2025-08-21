@@ -1,0 +1,98 @@
+name: Python checks 
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  clipy-test:
+    name: Ensure cli.py is up to date
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+        cache: 'pip'
+
+    - name: Checking cli.py status
+      run: |
+        ./simplyblock_cli/scripts/generate.sh
+        changes="$(git diff simplyblock_cli/cli.py)"
+        if [[ "${changes}" ]]; then
+          echo "cli.py has changed after regeneration. Stopping."
+          echo "${changes}"
+          exit 1
+        fi
+
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+        cache: 'pip'
+
+    - name: Install test dependencies
+      run: pip install -r requirements.txt
+
+    - name: Install package
+      run: pip install .
+
+    - name: Run tests
+      run: pytest --import-mode=importlib -v
+
+
+  lint:
+    name: Linter
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+        cache: 'pip'
+
+    - name: Install linter
+      run: pip install ruff
+
+    - name: Execute linter
+      run: ruff check
+
+
+  types:
+    name: Type checker
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+        cache: 'pip'
+
+    - name: Install type checker
+      run: pip install mypy 
+
+    - name: Execute type checker
+      run: |
+        pip install -r requirements.txt
+        pip install -r type-requirements.txt
+        mypy simplyblock_web simplyblock_cli simplyblock_core

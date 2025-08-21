@@ -44,7 +44,7 @@ spec:
           value: simplyblock-cache 
       initContainers:
         - name: copy-script
-          image: busybox
+          image: public.ecr.aws/simply-block/busybox
           command: ["sh", "-c", "cp /config/restart_script.py /script/restart_script.py"]
           volumeMounts:
             - name: script-volume
@@ -55,7 +55,7 @@ spec:
       - name: spdk-container
         image: {{ SPDK_IMAGE }}
         imagePullPolicy: "Always"
-        command: ["/root/scripts/run_spdk_tgt.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
+        command: ["/root/spdk/scripts/run_spdk_tgt.sh", "{{ SPDK_CPU_MASK }}", "{{ SPDK_MEM }}"]
         lifecycle:
           postStart:
             exec:
@@ -64,13 +64,17 @@ spec:
           - name: SPDKCSI_SECRET
             valueFrom:
               secretKeyRef:
-                name: spdkcsi-secret
+                name: simplyblock-csi-secret
                 key: secret.json
           - name: CLUSTER_CONFIG
             valueFrom:
               configMapKeyRef:
-                name: spdkcsi-cm
+                name: simplyblock-csi-cm
                 key: config.json
+        lifecycle:
+          postStart:
+            exec:
+              command: ["/bin/sh", "-c", "sudo modprobe nbd || echo failed to modprobe nbd"]
         securityContext:
           privileged: true
         volumeMounts:

@@ -1,23 +1,21 @@
 #!/usr/bin/env python
 # encoding: utf-8
+from simplyblock_core import utils as core_utils
 import argparse
-import logging
 
-from flask import Flask
+from flask_openapi3 import OpenAPI
 
-import utils
 from simplyblock_core import constants
+from simplyblock_web import utils
+from simplyblock_web.api import internal as internal_api
 
-logger_handler = logging.StreamHandler()
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-logger = logging.getLogger()
-logger.addHandler(logger_handler)
-logger.setLevel(logging.DEBUG)
+logger = core_utils.get_logger(__name__)
 
 
-app = Flask(__name__)
+app = OpenAPI(__name__)
 app.url_map.strict_slashes = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
+app.register_error_handler(Exception, utils.error_handler)
 
 
 @app.route('/', methods=['GET'])
@@ -27,8 +25,7 @@ def status():
 
 MODES = [
     "storage_node",
-    "caching_docker_node",
-    "caching_kubernetes_node",
+    "storage_node_k8s",
 ]
 
 parser = argparse.ArgumentParser()
@@ -39,18 +36,10 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     mode = args.mode
-    if mode == "caching_docker_node":
-        from blueprints import node_api_basic, node_api_caching_docker
-        app.register_blueprint(node_api_basic.bp)
-        app.register_blueprint(node_api_caching_docker.bp)
-
-    if mode == "caching_kubernetes_node":
-        from blueprints import node_api_basic, node_api_caching_ks
-        app.register_blueprint(node_api_basic.bp)
-        app.register_blueprint(node_api_caching_ks.bp)
-
     if mode == "storage_node":
-        from blueprints import snode_ops
-        app.register_blueprint(snode_ops.bp)
+        app.register_api(internal_api.storage_node.docker.api)
+
+    if mode == "storage_node_k8s":
+        app.register_api(internal_api.storage_node.kubernetes.api)
 
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)

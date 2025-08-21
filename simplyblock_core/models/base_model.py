@@ -2,35 +2,81 @@
 import pprint
 
 import json
-from typing import Mapping
+from inspect import ismethod
+import sys
+from typing import Mapping, Type
+from collections import ChainMap
 
 
 class BaseModel(object):
-    def __init__(self):
-        self._attribute_map = {
-            "id": {"type": str, "default": ""},
-            "name": {"type": str, "default": self.__class__.__name__},
-            "object_type": {"type": str, "default": ""},
-            "deleted": {"type": bool, 'default': False}
-        }
-        self.set_attrs({}, {})
 
-    def get_id(self):
-        return self.id
+    _STATUS_CODE_MAP: dict = {}
 
-    def set_attrs(self, attributes, data):
-        self._attribute_map.update(attributes)
+    id: str = ""
+    uuid: str = ""
+    name: str = ""
+    status: str = ""
+    deleted: bool = False
+    updated_at: str = ""
+    create_dt: str= ""
+    remove_dt: str= ""
+    object_type: str= "object"
+
+
+    def __init__(self, data=None):
+        self.name = self.__class__.__name__
         self.from_dict(data)
 
+    @classmethod
+    def all_annotations(cls) -> Mapping[str, Type]:
+        """Returns a dictionary-like ChainMap that includes annotations for all
+           attributes defined in cls or inherited from superclasses."""
+        if sys.version_info >= (3, 10):
+            from inspect import get_annotations
+            return ChainMap(*(
+                get_annotations(c)
+                for c
+                in cls.__mro__
+            ))
+        else:
+            return ChainMap(*(
+                c.__annotations__
+                for c
+                in cls.__mro__
+                if '__annotations__' in c.__dict__
+            ))
+
+    def get_id(self):
+        return self.uuid
+
+    def get_attrs_map(self):
+        _attribute_map = {}
+        for s , t in self.all_annotations().items():
+            if not s.startswith("_") and not ismethod(getattr(self, s)):
+                _attribute_map[s]= {"type": t, "default": getattr(self, s)}
+        return _attribute_map
+
+    def get_db_id(self, use_this_id=None):
+        if use_this_id:
+            return "%s/%s/%s" % (self.object_type, self.name, use_this_id)
+        else:
+            return "%s/%s/%s" % (self.object_type, self.name, self.get_id())
+
     def from_dict(self, data):
-        for attr in self._attribute_map:
+        for attr, value_dict in self.get_attrs_map().items():
+            value = value_dict['default']
             if data is not None and attr in data:
-                dtype = self._attribute_map[attr]['type']
+                dtype = value_dict['type']
                 value = data[attr]
                 if dtype in [int, float, str, bool]:
-                    value = self._attribute_map[attr]['type'](data[attr])
+                    try:
+                        value = dtype(value)
+                    except Exception:
+                        if type(value) is list and dtype is int:
+                            value = len(value)
+
                 elif hasattr(dtype, '__origin__'):
-                    if dtype.__origin__ == list:
+                    if dtype.__origin__ is list:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
                             value = [dtype.__args__[0]().from_dict(item) for item in data[attr]]
                         else:
@@ -39,21 +85,16 @@ class BaseModel(object):
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[1], "from_dict"):
                             value = {item: dtype.__args__[1]().from_dict(data[attr][item]) for item in data[attr]}
                         else:
-                            value = self._attribute_map[attr]['type'](data[attr])
-                elif hasattr(dtype, '__origin__') and hasattr(dtype, "__args__"):
-                    if hasattr(dtype.__args__[0], "from_dict"):
-                        value = dtype.__args__[0]().from_dict(data[attr])
+                            value = value_dict['type'](data[attr])
                 else:
-                    value = self._attribute_map[attr]['type'](data[attr])
-                setattr(self, attr, value)
-            else:
-                setattr(self, attr, self._attribute_map[attr]['default'])
+                    value = value_dict['type'](data[attr])
+            setattr(self, attr, value)
+        self.id = self.uuid
         return self
 
     def to_dict(self):
-        self.id = self.get_id()
-        result = {}
-        for attr in self._attribute_map:
+        result: dict = {}
+        for attr in self.get_attrs_map():
             value = getattr(self, attr)
             if isinstance(value, list):
                 result[attr] = list(map(lambda x: x.to_dict() if hasattr(x, "to_dict") else x, value))
@@ -74,28 +115,29 @@ class BaseModel(object):
         data = self.to_dict()
         for key in ['name', 'object_type']:
             del data[key]
+        data['status_code'] = self.get_status_code()
         return data
 
     def to_str(self):
-        """Returns the string representation of the model
-
-        :rtype: str
-        """
         return pprint.pformat(self.to_dict())
 
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
+        if not kv_store:
+            return []
         try:
             objects = []
-            prefix = "%s/%s/%s" % (self.object_type, self.name, id)
-            for k, v in kv_store.db.get_range_startswith(prefix.encode('utf-8'),  limit=limit, reverse=reverse):
+            prefix = self.get_db_id(id)
+            for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
                 objects.append(self.__class__().from_dict(json.loads(v)))
             return objects
-        except Exception as e:
-            print(f"Error reading from FDB: {e}")
+        except Exception:
+            from simplyblock_core import utils
+            logger = utils.get_logger(__name__)
+            logger.exception('Error reading from FDB')
             return []
 
     def get_last(self, kv_store):
-        id = "/".join(self.get_id().split("/")[:2])
+        id = self.get_db_id(" ")
         objects = self.read_from_db(kv_store, id=id, limit=1, reverse=True)
         if objects:
             return objects[0]
@@ -103,21 +145,29 @@ class BaseModel(object):
 
     def write_to_db(self, kv_store=None):
         if not kv_store:
-            from simplyblock_core.kv_store import KVStore
-            kv_store = KVStore()
+            from simplyblock_core.db_controller import DBController
+            kv_store = DBController().kv_store
         try:
-            prefix = "%s/%s/%s" % (self.object_type, self.name, self.get_id())
+            prefix = self.get_db_id()
             st = json.dumps(self.to_dict())
-            kv_store.db.set(prefix.encode(), st.encode())
+            kv_store.set(prefix.encode(), st.encode())
             return True
         except Exception as e:
-            print("Error Writing to FDB!")
-            print(e)
+            print(f"Error Writing to FDB! {e}")
             exit(1)
 
     def remove(self, kv_store):
-        prefix = "%s/%s/%s" % (self.object_type, self.name, self.get_id())
-        return kv_store.db.clear(prefix.encode())
+        prefix = self.get_db_id()
+        return kv_store.clear(prefix.encode())
+
+    def keys(self):
+        return self.get_attrs_map().keys()
+
+    def get_status_code(self):
+        if self.status in self._STATUS_CODE_MAP:
+            return self._STATUS_CODE_MAP[self.status]
+        else:
+            return -1
 
     def __repr__(self):
         """For `print` and `pprint`"""
@@ -130,6 +180,34 @@ class BaseModel(object):
         return not self == other
 
     def __getitem__(self, item):
-        if isinstance(item, str) and item in self._attribute_map:
+        if isinstance(item, str) and item in self.get_attrs_map().keys():
             return getattr(self, item)
         return False
+
+
+class BaseNodeObject(BaseModel):
+
+    STATUS_ONLINE = 'online'
+    STATUS_OFFLINE = 'offline'
+    STATUS_SUSPENDED = 'suspended'
+    STATUS_IN_SHUTDOWN = 'in_shutdown'
+    STATUS_REMOVED = 'removed'
+    STATUS_RESTARTING = 'in_restart'
+
+    STATUS_IN_CREATION = 'in_creation'
+    STATUS_UNREACHABLE = 'unreachable'
+    STATUS_SCHEDULABLE = 'schedulable'
+    STATUS_DOWN = 'down'
+
+    _STATUS_CODE_MAP = {
+        STATUS_ONLINE: 0,
+        STATUS_OFFLINE: 1,
+        STATUS_SUSPENDED: 2,
+        STATUS_REMOVED: 3,
+        STATUS_IN_CREATION: 10,
+        STATUS_IN_SHUTDOWN: 11,
+        STATUS_RESTARTING: 12,
+        STATUS_UNREACHABLE: 20,
+        STATUS_SCHEDULABLE: 30,
+        STATUS_DOWN: 40,
+    }

@@ -1,18 +1,40 @@
 name: Python Package Build
 
 on:
+  workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
-      - 'env_var'
+      - 'simplyblock_core/env_var'
 
 permissions:
   contents: read
 
 jobs:
+  
+  get_spdk_hash:
+     runs-on: ubuntu-latest
+     outputs:
+       short_sha: ${{ steps.get_current_hash.outputs.short_sha }}
+     steps:
+     - name: Checkout repository at specified branch
+       uses: actions/checkout@v4
+       with:
+         repository: simplyblock-io/ultra
+         ref: main
+         fetch-depth: 1
+         token: ${{ secrets.GH_ACCESS_KEY_ID_MANOHAR }}
+     - name: Get short commit hash
+       id: get_current_hash
+       run: |
+         SHORT_SHA=$(git rev-parse --short=8 HEAD)
+         echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+       shell: bash
+
   deploy:
-
     runs-on: ubuntu-latest
-
+    needs: get_spdk_hash
     steps:
     - uses: actions/checkout@v3
     - name: Set up Python
@@ -23,6 +45,35 @@ jobs:
       run: |
         python -m pip install --upgrade pip twine setuptools
         pip install build
+    - name: Checking cli.py status
+      run: |
+        ./simplyblock_cli/scripts/generate.sh
+        changes="$(git diff simplyblock_cli/cli.py)"
+        if [[ "${changes}" ]]; then
+          echo "cli.py has changed after regeneration. Stopping."
+          echo "${changes}"
+        fi
+
+    - name: Update simplyblock_core/env_var
+      if: ${{ github.ref == 'refs/heads/main' }}
+      run: |
+        
+        SHORT_SHA=$(git rev-parse --short=8 HEAD)
+        BRANCH=$(echo "${GITHUB_REF#refs/heads/}" | sed 's/\//-/g')
+        echo "BRANCH: ${BRANCH}"
+
+        echo "Replacing SIMPLY_BLOCK_DOCKER_IMAGE with $version"
+        sed -i "s|^SIMPLY_BLOCK_DOCKER_IMAGE=.*|SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:${BRANCH}-${SHORT_SHA}|" simplyblock_core/env_var
+        
+        echo "Replacing SIMPLY_BLOCK_SPDK_ULTRA_IMAGE with main-$spdk_tag"
+        sed -i "s|^SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=.*|SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-${spdk_tag}|" simplyblock_core/env_var
+        echo "----- Updated env_var -----"
+
+        cat simplyblock_core/env_var
+      env:
+        version: ${{ github.event.release.tag_name }}
+        spdk_tag: ${{ needs.get_spdk_hash.outputs.short_sha }}
+
     - name: Build package
       run: python setup.py sdist
     - name: Publish package to pypi
@@ -31,8 +82,11 @@ jobs:
         user: __token__
         password: ${{ secrets.PYPI_API_TOKEN }}
 
+    - name: print package name
+      run: echo "::notice title=PIP Package::$(ls dist)"
+
     - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v1
+      uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_HAMDI }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_HAMDI }}
@@ -40,5 +94,5 @@ jobs:
 
     - name: Publish package codeArtifact
       run: |
-        aws codeartifact login --tool twine --repository sbcli --domain simplyblock --domain-owner 565979732541 --region eu-west-1
+        aws codeartifact login --tool twine --repository sbcli --domain simplyblock --domain-owner ${{ secrets.AWS_ACCOUNT_ID }} --region eu-west-1
         twine upload dist/* -r codeartifact

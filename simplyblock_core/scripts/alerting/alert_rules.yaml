@@ -306,8 +306,8 @@ groups:
           labels:
             app: simplyblock
           isPaused: false
-        - uid: e582398b-6ab8-444a-8d2e-5e35715bd58a
-          title: Cluster_provisioned_capacity_reached
+        - uid: f3c9d7b6-5a82-4e1d-b7c3-89f2a4e61d4b
+          title: StorageNode_status_online_to_down
           condition: C
           data:
             - refId: A
@@ -318,7 +318,7 @@ groups:
               model:
                 disableTextWrap: false
                 editorMode: builder
-                expr: cluster_size_free
+                expr: snode_status_code
                 fullMetaSearch: false
                 includeNullMetadata: true
                 instant: true
@@ -337,8 +337,9 @@ groups:
                 conditions:
                     - evaluator:
                         params:
-                            - 1.073741822e+09
-                        type: lt
+                            - 39
+                            - 41
+                        type: within_range
                       operator:
                         type: and
                       query:
@@ -360,8 +361,156 @@ groups:
           execErrState: Error
           for: 1m
           annotations:
-            description: The rule alerts cluster capacity below 1 GB
-            summary: Cluster {{ $labels.cluster}} capacity is below 1GB
+            description: The rule alerts for down storage nodes.
+            summary: storage node {{ $labels.snode }} in cluster {{$labels.cluster }} is down
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: a8f1c3d2-7b45-4e98-923f-61d4b7f2c89a
+          title: StorageNode_health_check_false
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: builder
+                expr: snode_health_check
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+                useBackend: false
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - -1
+                            - 1 
+                        type: within_range
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
+          for: 2m
+          annotations:
+            description: The rule alerts for unhealthy storage nodes.
+            summary: storage node {{ $labels.snode }} in cluster {{$labels.cluster }} is unhealthy
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: e582398b-6ab8-444a-8d2e-5e35715bd58a
+          title: Cluster_provisioned_capacity_reached
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: builder
+                expr: cluster_prov_cap_crit
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+                useBackend: false
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: builder
+                expr: cluster_size_prov_util
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: B
+                useBackend: false
+            - refId: D  
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                expression: $A <= $B
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: D
+                type: math
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - D
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: D
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
+          for: 1m
+          annotations:
+            description: The rule alerts about cluster provisioned capacity reached
+            summary: Cluster {{ $labels.cluster}} provisioned capacity reached
           labels:
             app: simplyblock
           isPaused: false
@@ -377,7 +526,95 @@ groups:
               model:
                 disableTextWrap: false
                 editorMode: builder
-                expr: cluster_size_free
+                expr: cluster_cap_crit
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+                useBackend: false
+            - refId: B
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: builder
+                expr: cluster_size_util
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: B
+                useBackend: false
+            - refId: D  
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                expression: $A <= $B
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: D
+                type: math
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - D
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: D
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
+          for: 1m
+          annotations:
+            description: The rule alerts about cluster absolute capacity reached.
+            summary: Cluster {{ $labels.cluster }} absolute capacity reached
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: bd752874-f5c3-4c43-a553-0443eaa3560c
+          title: Lvol_status_online_to_offline
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: builder
+                expr: lvol_status_code
                 fullMetaSearch: false
                 includeNullMetadata: true
                 instant: true
@@ -396,8 +633,9 @@ groups:
                 conditions:
                     - evaluator:
                         params:
-                            - 10000
-                        type: lt
+                            - 1
+                            - 3
+                        type: within_range
                       operator:
                         type: and
                       query:
@@ -417,10 +655,71 @@ groups:
                 type: threshold
           noDataState: NoData
           execErrState: Error
+          for: 2m
+          annotations:
+            description: The rule alerts for offline lvols.
+            summary: lvol {{ $labels.lvol }} in cluster {{$labels.cluster }} is offline
+          labels:
+            app: simplyblock
+          isPaused: false
+        - uid: f2d58d12-4b5e-4c8c-9aef-73e06c097e18
+          title: Root Filesystem Low Space Alert
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: PBFA97CFB590B2093
+              model:
+                disableTextWrap: false
+                editorMode: builder
+                expr: |
+                  (node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / 
+                   node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) * 100
+                fullMetaSearch: false
+                includeNullMetadata: true
+                instant: true
+                intervalMs: 1000
+                legendFormat: __auto
+                maxDataPoints: 43200
+                range: false
+                refId: A
+                useBackend: false
+            - refId: C
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: __expr__
+              model:
+                conditions:
+                  - evaluator:
+                      params:
+                        - 20
+                      type: lt
+                    operator:
+                      type: and
+                    query:
+                      params:
+                        - C
+                    reducer:
+                      params: []
+                      type: last
+                    type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
           for: 1m
           annotations:
-            description: The rule alerts about cluster absolute capacity reached.
-            summary: Cluster {{ $labels.cluster }} absolute capacity reached
+            description: The rule alerts when root filesystem space is critically low (below 20%).
+            summary: 'Root filesystem space is critically low on {{ $labels.instance }}.'
           labels:
             app: simplyblock
           isPaused: false

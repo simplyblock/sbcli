@@ -1,5 +1,15 @@
 /.idea/
 *.pyc
-env_var
 e2e/logs/*.log!
-/env_var
+.DS_Store
+*.log
+.python-version
+
+# Ignore generated sbcli files
+sbcli*
+build
+dist
+
+.ruff_cache
+.env
+.tox

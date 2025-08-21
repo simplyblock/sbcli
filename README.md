@@ -1,35 +1,27 @@
 
-# Simply Block
-[![Docker Image Build](https://github.com/simplyblock-io/sbcli/actions/workflows/docker-image.yml/badge.svg)](https://github.com/simplyblock-io/sbcli/actions/workflows/docker-image.yml)
+# SBCLI (simplyblock CLI)
 
-[![Python Unit Testing](https://github.com/simplyblock-io/sbcli/actions/workflows/python-testing.yml/badge.svg)](https://github.com/simplyblock-io/sbcli/actions/workflows/python-testing.yml)
-
+Simplyblock provides a feature-rich CLI (command line interface) to deploy simplyblock Cluster and to manage the simplyblock Control plane
 
 ## Install
-Add the package repo from AWS CodeArtifact using [awscli](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
 
-```bash
-aws codeartifact login --tool pip --repository sbcli --domain simplyblock --domain-owner 565979732541 --region eu-west-1
+The CLI can be installed using pypi package [sbctl](https://pypi.org/project/sbctl/)
+
 ```
-Install package
-```bash
-pip install --extra-index-url https://pypi.org/simple sbcli-dev
+pip install --upgrade sbctl
 ```
 
 # Components
 
-## Simply Block Core
+## Simplyblock Core
 Contains core logic and controllers for the simplyblock cluster
 
-## Simply Block CLI
-Please see this document
-[README.md](../main/simplyblock_cli/README.md)
+## Simplyblock CLI
+The list of all the available CLI options can be here [CLI docs](./simplyblock_cli/README.md)
 
+## Simplyblock Web API
 
-## Simply Block Web API
-Please see this document
-[README.md](../main/simplyblock_web/README.md)
-
+Web app that provides API to manage the cluster. More about this in [README.md](./simplyblock_web/README.md)
 
 
 ### local development
@@ -40,9 +32,7 @@ Depending on the OS architecture, please install the appropriate version from th
 ```
 wget https://github.com/apple/foundationdb/releases/download/7.3.3/FoundationDB-7.3.3_arm64.pkg
 ```
-
 setup the code on a management node and the webApp code can be developed by building the `docker-compose-dev.yml` file.
-
 
 ```
 sudo docker compose -f docker-compose-dev.yml up --build -d
