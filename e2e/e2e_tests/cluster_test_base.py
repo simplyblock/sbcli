@@ -667,7 +667,7 @@ class TestClusterBase:
         """
         filtered_tasks = [
             task for task in tasks
-            if 'device_migration' in task['function_name'] and task['date'] > timestamp
+            if 'balancing_on_restart' in task['function_name'] and task['date'] > timestamp
             and (node_id is None or task['node_id'] == node_id)
         ]
         return filtered_tasks
