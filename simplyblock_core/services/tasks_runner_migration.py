@@ -135,6 +135,7 @@ def update_master_task(task):
     def _set_master_task_status(master_task, status):
         master_task = db.get_task_by_id(master_task.uuid)
         if master_task.status != status:
+            logger.info(f"_set_master_task_status: {status}")
             master_task.status = status
             master_task.function_result = status
             master_task.write_to_db(db.kv_store)
@@ -145,6 +146,9 @@ def update_master_task(task):
         for sub_task_id in master_task.sub_tasks:
             sub_task = db.get_task_by_id(sub_task_id)
             status_map[sub_task.status] = status_map.get(sub_task.status, 0) + 1
+
+        logger.info(f"master_task.sub_tasks: {len(master_task.sub_tasks)}")
+        logger.info(f"status_map: {status_map}")
 
         if status_map[JobSchedule.STATUS_DONE] == len(master_task.sub_tasks):  # all tasks done
             _set_master_task_status(master_task, JobSchedule.STATUS_DONE)
