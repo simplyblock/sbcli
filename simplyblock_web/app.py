@@ -2,11 +2,10 @@
 # encoding: utf-8
 
 import logging
-from typing import cast
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.wsgi import WSGIMiddleware
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse
 import uvicorn
 from uvicorn.config import Config
 

@@ -4,11 +4,10 @@
 import json
 import logging
 import re
-from typing import Dict, List, Optional, Tuple, TypedDict, Union, Any
+from typing import List, Tuple, TypedDict
 
 import boto3
 import requests
-from botocore.client import BaseClient
 
 from simplyblock_core import shell_utils
 import simplyblock_core.utils.pci as pci_utils

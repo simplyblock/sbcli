@@ -2,10 +2,11 @@
 # encoding: utf-8
 
 import base64
+import logging
 from functools import wraps
 from typing import Any, Callable, Dict, Tuple, TypeVar, Union, cast
 
-from flask import request, Response, jsonify
+from flask import request, Response
 from werkzeug.wrappers import Response as WerkzeugResponse
 
 from simplyblock_core.db_controller import DBController
