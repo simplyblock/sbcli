@@ -1,66 +1,143 @@
 #!/usr/bin/env python
 # encoding: utf-8
+
 import json
 import logging
-import requests
-import boto3
 import re
+from typing import Dict, List, Optional, Tuple, TypedDict, Union, Any
+
+import boto3
+import requests
+from botocore.client import BaseClient
 
 from simplyblock_core import shell_utils
 import simplyblock_core.utils.pci as pci_utils
 
 
+# Type definitions
+class NVMENamespace(TypedDict, total=False):
+    NameSpace: str
+    PhysicalSize: int
+    SectorSize: int
+
+
+class NVMeController(TypedDict, total=False):
+    Controller: str
+    Address: str
+    Transport: str
+    ModelNumber: str
+    SerialNumber: str
+    Namespaces: List[NVMENamespace]
+
+
+class NVMeSubsystem(TypedDict, total=False):
+    SubsystemNQN: str
+    Controllers: List[NVMeController]
+    Namespaces: List[NVMENamespace]
+
+
+class NVMeDevice(TypedDict):
+    nqn: str
+    size: int
+    sector_size: int
+    device_name: str
+    device_path: str
+    controller_name: str
+    address: str
+    transport: str
+    model_id: str
+    serial_number: str
+
+
 logger = logging.getLogger(__name__)
 
 
-def get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
+def get_spdk_pcie_list() -> List[str]:
+    """
+    Get a list of PCIe devices bound to SPDK-compatible drivers.
+    
+    Returns:
+        List[str]: List of PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
+    """
     return pci_utils.list_devices(driver_name='uio_pci_generic') or pci_utils.list_devices(driver_name='vfio-pci')
 
 
-def get_nvme_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
+def get_nvme_pcie_list() -> List[str]:
+    """
+    Get a list of NVMe PCIe devices.
+    
+    Returns:
+        List[str]: List of NVMe PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
+    """
     return pci_utils.list_devices(driver_name='nvme')
 
 
-def get_nvme_pcie():
+def get_nvme_pcie() -> List[Tuple[str, Tuple[str, str]]]:
+    """
+    Get a list of NVMe PCIe devices with their vendor and device IDs.
+    
+    Returns:
+        List[Tuple[str, Tuple[str, str]]]: List of tuples containing 
+            (pci_address, (vendor_id, device_id))
+    """
     return [
-            (address, (pci_utils.vendor_id(address), pci_utils.device_id(address)))
-            for address
-            in pci_utils.list_devices(device_class=pci_utils.NVME_CLASS)
+        (address, (pci_utils.vendor_id(address), pci_utils.device_id(address)))
+        for address in pci_utils.list_devices(device_class=pci_utils.NVME_CLASS)
     ]
 
 
-def get_nvme_devices():
+def get_nvme_devices() -> List[NVMeDevice]:
+    """
+    Get detailed information about NVMe devices in the system.
+    
+    Returns:
+        List[NVMeDevice]: A list of dictionaries containing NVMe device information
+    """
     out, err, rc = shell_utils.run_command("nvme list -v -o json")
     if rc != 0:
-        logger.error("Error getting nvme list")
-        logger.error(err)
+        logger.error("Error getting nvme list: %s", err)
         return []
-    data = json.loads(out)
-    logger.debug("nvme list:")
-    logger.debug(data)
-
-    devices = []
-    if data and 'Devices' in data and data['Devices']:
-        for dev in data['Devices'][0]['Subsystems']:
-            if 'Controllers' in dev and dev['Controllers']:
-                controller = dev['Controllers'][0]
-                namespace = None
-                if "Namespaces" in dev and dev['Namespaces']:
-                    namespace = dev['Namespaces'][0]
-                elif controller and controller["Namespaces"]:
-                    namespace = controller['Namespaces'][0]
-                if namespace:
-                    devices.append({
-                        'nqn': dev['SubsystemNQN'],
-                        'size': namespace['PhysicalSize'],
-                        'sector_size': namespace['SectorSize'],
-                        'device_name': namespace['NameSpace'],
-                        'device_path': "/dev/"+namespace['NameSpace'],
-                        'controller_name': controller['Controller'],
-                        'address': controller['Address'],
-                        'transport': controller['Transport'],
-                        'model_id': controller['ModelNumber'],
-                        'serial_number': controller['SerialNumber']})
+        
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse NVMe device list: %s", e)
+        return []
+        
+    logger.debug("NVMe device list: %s", data)
+    devices: List[NVMeDevice] = []
+    
+    if not data or 'Devices' not in data or not data['Devices']:
+        return devices
+        
+    for dev in data['Devices'][0].get('Subsystems', []):
+        if not dev.get('Controllers'):
+            continue
+            
+        controller = dev['Controllers'][0]
+        namespace = None
+        
+        # Try to get namespace from device first, then from controller
+        if dev.get('Namespaces'):
+            namespace = dev['Namespaces'][0]
+        elif controller and controller.get('Namespaces'):
+            namespace = controller['Namespaces'][0]
+            
+        if namespace:
+            device: NVMeDevice = {
+                'nqn': dev.get('SubsystemNQN', ''),
+                'size': namespace.get('PhysicalSize', 0),
+                'sector_size': namespace.get('SectorSize', 0),
+                'device_name': namespace.get('NameSpace', ''),
+                'device_path': f"/dev/{namespace.get('NameSpace', '')}",
+                'controller_name': controller.get('Controller', ''),
+                'address': controller.get('Address', ''),
+                'transport': controller.get('Transport', ''),
+                'model_id': controller.get('ModelNumber', ''),
+                'serial_number': controller.get('SerialNumber', '')
+            }
+            devices.append(device)
+            
     return devices
 
 
