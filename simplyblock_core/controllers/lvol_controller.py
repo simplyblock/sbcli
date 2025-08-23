@@ -972,6 +972,13 @@ def delete_lvol(id_or_name, force_delete=False):
     # if lvol is clone and snapshot is deleted, then delete snapshot
     if lvol.cloned_from_snap:
         snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+        if snap.snap_ref_id:
+            ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
+            ref_snap.ref_count -= 1
+            ref_snap.write_to_db(db_controller.kv_store)
+        else:
+            snap.ref_count -= 1
+            snap.write_to_db(db_controller.kv_store)
         if snap and snap.deleted is True:
             snapshot_controller.delete(snap.get_id())
 
@@ -1080,6 +1087,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
 
 def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
     db_controller = DBController()
+    snap_dict = {}
     lvols = []
     if cluster_id:
         lvols = db_controller.get_lvols(cluster_id)
@@ -1098,6 +1106,9 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
+        cloned_snapped = lvol.cloned_from_snap
+        if cloned_snapped:
+            snap_dict[cloned_snapped] = snap_dict.get(cloned_snapped, 0) + 1
         size_used = 0
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
@@ -1118,6 +1129,10 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
         })
+    for snap, count in snap_dict.items():
+        ref_snap = db_controller.get_snapshot_by_id(snap)
+        ref_snap.ref_count = count
+        ref_snap.write_to_db(db_controller.kv_store)
 
     if is_json:
         return json.dumps(data, indent=2)
