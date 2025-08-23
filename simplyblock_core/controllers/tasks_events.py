@@ -3,6 +3,7 @@ import logging
 
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = logging.getLogger()
 db_controller = DBController()
@@ -21,14 +22,26 @@ def _task_event(task, message, caused_by, event):
 
 
 def task_create(task, caused_by=ec.CAUSED_BY_CLI):
-    _task_event(task, f"task created: {task.uuid}", caused_by, ec.EVENT_OBJ_CREATED)
+    if task.function_name in [JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+                              JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+                              JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION]:
+        _task_event(task, "Re-balancing task created", caused_by, ec.EVENT_OBJ_CREATED)
+    else:
+        _task_event(task, "Task created", caused_by, ec.EVENT_OBJ_CREATED)
 
 
 def task_updated(task, caused_by=ec.CAUSED_BY_CLI):
-    return
-    # _task_event(task, f"Task updated: {task.uuid}", caused_by, ec.EVENT_STATUS_CHANGE)
+    if task.function_name in [JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+                              JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+                              JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION]:
+        _task_event(task, "Re-balancing task updated", caused_by, ec.EVENT_STATUS_CHANGE)
+    else:
+        _task_event(task, "Task updated", caused_by, ec.EVENT_STATUS_CHANGE)
 
 
 def task_canceled(task, caused_by=ec.CAUSED_BY_CLI):
-    _task_event(task, f"Task canceled: {task.uuid}", caused_by, ec.EVENT_STATUS_CHANGE)
+    if task.function_name in [JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
+        _task_event(task, "Subtask canceled", caused_by, ec.EVENT_STATUS_CHANGE)
+    else:
+        _task_event(task, "Task canceled", caused_by, ec.EVENT_STATUS_CHANGE)
 

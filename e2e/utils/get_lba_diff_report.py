@@ -225,11 +225,11 @@ def main():
     remote_host = os.environ.get("FIO_REMOTE_HOST")
     fio_file_path = os.environ.get("FIO_FILE_PATH")
     offset_bytes = int(os.environ.get("FIO_OFFSET_BYTES"))
-    expected_path = os.environ.get("FIO_EXPECTED_PATH")
-    received_path = os.environ.get("FIO_RECEIVED_PATH")
+    expected_path = os.environ.get("FIO_EXPECTED_PATH", "")
+    received_path = os.environ.get("FIO_RECEIVED_PATH", "")
     length_bytes = int(os.environ.get("FIO_LENGTH_BYTES", "32768"))
 
-    if not all([remote_host, fio_file_path, expected_path, received_path]):
+    if not all([remote_host, fio_file_path]):
         raise EnvironmentError("One or more required environment variables are missing.")
 
     ssh_key_path = os.path.join(Path.home(), ".ssh", "simplyblock-us-east-2.pem")

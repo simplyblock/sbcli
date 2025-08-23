@@ -93,8 +93,9 @@ def task_runner(task):
         rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name, qos_high_priority)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
-            task.function_result = "Failed to start device migration task"
-            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "Failed to start device migration task, retry later"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.retry += 1
             task.write_to_db(db.kv_store)
             return True
         task.function_params['migration'] = {
@@ -121,6 +122,50 @@ def task_runner(task):
 db = db_controller.DBController()
 
 logger.info("Starting Tasks runner...")
+
+
+def update_master_task(task):
+    master_task = None
+    tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+    for t in tasks:
+        if task.uuid in t.sub_tasks:
+            master_task = t
+            break
+
+    def _set_master_task_status(master_task, status):
+        master_task = db.get_task_by_id(master_task.uuid)
+        if master_task.status != status:
+            logger.info(f"_set_master_task_status: {status}")
+            master_task.status = status
+            master_task.function_result = status
+            master_task.write_to_db(db.kv_store)
+            tasks_events.task_updated(master_task)
+
+    status_map = {
+        JobSchedule.STATUS_DONE: 0,
+        JobSchedule.STATUS_NEW: 0,
+        JobSchedule.STATUS_SUSPENDED: 0,
+        JobSchedule.STATUS_RUNNING: 0,
+    }
+    if master_task:
+        for sub_task_id in master_task.sub_tasks:
+            sub_task = db.get_task_by_id(sub_task_id)
+            status_map[sub_task.status] = status_map.get(sub_task.status, 0) + 1
+
+        logger.info(f"master_task.sub_tasks: {len(master_task.sub_tasks)}")
+        logger.info(f"status_map: {status_map}")
+
+        if status_map[JobSchedule.STATUS_DONE] == len(master_task.sub_tasks):  # all tasks done
+            _set_master_task_status(master_task, JobSchedule.STATUS_DONE)
+        elif status_map[JobSchedule.STATUS_NEW] == len(master_task.sub_tasks):  # all tasks new
+            _set_master_task_status(master_task, JobSchedule.STATUS_NEW)
+        elif status_map[JobSchedule.STATUS_SUSPENDED] == len(master_task.sub_tasks):  # all tasks suspended
+            _set_master_task_status(master_task, JobSchedule.STATUS_SUSPENDED)
+        else:  # set running
+            _set_master_task_status(master_task, JobSchedule.STATUS_RUNNING)
+        return True
+
+
 while True:
     clusters = db.get_clusters()
     if not clusters:
@@ -132,18 +177,28 @@ while True:
                 if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE:
                     task = db.get_task_by_id(task.uuid)
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_active_node_mig_task(
-                            task.cluster_id, task.node_id,  task.function_params["distr_name"])
-                        if active_task:
+                        active_task = False
+                        suspended_task= False
+                        for t in db.get_job_tasks(task.cluster_id):
+                            if t.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
+                                                      JobSchedule.FN_NEW_DEV_MIG] and t.node_id == task.node_id:
+                                if "distr_name" in t.function_params and t.function_params[
+                                    "distr_name"] == task.function_params["distr_name"] and t.canceled is False:
+                                    if t.status == JobSchedule.STATUS_RUNNING:
+                                        active_task = True
+                                    elif t.status == JobSchedule.STATUS_SUSPENDED and t.function_name == JobSchedule.FN_NEW_DEV_MIG:
+                                        suspended_task = True
+                            if active_task and suspended_task:
+                                break
+                        if active_task or suspended_task:
                             logger.info("task found on same node, retry")
                             continue
                     elif task.status == JobSchedule.STATUS_RUNNING:
                         pass
 
                     res = task_runner(task)
+                    update_master_task(task)
                     if res:
-                        tasks_events.task_updated(task)
-
                         node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
                         if not node_task:
                             logger.info("no task found on same node, resuming compression")

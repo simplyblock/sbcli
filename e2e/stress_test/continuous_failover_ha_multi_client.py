@@ -29,7 +29,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 30
+        self.total_lvols = 20
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
@@ -46,6 +46,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.outage_start_time = None
         self.outage_end_time = None
         self.node_vs_lvol = {}
+        self.snap_vs_node = {}
         self.sn_nodes_with_sec = []
         self.sn_primary_secondary_map = {}
         self.lvol_node = ""
@@ -88,7 +89,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         """Create lvols and start FIO with random configurations."""
         for i in range(count):
             fs_type = random.choice(["ext4", "xfs"])
-            is_crypto = random.choice([False, False])
+            is_crypto = random.choice([True, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             while lvol_name in self.lvol_mount_details:
                 self.lvol_name = f"lvl{generate_random_sequence(15)}"
@@ -625,6 +626,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     continue
                 
             self.snapshot_names.append(snapshot_name)
+            lvol_node_id = self.sbcli_utils.get_lvol_details(
+                lvol_id=self.lvol_mount_details[lvol]["ID"])[0]["node_id"]
+            self.snap_vs_node[snapshot_name] = lvol_node_id
             self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
             clone_name = f"clone_{generate_random_sequence(15)}"
             if clone_name in list(self.clone_mount_details):
@@ -755,11 +759,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
 
-            # self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
-            # sleep_n_sec(10)
-            # self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
-            #                              new_size=f"{self.int_lvol_size}G")
+            self.sbcli_utils.resize_lvol(lvol_id=self.lvol_mount_details[lvol]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
+            sleep_n_sec(10)
+            self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
+                                         new_size=f"{self.int_lvol_size}G")
             
 
     def delete_random_lvols(self, count):
@@ -767,10 +771,10 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] == self.current_outage_node]
         skip_nodes.append(self.current_outage_node)
         skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
-        # skip_nodes = []
-        self.logger.info(f"Skipping Nodes: {skip_nodes}")
+        skip_nodes_lvol = []
+        self.logger.info(f"Skipping Nodes: {skip_nodes_lvol}")
         available_lvols = [
-            lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes for lvol in lvols
+            lvol for node, lvols in self.node_vs_lvol.items() if node not in skip_nodes_lvol for lvol in lvols
         ]
         self.logger.info(f"Available Lvols: {available_lvols}")
         if len(available_lvols) < count:
@@ -816,6 +820,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 del self.clone_mount_details[del_key]
             for snapshot in snapshots:
                 snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot)
+                # snapshot_node = self.snap_vs_node[snapshot]
+                # if snapshot_node not in skip_nodes:
                 self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id)
                 self.snapshot_names.remove(snapshot)
 
@@ -868,7 +874,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         outage_type = self.perform_random_outage()
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-            self.delete_random_lvols(6)
+            self.delete_random_lvols(4)
             if not self.k8s_test:
                 for node in self.storage_nodes:
                     self.ssh_obj.restart_docker_logging(
@@ -1093,7 +1099,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.delete_random_lvols(8)
+                self.delete_random_lvols(5)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
                         self.ssh_obj.restart_docker_logging(
@@ -1112,7 +1118,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node
                     )
-                self.create_lvols_with_fio(6)
+                self.create_lvols_with_fio(5)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
                         self.ssh_obj.restart_docker_logging(
