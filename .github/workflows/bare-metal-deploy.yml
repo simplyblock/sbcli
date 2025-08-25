@@ -138,7 +138,7 @@ jobs:
         kubectl patch serviceaccount default --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
       env:
         SECRET: ${{ secrets.docker_pass }}
-        MNODE: ${{ needs.deploy.outputs.mnodes }}
+        MNODE: "192.168.10.111"
 
     - name: Deploy cluster 
       id: deployment
