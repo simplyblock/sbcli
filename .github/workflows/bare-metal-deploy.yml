@@ -129,10 +129,11 @@ jobs:
         kubectl create secret docker-registry regcred \
           --docker-server=https://index.docker.io/v1/ \
           --docker-username=hamdysimplyblock \
-          --docker-password=${{ secrets.DOCKER_PASS }} \
+          --docker-password=${SECRET} \
           --docker-email=a@b.com
-
         kubectl patch serviceaccount default --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+      env:
+        SECRET: ${{ secrets.DOCKER_PASS }}
 
     - name: Deploy cluster 
       id: deployment
