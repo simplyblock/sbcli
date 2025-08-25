@@ -80,6 +80,16 @@ while True:
                         nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
                         # connect to remote devs
                         try:
+                            node_bdevs = node.rpc_client().get_bdevs()
+                            logger.debug(node_bdevs)
+                            if node_bdevs:
+                                node_bdev_names = {}
+                                for b in node_bdevs:
+                                    node_bdev_names[b['name']] = b
+                                    for al in b['aliases']:
+                                        node_bdev_names[al] = b
+                            else:
+                                node_bdev_names = {}
                             remote_devices = []
                             for nd in nodes:
                                 if nd.get_id() == node.get_id() or nd.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -97,7 +107,7 @@ while True:
 
                                     dev.remote_bdev = storage_node_ops.connect_device(
                                         f"remote_{dev.alceml_bdev}", dev, node.rpc_client(),
-                                        bdev_names=[], reattach=False)
+                                        bdev_names=list(node_bdev_names), reattach=False)
 
                                     remote_devices.append(dev)
                             if not remote_devices:
