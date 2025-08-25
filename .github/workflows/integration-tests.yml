@@ -67,3 +67,5 @@ jobs:
       cluster: ${{ vars.ci_cluster }}
       docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
       sbcli_source: ${{ github.head_ref || github.ref_name }}
+    secrets:
+      docker_pass: ${{ secrets.DOCKER_PASS }}
