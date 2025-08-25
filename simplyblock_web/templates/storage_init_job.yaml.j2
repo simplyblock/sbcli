@@ -22,7 +22,7 @@ spec:
           image: ubuntu:22.04
           securityContext:
             privileged: true
-          command: ["/bin/bash", "-c"]
+          command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
@@ -42,7 +42,7 @@ spec:
               fi
 
               echo "--- Restarting kubelet ---"
-              nsenter --target 1 --mount --uts --ipc --net --pid -- bash -c '
+              nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
                 if command -v systemctl >/dev/null 2>&1; then
                   echo "Restarting kubelet..."
                   systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
