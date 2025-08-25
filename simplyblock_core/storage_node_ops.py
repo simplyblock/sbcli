@@ -12,7 +12,6 @@ import uuid
 
 import docker
 
-from concurrent.futures import ThreadPoolExecutor
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
