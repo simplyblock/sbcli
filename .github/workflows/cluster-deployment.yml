@@ -2,6 +2,9 @@ name: Deploy and test cluster
 
 on:
   workflow_call:
+    secrets:
+      docker_pass:
+        required: false 
     inputs:
       cluster:
         description: 'Cluster identifier'
@@ -15,9 +18,7 @@ on:
         description: 'Docker image'
         type: string
         required: true
-      docker_pass:
-        type: string
-        required: false
+
 
 concurrency:
   group: ${{ inputs.cluster }}
@@ -33,7 +34,7 @@ jobs:
       cluster: ${{ inputs.cluster }}
       docker_image: ${{ inputs.docker_image }}
       sbcli_source: ${{ inputs.sbcli_source }}
-      docker_pass: ${{ inputs.docker_pass }}
+      docker_pass: ${{ secrets.docker_pass }}
 
   test:
     needs: deploy
