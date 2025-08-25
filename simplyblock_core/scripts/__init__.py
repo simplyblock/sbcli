@@ -10,9 +10,13 @@ logger = logging.getLogger()
 
 
 def __run_script(args: list):
-    output = subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
-    if output:
+    try:
+        output = subprocess.check_output(args, timeout=600, text=True, stderr=subprocess.STDOUT)
+        if output:
+            logger.debug(output.strip())
+    except subprocess.CalledProcessError:
         logger.debug(output.strip())
+        raise
 
 
 def install_deps(mode):
