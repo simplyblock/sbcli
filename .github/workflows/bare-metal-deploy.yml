@@ -2,6 +2,9 @@ name: Deploy cluster
 
 on:
   workflow_call:
+    secrets:
+      docker_pass:
+        required: false
     inputs:
       runs_on:  # Has to be an input
         description: Platform to execute on
@@ -32,9 +35,6 @@ on:
         required: false
         type: string
         default: 4096
-      docker_pass:
-        required: false
-        type: string
       k8s_snode:
         description: "Run snode on k8s"
         required: false
@@ -132,7 +132,7 @@ jobs:
           --docker-email=a@b.com
         kubectl patch serviceaccount default --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
       env:
-        SECRET: ${{ inputs.docker_pass }}
+        SECRET: ${{ secrets.docker_pass }}
 
     - name: Deploy cluster 
       id: deployment
