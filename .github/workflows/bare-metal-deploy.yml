@@ -32,10 +32,9 @@ on:
         required: false
         type: string
         default: 4096
-      nr_hugepages:
+      docker_pass:
         required: false
         type: string
-        default: 2048
       k8s_snode:
         description: "Run snode on k8s"
         required: false
@@ -133,7 +132,7 @@ jobs:
           --docker-email=a@b.com
         kubectl patch serviceaccount default --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
       env:
-        SECRET: ${{ secrets.DOCKER_PASS }}
+        SECRET: ${{ inputs.docker_pass }}
 
     - name: Deploy cluster 
       id: deployment
@@ -178,7 +177,7 @@ jobs:
         NPCS: ${{ inputs.npcs }}
         BS: ${{ inputs.bs }}
         CHUNK_BS: ${{ inputs.chunk_bs }}
-        NR_HUGEPAGES: ${{ inputs.nr_hugepages }}
+        NR_HUGEPAGES: 2048
         SBCLI_BRANCH: ${{ inputs.sbcli_source }}
         SIMPLY_BLOCK_DOCKER_IMAGE: ${{ inputs.docker_image }}
 

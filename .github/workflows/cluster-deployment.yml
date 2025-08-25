@@ -30,6 +30,7 @@ jobs:
       cluster: ${{ inputs.cluster }}
       docker_image: ${{ inputs.docker_image }}
       sbcli_source: ${{ inputs.sbcli_source }}
+      docker_pass: ${{ secrets.DOCKER_PASS }}
 
   test:
     needs: deploy
