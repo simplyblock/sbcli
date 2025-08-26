@@ -1,5 +1,4 @@
 import pytest
-import time
 
 from simplyblock_web.test import util
 from simplyblock_web.test.api.v2.util import list_ids
