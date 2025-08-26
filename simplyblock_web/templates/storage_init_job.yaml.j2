@@ -17,19 +17,11 @@ spec:
           operator: Exists
         - effect: NoExecute
           operator: Exists
-      volumes:
-        - name: etc
-          hostPath:
-            path: /etc
       containers:
         - name: init-setup
           image: ubuntu:22.04
           securityContext:
             privileged: true
-          volumeMounts:
-            - name: etc
-              mountPath: /etc
-              readOnly: true
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -50,7 +42,7 @@ spec:
               fi
               
               echo "--- Checking OS ---"
-              OS_ID=$(grep -oP '(?<=^ID=).+' /etc/os-release | tr -d '"')
+              OS_ID="$(cat /proc/version | awk '{print $3}' | awk -F'-' '{print $NF}')"
 
               if [ "$OS_ID" != "talos" ]; then
                 echo "--- Restarting kubelet ---"
@@ -63,7 +55,8 @@ spec:
                   fi
                 '
               else
-                echo "Talos detected; skipping nsenter and kubelet restart"
+                echo "Talos detected - skipping nsenter and kubelet restart."
+                echo "Use 'talosctl service kubelet restart -n $NODE_IP' to restart the node kubelet"
               fi
 
               echo "--- Init setup complete ---"
