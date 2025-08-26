@@ -1109,7 +1109,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
 
     data = []
 
-    snap_dict = {}
+    snap_dict : dict[str, int] = {}
     for lvol in lvols:
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
