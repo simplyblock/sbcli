@@ -58,6 +58,9 @@ def test_restart(call, cluster):
     assert node['status'] == 'online'
     node_uuid = node['id']
 
+    call('POST', f'/clusters/{cluster}/storage-nodes/{node_uuid}/suspend')
+    assert call('GET', f'/clusters/{cluster}/storage-nodes/{node_uuid}')['status'] == 'suspended'
+
     call('POST', f'/clusters/{cluster}/storage-nodes/{node_uuid}/restart', data={'force': True})
     _check_status_transition(
         ['online', 'in_restart', 'online'],

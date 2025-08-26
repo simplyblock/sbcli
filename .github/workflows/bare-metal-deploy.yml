@@ -62,7 +62,6 @@ jobs:
   
   k8s:
     runs-on: ${{ inputs.runs_on }}
-    if: ${{ inputs.k8s_snode == true }}
     steps:
     - name: Checkout deployment tooling
       uses: actions/checkout@v4

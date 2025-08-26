@@ -1,4 +1,5 @@
 import pytest
+import time
 
 from simplyblock_web.test import util
 from simplyblock_web.test.api.v2.util import list_ids
@@ -33,6 +34,7 @@ def test_snapshot_delete(call, cluster, storage_pool):
     assert clone_uuid not in list_ids(call, f'/clusters/{cluster}/storage-pools/{storage_pool}/volumes')
 
     call('DELETE', f'/clusters/{cluster}/storage-pools/{storage_pool}/snapshots/{snapshot_uuid}')
+    util.await_deletion(call, f'/clusters/{cluster}/storage-pools/{storage_pool}/snapshots/{snapshot_uuid}')
     assert snapshot_uuid not in list_ids(call, f'/clusters/{cluster}/storage-pools/{storage_pool}/snapshots')
 
 
@@ -65,5 +67,6 @@ def test_snapshot_softdelete(call, cluster, storage_pool):
 
     call('DELETE', f'/clusters/{cluster}/storage-pools/{storage_pool}/volumes/{clone_uuid}')
     util.await_deletion(call, f'/clusters/{cluster}/storage-pools/{storage_pool}/volumes/{clone_uuid}')
+    util.await_deletion(call, f'/clusters/{cluster}/storage-pools/{storage_pool}/snapshots/{snapshot_uuid}')
     assert clone_uuid not in list_ids(call, f'/clusters/{cluster}/storage-pools/{storage_pool}/volumes')
     assert snapshot_uuid not in list_ids(call, f'/clusters/{cluster}/storage-pools/{storage_pool}/snapshots')
