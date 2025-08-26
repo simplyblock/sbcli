@@ -148,9 +148,9 @@ jobs:
         KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
 
         # install helm on mgmt node
-        sh -i $KEY -o StrictHostKeyChecking=no root@$MNODES "
+        ssh -i $KEY -o StrictHostKeyChecking=no root@$MNODES "
           sudo yum install -y tar
-          curl -fsSL -o /roo/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          curl -fsSL -o /root/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           chmod 700 /root/get_helm.sh
           /root/get_helm.sh
         "
