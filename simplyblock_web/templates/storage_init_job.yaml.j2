@@ -17,11 +17,18 @@ spec:
           operator: Exists
         - effect: NoExecute
           operator: Exists
+      volumes:
+        - name: etc
+          hostPath:
+            path: /etc
       containers:
         - name: init-setup
           image: ubuntu:22.04
           securityContext:
             privileged: true
+          volumeMounts:
+            - name: etc
+              mountPath: /etc
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -40,15 +47,22 @@ spec:
                 echo "Failed to apply config"
                 exit 1
               fi
+              
+              echo "--- Checking OS ---"
+              OS_ID=$(grep -oP '(?<=^ID=).+' /etc/os-release | tr -d '"')
 
-              echo "--- Restarting kubelet ---"
-              nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
-                if command -v systemctl >/dev/null 2>&1; then
-                  echo "Restarting kubelet..."
-                  systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
-                else
-                  echo "systemctl not found; skipping kubelet restart"
-                fi
-              '
+              if [ "$OS_ID" != "talos" ]; then
+                echo "--- Restarting kubelet ---"
+                nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
+                  if command -v systemctl >/dev/null 2>&1; then
+                    echo "Restarting kubelet..."
+                    systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
+                  else
+                    echo "systemctl not found; skipping kubelet restart"
+                  fi
+                '
+              else
+                echo "Talos detected; skipping nsenter and kubelet restart"
+              fi
 
               echo "--- Init setup complete ---"
