@@ -103,7 +103,8 @@ def device_set_online(device_id):
     ret = device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
     if ret:
         logger.info("Adding task to device data migration")
-        task_id = tasks_controller.add_device_mig_task(device_id)
+        dev = DBController().get_storage_device_by_id(device_id)
+        task_id = tasks_controller.add_device_mig_task([device_id], dev.cluster_id)
         if task_id:
             logger.info(f"Task id: {task_id}")
     return ret
