@@ -118,7 +118,7 @@ def task_runner_device(task):
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
 
-        tasks_controller.add_device_mig_task(device.get_id())
+        tasks_controller.add_device_mig_task([device.get_id()], task.cluster_id)
         return True
 
     task.retry += 1
