@@ -186,7 +186,6 @@ def task_runner_node(task):
         # node is unreachable, retry
         logger.info(f"Node is not reachable: {task.node_id}, retry")
         task.function_result = "Node is unreachable, retry"
-        task.retry += 1
         task.write_to_db(db.kv_store)
         return False
 
