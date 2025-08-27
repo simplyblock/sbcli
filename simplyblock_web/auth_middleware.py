@@ -22,7 +22,7 @@ def token_required(f):
             if len(au.split()) == 2:
                 cluster_id = au.split()[0]
                 cluster_secret = au.split()[1]
-            if cluster_id and cluster_id == "Basic":
+            if cluster_secret and cluster_id and cluster_id == "Basic":
                 try:
                     tkn = base64.b64decode(cluster_secret).decode('utf-8')
                     if tkn:

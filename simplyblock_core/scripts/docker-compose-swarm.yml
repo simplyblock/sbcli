@@ -11,7 +11,7 @@ services:
 
   fdb-server:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.42
+    image: foundationdb/foundationdb:7.3.63
     networks:
       - hostnet
     environment:
@@ -29,12 +29,12 @@ services:
       placement:
         constraints: [ node.role == manager ]
       resources:
-        limits:
+        reservations:
           memory: 4g
 
   fdb-backup-agent:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.42
+    image: foundationdb/foundationdb:7.3.63
     entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
     networks:
       - hostnet
@@ -49,7 +49,7 @@ services:
   WebAppAPI:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_web/app.py"
+    command: "python3 simplyblock_web/app.py"
     networks:
       - localnet
     deploy:
@@ -92,38 +92,10 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  CachingNodeMonitor:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/caching_node_monitor.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
   LVolStatsCollector:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/lvol_stat_collector.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  CachedLVolStatsCollector:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python simplyblock_core/services/cached_lvol_stat_collector.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -226,6 +198,20 @@ services:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/lvol_monitor.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  SnapshotMonitor:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/snapshot_monitor.py"
     deploy:
       placement:
         constraints: [node.role == manager]

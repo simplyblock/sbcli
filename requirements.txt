@@ -1,4 +1,4 @@
-foundationdb==7.3.3
+foundationdb==7.3.63
 requests
 prettytable>=3.10.0
 docker
@@ -21,3 +21,6 @@ ec2-metadata
 flask-swagger-ui
 sentry-sdk[flask]
 flask-openapi3
+jsonschema
+fastapi
+uvicorn

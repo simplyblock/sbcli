@@ -49,6 +49,7 @@ class LVol(BaseModel):
     nodes: List[str] = []
     nqn: str = ""
     ns_id: int = 1
+    max_namespace_per_subsys: int = 1
     subsys_port: int = 9090
     nvme_dev: NVMeDevice = None  # type: ignore[assignment]
     pool_uuid: str = ""

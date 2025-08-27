@@ -3,7 +3,6 @@ import time
 
 
 from simplyblock_core import db_controller, storage_node_ops, utils
-from simplyblock_core.controllers import tasks_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 
@@ -55,6 +54,5 @@ while True:
                         task.function_result = str(res)
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db.kv_store)
-                        tasks_events.task_updated(task)
 
     time.sleep(5)

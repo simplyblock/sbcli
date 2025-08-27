@@ -3,9 +3,11 @@ import time
 
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
-from simplyblock_core.controllers import tasks_events, tcp_ports_events, health_controller
+from simplyblock_core.controllers import tcp_ports_events, health_controller
+from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.snode_client import SNodeClient
 
@@ -57,10 +59,92 @@ while True:
                             task.write_to_db(db.kv_store)
                             continue
 
-                        logger.info("connecting remote devices")
-                        node.remote_devices = storage_node_ops._connect_to_remote_devs(
-                            node, force_conect_restarting_nodes=True)
-                        node.write_to_db()
+                        # check node ping
+                        ping_check = health_controller._check_node_ping(node.mgmt_ip)
+                        logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+                        if not ping_check:
+                            time.sleep(1)
+                            ping_check = health_controller._check_node_ping(node.mgmt_ip)
+                            logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+
+                        if not ping_check:
+                            msg = "Node ping is false, retry task"
+                            logger.info(msg)
+                            task.function_result = msg
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.write_to_db(db.kv_store)
+                            continue
+
+                        # check node ping
+                        logger.info("connect to remote devices")
+                        nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
+                        # connect to remote devs
+                        try:
+                            node_bdevs = node.rpc_client().get_bdevs()
+                            logger.debug(node_bdevs)
+                            if node_bdevs:
+                                node_bdev_names = {}
+                                for b in node_bdevs:
+                                    node_bdev_names[b['name']] = b
+                                    for al in b['aliases']:
+                                        node_bdev_names[al] = b
+                            else:
+                                node_bdev_names = {}
+                            remote_devices = []
+                            for nd in nodes:
+                                if nd.get_id() == node.get_id() or nd.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                                    continue
+                                logger.info(f"Connecting to node {nd.get_id()}")
+                                for index, dev in enumerate(nd.nvme_devices):
+
+                                    if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                                          NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                                        logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
+                                        continue
+
+                                    if not dev.alceml_bdev:
+                                        raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
+
+                                    dev.remote_bdev = storage_node_ops.connect_device(
+                                        f"remote_{dev.alceml_bdev}", dev, node.rpc_client(),
+                                        bdev_names=list(node_bdev_names), reattach=False)
+
+                                    remote_devices.append(dev)
+                            if not remote_devices:
+                                msg = "Node unable to connect to remote devs, retry task"
+                                logger.info(msg)
+                                task.function_result = msg
+                                task.status = JobSchedule.STATUS_SUSPENDED
+                                task.write_to_db(db.kv_store)
+                                continue
+                            else:
+                                node = db.get_storage_node_by_id(task.node_id)
+                                node.remote_devices = remote_devices
+                                node.write_to_db()
+
+                            logger.info("connect to remote JM devices")
+                            remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+                            if not remote_jm_devices or len(remote_jm_devices) < 2:
+                                msg = "Node unable to connect to remote JMs, retry task"
+                                logger.info(msg)
+                                task.function_result = msg
+                                task.status = JobSchedule.STATUS_SUSPENDED
+                                task.write_to_db(db.kv_store)
+                                continue
+                            else:
+                                node = db.get_storage_node_by_id(task.node_id)
+                                node.remote_jm_devices = remote_jm_devices
+                                node.write_to_db()
+
+
+                        except Exception as e:
+                            logger.error(e)
+                            msg = "Error when connect to remote devs, retry task"
+                            logger.info(msg)
+                            task.function_result = msg
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.write_to_db(db.kv_store)
+                            continue
 
                         logger.info("Sending device status event")
                         for db_dev in node.nvme_devices:
@@ -93,12 +177,13 @@ while True:
                             sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
 
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
-                        snode_api.firewall_set_port(port_number, "tcp", "allow", node.rpc_port)
+
+                        fw_api = FirewallClient(f"{node.mgmt_ip}:5001", timeout=5, retry=2)
+                        fw_api.firewall_set_port(port_number, "tcp", "allow", node.rpc_port)
                         tcp_ports_events.port_allowed(node, port_number)
 
                         task.function_result = f"Port {port_number} allowed on node"
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db.kv_store)
-                        tasks_events.task_updated(task)
 
     time.sleep(5)

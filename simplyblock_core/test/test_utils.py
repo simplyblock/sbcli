@@ -3,6 +3,7 @@ from typing import ContextManager
 import pytest
 
 from simplyblock_core import utils
+from simplyblock_core.utils import helpers
 
 @pytest.mark.parametrize('args,expected', [
     (('0',), 0),
@@ -109,3 +110,13 @@ def test_convert_size(size, unit, expected):
             utils.convert_size(size, unit)
     else:
         assert utils.convert_size(size, unit) == expected
+
+
+def test_singleton():
+    with pytest.raises(ValueError):
+        helpers.single([])
+
+    assert helpers.single([1]) == 1
+
+    with pytest.raises(ValueError):
+        helpers.single([1, 2])

@@ -1,6 +1,7 @@
 # coding=utf-8
 
 import time
+import os
 from datetime import datetime
 
 
@@ -15,6 +16,59 @@ logger = utils.get_logger(__name__)
 # get DB controller
 db = db_controller.DBController()
 
+
+# ----- Backend Abstractions -----
+
+class NodeBackend:
+    def get_reachable_nodes(self) -> list[str]:
+        raise NotImplementedError
+
+
+class DockerNodeBackend(NodeBackend):
+    def get_reachable_nodes(self) -> list[str]:
+        client = utils.get_docker_client()
+        reachable = []
+        for node in client.nodes.list(filters={"role": "manager"}):
+            addr = node.attrs["ManagerStatus"]["Addr"].split(":")[0]
+            if node.attrs["ManagerStatus"]["Reachability"] == "reachable":
+                reachable.append(addr)
+        return reachable
+
+
+class K8sNodeBackend(NodeBackend):
+    def __init__(self):
+        from kubernetes import client, config
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+        self.v1 = client.CoreV1Api()
+
+    def get_reachable_nodes(self) -> list[str]:
+        reachable = []
+        nodes = self.v1.list_node().items
+        for node in nodes:
+            ready = any(c.status == "True" and c.type == "Ready" for c in node.status.conditions)
+            if ready:
+                for addr in node.status.addresses:
+                    if addr.type == "InternalIP":
+                        reachable.append(addr.address)
+        return reachable
+
+
+# ----- Backend Selection -----
+
+backend_type = os.getenv("BACKEND_TYPE", "docker").lower()
+backend: NodeBackend
+
+if backend_type == "docker":
+    backend = DockerNodeBackend()
+elif backend_type == "k8s":
+    backend = K8sNodeBackend()
+else:
+    raise ValueError(f"Unsupported BACKEND_TYPE '{backend_type}', use 'docker' or 'k8s'")
+
+logger.info(f"Using backend: {backend_type}")
 
 def set_node_online(node):
     if node.status == MgmtNode.STATUS_UNREACHABLE:
@@ -42,6 +96,8 @@ logger.info("Starting Mgmt node monitor")
 while True:
     # get storage nodes
     nodes = db.get_mgmt_nodes()
+    reachable_ips = set(backend.get_reachable_nodes())
+
     for node in nodes:
         if node.status not in [MgmtNode.STATUS_ONLINE, MgmtNode.STATUS_UNREACHABLE]:
             logger.info(f"Node status is: {node.status}, skipping")
@@ -60,19 +116,7 @@ while True:
             set_node_offline(node)
             continue
 
-        c = utils.get_docker_client()
-        nl = c.nodes.list(filters={'role': 'manager'})
-        docker_node = None
-        for n in nl:
-            if n.attrs['ManagerStatus']['Addr'].startswith(node.mgmt_ip):
-                docker_node = n
-                break
-        if not docker_node:
-            logger.error("Node is not part of the docker swarm!")
-            set_node_offline(node)
-            continue
-
-        if docker_node.attrs['ManagerStatus']['Reachability'] == 'reachable':
+        if node.mgmt_ip in reachable_ips:
             set_node_online(node)
         else:
             set_node_offline(node)

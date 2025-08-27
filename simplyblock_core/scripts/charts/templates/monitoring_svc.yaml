@@ -1,0 +1,79 @@
+{{- if .Values.monitoring.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-graylog
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-graylog
+  ports:
+    - name: web
+      port: 9000
+      targetPort: 9000
+    - name: gelf-tcp
+      port: 12201
+      protocol: TCP
+      targetPort: 12201
+    - name: gelf-udp
+      port: 12201
+      protocol: UDP
+      targetPort: 12201
+  
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-thanos-store
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-thanos-store
+  ports:
+    - name: thanos-store
+      port: 10901
+      targetPort: 10901
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-thanos-query
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-thanos-query
+  ports:
+    - name: thanos-query
+      port: 9091
+      targetPort: 9091
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-node-exporter
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-node-exporter
+  ports:
+    - name: simplyblock-node-exporter
+      protocol: TCP
+      port: 9100
+      targetPort: 9100
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-grafana
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-grafana
+  ports:
+    - name: grafana
+      port: 3000
+      targetPort: 3000
+{{- end }}

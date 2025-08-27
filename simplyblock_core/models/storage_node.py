@@ -180,7 +180,7 @@ class StorageNode(BaseNodeObject):
 
             if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
                 rpc_client.subsystem_delete(self.hublvol.nqn)
-                self.hublvol = None
+                self.hublvol = None  # type: ignore[assignment]
 
             raise
 

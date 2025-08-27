@@ -46,6 +46,7 @@ class Cluster(BaseModel):
     enable_node_affinity: bool = False
     enable_qos: bool = False
     grafana_endpoint: str = ""
+    mode: str = ""
     grafana_secret: str = ""
     contact_point: str = ""
     ha_type: str = "single"
@@ -54,6 +55,7 @@ class Cluster(BaseModel):
     jm_device_per_node: int = 1
     max_queue_size: int = 128
     model_ids: List[str] = []
+    cluster_name: str = None # type: ignore[assignment]
     nqn: str = ""
     page_size_in_blocks: int = 2097152
     prov_cap_crit: int = 190
