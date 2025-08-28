@@ -373,22 +373,31 @@ def _check_node_lvstore(
                 if results:
                     logger.info(utils.print_table(results))
                     logger.info(f"Checking Distr map ... {is_passed}")
-                    if not is_passed and auto_fix and False:
+                    if not is_passed and auto_fix:
                         for result in results:
                             if result['Results'] == 'failed':
                                 if result['Kind'] == "Device":
                                     if result['Found Status']:
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
                                         if dev.status == NVMeDevice.STATUS_ONLINE:
-                                            name = f"remote_{dev.alceml_bdev}"
-                                            logger.info(f"detaching {name} from {node.get_id()}")
-                                            rpc_client.bdev_nvme_detach_controller(name)
-                                            time.sleep(1)
-                                            remote_devices = storage_node_ops._connect_to_remote_devs(node)
-                                            n = db_controller.get_storage_node_by_id(node.get_id())
-                                            n.remote_devices = remote_devices
-                                            n.write_to_db()
-                                        distr_controller.send_dev_status_event(dev, dev.status, node)
+                                            try:
+                                                remote_bdev = storage_node_ops.connect_device(
+                                                    f"remote_{dev.alceml_bdev}", dev, rpc_client,
+                                                    bdev_names=node_bdev_names, reattach=False)
+                                                if remote_bdev:
+                                                    new_remote_devices = []
+                                                    n = db_controller.get_storage_node_by_id(node.get_id())
+                                                    for rem_dev in n.remote_devices:
+                                                        if dev.get_id() == rem_dev.get_id():
+                                                            continue
+                                                        new_remote_devices.append(rem_dev)
+                                                    dev.remote_bdev = remote_bdev
+                                                    new_remote_devices.append(dev)
+                                                    n.remote_devices = new_remote_devices
+                                                    n.write_to_db()
+                                                    distr_controller.send_dev_status_event(dev, dev.status, node)
+                                            except Exception as e:
+                                                logger.error(f"Failed to connect to {dev.get_id()}: {e}")
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
                                     distr_controller.send_node_status_event(n, n.status, node)
