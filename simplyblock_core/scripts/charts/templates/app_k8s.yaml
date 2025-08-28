@@ -16,7 +16,14 @@ spec:
         log-collector/enabled: "true"
     spec:
       nodeSelector:
-        simplyblock.io/role: mgmt-plane  
+        simplyblock.io/role: mgmt-plane
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 777 /etc/foundationdb']
+        volumeMounts:
+        - name: fdb-config
+          mountPath: /etc/foundationdb
       containers:
       - name: fdb-server
         image: foundationdb/foundationdb:7.3.42
@@ -51,6 +58,9 @@ spec:
           - name: fdb-entrypoint                     
             mountPath: /var/fdb/scripts
             readOnly: true
+          - name: fdb-config
+            mountPath: /etc/foundationdb
+            readOnly: true
         resources:
           requests:
             cpu: "100m"
@@ -75,6 +85,8 @@ spec:
         configMap:
           name: simplyblock-fdb-entrypoint-script
           defaultMode: 0777
+      - name: fdb-config
+        emptyDir: {}
       hostNetwork: true
 
 ---
