@@ -1,8 +1,43 @@
+import os
+import sys
+import logging
+
+
 from simplyblock_core.storage_node_ops import generate_automated_deployment_config, upgrade_automated_deployment_config
-from simplyblock_core import utils
+from simplyblock_core import constants, utils
 from simplyblock_cli.clibase import range_type
+from simplyblock_web import node_utils_k8s
+
 
 import argparse
+from kubernetes.client import ApiException
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(constants.LOG_LEVEL)
+
+POD_PREFIX = "snode-spdk-pod"
+
+def _is_pod_present_for_node():
+    k8s_core_v1 = utils.get_k8s_core_client()
+    namespace = node_utils_k8s.get_namespace()
+    node_name = os.environ.get("HOSTNAME", "")
+
+    if not node_name:
+        raise RuntimeError(f"{node_name} env variable not set")
+
+    try:
+        resp = k8s_core_v1.list_namespaced_pod(namespace)
+        for pod in resp.items:
+            if (pod.metadata.name.startswith(POD_PREFIX) and
+                pod.spec.node_name == node_name):
+                return True
+    except ApiException as e:
+        raise RuntimeError(f"API error: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Unexpected error: {e}")
+    return False
+
 
 if __name__ == "__main__":
 
@@ -31,6 +66,10 @@ if __name__ == "__main__":
     if args.upgrade:
         upgrade_automated_deployment_config()
     else:
+        if _is_pod_present_for_node():
+            logger.info("Skipped generating automated deployment configuration — pod already present.")
+            sys.exit(0)
+
         if not args.max_lvol:
             parser.error('--max-lvol required.')
         if not args.max_prov:
