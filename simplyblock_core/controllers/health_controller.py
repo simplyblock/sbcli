@@ -373,7 +373,7 @@ def _check_node_lvstore(
                 if results:
                     logger.info(utils.print_table(results))
                     logger.info(f"Checking Distr map ... {is_passed}")
-                    if not is_passed and auto_fix:
+                    if not is_passed and auto_fix and False:
                         for result in results:
                             if result['Results'] == 'failed':
                                 if result['Kind'] == "Device":
