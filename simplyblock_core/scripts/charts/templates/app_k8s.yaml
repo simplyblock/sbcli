@@ -20,10 +20,18 @@ spec:
       initContainers:
       - name: init-fdb
         image: busybox:1.28
-        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 777 /etc/foundationdb']
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 777 /etc/foundationdb && echo "$$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
         volumeMounts:
         - name: fdb-config
           mountPath: /etc/foundationdb
+        securityContext:
+          runAsUser: 0  # Run as root to ensure directory creation works
       containers:
       - name: fdb-server
         image: foundationdb/foundationdb:7.3.42
@@ -53,14 +61,11 @@ spec:
             mountPath: /var/fdb/data
           - name: fdb-logs
             mountPath: /var/fdb/logs
-          - name: cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
           - name: fdb-entrypoint                     
             mountPath: /var/fdb/scripts
             readOnly: true
           - name: fdb-config
             mountPath: /etc/foundationdb
-            readOnly: true
         resources:
           requests:
             cpu: "100m"
@@ -69,22 +74,22 @@ spec:
             cpu: "500m"
             memory: "2Gi"
       volumes:
-      - name: fdb-data
-        hostPath:
-          path: /etc/foundationdb/data
-          type: DirectoryOrCreate
-      - name: fdb-logs
-        hostPath:
-          path: /etc/foundationdb/logs
-          type: DirectoryOrCreate
-      - name: cluster-file
-        hostPath:
-          path: /etc/foundationdb/fdb.cluster
-          type: FileOrCreate
       - name: fdb-entrypoint                         
         configMap:
           name: simplyblock-fdb-entrypoint-script
           defaultMode: 0777
+      - name: fdb-data
+        hostPath:
+          path: /var/lib/foundationdb/data
+          type: DirectoryOrCreate
+      - name: fdb-logs
+        hostPath:
+          path: /var/log/foundationdb
+          type: DirectoryOrCreate
+      - name: fdb-tls
+        hostPath:
+          path: /var/lib/foundationdb/tls
+          type: DirectoryOrCreate
       - name: fdb-config
         emptyDir: {}
       hostNetwork: true
@@ -109,6 +114,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane 
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: foundationdb
+          mountPath: /etc/foundationdb
       containers:
       - name: fdb-backup-agent
         image: foundationdb/foundationdb:7.3.42
@@ -122,8 +140,8 @@ spec:
               name: simplyblock-config
               key: FDB_CLUSTER_FILE_CONTENTS
         volumeMounts:
-          - name: cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
+          - name: foundationdb
+            mountPath: /etc/foundationdb
         resources:
           requests:
             cpu: "100m"
@@ -132,9 +150,8 @@ spec:
             cpu: "250m"
             memory: "1Gi"
       volumes:
-      - name: cluster-file
-        hostPath:
-          path: /etc/foundationdb/fdb.cluster
+      - name: foundationdb
+        emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -154,6 +171,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane 
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: fdb-config
+          mountPath: /etc/foundationdb
       containers:
       - name: webappapi
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -183,8 +213,7 @@ spec:
             memory: "2Gi"
       volumes:
       - name: fdb-config
-        hostPath:
-          path: /etc/foundationdb
+        emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -205,6 +234,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane 
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: fdb-config
+          mountPath: /etc/foundationdb
       containers:
       - name: storage-node-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -228,8 +270,7 @@ spec:
             memory: "1Gi"
       volumes:
       - name: fdb-config
-        hostPath:
-          path: /etc/foundationdb
+        emptyDir: {}
       
 ---
 apiVersion: apps/v1
@@ -251,6 +292,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: foundationdb
+          mountPath: /etc/foundationdb
       containers:
         - name: mgmt-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -276,8 +330,7 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
 
 ---
 apiVersion: apps/v1
@@ -299,6 +352,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: foundationdb
+          mountPath: /etc/foundationdb
       containers:
         - name: lvol-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -322,8 +388,7 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
 
 ---
 apiVersion: apps/v1
@@ -345,6 +410,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: foundationdb
+          mountPath: /etc/foundationdb
       containers:
         - name: main-distr-event-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -368,8 +446,7 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
 
 ---
 apiVersion: apps/v1
@@ -402,9 +479,19 @@ spec:
             configMapKeyRef:
               name: simplyblock-config
               key: LOG_LEVEL
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
         volumeMounts:
-        - mountPath: /etc/foundationdb
-          name: foundationdb-volume
+        - name: foundationdb-volume
+          mountPath: /etc/foundationdb
         resources:
           requests:
             cpu: "100m"
@@ -414,8 +501,8 @@ spec:
             memory: "1Gi"
       volumes:
       - name: foundationdb-volume
-        hostPath:
-          path: /etc/foundationdb
+        emptyDir: {}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -436,6 +523,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: foundationdb-volume
+          mountPath: /etc/foundationdb
       containers:
       - name: capacity-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -459,8 +559,8 @@ spec:
             memory: "1Gi"
       volumes:
       - name: foundationdb-volume
-        hostPath:
-          path: /etc/foundationdb
+        emptyDir: {}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -481,6 +581,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: foundationdb-volume
+          mountPath: /etc/foundationdb
       containers:
       - name: health-check
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -504,8 +617,8 @@ spec:
             memory: "1Gi"
       volumes:
       - name: foundationdb-volume
-        hostPath:
-          path: /etc/foundationdb
+        emptyDir: {}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -526,6 +639,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: foundationdb-volume
+          mountPath: /etc/foundationdb
       containers:
       - name: device-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -549,8 +675,8 @@ spec:
             memory: "1Gi"
       volumes:
       - name: foundationdb-volume
-        hostPath:
-          path: /etc/foundationdb
+        emptyDir: {}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -571,6 +697,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: foundationdb-volume
+          mountPath: /etc/foundationdb
       containers:
       - name: lvol-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -594,8 +733,8 @@ spec:
             memory: "1Gi"
       volumes:
       - name: foundationdb-volume
-        hostPath:
-          path: /etc/foundationdb
+        emptyDir: {}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -616,6 +755,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: foundationdb
+          mountPath: /etc/foundationdb
       containers:
         - name: cleanupfdb
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -641,8 +793,8 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -663,6 +815,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+        - name: init-fdb
+          image: busybox:1.28
+          command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+          env:
+            - name: FDB_CLUSTER_FILE_CONTENTS
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: FDB_CLUSTER_FILE_CONTENTS
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
       containers:
         - name: tasks-runner-restart
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -686,8 +851,8 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -708,6 +873,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+        - name: init-fdb
+          image: busybox:1.28
+          command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+          env:
+            - name: FDB_CLUSTER_FILE_CONTENTS
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: FDB_CLUSTER_FILE_CONTENTS
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
       containers:
         - name: tasks-runner-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -731,8 +909,7 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -753,6 +930,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+        - name: init-fdb
+          image: busybox:1.28
+          command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+          env:
+            - name: FDB_CLUSTER_FILE_CONTENTS
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: FDB_CLUSTER_FILE_CONTENTS
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
       containers:
         - name: tasks-runner-failed-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -776,8 +966,7 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -796,6 +985,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+        - name: init-fdb
+          image: busybox:1.28
+          command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+          env:
+            - name: FDB_CLUSTER_FILE_CONTENTS
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: FDB_CLUSTER_FILE_CONTENTS
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
       containers:
         - name: tasks-runner-cluster-status
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -819,8 +1021,7 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -841,6 +1042,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+        - name: init-fdb
+          image: busybox:1.28
+          command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+          env:
+            - name: FDB_CLUSTER_FILE_CONTENTS
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: FDB_CLUSTER_FILE_CONTENTS
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
       containers:
         - name: tasks-runner-new-device-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -864,8 +1078,7 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -886,6 +1099,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
+      initContainers:
+        - name: init-fdb
+          image: busybox:1.28
+          command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+          env:
+            - name: FDB_CLUSTER_FILE_CONTENTS
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: FDB_CLUSTER_FILE_CONTENTS
+          volumeMounts:
+            - name: foundationdb
+              mountPath: /etc/foundationdb
       containers:
         - name: tasks-node-addrunner
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -909,8 +1135,7 @@ spec:
               memory: "1Gi"
       volumes:
         - name: foundationdb
-          hostPath:
-            path: /etc/foundationdb
+          emptyDir: {}
 
 ---
 
