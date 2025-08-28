@@ -74,11 +74,13 @@ def detect_fe_be_tags(ssh_obj, client_ip: str) -> Tuple[Optional[str], Optional[
             continue
         repo, tag, digest = parts[0], parts[1], parts[2]
         digest = (digest or "").replace("sha256:", "").strip()
+        if "/" in repo:
+            repo = repo.split("/")[-1]
 
-        if repo == "simplyblock/simplyblock":  # FE
+        if "simplyblock" in repo:  # FE
             fe_branch = tag
             fe_commit = digest
-        elif repo == "simplyblock/spdk":       # BE
+        elif "spdk" in repo or "ultra" in repo:       # BE
             be_branch = tag
             be_commit = digest
 
