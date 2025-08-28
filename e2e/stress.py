@@ -186,7 +186,7 @@ def main():
         try:
             test_run_api.complete_run(
                 status=final_status,
-                completion_comment=COMPLETION_COMMENT,
+                completion_comment=summary,
                 completion_jira_ticket=JIRA_TICKET,
                 failure_reason_id=failure_reason_id
             )
