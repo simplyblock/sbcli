@@ -84,7 +84,7 @@ class FirewallClient:
             logger.info("Using other firewall path: firewall_set_port")
             mgmt_ip = self.ip_address.split(":")[0]
             self.url = f"http://{mgmt_ip}:5000/"
-            return self._request("POST", "firewall_set_port", params)
+            return self._request("POST", "snode/firewall_set_port", params)
 
     def get_firewall(self, rpc_port=None):
         params = {"rpc_port": rpc_port}
@@ -95,4 +95,4 @@ class FirewallClient:
             logger.info("Using other firewall path: get_firewall")
             mgmt_ip = self.ip_address.split(":")[0]
             self.url = f"http://{mgmt_ip}:5000/"
-            return self._request("GET", "get_firewall", params)
+            return self._request("GET", "snode/get_firewall", params)
