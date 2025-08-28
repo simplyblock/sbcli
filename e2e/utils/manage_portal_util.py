@@ -15,10 +15,11 @@ SUPABASE_FUNC_CREATE_URL = os.getenv(
     "SUPABASE_FUNC_CREATE_URL",
     "https://whnvlzdyeertvilbymng.supabase.co/functions/v1/test-runs/create",
 )
-SUPABASE_REST_URL = os.getenv(
-    "SUPABASE_REST_URL",
-    "https://whnvlzdyeertvilbymng.supabase.co/rest/v1/test_runs",
+SUPABASE_FUNC_COMPLETE_URL = os.getenv(
+    "SUPABASE_FUNC_COMPLETE_URL",
+    "https://whnvlzdyeertvilbymng.supabase.co/functions/v1/test-runs/complete",
 )
+
 
 DEFAULT_HEADERS = {
     "Content-Type": "application/json",
@@ -130,17 +131,15 @@ class TestRunsAPI:
         if not self.run_id:
             raise RuntimeError("No run_id found. Call create_run() first.")
 
-        url = f"{SUPABASE_REST_URL}?id=eq.{self.run_id}"
         body = {
+            "test_run_id": self.run_id,
             "status": status,
-            "completed_at": _utc_iso(),
-            "updated_at": _utc_iso(),
             "completion_comment": completion_comment,
             "completion_jira_ticket": completion_jira_ticket or completion_comment,
         }
         if status == "failed" and failure_reason_id:
             body["failure_reason_id"] = failure_reason_id
 
-        resp = requests.patch(url, headers=DEFAULT_HEADERS, json=body, timeout=30)
+        resp = requests.put(SUPABASE_FUNC_COMPLETE_URL, headers=DEFAULT_HEADERS, json=body, timeout=30)
         resp.raise_for_status()
         return resp.json()
