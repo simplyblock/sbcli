@@ -18,6 +18,8 @@ spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
       securityContext:
+        runAsUser: 1100
+        runAsGroup: 1100
         fsGroup: 1100
         supplementalGroups:
           - 0 
