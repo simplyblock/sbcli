@@ -168,7 +168,7 @@ spec:
             memory: "512Mi"
           limits:
             cpu: "500m"
-            memory: "1Gi"
+            memory: "2Gi"
       volumes:
       - name: fdb-config
         hostPath:
@@ -207,6 +207,13 @@ spec:
         volumeMounts:
         - name: fdb-config
           mountPath: /etc/foundationdb
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "250m"
+            memory: "1Gi"
       volumes:
       - name: fdb-config
         hostPath:
@@ -248,6 +255,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -287,6 +301,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -326,6 +347,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -365,6 +393,13 @@ spec:
         volumeMounts:
         - mountPath: /etc/foundationdb
           name: foundationdb-volume
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "250m"
+            memory: "1Gi"
       volumes:
       - name: foundationdb-volume
         hostPath:
@@ -403,6 +438,13 @@ spec:
         volumeMounts:
         - mountPath: /etc/foundationdb
           name: foundationdb-volume
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "250m"
+            memory: "1Gi"
       volumes:
       - name: foundationdb-volume
         hostPath:
@@ -441,6 +483,13 @@ spec:
         volumeMounts:
         - mountPath: /etc/foundationdb
           name: foundationdb-volume
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "250m"
+            memory: "1Gi"
       volumes:
       - name: foundationdb-volume
         hostPath:
@@ -479,6 +528,13 @@ spec:
         volumeMounts:
         - mountPath: /etc/foundationdb
           name: foundationdb-volume
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "250m"
+            memory: "1Gi"
       volumes:
       - name: foundationdb-volume
         hostPath:
@@ -517,6 +573,13 @@ spec:
         volumeMounts:
         - mountPath: /etc/foundationdb
           name: foundationdb-volume
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "250m"
+            memory: "1Gi"
       volumes:
       - name: foundationdb-volume
         hostPath:
@@ -557,6 +620,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -595,6 +665,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -633,6 +710,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -671,6 +755,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -707,6 +798,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -745,6 +843,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -783,6 +888,13 @@ spec:
           volumeMounts:
             - name: foundationdb
               mountPath: /etc/foundationdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "250m"
+              memory: "1Gi"
       volumes:
         - name: foundationdb
           hostPath:
@@ -811,12 +923,6 @@ spec:
       containers:
         - name: fluent-bit
           image: fluent/fluent-bit:1.8.11
-          resources:
-            limits:
-              memory: 100Mi
-            requests:
-              cpu: 100m
-              memory: 100Mi
           volumeMounts:
             - name: varlog
               mountPath: /var/log
