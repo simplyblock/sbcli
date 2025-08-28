@@ -13,6 +13,17 @@ from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils
 from utils.common_utils import CommonUtils
 
+from utils.manage_portal_util import (
+    TestRunsAPI,
+    detect_fe_be_tags,
+    FAILURE_REASON_OTHER,
+    resolve_environment_id_from_ip
+)
+
+
+PROFILE_KEY = "e2e"         # fixed
+JIRA_TICKET = ""            # always empty, per your note
+COMPLETION_COMMENT = "E2E run"
 
 def main():
     """Run complete test suite"""
@@ -81,6 +92,45 @@ def main():
         available_tests = ', '.join(cls.__name__ for cls in tests)
         print(f"Test '{args.testname}' not found. Available tests are: {available_tests}")
         raise TestNotFoundException(args.testname, available_tests)
+    
+    test_run_api = TestRunsAPI(PROFILE_KEY)
+    try:
+        cluster_base = TestClusterBase()
+        ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
+        sbcli_utils = SbcliUtils(
+            cluster_api_url=cluster_base.api_base_url,
+            cluster_id=cluster_base.cluster_id,
+            cluster_secret=cluster_base.cluster_secret
+        )
+
+        mgmt_nodes, storage_node = sbcli_utils.get_all_nodes_ip()
+        mgmt_ip_for_env = mgmt_nodes[0]
+        environment_id = resolve_environment_id_from_ip(mgmt_ip_for_env)
+        if not environment_id:
+            raise RuntimeError(f"Could not resolve environment for mgmt IP {mgmt_ip_for_env}")
+        ssh_obj.connect(address=storage_node[0], bastion_server_address=cluster_base.bastion_server)
+
+        fe_branch, fe_commit, be_branch, be_commit = detect_fe_be_tags(ssh_obj, storage_node[0])
+
+        test_run_id = test_run_api.create_run(
+            jira_ticket=JIRA_TICKET,
+            github_branch_frontend=fe_branch or "unknown",
+            github_branch_backend=be_branch or "unknown",
+            github_commit_tag_frontend=fe_commit or "unknown",
+            github_commit_tag_backend=be_commit or "unknown",
+            environment_id=environment_id
+        )
+        logger.info(f"Test Run started: {test_run_id}")
+
+        # Close the temp SSH connection used for tag detection
+        for node, ssh in ssh_obj.ssh_connections.items():
+            logger.info(f"Closing temp ssh connection for FE/BE detection: {node}")
+            ssh.close()
+
+    except Exception as e:
+        logger.error("Failed to create Test Run; proceeding without external tracking.")
+        logger.error(e)
+        test_run_id = None
 
     errors = {}
     passed_cases = []
@@ -165,6 +215,21 @@ def main():
         )
         common_utils = CommonUtils(sbcli_utils, ssh_obj)
         common_utils.send_slack_summary("E2E Test Summary Report", summary)
+
+    final_status = "completed" if not errors else "failed"
+    failure_reason_id = FAILURE_REASON_OTHER if final_status == "failed" else None
+
+    if test_run_id:
+        try:
+            test_run_api.complete_run(
+                status=final_status,
+                completion_comment=COMPLETION_COMMENT,
+                completion_jira_ticket=JIRA_TICKET,
+                failure_reason_id=failure_reason_id
+            )
+            logger.info(f"Test Run marked {final_status}.")
+        except Exception as e:
+            logger.error(f"Failed to update Test Run status: {e}")
 
     if errors:
         raise MultipleExceptions(errors)
