@@ -7,6 +7,7 @@ import subprocess
 import time
 import uuid
 import textwrap
+import psutil
 import typing as t
 
 import docker
@@ -202,20 +203,24 @@ def _set_max_result_window(cluster_ip, max_window=100000):
         logger.error(f"Failed to create template for future indices: {response_template.text}")
         return False
 
-   
+def check_interface_up(iface: str) -> bool:
+    stats = psutil.net_if_stats()
+    return iface in stats and stats[iface].isup
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name, 
-                   tls_secret, ingress_host_source, dns_name) -> str:
+                   tls_secret, ingress_host_source, dns_name,use_tcp=True,use_rdma=False,use_linux_blk=False,use_tiering,use_as_capacity_tier=False) -> str:
 
+                       
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
         
     if ingress_host_source == "dns":
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns")
-
+               
     logger.info("Installing dependencies...")
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
@@ -223,7 +228,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if mode == "docker": 
         if not ifname:
             ifname = "eth0"
-
+    
+        if not check_interface_up(ifname):
+            raise ValueError(f"interface not available or up: {ifname}")
+        
         dev_ip = utils.get_iface_ip(ifname)
         if not dev_ip:
             raise ValueError(f"Error getting interface ip: {ifname}")
@@ -292,8 +300,15 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         cluster.prov_cap_warn = prov_cap_warn
     if prov_cap_crit and prov_cap_crit > 0:
         cluster.prov_cap_crit = prov_cap_crit
+
+    if distr_ndcs not in [1,2,4]:
+         raise ValueError("ndcs allowed values: 1, 2 or 4")
+    if distr_npcs not in [0,1,2]:
+        raise ValueError("npcs allowed values: 0, 1 or 2")
+                       
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
+                       
     cluster.distr_bs = distr_bs
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
@@ -311,7 +326,18 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
+    cluster.use_tcp = use_tcp
+    cluster.use_rdma = use_rdma
+                       
+    if use_linux_blk and use_as_capacity_tier:
+        raise ValueError("cannot combine with linux block device option with capacity tier cluster")
+    if use_tiering and use_as_capacity_tier:
+        raise ValueError("cannot combine tiering option with capacity tier cluster")
 
+    cluster.use_linux_blk = use_linux_blk
+    cluster.use_tiering =   use_tiering
+    cluster.use_as_capacity_tier = use_as_capacity_tier
+                       
     if mode == "docker": 
         if not disable_monitoring:
             utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
@@ -363,6 +389,23 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     logger.info(cluster.uuid)
     return cluster.uuid
 
+def migrate_release(uuid, use_tcp=True,use_rdma=False):
+   db_controller = DBController()
+   cluster = db_controller.get_cluster_by_id(cluster_id) 
+   cluster.use_tcp = use_tcp
+   cluster.use_rdma = use_rdma
+   cluster.use_linux_blk = False
+   cluster.use_tiering =   False
+   cluster.use_as_capacity_tier = False
+   cluster.write_to_db(db_controller.kv_store) 
+
+def cluster_update_fabric(uuid, use_tcp=True,use_rdma=False)
+   db_controller = DBController()
+   cluster = db_controller.get_cluster_by_id(cluster_id)
+   cluster.use_tcp = use_tcp
+   cluster.use_rdma = use_rdma
+   cluster.write_to_db(db_controller.kv_store)
+
 def parse_nvme_list_output(output, target_model):
     lines = output.splitlines()
     for line in lines:
@@ -370,7 +413,6 @@ def parse_nvme_list_output(output, target_model):
             return line.split()[0]
 
     raise ValueError(f"Device with model {target_model} not found in nvme list")
-
 
 def _cleanup_nvme(mount_point, nqn_value) -> None:
     logger.info(f"Starting cleanup for NVMe device with NQN: {nqn_value}")
@@ -445,6 +487,11 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
+    if distr_ndcs not in [1,2,4]:
+         raise ValueError("ndcs allowed values: 1, 2 or 4")
+    if distr_npcs not in [0,1,2]:
+        raise ValueError("npcs allowed values: 0, 1 or 2")
+                    
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
     cluster.distr_bs = distr_bs
@@ -464,6 +511,18 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if prov_cap_crit and prov_cap_crit > 0:
         cluster.prov_cap_crit = prov_cap_crit
 
+    cluster.use_tcp = use_tcp
+    cluster.use_rdma = use_rdma
+                       
+    if use_linux_blk and use_as_capacity_tier:
+        raise ValueError("cannot combine linux block device option with capacity tier cluster")
+    if use_tiering and use_as_capacity_tier:
+        raise ValueError("cannot combine tiering option with capacity tier cluster")
+
+    cluster.use_linux_blk = use_linux_blk
+    cluster.use_tiering =   use_tiering
+    cluster.use_as_capacity_tier = use_as_capacity_tier
+                    
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
