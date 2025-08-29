@@ -225,7 +225,8 @@ def main():
                 status=final_status,
                 completion_comment=summary,
                 completion_jira_ticket=JIRA_TICKET,
-                failure_reason_id=failure_reason_id
+                failure_reason_id=failure_reason_id,
+                errors=errors
             )
             logger.info(f"Test Run marked {final_status}.")
         except Exception as e:

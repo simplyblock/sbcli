@@ -129,15 +129,18 @@ class TestRunsAPI:
         completion_comment: str,
         completion_jira_ticket: Optional[str] = None,
         failure_reason_id: Optional[str] = None,
+        errors: dict | None = None,
     ):
         if not self.run_id:
             raise RuntimeError("No run_id found. Call create_run() first.")
+        
+        comment = self._format_comment(completion_comment, errors)
 
         body = {
             "test_run_id": self.run_id,
             "status": status,
-            "completion_comment": completion_comment,
-            "completion_jira_ticket": completion_jira_ticket or completion_comment,
+            "completion_comment": comment,
+            "completion_jira_ticket": completion_jira_ticket,
         }
         if status == "failed" and failure_reason_id:
             body["failure_reason_id"] = failure_reason_id
@@ -145,3 +148,23 @@ class TestRunsAPI:
         resp = requests.put(SUPABASE_FUNC_COMPLETE_URL, headers=DEFAULT_HEADERS, json=body, timeout=30)
         resp.raise_for_status()
         return resp.json()
+
+    @staticmethod
+    def _format_comment(summary: str, errors: dict | None) -> str:
+        """
+        Take summary (raw test results string) + errors dict and
+        return a nicely formatted message.
+        """
+        if not errors:
+            return summary
+
+        lines = [summary, "\n---\n🚨 *Error Details:*"]
+        for test_name, err_list in errors.items():
+            for e in err_list:
+                etype = type(e).__name__
+                msg = str(e) or repr(e)
+                # truncate if very long
+                if len(msg) > 300:
+                    msg = msg[:299] + "…"
+                lines.append(f"- `{test_name}` → {etype}: {msg}")
+        return "\n".join(lines)
