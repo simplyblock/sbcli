@@ -198,14 +198,22 @@ class RPCClient:
     def subsystem_add_host(self, nqn, host):
         params = {"nqn": nqn, "host": host}
         return self._request("nvmf_subsystem_add_host", params)
-
+    
+    def bdev_aio_create(name, filename, block_size=4096, fallocate=True, uuid): 
+        params = {"name" : name,
+            "filename" : filename,
+            "block_size" : block_size,
+            "fallocate" : fallocate,
+            "uuid" : uuid}
+        return self._request("bdev_aio_create",parms)
+    
     def transport_list(self, trtype=None):
         params = None
         if trtype:
             params = {"trtype": trtype}
         return self._request("nvmf_get_transports", params)
 
-    def transport_create(self, trtype, qpair_count=6,shared_bufs=24576):
+    def transport_create_tcp(self, qpair_count=3,shared_bufs=24576):
         """
             [{'trtype': 'TCP', 'max_queue_depth': 128,
                'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
@@ -219,7 +227,7 @@ class RPCClient:
             TODO, investigate what is the best configuration for the parameters above and bdev_io_pool_size
         """
         params = {
-            "trtype": trtype,
+            "trtype": "tcp",
             "max_io_qpairs_per_ctrlr": 128,
             "max_queue_depth": 256,
             "abort_timeout_sec": 5,
@@ -234,6 +242,24 @@ class RPCClient:
             "c2h_success": True,
             "sock_priority": 0,
             "ack_timeout": 8000,
+        }
+        return self._request("nvmf_create_transport", params)
+
+    def transport_create_rdma(self, qpair_count=3,shared_bufs=24576):
+        params = {
+            "trtype": "RDMA",
+            "max_io_qpairs_per_ctrlr": 128,
+            "max_queue_depth": 256,
+            "abort_timeout_sec": 5,
+            "zcopy": True,
+            "in_capsule_data_size": 8192,
+            "max_io_size": 131072,
+            "io_unit_size": 8192,
+            "max_aq_depth": 128,
+            "num_shared_buffers": shared_bufs,
+            "buf_cache_size": 512,
+            "dif_insert_or_strip": False,
+            "ack_timeout": 1000,
         }
         return self._request("nvmf_create_transport", params)
 
@@ -665,7 +691,23 @@ class RPCClient:
         else:
             params["multipath"] = "disable"
         return self._request("bdev_nvme_attach_controller", params)
-
+           
+    def bdev_nvme_attach_controller_rdma(self, name, nqn, ep, port, multipath=False):
+        params = {
+            "name": name,
+            "trtype": "RDMA",
+            "traddr": ep,
+            "trsvcid": str(port),
+            "subnqn": nqn,
+            "fabrics_connect_timeout_us": 5000000,
+            "num_io_queues": 128,
+        }
+        if multipath:
+            params["multipath"] = "failover"
+        else:
+            params["multipath"] = "disable"
+        return self._request("bdev_nvme_attach_controller", params)  
+    
     def bdev_nvme_attach_controller_tcp_caching(self, name, nqn, ip, port):
         params = {
             "name": name,
@@ -800,7 +842,7 @@ class RPCClient:
         }
         return self._request("bdev_malloc_create", params)
 
-    def ultra21_lvol_bmap_init(self, bdev_name, num_blocks, block_len, page_len, max_num_blocks):
+    def ultra21__bmap_init(self, bdev_name, num_blocks, block_len, page_len, max_num_blocks):
         params = {
             "base_bdev": bdev_name,
             "blockcnt": num_blocks,
