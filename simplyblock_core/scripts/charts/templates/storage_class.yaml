@@ -6,8 +6,5 @@ metadata:
 provisioner: openebs.io/local
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
-reclaimPolicy: Delete
-parameters:
-  storageType: hostpath
-  BasePath: "/var/mnt/data"
+reclaimPolicy: Retain
 {{- end }}
