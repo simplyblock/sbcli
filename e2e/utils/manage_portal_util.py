@@ -129,7 +129,7 @@ class TestRunsAPI:
         completion_comment: str,
         completion_jira_ticket: Optional[str] = None,
         failure_reason_id: Optional[str] = None,
-        errors: dict | None = None,
+        errors: dict = None,
     ):
         if not self.run_id:
             raise RuntimeError("No run_id found. Call create_run() first.")
