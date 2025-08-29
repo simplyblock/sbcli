@@ -150,7 +150,7 @@ class TestRunsAPI:
         return resp.json()
 
     @staticmethod
-    def _format_comment(summary: str, errors: dict | None) -> str:
+    def _format_comment(summary: str, errors: dict) -> str:
         """
         Take summary (raw test results string) + errors dict and
         return a nicely formatted message.
