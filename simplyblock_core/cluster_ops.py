@@ -1148,11 +1148,24 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
     if mgmt_image:
         service_image = mgmt_image
+    service_names = []
     for service in cluster_docker.services.list():
         if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
         "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
             logger.info(f"Updating service {service.name}")
             service.update(image=service_image, force_update=True)
+            service_names.append(service.attrs['Spec']['Name'] )
+
+    if "app_SnapshotMonitor" not in service_names:
+        logger.info("Creating snapshot monitor service")
+        cluster_docker.services.create(
+            image=service_image,
+            command="python simplyblock_core/services/snapshot_monitor.py",
+            name="app_SnapshotMonitor",
+            mounts=["/etc/foundationdb:/etc/foundationdb"],
+            env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
+            networks=["host"]
+        )
     logger.info("Done updating mgmt cluster")
 
     if mgmt_only:
