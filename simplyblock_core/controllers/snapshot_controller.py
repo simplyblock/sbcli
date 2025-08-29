@@ -347,7 +347,7 @@ def delete(snapshot_uuid, force_delete=False):
 
     try:
         base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
-        if base_lvol.deleted is True:
+        if base_lvol and base_lvol.deleted is True:
             lvol_controller.delete_lvol(base_lvol.get_id())
     except KeyError:
         pass
