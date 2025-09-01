@@ -290,6 +290,7 @@ jobs:
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
           export SBCLI_CMD=${SBCLI_CMD}
+          export SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
