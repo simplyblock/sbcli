@@ -370,6 +370,8 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default', dest='disable_monitoring', action='store_true')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
+        argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
+        argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -388,6 +390,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enables node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
+        argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size')
         if self.developer_mode:

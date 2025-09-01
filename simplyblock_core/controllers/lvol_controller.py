@@ -1214,6 +1214,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
 
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
             transport = nic.get_transport_type().lower()
             ip = nic.ip4_address
@@ -1226,11 +1227,11 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 "nqn": lvol.nqn,
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 "ctrl-loss-tmo": ctrl_loss_tmo,
-                "nr-io-queues": constants.LVOL_NVME_CONNECT_NR_IO_QUEUES,
+                "nr-io-queues": cluster.client_qpair_count,
                 "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                            f"--ctrl-loss-tmo={ctrl_loss_tmo} "
-                           f"--nr-io-queues={constants.LVOL_NVME_CONNECT_NR_IO_QUEUES} "
+                           f"--nr-io-queues={cluster.client_qpair_count} "
                            f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
                            f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
             })
