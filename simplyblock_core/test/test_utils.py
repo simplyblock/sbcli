@@ -135,10 +135,10 @@ def test_singleton():
     ("1,2,4-10,12-20:4", [1, 2, 4, 5, 6, 7, 8, 9, 10, 12, 16, 20]),
     ("9,  25  ,41", [9, 25, 41]),
     ("", []),
-    ("a-b", ValueError),
-    ("5-2", ValueError),
-    ("0-5:0", ValueError),
-    ("0-5:-1", ValueError),
+    ("a-b", pytest.raises(ValueError)),
+    ("5-2", pytest.raises(ValueError)),
+    ("0-5:0", pytest.raises(ValueError)),
+    ("0-5:-1", pytest.raises(ValueError)),
 ])
 def test_parse_thread_siblings_list(input, expected):
     if isinstance(expected, ValueError):
