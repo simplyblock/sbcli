@@ -16,7 +16,7 @@ spec:
         log-collector/enabled: "true"
     spec:
       nodeSelector:
-        simplyblock.io/role: mgmt-plane  
+        simplyblock.io/role: mgmt-plane
       containers:
       - name: fdb-server
         image: foundationdb/foundationdb:7.3.42
@@ -46,11 +46,11 @@ spec:
             mountPath: /var/fdb/data
           - name: fdb-logs
             mountPath: /var/fdb/logs
-          - name: cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
           - name: fdb-entrypoint                     
             mountPath: /var/fdb/scripts
             readOnly: true
+          - name: fdb-config
+            mountPath: /etc/foundationdb
         resources:
           requests:
             cpu: "100m"
@@ -59,22 +59,25 @@ spec:
             cpu: "500m"
             memory: "2Gi"
       volumes:
-      - name: fdb-data
-        hostPath:
-          path: /etc/foundationdb/data
-          type: DirectoryOrCreate
-      - name: fdb-logs
-        hostPath:
-          path: /etc/foundationdb/logs
-          type: DirectoryOrCreate
-      - name: cluster-file
-        hostPath:
-          path: /etc/foundationdb/fdb.cluster
-          type: FileOrCreate
       - name: fdb-entrypoint                         
         configMap:
           name: simplyblock-fdb-entrypoint-script
           defaultMode: 0777
+      - name: fdb-data
+        hostPath:
+          path: /var/lib/foundationdb/data
+          type: DirectoryOrCreate
+      - name: fdb-logs
+        hostPath:
+          path: /var/log/foundationdb
+          type: DirectoryOrCreate
+      - name: fdb-tls
+        hostPath:
+          path: /var/lib/foundationdb/tls
+          type: DirectoryOrCreate
+      - name: fdb-config
+        hostPath:
+          path: /var/foundationdb
       hostNetwork: true
 
 ---
@@ -110,8 +113,8 @@ spec:
               name: simplyblock-config
               key: FDB_CLUSTER_FILE_CONTENTS
         volumeMounts:
-          - name: cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
+          - name: foundationdb
+            mountPath: /etc/foundationdb
         resources:
           requests:
             cpu: "100m"
@@ -120,9 +123,9 @@ spec:
             cpu: "250m"
             memory: "1Gi"
       volumes:
-      - name: cluster-file
+      - name: foundationdb
         hostPath:
-          path: /etc/foundationdb/fdb.cluster
+          path: /var/foundationdb
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -142,6 +145,19 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane 
+      initContainers:
+      - name: init-fdb
+        image: busybox:1.28
+        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
+        env:
+        - name: FDB_CLUSTER_FILE_CONTENTS
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: FDB_CLUSTER_FILE_CONTENTS
+        volumeMounts:
+        - name: fdb-config
+          mountPath: /etc/foundationdb
       containers:
       - name: webappapi
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -172,7 +188,7 @@ spec:
       volumes:
       - name: fdb-config
         hostPath:
-          path: /etc/foundationdb
+          path: /var/foundationdb
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -210,7 +226,7 @@ spec:
       volumes:
       - name: fdb-config
         hostPath:
-          path: /etc/foundationdb
+          path: /var/foundationdb
       
 ---
 apiVersion: apps/v1
@@ -251,7 +267,7 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
 
 ---
 apiVersion: apps/v1
@@ -290,7 +306,7 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
 
 ---
 apiVersion: apps/v1
@@ -329,7 +345,7 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
 
 ---
 apiVersion: apps/v1
@@ -364,11 +380,12 @@ spec:
               key: LOG_LEVEL
         volumeMounts:
         - mountPath: /etc/foundationdb
-          name: foundationdb-volume
+          name: foundationdb
       volumes:
-      - name: foundationdb-volume
+      - name: foundationdb
         hostPath:
-          path: /etc/foundationdb
+          path: /var/foundationdb
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -402,11 +419,12 @@ spec:
               key: LOG_LEVEL
         volumeMounts:
         - mountPath: /etc/foundationdb
-          name: foundationdb-volume
+          name: foundationdb
       volumes:
-      - name: foundationdb-volume
+      - name: foundationdb
         hostPath:
-          path: /etc/foundationdb
+          path: /var/foundationdb
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -440,11 +458,12 @@ spec:
               key: LOG_LEVEL
         volumeMounts:
         - mountPath: /etc/foundationdb
-          name: foundationdb-volume
+          name: foundationdb
       volumes:
-      - name: foundationdb-volume
+      - name: foundationdb
         hostPath:
-          path: /etc/foundationdb
+          path: /var/foundationdb
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -478,11 +497,12 @@ spec:
                 key: LOG_LEVEL
         volumeMounts:
         - mountPath: /etc/foundationdb
-          name: foundationdb-volume
+          name: foundationdb
       volumes:
-      - name: foundationdb-volume
+      - name: foundationdb
         hostPath:
-          path: /etc/foundationdb
+          path: /var/foundationdb
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -516,11 +536,12 @@ spec:
               key: LOG_LEVEL
         volumeMounts:
         - mountPath: /etc/foundationdb
-          name: foundationdb-volume
+          name: foundationdb
       volumes:
-      - name: foundationdb-volume
+      - name: foundationdb
         hostPath:
-          path: /etc/foundationdb
+          path: /var/foundationdb
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -560,7 +581,8 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -598,7 +620,8 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -636,7 +659,7 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -674,7 +697,7 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -710,7 +733,7 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -748,7 +771,7 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -786,7 +809,7 @@ spec:
       volumes:
         - name: foundationdb
           hostPath:
-            path: /etc/foundationdb
+            path: /var/foundationdb
 
 ---
 
