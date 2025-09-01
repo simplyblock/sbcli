@@ -20,6 +20,10 @@ logger = lg.getLogger()
 
 
 def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
+    ret = rpc_client.get_bdevs(base_name)
+    if not ret:
+        logger.error(f"Failed to find LVol bdev {base_name}")
+        return False
     key_name = f'key_{name}'
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
     if not ret:
@@ -765,7 +769,7 @@ def recreate_lvol(lvol_id):
     return lvol
 
 
-def _remove_bdev_stack(bdev_stack, rpc_client):
+def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
     for bdev in bdev_stack:
         # if 'status' in bdev and bdev['status'] == 'deleted':
         #     continue
@@ -788,9 +792,9 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_lvol":
             name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
-            ret = rpc_client.delete_lvol(name)
+            ret = rpc_client.delete_lvol(name, del_async=del_async)
         elif type == "bdev_lvol_clone":
-            ret = rpc_client.delete_lvol(name)
+            ret = rpc_client.delete_lvol(name,  del_async=del_async)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
@@ -802,7 +806,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client):
     return True
 
 
-def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -824,11 +828,11 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True):
 
     # 2- remove bdevs
     logger.info("Removing bdev stack")
-    ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+    ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, del_async)
     if not ret:
         return False
 
-    lvol.deletion_status = 'bdevs_deleted'
+    lvol.deletion_status = node_id
     lvol.write_to_db(db_controller.kv_store)
     return True
 
@@ -956,17 +960,6 @@ def delete_lvol(id_or_name, force_delete=False):
                 if not force_delete:
                     return False
 
-        # 3- delete lvol bdev from secondary
-        if secondary_node:
-            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
-            if secondary_node.status == StorageNode.STATUS_ONLINE:
-
-                ret = delete_lvol_from_node(lvol.get_id(), secondary_node.get_id())
-                if not ret:
-                    logger.error(f"Failed to delete lvol from node: {secondary_node.get_id()}")
-                    if not force_delete:
-                        return False
-
     lvol = db_controller.get_lvol_by_id(lvol.get_id())
     # set status
     old_status = lvol.status
@@ -978,6 +971,13 @@ def delete_lvol(id_or_name, force_delete=False):
     if lvol.cloned_from_snap:
         try:
             snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            if snap.snap_ref_id:
+                ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
+                ref_snap.ref_count -= 1
+                ref_snap.write_to_db(db_controller.kv_store)
+            else:
+                snap.ref_count -= 1
+                snap.write_to_db(db_controller.kv_store)
             if snap.deleted is True:
                 snapshot_controller.delete(snap.get_id())
         except KeyError:
@@ -1108,10 +1108,15 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         lvols = db_controller.get_all_lvols()
 
     data = []
+
+    snap_dict : dict[str, int] = {}
     for lvol in lvols:
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
+        cloned_snapped = lvol.cloned_from_snap
+        if cloned_snapped:
+            snap_dict[cloned_snapped] = snap_dict.get(cloned_snapped, 0) + 1
         size_used = 0
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
@@ -1132,6 +1137,10 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
         })
+    for snap, count in snap_dict.items():
+        ref_snap = db_controller.get_snapshot_by_id(snap)
+        ref_snap.ref_count = count
+        ref_snap.write_to_db(db_controller.kv_store)
 
     if is_json:
         return json.dumps(data, indent=2)

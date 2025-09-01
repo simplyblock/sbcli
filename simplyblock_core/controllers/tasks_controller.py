@@ -39,7 +39,7 @@ def _validate_new_task_node_restart(cluster_id, node_id):
 
 
 def _add_task(function_name, cluster_id, node_id, device_id,
-              max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None):
+              max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None, send_to_cluster_log=True):
 
     if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_FAILED_DEV_MIG]:
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
@@ -73,21 +73,43 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     task_obj.max_retry = max_retry
     task_obj.status = JobSchedule.STATUS_NEW
     task_obj.write_to_db(db.kv_store)
-    tasks_events.task_create(task_obj)
+    if send_to_cluster_log:
+        tasks_events.task_create(task_obj)
     return task_obj.uuid
 
 
 def add_device_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
+    tasks = db.get_job_tasks(device.cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART :
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                logger.info(f"Task found, skip adding new task: {task.get_id()}")
+                return False
+
+    sub_tasks = []
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
             continue
 
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
-                _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
-                          max_retry=-1, function_params={'distr_name': bdev['name']})
-    return True
+                task_id = _add_task(JobSchedule.FN_DEV_MIG, device.cluster_id, node.get_id(), device.get_id(),
+                          max_retry=-1, function_params={'distr_name': bdev['name']}, send_to_cluster_log=False)
+                if task_id:
+                    sub_tasks.append(task_id)
+    if sub_tasks:
+        task_obj = JobSchedule()
+        task_obj.uuid = str(uuid.uuid4())
+        task_obj.cluster_id = device.cluster_id
+        task_obj.date = int(time.time())
+        task_obj.function_name = JobSchedule.FN_BALANCING_AFTER_NODE_RESTART
+        task_obj.sub_tasks = sub_tasks
+        task_obj.status = JobSchedule.STATUS_NEW
+        task_obj.write_to_db(db.kv_store)
+        tasks_events.task_create(task_obj)
+
+        return True
 
 
 def add_device_to_auto_restart(device):
@@ -119,10 +141,14 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
     tasks.reverse()
     if is_json is True:
         for t in tasks:
+            if t.function_name == JobSchedule.FN_DEV_MIG:
+                continue
             data.append(t.get_clean_dict())
         return json.dumps(data, indent=2)
 
     for task in tasks:
+        if task.function_name == JobSchedule.FN_DEV_MIG:
+            continue
         if task.max_retry > 0:
             retry = f"{task.retry}/{task.max_retry}"
         else:
@@ -136,9 +162,17 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             except Exception as e:
                 logger.error(e)
 
+        if task.sub_tasks:
+            target_id = f"Master task for {len(task.sub_tasks)} subtasks"
+
+        else:
+            target_id = f"NodeID:{task.node_id}"
+            if task.device_id:
+                target_id += f"\nDeviceID:{task.device_id}"
+
         data.append({
             "Task ID": task.uuid,
-            "Node ID / Device ID": f"{task.node_id}\n{task.device_id}",
+            "Target ID": target_id,
             "Function": task.function_name,
             "Retry": retry,
             "Status": task.status,
@@ -155,6 +189,10 @@ def cancel_task(task_id):
         logger.error(e)
         return False
 
+    if task.sub_tasks:
+        logger.error("Can not cancel master task")
+        return False
+
     if task.device_id:
         device_controller.device_set_retries_exhausted(task.device_id, True)
 
@@ -162,6 +200,36 @@ def cancel_task(task_id):
     task.write_to_db(db.kv_store)
     tasks_events.task_canceled(task)
     return True
+
+
+def get_subtasks(master_task_id):
+    master_task = db.get_task_by_id(master_task_id)
+    data = []
+    for sub_task_id in master_task.sub_tasks:
+        sub_task = db.get_task_by_id(sub_task_id)
+        if sub_task.max_retry > 0:
+            retry = f"{sub_task.retry}/{sub_task.max_retry}"
+        else:
+            retry = f"{sub_task.retry}"
+
+        upd = sub_task.updated_at
+        if upd:
+            try:
+                parsed = datetime.datetime.fromisoformat(upd)
+                upd = parsed.strftime("%H:%M:%S, %d/%m/%Y")
+            except Exception as e:
+                logger.error(e)
+
+        data.append({
+            "Task ID": sub_task.uuid,
+            "Node ID / Device ID": f"{sub_task.node_id}\n{sub_task.device_id}",
+            "Function": sub_task.function_name,
+            "Retry": retry,
+            "Status": sub_task.status,
+            "Result": sub_task.function_result,
+            "Updated At": upd or "",
+        })
+    return utils.print_table(data)
 
 
 def get_active_node_restart_task(cluster_id, node_id):

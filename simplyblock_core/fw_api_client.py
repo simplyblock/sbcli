@@ -77,8 +77,22 @@ class FirewallClient:
             "action": action,
             "rpc_port": rpc_port,
         }
-        return self._request("POST", "firewall", params)
+        try:
+            return self._request("POST", "firewall", params)
+        except Exception as e:
+            logger.warning(e)
+            logger.info("Using other firewall path: firewall_set_port")
+            mgmt_ip = self.ip_address.split(":")[0]
+            self.url = f"http://{mgmt_ip}:5000/"
+            return self._request("POST", "firewall_set_port", params)
 
     def get_firewall(self, rpc_port=None):
         params = {"rpc_port": rpc_port}
-        return self._request("GET", "firewall", params)
+        try:
+            return self._request("GET", "firewall", params)
+        except Exception as e:
+            logger.warning(e)
+            logger.info("Using other firewall path: get_firewall")
+            mgmt_ip = self.ip_address.split(":")[0]
+            self.url = f"http://{mgmt_ip}:5000/"
+            return self._request("GET", "get_firewall", params)

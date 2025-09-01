@@ -116,15 +116,28 @@ def add(lvol_id, snapshot_name):
         lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
 
         if host_node.status == StorageNode.STATUS_ONLINE:
-            primary_node = host_node
-            if sec_node.status == StorageNode.STATUS_ONLINE:
-                secondary_node = sec_node
-            elif sec_node.status == StorageNode.STATUS_DOWN:
-                msg = "Secondary node is in down status, can not create snapshot"
-                logger.error(msg)
-                return False, msg
+            if lvol_controller.is_node_leader(host_node, lvol.lvs_name):
+                primary_node = host_node
+                if sec_node.status == StorageNode.STATUS_DOWN:
+                    msg = "Secondary node is in down status, can not create snapshot"
+                    logger.error(msg)
+                    lvol.remove(db_controller.kv_store)
+                    return False, msg
+                elif sec_node.status == StorageNode.STATUS_ONLINE:
+                    secondary_node = sec_node
+
+            elif sec_node.status == StorageNode.STATUS_ONLINE:
+                if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
+                    primary_node = sec_node
+                    secondary_node = host_node
+                else:
+                    # both nodes are non leaders and online, set primary as leader
+                    primary_node = host_node
+                    secondary_node = sec_node
+
             else:
                 # sec node is not online, set primary as leader
+                primary_node = host_node
                 secondary_node = None
 
         elif sec_node.status == StorageNode.STATUS_ONLINE:
@@ -188,6 +201,7 @@ def add(lvol_id, snapshot_name):
     snap.created_at = int(time.time())
     snap.lvol = lvol
     snap.vuid = snap_vuid
+    snap.status = SnapShot.STATUS_ONLINE
 
     snap.write_to_db(db_controller.kv_store)
 
@@ -223,6 +237,7 @@ def list(all=False):
             "LVol ID": snap.lvol.get_id(),
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
             "Health": snap.health_check,
+            "Status": snap.status,
         })
     return utils.print_table(data)
 
@@ -267,7 +282,11 @@ def delete(snapshot_uuid, force_delete=False):
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 if not force_delete:
                     return False
-
+            snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+            snap.status = SnapShot.STATUS_IN_DELETION
+            snap.deletion_status = snode.get_id()
+            snap.write_to_db(db_controller.kv_store)
+            snapshot_events.snapshot_delete(snap)
         else:
             msg = f"Host node is not online {snode.get_id()}"
             logger.error(msg)
@@ -275,7 +294,6 @@ def delete(snapshot_uuid, force_delete=False):
 
     else:
 
-        secondary_node = None
         primary_node = None
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
@@ -287,28 +305,19 @@ def delete(snapshot_uuid, force_delete=False):
                     logger.error(msg)
                     return False
 
-                elif sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_node = sec_node
-                else:
-                    secondary_node = None
-
             elif sec_node.status == StorageNode.STATUS_ONLINE:
                 if lvol_controller.is_node_leader(sec_node, snap.lvol.lvs_name):
                     primary_node = sec_node
-                    secondary_node = host_node
                 else:
                     # both nodes are non leaders and online, set primary as leader
                     primary_node = host_node
-                    secondary_node = sec_node
 
             else:
                 # sec node is not online, set primary as leader
                 primary_node = host_node
-                secondary_node = None
 
         elif sec_node.status == StorageNode.STATUS_ONLINE:
             # primary is not online but secondary is, create on secondary and set leader if needed,
-            secondary_node = None
             primary_node = sec_node
 
         else:
@@ -317,30 +326,24 @@ def delete(snapshot_uuid, force_delete=False):
             logger.error(msg)
             return False
 
-        if primary_node:
+        if not primary_node:
+            msg = "Host nodes are not online"
+            logger.error(msg)
+            return False
 
-            rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
-                                       primary_node.rpc_password)
+        rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
+                                   primary_node.rpc_password)
 
-            ret = rpc_client.delete_lvol(snap.snap_bdev)
-            if not ret:
-                logger.error(f"Failed to delete snap from node: {snode.get_id()}")
-                if not force_delete:
-                    return False
-
-        if secondary_node:
-            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
-            if secondary_node.status == StorageNode.STATUS_ONLINE:
-                sec_rpc_client = RPCClient(secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username,
-                                           secondary_node.rpc_password)
-                ret = sec_rpc_client.delete_lvol(snap.snap_bdev)
-                if not ret:
-                    logger.error(f"Failed to delete snap from node: {secondary_node.get_id()}")
-                    if not force_delete:
-                        return False
-
-
-    snap.remove(db_controller.kv_store)
+        ret = rpc_client.delete_lvol(snap.snap_bdev)
+        if not ret:
+            logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+            if not force_delete:
+                return False
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+        snap.deletion_status = primary_node.get_id()
+        snap.status = SnapShot.STATUS_IN_DELETION
+        snap.write_to_db(db_controller.kv_store)
+        snapshot_events.snapshot_delete(snap)
 
     try:
         base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
@@ -350,7 +353,6 @@ def delete(snapshot_uuid, force_delete=False):
         pass
 
     logger.info("Done")
-    snapshot_events.snapshot_delete(snap)
     return True
 
 

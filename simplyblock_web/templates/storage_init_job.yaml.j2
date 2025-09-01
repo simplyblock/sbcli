@@ -22,7 +22,7 @@ spec:
           image: ubuntu:22.04
           securityContext:
             privileged: true
-          command: ["/bin/bash", "-c"]
+          command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
@@ -40,15 +40,23 @@ spec:
                 echo "Failed to apply config"
                 exit 1
               fi
+              
+              echo "--- Checking OS ---"
+              OS_ID="$(cat /proc/version | awk '{print $3}' | awk -F'-' '{print $NF}')"
 
-              echo "--- Restarting kubelet ---"
-              nsenter --target 1 --mount --uts --ipc --net --pid -- bash -c '
-                if command -v systemctl >/dev/null 2>&1; then
-                  echo "Restarting kubelet..."
-                  systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
-                else
-                  echo "systemctl not found; skipping kubelet restart"
-                fi
-              '
+              if [ "$OS_ID" != "talos" ]; then
+                echo "--- Restarting kubelet ---"
+                nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
+                  if command -v systemctl >/dev/null 2>&1; then
+                    echo "Restarting kubelet..."
+                    systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
+                  else
+                    echo "systemctl not found; skipping kubelet restart"
+                  fi
+                '
+              else
+                echo "Talos detected - skipping nsenter and kubelet restart."
+                echo "Use 'talosctl service kubelet restart -n $NODE_IP' to restart the node kubelet"
+              fi
 
               echo "--- Init setup complete ---"

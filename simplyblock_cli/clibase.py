@@ -412,6 +412,9 @@ class CLIWrapperBase:
     def cluster__cancel_task(self, sub_command, args):
         return tasks_controller.cancel_task(args.task_id)
 
+    def cluster__get_subtasks(self, sub_command, args):
+        return tasks_controller.get_subtasks(args.task_id)
+
     def cluster__delete(self, sub_command, args):
         cluster_ops.delete_cluster(args.cluster_id)
         return True

@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
-from simplyblock_core.controllers import tasks_events, tcp_ports_events, health_controller
+from simplyblock_core.controllers import tcp_ports_events, health_controller
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
@@ -80,6 +80,16 @@ while True:
                         nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
                         # connect to remote devs
                         try:
+                            node_bdevs = node.rpc_client().get_bdevs()
+                            logger.debug(node_bdevs)
+                            if node_bdevs:
+                                node_bdev_names = {}
+                                for b in node_bdevs:
+                                    node_bdev_names[b['name']] = b
+                                    for al in b['aliases']:
+                                        node_bdev_names[al] = b
+                            else:
+                                node_bdev_names = {}
                             remote_devices = []
                             for nd in nodes:
                                 if nd.get_id() == node.get_id() or nd.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -97,20 +107,35 @@ while True:
 
                                     dev.remote_bdev = storage_node_ops.connect_device(
                                         f"remote_{dev.alceml_bdev}", dev, node.rpc_client(),
-                                        bdev_names=[], reattach=False)
+                                        bdev_names=list(node_bdev_names), reattach=False)
 
                                     remote_devices.append(dev)
-                            if remote_devices:
-                                node = db.get_storage_node_by_id(task.node_id)
-                                node.remote_devices = remote_devices
-                                node.write_to_db()
-                            else:
+                            if not remote_devices:
                                 msg = "Node unable to connect to remote devs, retry task"
                                 logger.info(msg)
                                 task.function_result = msg
                                 task.status = JobSchedule.STATUS_SUSPENDED
                                 task.write_to_db(db.kv_store)
                                 continue
+                            else:
+                                node = db.get_storage_node_by_id(task.node_id)
+                                node.remote_devices = remote_devices
+                                node.write_to_db()
+
+                            logger.info("connect to remote JM devices")
+                            remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+                            if not remote_jm_devices or len(remote_jm_devices) < 2:
+                                msg = "Node unable to connect to remote JMs, retry task"
+                                logger.info(msg)
+                                task.function_result = msg
+                                task.status = JobSchedule.STATUS_SUSPENDED
+                                task.write_to_db(db.kv_store)
+                                continue
+                            else:
+                                node = db.get_storage_node_by_id(task.node_id)
+                                node.remote_jm_devices = remote_jm_devices
+                                node.write_to_db()
+
 
                         except Exception as e:
                             logger.error(e)
@@ -160,6 +185,5 @@ while True:
                         task.function_result = f"Port {port_number} allowed on node"
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db.kv_store)
-                        tasks_events.task_updated(task)
 
     time.sleep(5)
