@@ -141,7 +141,7 @@ def test_singleton():
     ("0-5:-1", pytest.raises(ValueError)),
 ])
 def test_parse_thread_siblings_list(input, expected):
-    if isinstance(expected, ValueError):
+    if isinstance(expected, ContextManager):
         with expected:
             parse_thread_siblings_list(input)
     else:
