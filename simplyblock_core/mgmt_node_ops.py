@@ -253,8 +253,9 @@ def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
         hostname = utils.get_node_name_by_ip(mgmt_ip)
     try:
         node = db_controller.get_mgmt_node_by_hostname(hostname)
-        logger.error('Node already exists in cluster')
-        return False
+        if node:
+            logger.error("Node already exists in the cluster")
+            return False
     except KeyError:
         pass
 
