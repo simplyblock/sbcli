@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
+from .snode_ops import bind_device_to_spdk
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -625,3 +626,5 @@ def apply_config():
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)
+
+api.post('/bind_device_to_spdk')(bind_device_to_spdk)
