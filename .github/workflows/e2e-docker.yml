@@ -133,6 +133,7 @@ jobs:
           export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
           export AWS_REGION=${{ secrets.AWS_REGION }}
           export SSH_USER=root
+          export SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
           TESTNAME=""
           if [ -n "${{ github.event.inputs.test_case_to_run }}" ]; then
             TESTNAME=" --testname ${{ github.event.inputs.test_case_to_run }}"
