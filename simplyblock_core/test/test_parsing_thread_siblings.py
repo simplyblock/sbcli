@@ -1,5 +1,3 @@
-import unittest
-
 import pytest
 
 from simplyblock_core.utils import parse_thread_siblings_list
