@@ -20,7 +20,7 @@ data:
         static_configs:
           - targets: ['simplyblock-webappapi:5000']
         honor_labels: true
-        metrics_path: '/api/v1/cluster/metrics'
+        metrics_path: '/cluster/metrics'
         basic_auth:
           username: '{{ .Values.cluster.id }}'
           password: '{{ .Values.cluster.secret }}'
