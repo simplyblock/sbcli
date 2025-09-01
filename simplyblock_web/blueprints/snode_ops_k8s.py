@@ -601,3 +601,5 @@ def apply_config():
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)
+
+api.post('/bind_device_to_spdk')(bind_device_to_spdk)
