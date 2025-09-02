@@ -151,12 +151,15 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 if dev_status == NVMeDevice.STATUS_ONLINE:
                     dev_status = NVMeDevice.STATUS_UNAVAILABLE
             logger.debug(f"Device: {dev.get_id()}, status: {dev_status}, bdev_name: {name}")
-            dev_map[dev.cluster_device_order] = {
-                "UUID": dev.get_id(),
-                "bdev_name": name,
-                "status": dev_status,
-                "physical_label": dev.physical_label
-            }
+            
+                dev_map[dev.cluster_device_order] = {
+                   "UUID": dev.get_id(),
+                   "bdev_name": name,
+                   "status": dev_status,}
+			
+            if ():
+                dev_map[dev.cluster_device_order].update("physical_label": dev.physical_label)
+            
             if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                 dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": -1}
             else:
