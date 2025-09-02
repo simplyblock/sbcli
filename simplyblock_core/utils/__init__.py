@@ -1882,7 +1882,7 @@ def label_node_as_mgmt_plane(node_name: str):
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
 
-def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> str | None:
+def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Union[str, None]:
 
     if isinstance(node_info, (bytes, bytearray)):
         try:
