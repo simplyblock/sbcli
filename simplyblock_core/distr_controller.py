@@ -155,9 +155,9 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 dev_map[dev.cluster_device_order] = {
                    "UUID": dev.get_id(),
                    "bdev_name": name,
-                   "status": dev_status,}
+                   "status": dev_status}
 			
-            if ():
+            if (snode.physical_label>0):
                 dev_map[dev.cluster_device_order].update("physical_label": dev.physical_label)
             
             if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
