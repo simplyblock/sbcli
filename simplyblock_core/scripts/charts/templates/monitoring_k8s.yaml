@@ -88,13 +88,6 @@ spec:
               name: simplyblock-graylog-data
             - mountPath: /usr/share/graylog/data/journal
               name: simplyblock-graylog-journal
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "512Mi"
-            limits:
-              cpu: "400m"
-              memory: "2Gi"
       volumes:
         - name: simplyblock-graylog-data
           emptyDir: {}
