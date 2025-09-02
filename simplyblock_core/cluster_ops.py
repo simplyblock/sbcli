@@ -654,14 +654,14 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         if snode.lvstore and force_lvstore_create is False:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             try:
-                ret = storage_node_ops.recreate_lvstore(snode)
+                ret = storage_node_ops.recreate_lvstore(snode,cluster.was_active_at_least_once)
             except Exception as e:
                 logger.error(e)
                 set_cluster_status(cl_id, ols_status)
                 raise ValueError("Failed to activate cluster")
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size,cluster.was_active_at_least_once)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if ret:
             snode.lvstore_status = "ready"
@@ -684,7 +684,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             continue
 
         logger.info(f"recreating secondary node {snode.get_id()}")
-        ret = storage_node_ops.recreate_lvstore_on_sec(snode)
+        ret = storage_node_ops.recreate_lvstore_on_sec(snode,cluster.was_active_at_least_once)
 
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if ret:
