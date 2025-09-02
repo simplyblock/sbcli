@@ -2916,7 +2916,7 @@ def set_node_status(node_id, status, reconnect_on_online=True):
     return True
 
 
-def recreate_lvstore_on_sec(secondary_node,previous_activate=True):
+def recreate_lvstore_on_sec(secondary_node,first_cluster_activate=False):
     db_controller = DBController()
     secondary_rpc_client = RPCClient(
         secondary_node.mgmt_ip, secondary_node.rpc_port,
@@ -2991,7 +2991,7 @@ def recreate_lvstore_on_sec(secondary_node,previous_activate=True):
     return True
 
 
-def recreate_lvstore(snode, force=False, previous_activate=True):
+def recreate_lvstore(snode, force=False, first_cluster_activate=False):
     db_controller = DBController()
 
     snode.lvstore_status = "in_creation"
@@ -3310,7 +3310,7 @@ def get_secondary_nodes(current_node):
     return nodes
 
 
-def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size,previous_activate=True):
+def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size,first_cluster_activate=False):
     db_controller = DBController()
     lvstore_stack = []
     distrib_list = []
