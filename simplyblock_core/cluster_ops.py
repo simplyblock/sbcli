@@ -709,6 +709,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         cluster.cluster_max_devices = dev_count
         cluster.cluster_max_nodes = len(online_nodes)
         cluster.write_to_db(db_controller.kv_store)
+    cluster.was_active_at_least_once=True
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
