@@ -78,9 +78,13 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     return task_obj.uuid
 
 
-def add_device_mig_task(device_id):
-    device = db.get_storage_device_by_id(device_id)
-    tasks = db.get_job_tasks(device.cluster_id)
+def add_device_mig_task(device_id_list, cluster_id):
+    if not device_id_list:
+        return False
+    sub_tasks = []
+
+    device = db.get_storage_device_by_id(device_id_list[0])
+    tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART :
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
