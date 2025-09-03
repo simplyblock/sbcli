@@ -759,6 +759,12 @@ commands:
               - single
               - ha
             default: ha
+          - name: "--is-single-node"
+            help: "For single node clusters only"
+            dest: is_single_node
+            type: bool
+            action: store_true
+            default: false
           - name: "--mode"
             help: "Environment to deploy management services, default: docker"
             dest: mode
@@ -905,6 +911,7 @@ commands:
             dest: is_single_node
             type: bool
             action: store_true
+            default: false
           - name: "--qpair-count"
             help: "NVMe/TCP transport qpair count per logical volume"
             usage: >
