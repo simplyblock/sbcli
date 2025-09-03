@@ -387,6 +387,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enables node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
+        argument = subcommand.add_argument('--is-single-node', help='For single node clusters only', dest='is_single_node', action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size')
