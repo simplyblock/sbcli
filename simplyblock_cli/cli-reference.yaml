@@ -900,6 +900,11 @@ commands:
             dest: enable_node_affinity
             type: bool
             action: store_true
+          - name: "--is-single-node"
+            help: "For single node clusters only"
+            dest: is_single_node
+            type: bool
+            action: store_true
           - name: "--qpair-count"
             help: "NVMe/TCP transport qpair count per logical volume"
             usage: >

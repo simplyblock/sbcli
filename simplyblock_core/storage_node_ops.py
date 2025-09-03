@@ -1048,7 +1048,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.iobuf_small_bufsize = small_bufsize or 0
         snode.iobuf_large_bufsize = large_bufsize or 0
         snode.enable_test_device = enable_test_device
-        snode.physical_label = get_next_physical_device_order(snode)
+
+        if cluster.is_single_node:
+            snode.physical_label = 0
+        else:
+            snode.physical_label = get_next_physical_device_order(snode)
 
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent
