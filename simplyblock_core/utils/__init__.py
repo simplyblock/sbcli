@@ -11,7 +11,7 @@ import sys
 import uuid
 import time
 import socket
-from typing import Union
+from typing import Union, Any
 from kubernetes import client, config
 from kubernetes.client import ApiException
 import docker
@@ -1881,3 +1881,22 @@ def label_node_as_mgmt_plane(node_name: str):
     except ApiException as e:
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
+
+def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Union[str, None]:
+
+    if isinstance(node_info, (bytes, bytearray)):
+        try:
+            node_info = json.loads(node_info.decode("utf-8"))
+        except Exception:
+            return None
+
+    if isinstance(iface_names, str):
+        iface_names = [iface_names]
+
+    for iface in iface_names:
+        iface_info = node_info.get("network_interface", {}).get(iface, {})
+        ip = iface_info.get("ip")
+        if ip:
+            return ip
+
+    return None  

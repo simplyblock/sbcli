@@ -817,8 +817,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if not cloud_instance:
             # Create a static cloud instance from node info
             cloud_instance = {"id": node_info['system_id'], "type": "None", "cloud": "None",
-                              "ip": node_info['network_interface'][iface_name]["ip"],
-                              "public_ip": node_info['network_interface'][iface_name]["ip"]}
+                              "ip": utils.get_mgmt_ip(node_info, iface_name),
+                              "public_ip": utils.get_mgmt_ip(node_info, iface_name)}
         """"
          "cloud_instance": {
               "id": "565979732541",
@@ -931,7 +931,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         rpc_port = utils.get_next_rpc_port(cluster_id)
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
-        mgmt_ip = node_info['network_interface'][iface_name]['ip']
+        mgmt_ip = utils.get_mgmt_ip(node_info, iface_name)
+        if not mgmt_ip:
+            logger.error(f"No management interface with IP found in provided interfaces: {iface_name}")
+            return False
         if not spdk_image:
             spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
