@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-rj
-SIMPLY_BLOCK_VERSION=0.2.0
+SIMPLY_BLOCK_VERSION=0.3.0
 
 
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:pci_driver_handling
