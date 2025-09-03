@@ -812,13 +812,15 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         #     if node_info['cluster_id'] != cluster_id:
         #         logger.error(f"This node is part of another cluster: {node_info['cluster_id']}")
         #         return False
+        ip_iface = utils.get_mgmt_ip(node_info, iface_name)
+        mgmt_ip = ip_iface[0] if ip_iface else None
 
         cloud_instance = node_info['cloud_instance']
         if not cloud_instance:
             # Create a static cloud instance from node info
             cloud_instance = {"id": node_info['system_id'], "type": "None", "cloud": "None",
-                              "ip": utils.get_mgmt_ip(node_info, iface_name),
-                              "public_ip": utils.get_mgmt_ip(node_info, iface_name)}
+                              "ip": mgmt_ip,
+                              "public_ip": mgmt_ip}
         """"
          "cloud_instance": {
               "id": "565979732541",
@@ -931,10 +933,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         rpc_port = utils.get_next_rpc_port(cluster_id)
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
-        mgmt_ip = utils.get_mgmt_ip(node_info, iface_name)
-        if not mgmt_ip:
+        mgmt_info = utils.get_mgmt_ip(node_info, iface_name)
+        if not mgmt_info:
             logger.error(f"No management interface with IP found in provided interfaces: {iface_name}")
             return False
+        
+        mgmt_ip, mgmt_iface = mgmt_info
+
         if not spdk_image:
             spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
@@ -967,7 +972,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         data_nics = []
-        names = node_config.get("nic_ports") or data_nics_list or [iface_name]
+        names = node_config.get("nic_ports") or data_nics_list or [mgmt_iface]
         for nic in names:
             device = node_info['network_interface'][nic]
             data_nics.append(
