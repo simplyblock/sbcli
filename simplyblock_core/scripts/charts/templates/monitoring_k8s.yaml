@@ -360,13 +360,6 @@ spec:
               subPath: node-exporter.json
             - name: grafana-data
               mountPath: /var/lib/grafana
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "512Mi"
-            limits:
-              cpu: "500m"
-              memory: "2Gi"
       volumes:
         - name: datasource-config
           configMap:
