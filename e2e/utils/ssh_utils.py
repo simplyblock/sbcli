@@ -154,7 +154,8 @@ class SshUtils:
 
                 login_worked = True
                 break
-            except Exception as _:
+            except Exception as e:
+                print(e)
                 self.logger.info(f"Trying username: {user}")
         if not login_worked:
             raise Exception(f"Login to {address} with user {user} Failed!!")
