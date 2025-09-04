@@ -754,7 +754,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
                 org_dev_node = node
                 break
 
-        if not org_dev or org_dev in new_devs or org_dev_node.get_id() == this_node.get_id():
+        if not org_dev or org_dev in new_devs or org_dev_node and org_dev_node.get_id() == this_node.get_id():
             continue
 
         try:
