@@ -44,6 +44,7 @@ class SshUtils:
         self.logger = setup_logger(__name__)
         self.fio_runtime = {}
         self.ssh_user = os.environ.get("SSH_USER", None)
+        self.bastion_ssh_user = os.environ.get("BASTION_SSH_USER", self.ssh_user)
         self.log_monitor_threads = {}
         self.log_monitor_stop_flags = {}
         self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
@@ -65,6 +66,7 @@ class SshUtils:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         username = self.ssh_user if self.ssh_user else username
+        bastion_username = self.bastion_ssh_user if self.bastion_ssh_user else username
 
         # Load the private key
         if not os.path.exists(SSH_KEY_LOCATION):
@@ -94,7 +96,7 @@ class SshUtils:
         # Connect to the bastion server
         self.logger.info(f"Connecting to bastion server {bastion_server_address}...")
         ssh.connect(hostname=bastion_server_address,
-                    username=username,
+                    username=bastion_username,
                     port=port,
                     pkey=private_key,
                     timeout=10000)
