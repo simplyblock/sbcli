@@ -43,7 +43,7 @@ class SshUtils:
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.logger = setup_logger(__name__)
         self.fio_runtime = {}
-        self.ssh_user = os.environ.get("SSH_USER", ["root", "ec2-user", "ubuntu"])
+        self.ssh_user = os.environ.get("SSH_USER", None)
         self.log_monitor_threads = {}
         self.log_monitor_stop_flags = {}
         self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
@@ -64,7 +64,9 @@ class SshUtils:
         # Initialize the SSH client
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        username = ["root", "ec2-user", "ubuntu"]
+        all_username = ["ec2-user", "ubuntu", "root"]
+
+        username = self.ssh_user if self.ssh_user else all_username
 
         # Load the private key
         if not os.path.exists(SSH_KEY_LOCATION):
