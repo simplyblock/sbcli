@@ -93,7 +93,7 @@ class SshUtils:
                     self.ssh_connections[address] = ssh
                     login_worked = True
                     return
-                except paramiko.ssh_exception.AuthenticationException as _:
+                except Exception as _:
                     self.logger.info(f"Trying username: {user}")
             if not login_worked:
                 raise Exception(f"Login to {address} with user {user} Failed!!")
@@ -119,7 +119,7 @@ class SshUtils:
                     return
                 login_worked = True
                 break
-            except paramiko.ssh_exception.AuthenticationException as _:
+            except Exception as _:
                 self.logger.info(f"Trying username: {user}")
         if not login_worked:
             raise Exception(f"Login to {address} with user {user} Failed!!")
@@ -152,7 +152,7 @@ class SshUtils:
 
                 login_worked = True
                 break
-            except paramiko.ssh_exception.AuthenticationException as _:
+            except Exception as _:
                 self.logger.info(f"Trying username: {user}")
         if not login_worked:
             raise Exception(f"Login to {address} with user {user} Failed!!")
