@@ -2,45 +2,31 @@
 # encoding: utf-8
 import json
 import logging
-import os
 import requests
 import boto3
 import re
 
 from simplyblock_core import shell_utils
-
+import simplyblock_core.utils.pci as pci_utils
 
 
 logger = logging.getLogger(__name__)
 
 
 def get_spdk_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/uio_pci_generic")
-    spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
-    if not spdk_pcie_list:
-        out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/vfio-pci")
-        spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
-    logger.debug(spdk_pcie_list)
-    return spdk_pcie_list
+    return pci_utils.list_devices(driver_name='uio_pci_generic') or pci_utils.list_devices(driver_name='vfio-pci')
 
 
 def get_nvme_pcie_list():  # return: ['0000:00:1e.0', '0000:00:1f.0']
-    out, err, _ = shell_utils.run_command("ls /sys/bus/pci/drivers/nvme")
-    spdk_pcie_list = [line for line in out.split() if line.startswith("0000")]
-    logger.debug(spdk_pcie_list)
-    return spdk_pcie_list
+    return pci_utils.list_devices(driver_name='nvme')
 
 
 def get_nvme_pcie():
-    # Returns a list of nvme pci address and vendor IDs,
-    # each list item is a tuple [("PCI_ADDRESS", "VENDOR_ID:DEVICE_ID")]
-    stream = os.popen("lspci -Dnn | grep -i nvme")
-    ret = stream.readlines()
-    devs = []
-    for line in ret:
-        line_array = line.split()
-        devs.append((line_array[0], line_array[-1][1:-1]))
-    return devs
+    return [
+            (address, (pci_utils.vendor_id(address), pci_utils.device_id(address)))
+            for address
+            in pci_utils.list_devices(device_class=pci_utils.NVME_CLASS)
+    ]
 
 
 def get_nvme_devices():
