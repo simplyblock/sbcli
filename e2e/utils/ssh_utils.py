@@ -43,8 +43,7 @@ class SshUtils:
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.logger = setup_logger(__name__)
         self.fio_runtime = {}
-        self.ssh_user = os.environ.get("SSH_USER", None)
-        self.bastion_ssh_user = os.environ.get("BASTION_SSH_USER", self.ssh_user)
+        self.ssh_user = os.environ.get("SSH_USER", ["root", "ec2-user", "ubuntu"])
         self.log_monitor_threads = {}
         self.log_monitor_stop_flags = {}
         self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
@@ -65,8 +64,7 @@ class SshUtils:
         # Initialize the SSH client
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        username = self.ssh_user if self.ssh_user else username
-        bastion_username = self.bastion_ssh_user if self.bastion_ssh_user else username
+        username = ["root", "ec2-user", "ubuntu"]
 
         # Load the private key
         if not os.path.exists(SSH_KEY_LOCATION):
@@ -78,37 +76,53 @@ class SshUtils:
         bastion_server_address = bastion_server_address or self.bastion_server
         if not bastion_server_address:
             # Direct connection to the target server
+            login_worked = False
             self.logger.info(f"Connecting directly to {address} on port {port}...")
-            username = "root"
-            ssh.connect(hostname=address,
-                        username=username,
-                        port=port,
-                        pkey=private_key,
-                        timeout=10000)
-            self.logger.info("Connected directly to the target server.")
+            for user in username:
+                try:
+                    ssh.connect(hostname=address,
+                                username=user,
+                                port=port,
+                                pkey=private_key,
+                                timeout=10000)
+                    self.logger.info("Connected directly to the target server.")
 
-            # Store the connection
-            if self.ssh_connections.get(address, None):
-                self.ssh_connections[address].close()
-            self.ssh_connections[address] = ssh
-            return
+                    # Store the connection
+                    if self.ssh_connections.get(address, None):
+                        self.ssh_connections[address].close()
+                    self.ssh_connections[address] = ssh
+                    login_worked = True
+                    return
+                except paramiko.ssh_exception.AuthenticationException as _:
+                    self.logger.info(f"Trying username: {user}")
+            if not login_worked:
+                raise Exception(f"Login to {address} with user {user} Failed!!")
 
         # Connect to the bastion server
         self.logger.info(f"Connecting to bastion server {bastion_server_address}...")
-        ssh.connect(hostname=bastion_server_address,
-                    username=bastion_username,
-                    port=port,
-                    pkey=private_key,
-                    timeout=10000)
-        self.logger.info("Connected to bastion server.")
+        login_worked = False
+        for user in username:
+            try:
+                ssh.connect(hostname=bastion_server_address,
+                            username=user,
+                            port=port,
+                            pkey=private_key,
+                            timeout=10000)
+                self.logger.info("Connected to bastion server.")
 
-        # Store bastion server connection
-        if self.ssh_connections.get(bastion_server_address, None):
-            self.ssh_connections[bastion_server_address].close()
-        self.ssh_connections[bastion_server_address] = ssh
+                # Store bastion server connection
+                if self.ssh_connections.get(bastion_server_address, None):
+                    self.ssh_connections[bastion_server_address].close()
+                self.ssh_connections[bastion_server_address] = ssh
 
-        if is_bastion_server:
-            return
+                if is_bastion_server:
+                    return
+                login_worked = True
+                break
+            except paramiko.ssh_exception.AuthenticationException as _:
+                self.logger.info(f"Trying username: {user}")
+        if not login_worked:
+            raise Exception(f"Login to {address} with user {user} Failed!!")
 
         # Setup the transport to the target server through the proxy
         self.logger.info(f"Connecting to target server {address} through bastion server...")
@@ -120,18 +134,28 @@ class SshUtils:
         # Connect to the target server through the proxy channel
         target_ssh = paramiko.SSHClient()
         target_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        target_ssh.connect(address,
-                        username=username,
-                        port=port,
-                        sock=channel,
-                        pkey=private_key,
-                        timeout=10000)
-        self.logger.info("Connected to target server through proxy.")
+        login_worked = False
+        for user in username:
+            try:
+                target_ssh.connect(address,
+                                   username=user,
+                                   port=port,
+                                   sock=channel,
+                                   pkey=private_key,
+                                   timeout=10000)
+                self.logger.info("Connected to target server through proxy.")
 
-        # Store the connection
-        if self.ssh_connections.get(address, None):
-            self.ssh_connections[address].close()
-        self.ssh_connections[address] = target_ssh
+                # Store the connection
+                if self.ssh_connections.get(address, None):
+                    self.ssh_connections[address].close()
+                self.ssh_connections[address] = target_ssh
+
+                login_worked = True
+                break
+            except paramiko.ssh_exception.AuthenticationException as _:
+                self.logger.info(f"Trying username: {user}")
+        if not login_worked:
+            raise Exception(f"Login to {address} with user {user} Failed!!")
 
 
     def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None, supress_logs=False):
