@@ -60,6 +60,7 @@ class Cluster(BaseModel):
     prov_cap_crit: int = 190
     prov_cap_warn: int = 180
     qpair_count: int = 32
+    client_qpair_count: int = 3
     secret: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
