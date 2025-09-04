@@ -198,7 +198,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         IP = ",".join(ip_list)
         multipath = True
     else:
-        IP = ip_list[0]
+        IP = next((iface.ip4_address for iface in snode.data_nics if iface.ip4_address), None)
         multipath = False
 
     ret = rpc_client.get_bdevs(raid_bdev)
@@ -284,7 +284,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         IP = ",".join(ip_list)
         multipath = True
     else:
-        IP = ip_list[0]
+        IP = next((iface.ip4_address for iface in snode.data_nics if iface.ip4_address), None)
         multipath = False
 
     return JMDevice({
