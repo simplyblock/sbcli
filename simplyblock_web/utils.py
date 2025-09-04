@@ -9,6 +9,7 @@ from flask import jsonify
 from pydantic import BaseModel, Field, model_validator
 
 from simplyblock_core import constants
+from simplyblock_core.utils.pci import PCIAddress
 
 
 IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
@@ -126,7 +127,7 @@ class RPCPortParams(BaseModel):
 
 
 class DeviceParams(BaseModel):
-    device_pci: str
+    device_pci: PCIAddress
 
 
 class NVMEConnectParams(BaseModel):
