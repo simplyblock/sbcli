@@ -11,6 +11,7 @@ import time
 import uuid
 
 import docker
+from docker.types import LogConfig
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
@@ -936,6 +937,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         if not spdk_image:
             spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+
+        if cluster.mode == "docker":
+            log_config_type = utils.get_storage_node_api_log_type(mgmt_ip, '/SNodeAPI')
+            if log_config_type != LogConfig.types.GELF:
+                logger.info("SNodeAPI container found but not configured with gelf logger")
+                start_storage_node_api_container(mgmt_ip, cluster_ip)
 
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
@@ -2672,7 +2679,7 @@ def deploy(ifname, isolate_cores=False):
     return f"{dev_ip}:5000"
 
 
-def start_storage_node_api_container(node_ip):
+def start_storage_node_api_container(node_ip, cluster_ip=None):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
     # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
@@ -2683,6 +2690,11 @@ def start_storage_node_api_container(node_ip):
     # create the api container
     utils.remove_container(node_docker, '/SNodeAPI')
 
+    if cluster_ip is not None:
+        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
+    else:
+        log_config = LogConfig(type=LogConfig.types.JOURNALD)
+
     node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_web/node_webapp.py storage_node",
@@ -2690,6 +2702,7 @@ def start_storage_node_api_container(node_ip):
         privileged=True,
         name="SNodeAPI",
         network_mode="host",
+        log_config=log_config,
         volumes=[
             '/etc/simplyblock:/etc/simplyblock',
             '/etc/foundationdb:/etc/foundationdb',
