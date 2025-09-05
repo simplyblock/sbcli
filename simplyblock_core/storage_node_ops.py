@@ -3370,7 +3370,7 @@ def get_node_jm_names(current_node, remote_node=None):
                 jm_list.append(f"remote_{jm_device.jm_bdev}n1")
             else:
                 jm_list.append(jm_device.jm_bdev)
-    else:
+    if not jm_list:
         jm_list.append("JM_LOCAL")
 
     if current_node.enable_ha_jm:
