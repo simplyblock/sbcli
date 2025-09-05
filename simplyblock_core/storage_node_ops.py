@@ -138,24 +138,24 @@ def _search_for_partitions(rpc_client, nvme_device):
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
-    raid_bdev = f"raid_jm_{snode.get_id()}"
+    jm_uuid = str(uuid.uuid4())
+    raid_bdev = f"raid_jm_{jm_uuid}"
     if len(jm_nvme_bdevs) > 1:
         raid_level = "1"
         ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
         if not ret:
-            logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+            logger.error(f"Failed to create {jm_uuid}")
             return False
     else:
         raid_bdev = jm_nvme_bdevs[0]
 
-    alceml_id = snode.get_id()
-    alceml_name = f"alceml_jm_{snode.get_id()}"
+    alceml_name = f"alceml_jm_{jm_uuid}"
     nvme_bdev = raid_bdev
 
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     ret = snode.create_alceml(
-        alceml_name, nvme_bdev, alceml_id,
+        alceml_name, nvme_bdev, jm_uuid,
         pba_init_mode=1 if after_restart else 3,
         pba_page_size=cluster.page_size_in_blocks,
         full_page_unmap=cluster.full_page_unmap
@@ -186,7 +186,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
         logger.info(f"add {pt_name} to subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, alceml_id)
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, jm_uuid)
         if not ret:
             logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
             return False
@@ -208,7 +208,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     ret = rpc_client.get_bdevs(raid_bdev)
 
     return JMDevice({
-        'uuid': alceml_id,
+        'uuid': jm_uuid,
         'device_name': jm_bdev,
         'size': ret[0]["block_size"] * ret[0]["num_blocks"],
         'status': JMDevice.STATUS_ONLINE,
