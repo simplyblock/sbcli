@@ -5,6 +5,8 @@ from http import HTTPStatus
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
+from simplyblock_core.workers.cleanup_foundationdb import db_controller
+
 
 class SbcliUtils:
     """Contains all API calls
@@ -428,9 +430,10 @@ class SbcliUtils:
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
-                 crypto=False, key1=None, key2=None):
+                 crypto=False, key1=None, key2=None, fabric="TCP", cluster_id=None):
         """Adds lvol with given params
         """
+
         if crypto:
             if not key1 or not key2:
                 raise Exception("Need two keys for crypto lvols")
