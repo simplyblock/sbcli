@@ -133,7 +133,7 @@ class SnapshotDTO(BaseModel):
     lvol: Optional[util.UrlPath]
 
     @staticmethod
-    def from_model(model: SnapShot, request: Request, cluster_id, pool_id):
+    def from_model(model: SnapShot, request: Request, cluster_id, pool_id, volume_id=None):
         return SnapshotDTO(
             id=model.get_id(),
             name=model.snap_name,
@@ -146,7 +146,7 @@ class SnapshotDTO(BaseModel):
                 cluster_id=cluster_id,
                 pool_id=pool_id,
                 volume_id=model.lvol.get_id(),
-            )) if model.lvol is not None else None,
+            )) if model.lvol is not None and (volume_id == model.lvol.get_id()) else None,
         )
 
 

@@ -200,7 +200,7 @@ def iostats(cluster: Cluster, pool: StoragePool, volume: Volume, history: Option
 @instance_api.get('/snapshots', name='clusters:storage-pools:volumes:snapshots:list')
 def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> List[SnapshotDTO]:
     return [
-        SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
+        SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id(), volume_id=volume.get_id())
         for snapshot
         in db.get_snapshots()
         if snapshot.lvol is not None and snapshot.lvol.get_id() == volume.get_id()
