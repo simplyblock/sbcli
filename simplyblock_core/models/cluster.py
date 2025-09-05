@@ -67,6 +67,7 @@ class Cluster(BaseModel):
     tls: bool = False
     is_re_balancing: bool = False
     full_page_unmap: bool = True
+    is_single_node: bool = False
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
