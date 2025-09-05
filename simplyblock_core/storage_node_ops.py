@@ -1085,7 +1085,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.number_of_distribs = number_of_distribs
         snode.number_of_alceml_devices = number_of_alceml_devices
         snode.enable_ha_jm = enable_ha_jm
-        snode.ha_jm_count = ha_jm_count
+        snode.ha_jm_count = ha_jm_count or constants.HA_JM_COUNT
         snode.minimum_sys_memory = minimum_sys_memory
 
         if 'cpu_count' in node_info:
@@ -3360,7 +3360,7 @@ def get_sorted_ha_jms(current_node, select_one_jm_per_node=True):
                 continue
             mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
             out.append(jm_id)
-    return out[:constants.HA_JM_COUNT-1]
+    return out[:current_node.ha_jm_count-1]
 
 
 def get_node_jm_names(current_node, remote_node=None):
@@ -3393,7 +3393,7 @@ def get_node_jm_names(current_node, remote_node=None):
                     if jm_dev.get_id() == jm_id:
                         jm_list.append(jm_dev.remote_bdev)
                         break
-    return jm_list[:constants.HA_JM_COUNT]
+    return jm_list[:current_node.ha_jm_count]
 
 
 def get_secondary_nodes(current_node):
