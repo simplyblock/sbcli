@@ -280,6 +280,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   TasksRunnerClusterStatus:
+    <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/tasks_cluster_status.py"
     deploy:

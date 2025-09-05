@@ -7,7 +7,7 @@ from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedi
 import jsonschema
 from jsonschema.exceptions import ValidationError
 
-from simplyblock_core import constants, utils
+from simplyblock_core import utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
