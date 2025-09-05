@@ -2028,15 +2028,16 @@ def list_storage_devices(node_id, is_json):
             "JM_VUID": distrib_params['jm_vuid'],
         })
 
-    if snode.jm_device and snode.jm_device.get_id():
-        jm_devices.append({
-            "UUID": snode.jm_device.uuid,
-            "Name": snode.jm_device.alceml_name,
-            "Size": utils.humanbytes(snode.jm_device.size),
-            "Status": snode.jm_device.status,
-            "IO Err": snode.jm_device.io_error,
-            "Health": snode.jm_device.health_check
-        })
+    for jm_device in snode.jm_devices:
+        if jm_device and jm_device.get_id():
+            jm_devices.append({
+                "UUID": jm_device.uuid,
+                "Name": jm_device.alceml_name,
+                "Size": utils.humanbytes(jm_device.size),
+                "Status": jm_device.status,
+                "IO Err": jm_device.io_error,
+                "Health": jm_device.health_check
+            })
 
     for jm_id in snode.jm_ids:
         try:
