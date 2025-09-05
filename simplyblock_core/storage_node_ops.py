@@ -137,6 +137,66 @@ def _search_for_partitions(rpc_client, nvme_device):
     return partitioned_devices
 
 
+def _recreate_jm_stack_on_raid(jm_device: JMDevice, snode: StorageNode, after_restart):
+    rpc_client = snode.rpc_client()
+    jm_uuid = jm_device.get_id()
+    raid_bdev = jm_device.raid_bdev
+    if len(jm_device.jm_nvme_bdev_list) > 1:
+        raid_level = "1"
+        ret = rpc_client.bdev_raid_create(raid_bdev, jm_device.jm_nvme_bdev_list, raid_level)
+        if not ret:
+            logger.error(f"Failed to create {jm_uuid}")
+            return False
+    else:
+        raid_bdev = jm_device.jm_nvme_bdev_list[0]
+
+    alceml_name = jm_device.alceml_bdev
+    nvme_bdev = raid_bdev
+
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    ret = snode.create_alceml(
+        alceml_name, nvme_bdev, jm_uuid,
+        pba_init_mode=1 if after_restart else 3,
+        pba_page_size=cluster.page_size_in_blocks,
+        full_page_unmap=cluster.full_page_unmap
+    )
+
+    if not ret:
+        logger.error(f"Failed to create alceml bdev: {alceml_name}")
+        return False
+
+    jm_bdev = jm_device.jm_bdev
+    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
+    if not ret:
+        logger.error(f"Failed to create {jm_bdev}")
+        return False
+
+    if snode.enable_ha_jm:
+        # add pass through
+        pt_name = jm_device.pt_bdev
+        ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
+        if not ret:
+            logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+            return False
+
+        subsystem_nqn = jm_device.nvmf_nqn
+        logger.info("creating subsystem %s", subsystem_nqn)
+        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
+        logger.info(f"add {pt_name} to subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, jm_uuid)
+        if not ret:
+            logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+            return False
+
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
+
+    return True
+
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     jm_uuid = str(uuid.uuid4())
     raid_bdev = f"raid_jm_{jm_uuid}"
@@ -508,7 +568,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
                 logger.error("Failed to create JM device")
                 return False
             snode.jm_devices.append(jm_device)
-        snode.jm_device = snode.jm_devices[0]
+        # snode.jm_device = snode.jm_devices[0]
 
     return True
 
@@ -531,7 +591,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
             if not jm_device:
                 logger.error("Failed to create JM device")
                 return False
-            snode.jm_device = jm_device
+            snode.jm_devices = [jm_device]
             continue
 
         new_devices.append(nvme)
@@ -588,81 +648,81 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     snode.write_to_db()
 
     # prepare JM device
-    jm_device = snode.jm_device
-    if jm_device is None or jm_device.status == JMDevice.STATUS_REMOVED:
-        return True
+    for jm_device in snode.jm_devices:
+        if jm_device is None or jm_device.status == JMDevice.STATUS_REMOVED:
+            return True
 
-    if not jm_device or not jm_device.uuid:
-        return True
+        if not jm_device or not jm_device.uuid:
+            return True
 
-    jm_device.status = JMDevice.STATUS_UNAVAILABLE
+        jm_device.status = JMDevice.STATUS_UNAVAILABLE
 
-    if jm_device.jm_nvme_bdev_list:
-        all_bdevs_found = True
-        for bdev_name in jm_device.jm_nvme_bdev_list:
-            ret = rpc_client.get_bdevs(bdev_name)
-            if not ret:
-                logger.error(f"BDev not found: {bdev_name}")
-                all_bdevs_found = False
-                break
+        if jm_device.jm_nvme_bdev_list:
+            all_bdevs_found = True
+            for bdev_name in jm_device.jm_nvme_bdev_list:
+                ret = rpc_client.get_bdevs(bdev_name)
+                if not ret:
+                    logger.error(f"BDev not found: {bdev_name}")
+                    all_bdevs_found = False
+                    break
 
-        if all_bdevs_found:
-            ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
-            if not ret:
-                logger.error("Failed to create JM device")
-                return False
+            if all_bdevs_found:
+                ret = _recreate_jm_stack_on_raid(jm_device, snode, after_restart=not clear_data)
+                if not ret:
+                    logger.error("Failed to create JM device")
+                    return False
 
 
-    else:
-        nvme_bdev = jm_device.nvme_bdev
-        if snode.enable_test_device:
-            ret = rpc_client.bdev_passtest_create(jm_device.testing_bdev, jm_device.nvme_bdev)
-            if not ret:
-                logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
-                return False
-            nvme_bdev = jm_device.testing_bdev
-
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        ret = snode.create_alceml(
-            jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
-            pba_init_mode=3 if clear_data else 1,
-            pba_page_size=cluster.page_size_in_blocks,
-            full_page_unmap=cluster.full_page_unmap
-        )
-
-        if not ret:
-            logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
-            return False
-
-        jm_bdev = f"jm_{snode.get_id()}"
-        ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask)
-        if not ret:
-            logger.error(f"Failed to create {jm_bdev}")
-            return False
-
-        if snode.enable_ha_jm:
-            # add pass through
-            pt_name = f"{jm_bdev}_PT"
-            ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
-            if not ret:
-                logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
-                return False
+        else:
+            nvme_bdev = jm_device.nvme_bdev
+            if snode.enable_test_device:
+                ret = rpc_client.bdev_passtest_create(jm_device.testing_bdev, jm_device.nvme_bdev)
+                if not ret:
+                    logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
+                    return False
+                nvme_bdev = jm_device.testing_bdev
 
             cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-            subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
-            logger.info("creating subsystem %s", subsystem_nqn)
-            ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
-            logger.info(f"add {pt_name} to subsystem")
-            ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, snode.get_id())
+            ret = snode.create_alceml(
+                jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),
+                pba_init_mode=3 if clear_data else 1,
+                pba_page_size=cluster.page_size_in_blocks,
+                full_page_unmap=cluster.full_page_unmap
+            )
+
             if not ret:
-                logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+                logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
                 return False
 
-            for iface in snode.data_nics:
-                if iface.ip4_address:
-                    tr_type = iface.get_transport_type()
-                    logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
+            jm_bdev = f"jm_{snode.get_id()}"
+            ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask)
+            if not ret:
+                logger.error(f"Failed to create {jm_bdev}")
+                return False
+
+            if snode.enable_ha_jm:
+                # add pass through
+                pt_name = f"{jm_bdev}_PT"
+                ret = rpc_client.bdev_PT_NoExcl_create(pt_name, jm_bdev)
+                if not ret:
+                    logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
+                    return False
+
+                cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+                subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
+                logger.info("creating subsystem %s", subsystem_nqn)
+                ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
+                logger.info(f"add {pt_name} to subsystem")
+                ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, snode.get_id())
+                if not ret:
+                    logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+                    return False
+
+                for iface in snode.data_nics:
+                    if iface.ip4_address:
+                        tr_type = iface.get_transport_type()
+                        logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                        ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
 
     return True
 
@@ -746,8 +806,9 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
 
     if this_node.lvstore_stack_secondary_1:
         org_node = db_controller.get_storage_node_by_id(this_node.lvstore_stack_secondary_1)
-        if org_node.jm_device:
-            remote_devices.append(org_node.jm_device)
+        for jm_device in org_node.jm_devices:
+            if jm_device:
+                remote_devices.append(jm_device)
         for jm_id in org_node.jm_ids:
             jm_dev = db_controller.get_jm_device_by_id(jm_id)
             if jm_dev and jm_dev not in remote_devices:
@@ -761,10 +822,11 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         org_dev = None
         org_dev_node = None
         for node in db_controller.get_storage_nodes():
-            if node.jm_device and node.jm_device.get_id() == jm_dev.get_id():
-                org_dev = node.jm_device
-                org_dev_node = node
-                break
+            for jm in node.jm_devices:
+                if jm and jm.get_id() == jm_dev.get_id():
+                    org_dev = jm
+                    org_dev_node = node
+                    break
 
         if not org_dev or org_dev in new_devs or org_dev_node and org_dev_node.get_id() == this_node.get_id():
             continue
@@ -1374,10 +1436,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 distr_controller.disconnect_device(dev)
 
-    if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status in [JMDevice.STATUS_ONLINE,
-                                                                                   JMDevice.STATUS_UNAVAILABLE]:
-        logger.info("Removing JM")
-        device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
+    for jm_device in snode.jm_devices:
+        if jm_device and jm_device.status in [JMDevice.STATUS_ONLINE,  JMDevice.STATUS_UNAVAILABLE]:
+            logger.info("Removing JM")
+            device_controller.remove_jm_device(jm_device.get_id(), force=True)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
@@ -1497,8 +1559,9 @@ def restart_storage_node(
 
                 snode.cloud_instance_id = new_cloud_instance_id
                 known_sn = [dev.serial_number for dev in snode.nvme_devices]
-                if snode.jm_device and 'serial_number' in snode.jm_device.device_data_dict:
-                    known_sn.append(snode.jm_device.device_data_dict['serial_number'])
+                for jm_device in snode.jm_devices:
+                    if jm_device and 'serial_number' in jm_device.device_data_dict:
+                        known_sn.append(jm_device.device_data_dict['serial_number'])
 
                 node_info, _ = snode_api.info()
                 for dev in node_info['nvme_devices']:
@@ -1741,17 +1804,17 @@ def restart_storage_node(
             removed_devices.append(db_dev)
             # distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
-    jm_dev_sn = ""
-    if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
-        jm_dev_sn = snode.jm_device.device_data_dict['serial_number']
-        known_devices_sn.append(jm_dev_sn)
+    for jm_dev in snode.jm_devices:
+        if jm_dev and "serial_number" in jm_dev.device_data_dict:
+            jm_dev_sn = jm_dev.device_data_dict['serial_number']
+            known_devices_sn.append(jm_dev_sn)
+            for dev in nvme_devs:
+                if dev.serial_number == jm_dev_sn:
+                    logger.info(f"JM device found: {jm_dev.get_id()}")
+                    jm_dev.nvme_bdev = dev.nvme_bdev
 
     for dev in nvme_devs:
-        if dev.serial_number == jm_dev_sn:
-            logger.info(f"JM device found: {snode.jm_device.get_id()}")
-            snode.jm_device.nvme_bdev = dev.nvme_bdev
-
-        elif dev.serial_number not in known_devices_sn:
+        if dev.serial_number not in known_devices_sn:
             logger.info(f"New device found: {dev.get_id()}")
             dev.status = NVMeDevice.STATUS_NEW
             new_devices.append(dev)
@@ -1845,8 +1908,9 @@ def restart_storage_node(
         for db_dev in snode.nvme_devices:
             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
-        if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-            device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+        for jm_dev in snode.jm_devices:
+            if jm_dev and jm_dev.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+                device_controller.set_jm_device_state(jm_dev.get_id(), JMDevice.STATUS_ONLINE)
 
         logger.info("Cluster is not ready yet")
         logger.info("Setting node status to Online")
@@ -1893,8 +1957,9 @@ def restart_storage_node(
             for db_dev in snode.nvme_devices:
                 distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
-            if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-                device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+            for jm_dev in snode.jm_devices:
+                if jm_dev and jm_dev.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
+                    device_controller.set_jm_device_state(jm_dev.get_id(), JMDevice.STATUS_ONLINE)
 
             logger.info("Setting node status to Online")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2136,9 +2201,10 @@ def shutdown_storage_node(node_id, force=False):
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
 
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        logger.info("Setting JM unavailable")
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+    for jm_device in snode.jm_devices:
+        if jm_device and jm_device.status != JMDevice.STATUS_REMOVED:
+            logger.info("Setting JM unavailable")
+            device_controller.set_jm_device_state(jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
@@ -2284,9 +2350,10 @@ def suspend_storage_node(node_id, force=False):
         if dev.status == NVMeDevice.STATUS_ONLINE:
             device_controller.device_set_unavailable(dev.get_id())
 
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        logger.info("Setting JM unavailable")
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+    for jm_device in snode.jm_devices:
+        if jm_device and jm_device.status != JMDevice.STATUS_REMOVED:
+            logger.info("Setting JM unavailable")
+            device_controller.set_jm_device_state(jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     logger.info("Setting node status to suspended")
     set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
@@ -2321,8 +2388,9 @@ def resume_storage_node(node_id):
         distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
     logger.info("Set JM Online")
-    if snode.jm_device and snode.jm_device.get_id():
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+    for jm_device in snode.jm_devices:
+        if jm_device and jm_device.get_id():
+            device_controller.set_jm_device_state(jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     logger.info("Connecting to remote devices")
     snode = db_controller.get_storage_node_by_id(node_id)
@@ -3266,10 +3334,10 @@ def get_sorted_ha_jms(current_node):
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() == current_node.get_id():  # pass
             continue
-
-        if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE and node.jm_device.get_id():
-            jm_count[node.jm_device.get_id()] = 0
-            jm_dev_to_mgmt_ip[node.jm_device.get_id()] = node.mgmt_ip
+        for jm_device in node.jm_devices:
+            if jm_device and jm_device.status == JMDevice.STATUS_ONLINE and jm_device.get_id():
+                jm_count[jm_device.get_id()] = 0
+                jm_dev_to_mgmt_ip[jm_device.get_id()] = node.mgmt_ip
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() == current_node.get_id():  # pass
@@ -3296,11 +3364,12 @@ def get_sorted_ha_jms(current_node):
 
 def get_node_jm_names(current_node, remote_node=None):
     jm_list = []
-    if current_node.jm_device:
-        if remote_node:
-            jm_list.append(f"remote_{current_node.jm_device.jm_bdev}n1")
-        else:
-            jm_list.append(current_node.jm_device.jm_bdev)
+    for jm_device in current_node.jm_devices:
+        if jm_device:
+            if remote_node:
+                jm_list.append(f"remote_{jm_device.jm_bdev}n1")
+            else:
+                jm_list.append(jm_device.jm_bdev)
     else:
         jm_list.append("JM_LOCAL")
 
@@ -3310,9 +3379,10 @@ def get_node_jm_names(current_node, remote_node=None):
                 continue
 
             if remote_node:
-                if remote_node.jm_device.get_id() == jm_id:
-                    jm_list.append(remote_node.jm_device.jm_bdev)
-                    continue
+                for jm_dev in remote_node.jm_devices:
+                    if jm_dev.get_id() == jm_id:
+                        jm_list.append(jm_dev.jm_bdev)
+                        break
                 for jm_dev in remote_node.remote_jm_devices:
                     if jm_dev.get_id() == jm_id:
                         jm_list.append(jm_dev.remote_bdev)

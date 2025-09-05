@@ -176,14 +176,14 @@ while True:
                             node_remote_devices_check = False
 
                 connected_jms = []
-                if snode.jm_device and snode.jm_device.get_id():
-                    jm_device = snode.jm_device
-                    logger.info(f"Node JM: {jm_device.get_id()}")
-                    if jm_device.jm_bdev in node_bdev_names:
-                        logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
-                        connected_jms.append(jm_device.get_id())
-                    else:
-                        logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
+                for jm_device in snode.jm_devices:
+                    if jm_device and jm_device.get_id():
+                        logger.info(f"Node JM: {jm_device.get_id()}")
+                        if jm_device.jm_bdev in node_bdev_names:
+                            logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
+                            connected_jms.append(jm_device.get_id())
+                        else:
+                            logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
 
                 if snode.enable_ha_jm:
                     logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
@@ -198,10 +198,11 @@ while True:
                     for jm_id in snode.jm_ids:
                         if jm_id and jm_id not in connected_jms:
                             for nd in db.get_storage_nodes():
-                                if nd.jm_device and nd.jm_device.get_id() == jm_id:
-                                    if nd.status == StorageNode.STATUS_ONLINE:
-                                        node_remote_devices_check = False
-                                    break
+                                for jm_device in nd.jm_devices:
+                                    if jm_device and jm_device.get_id() == jm_id:
+                                        if nd.status == StorageNode.STATUS_ONLINE:
+                                            node_remote_devices_check = False
+                                        break
 
                     if not node_remote_devices_check and cluster.status in [
                         Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:

@@ -17,7 +17,8 @@ def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNod
         return next(
             node
             for node in db_controller.get_storage_nodes()
-            if node.jm_device.get_id() == id
+            for jm_device in node.jm_devices
+            if jm_device.get_id() == id
         )
     except StopIteration:
         raise KeyError(f'No storage node with JM device {id}')
@@ -753,7 +754,11 @@ def set_jm_device_state(device_id, state):
         logger.error(e)
         return False
 
-    jm_device = snode.jm_device
+    jm_device = None
+    for jm_dev in snode.jm_devices:
+        if jm_dev and jm_dev.get_id() == device_id:
+            jm_device = jm_dev
+            break
 
     if jm_device.status != state:
         jm_device.status = state

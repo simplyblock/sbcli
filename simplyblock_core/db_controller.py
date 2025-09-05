@@ -279,9 +279,10 @@ class DBController(metaclass=Singleton):
 
     def get_jm_device_by_id(self, jm_id) -> JMDevice:
         for node in self.get_storage_nodes():
-            if node.jm_device and node.jm_device.get_id() == jm_id:
-                return node.jm_device
-        raise KeyError(f'JMDeviec {jm_id} not found')
+            for jm_device in node.jm_devices:
+                if jm_device and jm_device.get_id() == jm_id:
+                    return jm_device
+        raise KeyError(f'JMDevice {jm_id} not found')
 
     def get_primary_storage_nodes_by_cluster_id(self, cluster_id) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)

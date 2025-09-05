@@ -515,8 +515,7 @@ def check_node(node_id, with_devices=True):
             node_remote_devices_check &= check_remote_device(remote_device.get_id(), snode)
             print("*" * 100)
 
-        if snode.jm_device:
-            jm_device = snode.jm_device
+        for jm_device in snode.jm_devices:
             logger.info(f"Node JM: {jm_device.get_id()}")
             ret = check_jm_device(jm_device.get_id())
             if ret:
@@ -576,8 +575,9 @@ def check_device(device_id):
     except KeyError:
         # is jm device ?
         for node in db_controller.get_storage_nodes():
-            if node.jm_device and node.jm_device.get_id() == device_id:
-                return check_jm_device(node.jm_device.get_id())
+            for jm_device in node.jm_devices:
+                if jm_device and jm_device.get_id() == device_id:
+                    return check_jm_device(jm_device.get_id())
 
         logger.error("device not found")
         return False
@@ -784,7 +784,11 @@ def check_jm_device(device_id):
         logger.error("device not found")
         return False
 
-    jm_device = snode.jm_device
+    jm_device = None
+    for jm_bdev in snode.jm_devices:
+        if jm_bdev and jm_bdev.get_id() == device_id:
+            jm_device = jm_bdev
+            break
 
     if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
         logger.info(f"Skipping ,node status is {snode.status}")
