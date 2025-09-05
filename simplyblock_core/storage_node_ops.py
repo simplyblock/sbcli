@@ -923,10 +923,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if not spdk_image:
             spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
 
-        log_config_type = utils.get_storage_node_api_log_type(mgmt_ip, '/SNodeAPI')
-        if log_config_type != LogConfig.types.GELF:
-            logger.info("SNodeAPI container found but not configured with gelf logger")
-            start_storage_node_api_container(mgmt_ip, cluster_ip)
+        # replace the SNodeAPI container to apply the new logging config
+        # start_storage_node_api_container(mgmt_ip, cluster_ip)
 
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
