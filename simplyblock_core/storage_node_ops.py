@@ -2144,6 +2144,8 @@ def shutdown_storage_node(node_id, force=False):
 
 
 def suspend_storage_node(node_id, force=False):
+    logger.error("Please use 'sn shutdown --force' instead")
+    return False
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
