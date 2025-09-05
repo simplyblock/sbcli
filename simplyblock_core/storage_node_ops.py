@@ -165,7 +165,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return False
 
-    jm_bdev = f"jm_{snode.get_id()}"
+    jm_bdev = f"jm_{jm_uuid}"
     ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
     if not ret:
         logger.error(f"Failed to create {jm_bdev}")
