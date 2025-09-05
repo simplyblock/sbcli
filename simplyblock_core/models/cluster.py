@@ -60,6 +60,8 @@ class Cluster(BaseModel):
     prov_cap_crit: int = 190
     prov_cap_warn: int = 180
     qpair_count: int = 32
+    fabric_tcp: bool = True
+    fabric_rdma: bool = False
     secret: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False

@@ -220,7 +220,7 @@ class RPCClient:
         """
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": 128,
+            "max_io_qpairs_per_ctrlr": constants.QPAIR_COUNT,
             "max_queue_depth": 256,
             "abort_timeout_sec": 5,
             "zcopy": True,
@@ -231,10 +231,10 @@ class RPCClient:
             "num_shared_buffers": shared_bufs,
             "buf_cache_size": 512,
             "dif_insert_or_strip": False,
-            "c2h_success": True,
-            "sock_priority": 0,
             "ack_timeout": 8000,
         }
+        if trtype=="TCP":
+            params.update({"c2h_success": True,"sock_priority": 0})
         return self._request("nvmf_create_transport", params)
 
     def sock_impl_set_options(self):
@@ -268,8 +268,8 @@ class RPCClient:
                 "adrfam": "IPv4",
                 "traddr": traddr,
                 "trsvcid": str(trsvcid)
-            }
-        }
+            }}
+
         if ana_state:
             params["ana_state"] = ana_state
         return self._request("nvmf_subsystem_add_listener", params)
@@ -331,16 +331,17 @@ class RPCClient:
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, is_optimized=True, ana=None):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trype="TCP", is_optimized=True, ana=None):
         params = {
             "nqn": nqn,
             "listen_address": {
-                "trtype": "tcp",
+                "trtype": trtype,
                 "adrfam": "ipv4",
                 "traddr": ip,
                 "trsvcid": str(port)
             },
         }
+
         if is_optimized:
             params['ana_state'] = "optimized"
         else:
@@ -649,32 +650,21 @@ class RPCClient:
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)
 
-    def bdev_nvme_attach_controller_tcp(self, name, nqn, ip, port, multipath=False):
+    def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype, multipath=False):
         params = {
             "name": name,
-            "trtype": "tcp",
-            "traddr": ip,
-            "adrfam": "ipv4",
-            "trsvcid": str(port),
+            "trtype": trtype,
+            "traddr": traddr,
+            "trsvcid": str(trsvcid),
             "subnqn": nqn,
-            "fabrics_connect_timeout_us": 100000,
-            "num_io_queues": 128,
+            "fabrics_connect_timeout_us": 100000
         }
+        if trtype=="TCP":
+            params.update({"adrfam": "ipv4"})
         if multipath:
             params["multipath"] = "failover"
         else:
             params["multipath"] = "disable"
-        return self._request("bdev_nvme_attach_controller", params)
-
-    def bdev_nvme_attach_controller_tcp_caching(self, name, nqn, ip, port):
-        params = {
-            "name": name,
-            "trtype": "tcp",
-            "traddr": ip,
-            "adrfam": "ipv4",
-            "trsvcid": str(port),
-            "subnqn": nqn
-        }
         return self._request("bdev_nvme_attach_controller", params)
 
     def bdev_split(self, base_bdev, split_count):
@@ -720,14 +710,14 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": 1,
-            "transport_retry_count": 3,
-            "ctrlr_loss_timeout_sec": 1,
-            "fast_io_fail_timeout_sec" : 0,
-            "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 30000,
+            "bdev_retry_count": constants.BDEV_RETRY,
+            "transport_retry_count": constants.TRANSPORT_RETRY,
+            "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
+            "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
+            "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
+            "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
-            "transport_ack_timeout": 13,
+            "transport_ack_timeout": constants.ACK_TO
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -1018,6 +1008,7 @@ class RPCClient:
                 "trsvcid": str(trsvcid)
             }
         }
+
         return self._request("nvmf_subsystem_remove_listener", params)
 
 

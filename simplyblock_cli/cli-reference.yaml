@@ -113,9 +113,9 @@ commands:
             default: 3
             private: true
           - name: "--data-nics"
-            help: "Storage network interface name(s). Can be more than one."
+            help: "Storage network interface names. currently one interface is supported."
             description: >
-              Storage network interface name(s). Can be more than one. Comma-separated list: e.g. eth0,eth1
+              Storage network interface names, e.g. eth0,eth1
             dest: data_nics
             type: str
             nargs: "+"
@@ -797,6 +797,11 @@ commands:
                 min: 0
                 max: 128
             default: 0
+          - name: "--fabric"
+            help: "fabric: tcp, rdma or both (specify: tcp, rdma)"
+            dest: fabric
+            type: str
+            default: tcp
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max_queue_size
@@ -900,6 +905,11 @@ commands:
             dest: enable_node_affinity
             type: bool
             action: store_true
+          - name: "--fabric"
+            help: "fabric: tcp, rdma or both (specify: tcp, rdma)"
+            dest: fabric
+            type: str
+            default: tcp
           - name: "--qpair-count"
             help: "NVMe/TCP transport qpair count per logical volume"
             usage: >
@@ -1300,6 +1310,14 @@ commands:
               - default
               - ha
             default: default
+          - name: "--fabric"
+            help: "tcp or rdma (tcp is default). Cluster must support chosen fabric."
+            dest: fabric
+            type: str
+            choices:
+              - tcp
+              - rdma
+            default: tcp
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"
             dest: lvol_priority_class
