@@ -3326,7 +3326,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     return True, None
 
 
-def get_sorted_ha_jms(current_node):
+def get_sorted_ha_jms(current_node, select_one_jm_per_node=True):
     db_controller = DBController()
     jm_count = {}
     jm_dev_to_mgmt_ip = {}
@@ -3353,7 +3353,7 @@ def get_sorted_ha_jms(current_node):
     out = []
     for jm_id in jm_count.keys():
         if jm_id:
-            if jm_dev_to_mgmt_ip[jm_id] in mgmt_ips:
+            if jm_dev_to_mgmt_ip[jm_id] in mgmt_ips and select_one_jm_per_node is True:
                 continue
             if jm_dev_to_mgmt_ip[jm_id] == current_node.mgmt_ip:
                 continue
@@ -3439,7 +3439,12 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     lvol_subsys_port = utils.get_next_port(snode.cluster_id)
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
-        jm_ids = get_sorted_ha_jms(snode)
+        nodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        online_nodes = []
+        for node in nodes:
+            if node.status == StorageNode.STATUS_ONLINE:
+                online_nodes.append(node.get_id())
+        jm_ids = get_sorted_ha_jms(snode, select_one_jm_per_node=bool(len(online_nodes)>2))
         logger.debug(f"online_jms: {str(jm_ids)}")
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_ids = jm_ids
