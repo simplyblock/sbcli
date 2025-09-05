@@ -508,7 +508,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
             continue
 
         if nvme.is_partition:
-            for i in range(cluster.jm_device_per_node):
+            for i in range(snode.jm_device_per_node):
                 dev_part = f"{nvme.nvme_bdev[:-2]}p{i+1}"
                 if dev_part in bdevs_names:
                     if dev_part not in jm_devices:
@@ -527,19 +527,19 @@ def _prepare_cluster_devices_partitions(snode, devices):
             partitioned_devices = _search_for_partitions(rpc_client, nvme)
             logger.debug("partitioned_devices")
             logger.debug(partitioned_devices)
-            if len(partitioned_devices) == (cluster.jm_device_per_node + snode.num_partitions_per_dev):
+            if len(partitioned_devices) == (snode.jm_device_per_node + snode.num_partitions_per_dev):
                 logger.info("Partitioned devices found")
             else:
                 logger.info(f"Creating partitions for {nvme.nvme_bdev}")
                 _create_device_partitions(rpc_client, nvme, snode, snode.num_partitions_per_dev, snode.jm_percent,
-                                          snode.partition_size, cluster.jm_device_per_node)
+                                          snode.partition_size, snode.jm_device_per_node)
                 partitioned_devices = _search_for_partitions(rpc_client, nvme)
-                if len(partitioned_devices) == (cluster.jm_device_per_node + snode.num_partitions_per_dev):
+                if len(partitioned_devices) == (snode.jm_device_per_node + snode.num_partitions_per_dev):
                     logger.info("Device partitions created")
                 else:
                     logger.error("Failed to create partitions")
                     return False
-            for i in range(cluster.jm_device_per_node):
+            for i in range(snode.jm_device_per_node):
                 jm_devices.append(partitioned_devices.pop(0).nvme_bdev)
 
             for dev in partitioned_devices:
@@ -558,7 +558,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
 
     if jm_devices:
         snode.jm_devices = []
-        for i in range(cluster.jm_device_per_node):
+        for i in range(snode.jm_device_per_node):
             devs = []
             for d in jm_devices:
                 if d.endswith(f"p{i+1}"):
@@ -848,7 +848,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3):
+             partition_size="", ha_jm_count=3, jm_device_per_node=1):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1131,6 +1131,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             snode.physical_label = get_next_physical_device_order(snode)
 
         snode.num_partitions_per_dev = num_partitions_per_dev
+        snode.jm_device_per_node = jm_device_per_node
         snode.jm_percent = jm_percent
         snode.id_device_by_nqn = id_device_by_nqn
 

@@ -52,7 +52,6 @@ class Cluster(BaseModel):
     ha_type: str = "single"
     inflight_io_threshold: int = 4
     iscsi: str = ""
-    jm_device_per_node: int = 1
     max_queue_size: int = 128
     model_ids: List[str] = []
     cluster_name: str = None # type: ignore[assignment]

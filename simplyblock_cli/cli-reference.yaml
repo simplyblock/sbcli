@@ -182,6 +182,16 @@ commands:
             type: int
             default: 5000
             private: true
+          - name: "--jm-per-node"
+            help: "Number of JM devices to partition per node"
+            usage: >
+              Use this parameter --jm-per-node 2 in case of a cluster with only two storage nodes, default = 1.
+            dest: jm_device_per_node
+            type:
+              range:
+                min: 1
+                max: 4
+            default: 1
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >
@@ -835,16 +845,6 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
-          - name: "--jm-per-node"
-            help: "Number of JM devices to partition per node"
-            usage: >
-              Use this parameter --jm-per-node 2 in case of a cluster with only two storage nodes, default = 1.
-            dest: jm_device_per_node
-            type:
-              range:
-                min: 1
-                max: 4
-            default: 1
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -958,16 +958,6 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
-          - name: "--jm-per-node"
-            help: "Number of JM devices to partition per node"
-            usage: >
-              Use this parameter --jm-per-node 2 in case of a cluster with only two storage nodes, default = 1.
-            dest: jm_device_per_node
-            type:
-              range:
-                min: 1
-                max: 4
-            default: 1
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.

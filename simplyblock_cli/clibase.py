@@ -134,6 +134,7 @@ class CLIWrapperBase:
         enable_ha_jm = args.enable_ha_jm
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
+        jm_device_per_node = args.jm_device_per_node
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
@@ -153,6 +154,7 @@ class CLIWrapperBase:
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
+            jm_device_per_node=jm_device_per_node
         )
 
         return out
@@ -653,14 +655,12 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
-        jm_device_per_node = args.jm_device_per_node
         is_single_node = args.is_single_node
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node,
-            name, jm_device_per_node)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node, name)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -689,7 +689,6 @@ class CLIWrapperBase:
         enable_qos = args.enable_qos
         disable_monitoring = args.disable_monitoring
         strict_node_anti_affinity = args.strict_node_anti_affinity
-        jm_device_per_node = args.jm_device_per_node
         name = args.name
         tls_secret = args.tls_secret
         ingress_host_source = args.ingress_host_source
@@ -702,7 +701,7 @@ class CLIWrapperBase:
             ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring,
-            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, is_single_node, jm_device_per_node)
+            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, is_single_node)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

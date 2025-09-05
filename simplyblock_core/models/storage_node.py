@@ -54,6 +54,7 @@ class StorageNode(BaseNodeObject):
     jm_device: JMDevice = None # type: ignore[assignment]
     jm_devices: List[JMDevice] = []
     jm_percent: int = 3
+    jm_device_per_node: int = 1
     jm_vuid: int = 0
     lvols: int = 0
     lvstore: str = ""

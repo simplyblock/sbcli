@@ -207,7 +207,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name, 
-                   tls_secret, ingress_host_source, dns_name, is_single_node, jm_device_per_node) -> str:
+                   tls_secret, ingress_host_source, dns_name, is_single_node) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -311,7 +311,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
-    cluster.jm_device_per_node = jm_device_per_node
     cluster.mode = mode
 
     if mode == "docker":
@@ -421,7 +420,7 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node, name, jm_device_per_node=1) -> str:
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node, name) -> str:
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -458,7 +457,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.enable_qos = enable_qos
-    cluster.jm_device_per_node = jm_device_per_node
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
