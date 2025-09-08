@@ -82,7 +82,7 @@ jobs:
       run: |
         cd deploy/bare-metal
         eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
-        ./bootstrap-cluster.sh --max-lvol 100 --max-snap 100 --max-size 400G --number-of-devices 3 --sbcli-cmd sbcli-dev --spdk-debug --journal-partition 0 --ha-type ha
+        ./bootstrap-cluster.sh --max-lvol 100 --max-snap 100 --max-size 400G --number-of-devices 3 --sbcli-cmd sbctl --spdk-debug --journal-partition 0 --ha-type ha
         echo "mnodes=$MNODES" >> ${GITHUB_OUTPUT:-/dev/stdout}
         echo "storage_private_ips=${STORAGE_PRIVATE_IPS}" >> ${GITHUB_OUTPUT:-/dev/stdout}
       env:
