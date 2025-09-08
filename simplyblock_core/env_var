@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-iscsi
-SIMPLY_BLOCK_VERSION=0.0.1
+SIMPLY_BLOCK_VERSION=0.0.2
 
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:main-iscsi
