@@ -100,6 +100,7 @@ class StorageNode(BaseNodeObject):
     nvmf_port: int = 4420
     physical_label: int = 0
     hublvol: HubLVol = None  # type: ignore[assignment]
+    with_iscsi: bool = False
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node

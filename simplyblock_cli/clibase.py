@@ -78,8 +78,7 @@ class CLIWrapperBase:
         return parent_parser.add_parser(command, description=help, help=help, usage=usage)
 
     def storage_node__deploy(self, sub_command, args):
-        isolate_cores = args.isolate_cores
-        return storage_ops.deploy(args.ifname, isolate_cores)
+        return storage_ops.deploy(args.ifname, args.isolate_cores, args.with_iscsi)
 
     def storage_node__configure_upgrade(self, sub_command, args):
         storage_ops.upgrade_automated_deployment_config()
@@ -134,6 +133,7 @@ class CLIWrapperBase:
         enable_ha_jm = args.enable_ha_jm
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
+        with_iscsi = args.with_iscsi
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
@@ -153,6 +153,7 @@ class CLIWrapperBase:
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
+            with_iscsi=with_iscsi,
         )
 
         return out

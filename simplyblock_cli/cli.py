@@ -82,6 +82,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Prepares a host to be used as a storage node')
         argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0', type=str, dest='ifname')
         argument = subcommand.add_argument('--isolate-cores', help='Isolate cores in kernel args for provided cpu mask', default=False, dest='isolate_cores', action='store_true')
+        argument = subcommand.add_argument('--with-iscsi', help='Install and enable ISCSI services', default=False, dest='with_iscsi', action='store_true')
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node')
@@ -127,6 +128,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap')
+        argument = subcommand.add_argument('--with-iscsi', help='Install and enable ISCSI services', default=False, dest='with_iscsi', action='store_true')
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')

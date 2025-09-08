@@ -26,6 +26,12 @@ commands:
             type: bool
             default: false
             action: store_true
+          - name: "--with-iscsi"
+            help: "Install and enable ISCSI services"
+            dest: with_iscsi
+            type: bool
+            default: false
+            action: store_true
       - name: configure
         help: "Prepare a configuration file to be used when adding the storage node"
         description: >
@@ -182,6 +188,12 @@ commands:
             type: int
             default: 5000
             private: true
+          - name: "--with-iscsi"
+            help: "Install and enable ISCSI services"
+            dest: with_iscsi
+            type: bool
+            default: false
+            action: store_true
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >

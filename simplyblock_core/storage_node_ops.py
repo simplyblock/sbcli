@@ -775,7 +775,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3):
+             partition_size="", ha_jm_count=3, with_iscsi=False):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1057,6 +1057,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.iobuf_small_bufsize = small_bufsize or 0
         snode.iobuf_large_bufsize = large_bufsize or 0
         snode.enable_test_device = enable_test_device
+        snode.with_iscsi = bool(with_iscsi)
 
         if cluster.is_single_node:
             snode.physical_label = 0
@@ -2637,7 +2638,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         utils.set_hugepages_if_needed(numa, num_pages)
     return True
 
-def deploy(ifname, isolate_cores=False):
+def deploy(ifname, isolate_cores=False, with_iscsi=False):
     if not ifname:
         ifname = "eth0"
 
@@ -2666,6 +2667,8 @@ def deploy(ifname, isolate_cores=False):
 
     logger.info("Installing dependencies...")
     scripts.install_deps(mode="docker")
+    if with_iscsi:
+        scripts.install_iscsi_deps()
 
     logger.info(f"Node IP: {dev_ip}")
     scripts.configure_docker(dev_ip)

@@ -24,6 +24,10 @@ def install_deps(mode):
     return __run_script(['bash', '-x', os.path.join(DIR_PATH, 'install_deps.sh'), mode])
 
 
+def install_iscsi_deps():
+    return __run_script(['bash', '-x', os.path.join(DIR_PATH, 'install_iscsi_deps.sh')])
+
+
 def configure_docker(docker_ip):
     __run_script(['bash', '-x', os.path.join(DIR_PATH, 'config_docker.sh'), docker_ip])
 
