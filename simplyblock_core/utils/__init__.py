@@ -1782,9 +1782,7 @@ def get_storage_node_api_log_type(mgmt_ip, name):
         log_config = container.attrs["HostConfig"]["LogConfig"]
         if log_config and log_config["Type"]:
             return log_config["Type"]
-    except docker.errors.NotFound:
-        pass
-    except (docker.errors.DockerException, Exception):
+    except (docker.errors.NotFound, docker.errors.DockerException, Exception):
         pass
 
 def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
