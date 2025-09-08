@@ -1218,7 +1218,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
         for nic in snode.data_nics:
-            transport = nic.get_transport_type().lower()
+            transport = nic.trtype.lower()
             ip = nic.ip4_address
             port = lvol.subsys_port
             out.append({

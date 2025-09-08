@@ -807,6 +807,10 @@ commands:
             help: "fabric: tcp, rdma or both (specify: tcp, rdma)"
             dest: fabric
             type: str
+            choices:
+              - tcp
+              - rdma
+              - tcp,rdma
             default: tcp
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
@@ -915,6 +919,10 @@ commands:
             help: "fabric: tcp, rdma or both (specify: tcp, rdma)"
             dest: fabric
             type: str
+            choices:
+              - tcp
+              - rdma
+              - tcp,rdma
             default: tcp
           - name: "--is-single-node"
             help: "For single node clusters only"
@@ -1329,6 +1337,7 @@ commands:
             choices:
               - tcp
               - rdma
+              - tcp,rdma
             default: tcp
           - name: "--lvol-priority-class"
             help: "Logical volume priority class"

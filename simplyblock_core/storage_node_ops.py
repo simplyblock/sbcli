@@ -2,6 +2,8 @@
 import datetime
 import json
 import os
+import socket
+
 import psutil
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, List
@@ -1020,7 +1022,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
                 active_rdma=True
 
         if not active_tcp and not active_rdma:
-            logger.error(f"No usable storage network interface found.")
+            logger.error("No usable storage network interface found.")
             return False
 
         hostname = node_info['hostname'] + f"_{rpc_port}"
@@ -2586,7 +2588,7 @@ def get_node_ports(node_id):
             "ID": nic.get_id(),
             "Device name": nic.if_name,
             "Address": nic.ip4_address,
-            "Net type": nic.get_transport_type(),
+            "Net type": nic.trtype,
             "Status": nic.status,
         })
     return utils.print_table(out)

@@ -7,7 +7,7 @@ from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedi
 import jsonschema
 from jsonschema.exceptions import ValidationError
 
-from simplyblock_core import utils
+from simplyblock_core import utils, constants
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
@@ -331,7 +331,7 @@ class RPCClient:
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trype="TCP", is_optimized=True, ana=None):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True, ana=None):
         params = {
             "nqn": nqn,
             "listen_address": {
