@@ -940,7 +940,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         if cluster.mode == "docker":
             log_config_type = utils.get_storage_node_api_log_type(mgmt_ip, '/SNodeAPI')
-            if log_config_type != LogConfig.types.GELF:
+            if log_config_type and log_config_type != LogConfig.types.GELF:
                 logger.info("SNodeAPI container found but not configured with gelf logger")
                 start_storage_node_api_container(mgmt_ip, cluster_ip)
 
