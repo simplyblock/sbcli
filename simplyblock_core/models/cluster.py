@@ -62,6 +62,7 @@ class Cluster(BaseModel):
     qpair_count: int = 32
     fabric_tcp: bool = True
     fabric_rdma: bool = False
+    client_qpair_count: int = 3
     secret: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False

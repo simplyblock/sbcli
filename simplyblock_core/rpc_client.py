@@ -205,7 +205,7 @@ class RPCClient:
             params = {"trtype": trtype}
         return self._request("nvmf_get_transports", params)
 
-    def transport_create(self, trtype, qpair_count=6,shared_bufs=24576):
+    def transport_create(self, trtype, qpair_count=6, shared_bufs=24576):
         """
             [{'trtype': 'TCP', 'max_queue_depth': 128,
                'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,

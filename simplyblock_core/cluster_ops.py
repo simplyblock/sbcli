@@ -217,11 +217,11 @@ def parse_protocols(input_str: str):
         "tcp": "tcp" in parts,
         "rdma": "rdma" in parts,
     }
-   
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name, 
+                   enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
@@ -322,6 +322,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
+    cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
 
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
