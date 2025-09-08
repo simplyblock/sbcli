@@ -148,7 +148,7 @@ jobs:
           NPCS: ${{ github.event.inputs.npcs || 1 }}
           BS: ${{ github.event.inputs.bs || 4096 }}
           CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
-          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-pre' }}
 
       - name: Record Test End Time
         if: always()
