@@ -207,7 +207,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name, 
-                   tls_secret, ingress_host_source, dns_name) -> str:
+                   tls_secret, ingress_host_source, dns_name, is_single_node) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -297,6 +297,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.distr_bs = distr_bs
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
+    cluster.is_single_node = is_single_node
     if grafana_endpoint:
         cluster.grafana_endpoint = grafana_endpoint
     else:
@@ -420,7 +421,7 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, name) -> str:
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node, name) -> str:
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -451,6 +452,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.distr_bs = distr_bs
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
+    cluster.is_single_node = is_single_node
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.max_queue_size = max_queue_size
