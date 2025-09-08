@@ -124,7 +124,7 @@ jobs:
           export AWS_REGION=${{ secrets.AWS_REGION }}
           export SSH_USER=root
           export SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
-          TEST_CASE=${{ inputs.test_case_to_run || (github.ref == 'refs/heads/main' && 'TestHASingleNodeFailure') || '' }}
+          TEST_CASE=${{ inputs.test_case_to_run || '' }}
           python3 e2e.py ${TEST_CASE:+--testname} ${TEST_CASE} \
                   --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test || true }}
         env:
