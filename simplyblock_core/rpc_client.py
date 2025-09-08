@@ -7,7 +7,7 @@ from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedi
 import jsonschema
 from jsonschema.exceptions import ValidationError
 
-from simplyblock_core import constants, utils
+from simplyblock_core import utils
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
@@ -205,7 +205,7 @@ class RPCClient:
             params = {"trtype": trtype}
         return self._request("nvmf_get_transports", params)
 
-    def transport_create(self, trtype, qpair_count=6,shared_bufs=24576):
+    def transport_create(self, trtype, qpair_count=6, shared_bufs=24576):
         """
             [{'trtype': 'TCP', 'max_queue_depth': 128,
                'max_io_qpairs_per_ctrlr': 127, 'in_capsule_data_size': 4096,
@@ -220,7 +220,7 @@ class RPCClient:
         """
         params = {
             "trtype": trtype,
-            "max_io_qpairs_per_ctrlr": 128,
+            "max_io_qpairs_per_ctrlr": qpair_count,  # depends on how many cores on the client,
             "max_queue_depth": 256,
             "abort_timeout_sec": 5,
             "zcopy": True,
@@ -720,14 +720,14 @@ class RPCClient:
     def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": 1,
+            "bdev_retry_count": 0,
             "transport_retry_count": 3,
             "ctrlr_loss_timeout_sec": 1,
             "fast_io_fail_timeout_sec" : 0,
             "reconnect_delay_sec": 1,
-            "keep_alive_timeout_ms": 30000,
-            "timeout_us": constants.NVME_TIMEOUT_US,
-            "transport_ack_timeout": 13,
+            "keep_alive_timeout_ms": 10000,
+            "timeout_us": 4000000,
+            "transport_ack_timeout": 11,
         }
         return self._request("bdev_nvme_set_options", params)
 

@@ -18,6 +18,8 @@ spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
       securityContext:
+        runAsUser: 0
+        runAsGroup: 0
         fsGroup: 1100
         supplementalGroups:
           - 0 
@@ -91,8 +93,8 @@ spec:
               cpu: "100m"
               memory: "512Mi"
             limits:
-              cpu: "250m"
-              memory: "1Gi"
+              cpu: "400m"
+              memory: "2Gi"
       volumes:
         - name: simplyblock-graylog-data
           emptyDir: {}
@@ -358,13 +360,6 @@ spec:
               subPath: node-exporter.json
             - name: grafana-data
               mountPath: /var/lib/grafana
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "512Mi"
-            limits:
-              cpu: "500m"
-              memory: "2Gi"
       volumes:
         - name: datasource-config
           configMap:

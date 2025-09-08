@@ -20,6 +20,10 @@ logger = lg.getLogger()
 
 
 def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
+    ret = rpc_client.get_bdevs(base_name)
+    if not ret:
+        logger.error(f"Failed to find LVol bdev {base_name}")
+        return False
     key_name = f'key_{name}'
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
     if not ret:
@@ -967,6 +971,13 @@ def delete_lvol(id_or_name, force_delete=False):
     if lvol.cloned_from_snap:
         try:
             snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            if snap.snap_ref_id:
+                ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
+                ref_snap.ref_count -= 1
+                ref_snap.write_to_db(db_controller.kv_store)
+            else:
+                snap.ref_count -= 1
+                snap.write_to_db(db_controller.kv_store)
             if snap.deleted is True:
                 snapshot_controller.delete(snap.get_id())
         except KeyError:
@@ -1097,10 +1108,15 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         lvols = db_controller.get_all_lvols()
 
     data = []
+
+    snap_dict : dict[str, int] = {}
     for lvol in lvols:
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
+        cloned_snapped = lvol.cloned_from_snap
+        if cloned_snapped:
+            snap_dict[cloned_snapped] = snap_dict.get(cloned_snapped, 0) + 1
         size_used = 0
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
@@ -1121,6 +1137,10 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
         })
+    for snap, count in snap_dict.items():
+        ref_snap = db_controller.get_snapshot_by_id(snap)
+        ref_snap.ref_count = count
+        ref_snap.write_to_db(db_controller.kv_store)
 
     if is_json:
         return json.dumps(data, indent=2)
@@ -1194,6 +1214,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
 
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
             transport = nic.get_transport_type().lower()
             ip = nic.ip4_address
@@ -1206,11 +1227,11 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 "nqn": lvol.nqn,
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 "ctrl-loss-tmo": ctrl_loss_tmo,
-                "nr-io-queues": constants.LVOL_NVME_CONNECT_NR_IO_QUEUES,
+                "nr-io-queues": cluster.client_qpair_count,
                 "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                            f"--ctrl-loss-tmo={ctrl_loss_tmo} "
-                           f"--nr-io-queues={constants.LVOL_NVME_CONNECT_NR_IO_QUEUES} "
+                           f"--nr-io-queues={cluster.client_qpair_count} "
                            f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
                            f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
             })

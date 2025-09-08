@@ -2,6 +2,9 @@ name: Deploy cluster
 
 on:
   workflow_call:
+    secrets:
+      docker_pass:
+        required: false
     inputs:
       runs_on:  # Has to be an input
         description: Platform to execute on
@@ -32,14 +35,10 @@ on:
         required: false
         type: string
         default: 4096
-      nr_hugepages:
-        required: false
-        type: string
-        default: 2048
       k8s_snode:
         description: "Run snode on k8s"
         required: false
-        default: true
+        default: false
         type: boolean
 
     outputs:
@@ -63,7 +62,6 @@ jobs:
   
   k8s:
     runs-on: ${{ inputs.runs_on }}
-    if: ${{ inputs.k8s_snode == true }}
     steps:
     - name: Checkout deployment tooling
       uses: actions/checkout@v4
@@ -112,6 +110,7 @@ jobs:
     - name: Install Helm
       if: ${{ inputs.k8s_snode == true }}
       run: |
+        sudo yum install -y tar
         curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
         chmod 700 get_helm.sh
         ./get_helm.sh
@@ -122,14 +121,43 @@ jobs:
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
+    - name: setup Credentials
+      if: ${{ inputs.k8s_snode == true }}
+      run: |
+        cd deploy/bare-metal
+        eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
+        
+        mkdir -p $HOME/.kube
+        KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
+        scp -i "$KEY" -o StrictHostKeyChecking=no root@${MNODES}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+        sed -i "s/127.0.0.1/${MNODES}/g" $HOME/.kube/config
+
+        kubectl create secret docker-registry regcred \
+          --docker-server=https://index.docker.io/v1/ \
+          --docker-username=hamdysimplyblock \
+          --docker-password=${SECRET} \
+          --docker-email=a@b.com
+        kubectl patch serviceaccount default --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+      env:
+        SECRET: ${{ secrets.docker_pass }}
+
     - name: Deploy cluster 
       id: deployment
       run: |
         cd deploy/bare-metal
         eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
 
-        # Reset device partitions
         KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
+
+        # install helm on mgmt node
+        ssh -i $KEY -o StrictHostKeyChecking=no root@$MNODES "
+          sudo yum install -y tar
+          curl -fsSL -o /root/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 /root/get_helm.sh
+          /root/get_helm.sh
+        "
+
+        # Reset device partitions
         for node in $STORAGE_PRIVATE_IPS; do
           echo "restart node $node"
           ssh -i $KEY -o StrictHostKeyChecking=no root@$node "
@@ -165,7 +193,7 @@ jobs:
         NPCS: ${{ inputs.npcs }}
         BS: ${{ inputs.bs }}
         CHUNK_BS: ${{ inputs.chunk_bs }}
-        NR_HUGEPAGES: ${{ inputs.nr_hugepages }}
+        NR_HUGEPAGES: 2048
         SBCLI_BRANCH: ${{ inputs.sbcli_source }}
         SIMPLY_BLOCK_DOCKER_IMAGE: ${{ inputs.docker_image }}
 
@@ -183,10 +211,6 @@ jobs:
     - name: Deploy Snode on K8s
       run: |
         set -e
-        mkdir -p $HOME/.kube
-        KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
-        scp -i "$KEY" -o StrictHostKeyChecking=no root@${MNODE}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
-        sed -i "s/127.0.0.1/${MNODE}/g" $HOME/.kube/config
 
         helm install simplyblock-csi ./simplyblock-csi/charts/spdk-csi/latest/spdk-csi \
           --set csiConfig.simplybk.uuid=${CLUSTER_ID} \

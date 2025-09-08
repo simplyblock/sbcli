@@ -759,6 +759,12 @@ commands:
               - single
               - ha
             default: ha
+          - name: "--is-single-node"
+            help: "For single node clusters only"
+            dest: is_single_node
+            type: bool
+            action: store_true
+            default: false
           - name: "--mode"
             help: "Environment to deploy management services, default: docker"
             dest: mode
@@ -836,6 +842,28 @@ commands:
             aliases:
               - "-n"
             type: str
+          - name: "--qpair-count"
+            help: "NVMe/TCP transport qpair count per logical volume"
+            usage: >
+              Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
+              of very small logical volumes.
+            dest: qpair_count
+            type:
+              range:
+                min: 0
+                max: 128
+            default: 32
+          - name: "--client-qpair-count"
+            help: "default NVMe/TCP transport qpair count per logical volume for client"
+            usage: >
+              Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
+              of very small logical volumes.
+            dest: client_qpair_count
+            type:
+              range:
+                min: 0
+                max: 128
+            default: 3
       - name: add
         help: "Adds a new cluster"
         arguments:
@@ -900,6 +928,12 @@ commands:
             dest: enable_node_affinity
             type: bool
             action: store_true
+          - name: "--is-single-node"
+            help: "For single node clusters only"
+            dest: is_single_node
+            type: bool
+            action: store_true
+            default: false
           - name: "--qpair-count"
             help: "NVMe/TCP transport qpair count per logical volume"
             usage: >
@@ -910,7 +944,18 @@ commands:
               range:
                 min: 0
                 max: 128
-            default: 0
+            default: 32
+          - name: "--client-qpair-count"
+            help: "default NVMe/TCP transport qpair count per logical volume for client"
+            usage: >
+              Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
+              of very small logical volumes.
+            dest: client_qpair_count
+            type:
+              range:
+                min: 0
+                max: 128
+            default: 3
           - name: "--max-queue-size"
             help: "The max size the queue will grow"
             dest: max_queue_size
