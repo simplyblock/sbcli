@@ -10,14 +10,17 @@ import boto3
 import requests
 
 from simplyblock_core import shell_utils
+from simplyblock_core.utils.pci import PCIAddress
 import simplyblock_core.utils.pci as pci_utils
+from pydantic import BaseModel
 
 
 # Type definitions
-class NVMENamespace(TypedDict, total=False):
+class NVMENamespace(BaseModel):
     NameSpace: str
     PhysicalSize: int
     SectorSize: int
+
 
 
 class NVMeController(TypedDict, total=False):
@@ -51,22 +54,22 @@ class NVMeDevice(TypedDict):
 logger = logging.getLogger(__name__)
 
 
-def get_spdk_pcie_list() -> List[str]:
+def get_spdk_pcie_list() -> List[PCIAddress]:
     """
     Get a list of PCIe devices bound to SPDK-compatible drivers.
     
     Returns:
-        List[str]: List of PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
+        List[PCIAddress]: List of PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
     """
     return pci_utils.list_devices(driver_name='uio_pci_generic') or pci_utils.list_devices(driver_name='vfio-pci')
 
 
-def get_nvme_pcie_list() -> List[str]:
+def get_nvme_pcie_list() -> List[PCIAddress]:
     """
     Get a list of NVMe PCIe devices.
     
     Returns:
-        List[str]: List of NVMe PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
+        List[PCIAddress]: List of NVMe PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
     """
     return pci_utils.list_devices(driver_name='nvme')
 
