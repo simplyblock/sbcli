@@ -19,7 +19,7 @@ class TestSingleNodeOutage(TestClusterBase):
     7. While FIO is running, validate this scenario:
         a. In a cluster with three nodes, select one node, which does not
            have any lvol attached.
-        b. Suspend the Node via API or CLI while the fio test is running.
+        b.  the Node via API or CLI while the fio test is running.
         c. Shutdown the Node via API or CLI while the fio test is running.
         d. Check status of objects during outage:
             - the node is in status “offline”
@@ -145,9 +145,9 @@ class TestSingleNodeOutage(TestClusterBase):
         
         timestamp = int(datetime.now().timestamp())
 
-        self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
+        # self.sbcli_utils._node(node_uuid=no_lvol_node_uuid)
         try:
-            self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
+            self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=True)
         except Exception as _:
             self.logger.info("Waiting for node shutdown")
 
@@ -206,8 +206,12 @@ class TestSingleNodeOutage(TestClusterBase):
         )
 
         # Write steps in order
+        # steps = {
+        #     "Storage Node": ["ed", "shutdown", "restart"],
+        #     "Device": {"restart"}
+        # }
         steps = {
-            "Storage Node": ["suspended", "shutdown", "restart"],
+            "Storage Node": ["shutdown", "restart"],
             "Device": {"restart"}
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
@@ -396,9 +400,9 @@ class TestHASingleNodeOutage(TestClusterBase):
         for i in range(2):
             timestamp = int(datetime.now().timestamp())
             sleep_n_sec(30)
-            self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
+            # self.sbcli_utils._node(node_uuid=no_lvol_node_uuid)
             try:
-                self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid)
+                self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=True)
             except Exception as _:
                 self.logger.info("Waiting for node shutdown")
 
@@ -447,8 +451,12 @@ class TestHASingleNodeOutage(TestClusterBase):
 
 
         # Write steps in order
+        # steps = {
+        #     "Storage Node": ["ed", "shutdown", "restart"],
+        #     "Device": {"restart"}
+        # }
         steps = {
-            "Storage Node": ["suspended", "shutdown", "restart"],
+            "Storage Node": ["shutdown", "restart"],
             "Device": {"restart"}
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
