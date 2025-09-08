@@ -313,8 +313,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.distr_chunk_bs = distr_chunk_bs
     cluster.ha_type = ha_type
     protocols = parse_protocols(fabric)
-    cluster.tcp = protocols["tcp"]
-    cluster.rdma = protocols["rdma"]
+    cluster.fabric_tcp = protocols["tcp"]
+    cluster.fabric_rdma = protocols["rdma"]
     cluster.is_single_node = is_single_node
     if grafana_endpoint:
         cluster.grafana_endpoint = grafana_endpoint
