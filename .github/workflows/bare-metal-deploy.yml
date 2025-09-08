@@ -38,7 +38,7 @@ on:
       k8s_snode:
         description: "Run snode on k8s"
         required: false
-        default: true
+        default: false
         type: boolean
 
     outputs:
