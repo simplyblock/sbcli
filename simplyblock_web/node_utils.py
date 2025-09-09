@@ -4,7 +4,7 @@
 import json
 import logging
 import re
-from typing import List, Tuple, TypedDict
+from typing import List, Tuple
 
 import boto3
 import requests
