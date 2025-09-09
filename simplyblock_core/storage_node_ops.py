@@ -2,7 +2,12 @@
 import datetime
 import json
 import os
-from typing import List
+
+import socket
+
+import psutil
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, List
 
 import threading
 
@@ -31,7 +36,6 @@ from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
-
 
 logger = utils.get_logger(__name__)
 
@@ -64,9 +68,22 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
             time.sleep(1)
 
     bdev_name = None
+
+    db_ctrl=DBController()
+    node=db_ctrl.get_storage_node_by_id(device.node_id)
+    if node.active_rdma:
+        tr_type="RDMA"
+    else:
+        if node.active_tcp:
+            tr_type="TCP"
+        else:
+            msg="target node to connect has no active fabric."
+            logger.error(msg)
+            raise RuntimeError(msg)
+
     for ip in device.nvmf_ip.split(","):
-        ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                name, device.nvmf_nqn, ip, device.nvmf_port,
+        ret = rpc_client.bdev_nvme_attach_controller(
+                name, device.nvmf_nqn, ip, device.nvmf_port,tr_type,
                 multipath=device.nvmf_multipath)
         if not bdev_name and ret and isinstance(ret, list):
             bdev_name = ret[0]
@@ -192,10 +209,8 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
             return False
 
         for iface in snode.data_nics:
-            if iface.ip4_address:
-                tr_type = iface.get_transport_type()
-                logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
+                logger.info(f"adding {iface.trtype} listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
                 ip_list.append(iface.ip4_address)
 
     if len(ip_list) > 1:
@@ -279,9 +294,8 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
 
         for iface in snode.data_nics:
             if iface.ip4_address:
-                tr_type = iface.get_transport_type()
                 logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
+                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
                 ip_list.append(iface.ip4_address)
 
     if len(ip_list) > 1:
@@ -362,9 +376,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     ip_list = []
     for iface in snode.data_nics:
         if iface.ip4_address:
-            tr_type = iface.get_transport_type()
             logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
+            ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
             ip_list.append(iface.ip4_address)
 
     logger.info(f"add {pt_name} to subsystem")
@@ -647,9 +660,8 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
             for iface in snode.data_nics:
                 if iface.ip4_address:
-                    tr_type = iface.get_transport_type()
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                    ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
+                    ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
 
     return True
 
@@ -767,8 +779,27 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
 
     return new_devs
 
+def ifc_is_tcp(nic):
+    addrs = psutil.net_if_addrs().get(nic, [])
+    for addr in addrs:
+        if addr.family == socket.AF_INET:
+            return True
+    return False
 
-def add_node(cluster_id, node_addr, iface_name, data_nics_list,
+def ifc_is_roce(nic):
+    rdma_path = "/sys/class/infiniband/"
+    if not os.path.exists(rdma_path):
+        return False
+
+    for rdma_dev in os.listdir(rdma_path):
+        net_path = os.path.join(rdma_path, rdma_dev, "device/net")
+        if os.path.exists(net_path):
+            for iface in os.listdir(net_path):
+                if iface == nic:
+                    return True
+    return False
+
+def add_node(cluster_id, node_addr, iface_name,data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
@@ -955,16 +986,33 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         data_nics = []
+        active_tcp=False
+        active_rdma=False
+        fabric_tcp = cluster.fabric_tcp
+        fabric_rdma = cluster.fabric_rdma
         names = node_config.get("nic_ports") or data_nics_list or [iface_name]
         for nic in names:
             device = node_info['network_interface'][nic]
-            data_nics.append(
-                IFace({
-                    'uuid': str(uuid.uuid4()),
-                    'if_name': device['name'],
-                    'ip4_address': device['ip'],
-                    'status': device['status'],
-                    'net_type': device['net_type']}))
+            base_ifc_cfg={
+                      'uuid': str(uuid.uuid4()),
+                      'if_name': device['name'],
+                      'ip4_address': device['ip'],
+                      'status': device['status'],
+                       'net_type': device['net_type'],}
+            if fabric_tcp and ifc_is_tcp(nic):
+                cfg = base_ifc_cfg.copy()
+                cfg['trtype'] = "TCP"
+                data_nics.append(IFace(cfg))
+                active_tcp=True
+            if fabric_rdma and ifc_is_roce(nic):
+                cfg = base_ifc_cfg.copy()
+                cfg['trtype'] = "RDMA"
+                data_nics.append(IFace(cfg))
+                active_rdma=True
+
+        if not active_tcp and not active_rdma:
+            logger.error("No usable storage network interface found.")
+            return False
 
         hostname = node_info['hostname'] + f"_{rpc_port}"
         BASE_NQN = cluster.nqn.split(":")[0]
@@ -1002,6 +1050,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.enable_ha_jm = enable_ha_jm
         snode.ha_jm_count = ha_jm_count
         snode.minimum_sys_memory = minimum_sys_memory
+        snode.active_tcp=active_tcp
+        snode.active_rdma=active_rdma
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -1114,10 +1164,21 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         qpair = cluster.qpair_count
-        ret = rpc_client.transport_create("TCP", qpair,512*(req_cpu_count+1))
-        if not ret:
-            logger.error(f"Failed to create transport TCP with qpair: {qpair}")
+
+        if not cluster.fabric_tcp and not cluster.fabric_rdma:
+            logger.error("no active fabric")
             return False
+
+        if cluster.fabric_tcp:
+           ret = rpc_client.transport_create("TCP", qpair,512*(req_cpu_count+1))
+           if not ret:
+              logger.error(f"Failed to create transport TCP with qpair: {qpair}")
+              return False
+        if cluster.fabric_rdma:
+           ret = rpc_client.transport_create("RDMA", qpair,512*(req_cpu_count+1))
+           if not ret:
+              logger.error(f"Failed to create transport RDMA with qpair: {qpair}")
+              return False
 
         # 7- set jc singleton mask
         if snode.jc_singleton_mask:
@@ -2444,7 +2505,7 @@ def get_node_ports(node_id):
             "ID": nic.get_id(),
             "Device name": nic.if_name,
             "Address": nic.ip4_address,
-            "Net type": nic.get_transport_type(),
+            "Net type": nic.trtype,
             "Status": nic.status,
         })
     return utils.print_table(out)
@@ -3154,7 +3215,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
         if iface.ip4_address:
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(
-                lvol.nqn, iface.get_transport_type(), iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
+                lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     lvol_obj.status = LVol.STATUS_ONLINE

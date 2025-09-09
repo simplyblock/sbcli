@@ -107,7 +107,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--journal-partition', help='1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space.', type=int, default=1, dest='partitions')
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=int, default=3, dest='jm_percent')
-        argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', nargs='+')
+        argument = subcommand.add_argument('--data-nics', help='Storage network interface names. currently one interface is supported.', type=str, dest='data_nics', nargs='+')
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size')
         if self.developer_mode:
@@ -435,6 +435,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster ha type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
+        argument = subcommand.add_argument('--fabric', help='fabric: tcp, rdma or both (specify: tcp, rdma)', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         if self.developer_mode:
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size')
         if self.developer_mode:
@@ -460,6 +461,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enables node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
+        argument = subcommand.add_argument('--fabric', help='fabric: tcp, rdma or both (specify: tcp, rdma)', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         if self.developer_mode:
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size')
         if self.developer_mode:
@@ -610,6 +612,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='ha_type', choices=['single','default','ha',])
+        argument = subcommand.add_argument('--fabric', help='tcp or rdma (tcp is default). Cluster must support chosen fabric.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class')
         argument = subcommand.add_argument('--namespace', help='Set logical volume namespace for k8s clients', type=str, dest='namespace')
         if self.developer_mode:

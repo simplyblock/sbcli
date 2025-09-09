@@ -121,10 +121,25 @@ def _set_max_result_window(cluster_ip, max_window=100000):
     response_template.raise_for_status()
     logger.info("Template created for future indices.")
 
+def parse_protocols(input_str: str):
+    valid = {"tcp", "rdma"}
+
+    # split by comma, strip whitespace, and lowercase
+    parts = {p.strip().lower() for p in input_str.split(",")}
+
+    # validate input
+    if not parts.issubset(valid):
+        raise ValueError(f"Invalid protocol(s): {parts - valid}")
+
+    return {
+        "tcp": "tcp" in parts,
+        "rdma": "rdma" in parts,
+    }
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type,
-                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity) -> str:
+                   enable_node_affinity, qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, fabric) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -201,6 +216,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     c.distr_bs = distr_bs
     c.distr_chunk_bs = distr_chunk_bs
     c.ha_type = ha_type
+    protocols = parse_protocols(fabric)
+    c.fabric_tcp = protocols["tcp"]
+    c.fabric_rdma = protocols["rdma"]
+
     if grafana_endpoint:
         c.grafana_endpoint = grafana_endpoint
     else:
