@@ -125,7 +125,7 @@ def get_nvme_devices() -> List[NVMeDevice]:
             namespace = controller['Namespaces'][0]
             
         if namespace:
-            device: NVMeDevice = {
+            data = {
                 'nqn': dev.get('SubsystemNQN', ''),
                 'size': namespace.get('PhysicalSize', 0),
                 'sector_size': namespace.get('SectorSize', 0),
@@ -137,6 +137,7 @@ def get_nvme_devices() -> List[NVMeDevice]:
                 'model_id': controller.get('ModelNumber', ''),
                 'serial_number': controller.get('SerialNumber', '')
             }
+            device = NVMeDevice(**data)
             devices.append(device)
             
     return devices
