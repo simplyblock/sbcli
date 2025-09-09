@@ -1360,6 +1360,12 @@ commands:
             dest: uid
             type: str
             private: true
+          - name: "--with-iscsi"
+            help: "Expose LVol via ISCSI"
+            dest: with_iscsi
+            type: bool
+            default: false
+            action: store_true
           - name: "--pvc-name"
             aliases:
               - "--pvc_name"

@@ -1149,6 +1149,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 logger.error("Failed to set jc singleton mask")
                 return False
 
+        if snode.with_iscsi:
+            ret = rpc_client.ublk_create_target()
+            if not ret:
+                logger.error("Failed to create ublk target")
+                return False
+
         # get new node info after starting spdk
         # node_info, _ = snode_api.info()
 
@@ -1690,6 +1696,12 @@ def restart_storage_node(
         ret = rpc_client.jc_set_hint_lcpu_mask(snode.jc_singleton_mask)
         if not ret:
             logger.error("Failed to set jc singleton mask")
+            return False
+
+    if snode.with_iscsi:
+        ret = rpc_client.ublk_create_target()
+        if not ret:
+            logger.error("Failed to create ublk target")
             return False
 
     if not snode.ssd_pcie:

@@ -265,7 +265,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, with_iscsi=False):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -650,6 +650,12 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
         return False, msg
+
+    if lvol.with_iscsi:
+        logger.info("Add BDev to ublk")
+        ret = rpc_client.ublk_start_disk(lvol.ublk_id, lvol.top_bdev)
+        if not ret:
+            return False, "Failed to add bdev to ublk"
 
     if not lvol.namespace:
         if is_primary:

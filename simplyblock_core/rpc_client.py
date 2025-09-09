@@ -1224,3 +1224,30 @@ class RPCClient:
             "name": name
         }
         return self._request("iscsi_delete_target_node", params)
+
+    def ublk_create_target(self):
+        return self._request("ublk_create_target")
+
+    def ublk_destroy_target(self):
+        return self._request("ublk_destroy_target")
+
+    def ublk_start_disk(self, bdev_name, ublk_id):
+        params = {
+            "bdev_name": bdev_name,
+            "ublk_id": ublk_id,
+        }
+        return self._request("ublk_start_disk", params)
+
+    def ublk_stop_disk(self, ublk_id):
+        params = {
+            "ublk_id": ublk_id,
+        }
+        return self._request("ublk_stop_disk", params)
+
+    def ublk_get_disks(self, ublk_id=None):
+        params = None
+        if ublk_id:
+            params = {
+                "ublk_id": ublk_id
+            }
+        return self._request("ublk_get_disks", params)
