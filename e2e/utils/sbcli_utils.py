@@ -1,12 +1,7 @@
-
-import json
 import requests
 from http import HTTPStatus
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
-
-from simplyblock_core.workers.cleanup_foundationdb import db_controller
-
 
 class SbcliUtils:
     """Contains all API calls

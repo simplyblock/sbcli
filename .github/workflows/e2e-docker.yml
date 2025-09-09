@@ -73,16 +73,6 @@ jobs:
           KEY="~/.ssh/simplyblock-us-east-2.pem"
           eval $(python3 inventory.py inventory/c${cluster}.yml)
           ssh -i $KEY -o StrictHostKeyChecking=no root@192.168.10.1 "bash proxmox_script.sh cluster_${cluster}"
-          for node in $STORAGE_PRIVATE_IPS; do
-            echo "removing nvme disk partitions $node"
-            ssh -i $KEY -o StrictHostKeyChecking=no root@$node "
-              for disk in nvme0n1 nvme1n1 nvme2n1 nvme3n1; do
-                for part in 1 2; do
-                  sudo parted /dev/$disk rm $part || true
-                done
-              done
-            "
-          done
 
   deploy:
     needs: cleanup
