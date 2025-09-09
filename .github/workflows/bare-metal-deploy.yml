@@ -38,7 +38,7 @@ on:
       k8s_snode:
         description: "Run snode on k8s"
         required: false
-        default: false
+        default: true
         type: boolean
 
     outputs:
@@ -138,6 +138,22 @@ jobs:
           --docker-password=${SECRET} \
           --docker-email=a@b.com
         kubectl patch serviceaccount default --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+
+        # Create namespace simplyblock
+        kubectl create namespace simplyblock
+
+        # Create the secret in namespace simplyblock
+        kubectl create secret docker-registry regcred \
+          --docker-server=https://index.docker.io/v1/ \
+          --docker-username=hamdysimplyblock \
+          --docker-password=${SECRET} \
+          --docker-email=a@b.com \
+          -n simplyblock
+
+        # Patch the default service account in namespace simplyblock
+        kubectl patch serviceaccount default \
+          -n simplyblock \
+          --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
       env:
         SECRET: ${{ secrets.docker_pass }}
 
