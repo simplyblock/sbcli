@@ -4,6 +4,7 @@ from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
 
+
 class SbcliUtils:
     """Contains all API calls
     """
