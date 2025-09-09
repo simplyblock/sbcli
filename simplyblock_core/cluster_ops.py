@@ -1164,7 +1164,8 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             name="app_SnapshotMonitor",
             mounts=["/etc/foundationdb:/etc/foundationdb"],
             env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
-            networks=["host"]
+            networks=["host"],
+            constraints=["node.role == manager"]
         )
     logger.info("Done updating mgmt cluster")
 
