@@ -792,17 +792,6 @@ commands:
             dest: enable_node_affinity
             type: bool
             action: store_true
-          - name: "--qpair-count"
-            help: "NVMe/TCP transport qpair count per logical volume"
-            usage: >
-              Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
-              of very small logical volumes.
-            dest: qpair_count
-            type: 
-              range:
-                min: 0
-                max: 128
-            default: 0
           - name: "--fabric"
             help: "fabric: tcp, rdma or both (specify: tcp, rdma)"
             dest: fabric
