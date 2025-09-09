@@ -87,7 +87,7 @@ def storage_node_ports(uuid):
             "ID": nic.get_id(),
             "Device name": nic.if_name,
             "Address": nic.ip4_address,
-            "Net type": nic.get_transport_type(),
+            "Net type": nic.trtype,
             "Status": nic.status,
         })
     return utils.get_response(out)

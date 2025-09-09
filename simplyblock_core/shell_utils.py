@@ -10,3 +10,4 @@ def run_command(cmd):
         return stdout.strip().decode("utf-8"), stderr.strip(), process.returncode
     except Exception as e:
         return "", str(e), 1
+

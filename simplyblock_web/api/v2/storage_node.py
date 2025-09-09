@@ -141,7 +141,7 @@ def nics(cluster: Cluster, storage_node: StorageNode):
             "ID": nic.get_id(),
             "Device name": nic.if_name,
             "Address": nic.ip4_address,
-            "Net type": nic.get_transport_type(),
+            "Net type": nic.trtype,
             "Status": nic.status,
         }
         for nic in storage_node.data_nics
