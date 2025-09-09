@@ -73,6 +73,16 @@ jobs:
           KEY="~/.ssh/simplyblock-us-east-2.pem"
           eval $(python3 inventory.py inventory/c${cluster}.yml)
           ssh -i $KEY -o StrictHostKeyChecking=no root@192.168.10.1 "bash proxmox_script.sh cluster_${cluster}"
+          for node in $STORAGE_PRIVATE_IPS; do
+            echo "removing nvme disk partitions $node"
+            ssh -i $KEY -o StrictHostKeyChecking=no root@$node "
+              for disk in nvme0n1 nvme1n1 nvme2n1 nvme3n1; do
+                for part in 1 2; do
+                  sudo parted /dev/$disk rm $part || true
+                done
+              done
+            "
+          done
 
   deploy:
     needs: cleanup
@@ -132,7 +142,7 @@ jobs:
           NPCS: ${{ github.event.inputs.npcs || 1 }}
           BS: ${{ github.event.inputs.bs || 4096 }}
           CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
-          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbctl' }}
 
       - name: Record Test End Time
         if: always()
@@ -272,7 +282,7 @@ jobs:
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
-            OVERALL_STATUS=":x: Overall Status: FAILURE"
+            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
           fi
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
