@@ -74,12 +74,12 @@ def get_nvme_pcie_list() -> List[PCIAddress]:
     return pci_utils.list_devices(driver_name='nvme')
 
 
-def get_nvme_pcie() -> List[Tuple[str, Tuple[str, str]]]:
+def get_nvme_pcie() -> List[Tuple[str, Tuple[int, int]]]:
     """
     Get a list of NVMe PCIe devices with their vendor and device IDs.
     
     Returns:
-        List[Tuple[str, Tuple[str, str]]]: List of tuples containing 
+        List[Tuple[str, Tuple[int, int]]]: List of tuples containing
             (pci_address, (vendor_id, device_id))
     """
     return [
