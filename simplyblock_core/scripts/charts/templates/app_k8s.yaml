@@ -608,27 +608,27 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simplyblock-snaphot-monitor
+  name: simplyblock-snapshot-monitor
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: simplyblock-snaphot-monitor
+      app: simplyblock-snapshot-monitor
   template:
     metadata:
       annotations:
         log-collector/enabled: "true"
       labels:
-        app: simplyblock-snaphot-monitor
+        app: simplyblock-snapshot-monitor
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane
       containers:
-      - name: snaphot-monitor
+      - name: snapshot-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["python", "simplyblock_core/services/snaphot_monitor.py"]
+        command: ["python", "simplyblock_core/services/snapshot_monitor.py"]
         env:
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
