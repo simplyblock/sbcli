@@ -139,6 +139,9 @@ jobs:
           --docker-email=a@b.com
         kubectl patch serviceaccount default --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
 
+        # Create namespace simplyblock
+        kubectl create namespace simplyblock
+
         # Create the secret in namespace simplyblock
         kubectl create secret docker-registry regcred \
           --docker-server=https://index.docker.io/v1/ \
