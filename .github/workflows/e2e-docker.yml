@@ -132,7 +132,7 @@ jobs:
           NPCS: ${{ github.event.inputs.npcs || 1 }}
           BS: ${{ github.event.inputs.bs || 4096 }}
           CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
-          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}
+          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbctl' }}
 
       - name: Record Test End Time
         if: always()
@@ -272,7 +272,7 @@ jobs:
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
-            OVERALL_STATUS=":x: Overall Status: FAILURE"
+            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
           fi
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
