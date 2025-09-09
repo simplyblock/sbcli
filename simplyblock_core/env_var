@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
 SIMPLY_BLOCK_VERSION=19.0.4
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:25.7.7
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:rdma_integration_r
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-65dc9a9b
