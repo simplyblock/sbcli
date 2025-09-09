@@ -22,8 +22,7 @@ class NVMENamespace(BaseModel):
     SectorSize: int
 
 
-
-class NVMeController(TypedDict, total=False):
+class NVMeController(BaseModel):
     Controller: str
     Address: str
     Transport: str
@@ -32,13 +31,13 @@ class NVMeController(TypedDict, total=False):
     Namespaces: List[NVMENamespace]
 
 
-class NVMeSubsystem(TypedDict, total=False):
+class NVMeSubsystem(BaseModel):
     SubsystemNQN: str
     Controllers: List[NVMeController]
     Namespaces: List[NVMENamespace]
 
 
-class NVMeDevice(TypedDict):
+class NVMeDevice(BaseModel):
     nqn: str
     size: int
     sector_size: int
@@ -148,7 +147,7 @@ def get_spdk_devices():
 
 
 def _get_mem_info():
-    out, err, rc = shell_utils.run_command("cat /proc/meminfo")
+    out, _, rc = shell_utils.run_command("cat /proc/meminfo")
 
     if rc != 0:
         raise ValueError('Failed to get memory info')
