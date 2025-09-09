@@ -10,6 +10,7 @@ import time
 import uuid
 
 import docker
+from docker.types import LogConfig
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
@@ -921,6 +922,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         mgmt_ip = node_info['network_interface'][iface_name]['ip']
         if not spdk_image:
             spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
+
+        # replace the SNodeAPI container to apply the new logging config
+        # start_storage_node_api_container(mgmt_ip, cluster_ip)
 
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
@@ -1883,10 +1887,13 @@ def restart_storage_node(
                     logger.error("RPC failed bdev_lvol_set_qos_limit")
                     return False
 
+            online_devices_list = []
             for dev in snode.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
                     logger.info(f"Starting migration task for device {dev.get_id()}")
-                    tasks_controller.add_device_mig_task(dev.get_id())
+                    online_devices_list.append(dev.get_id())
+            if online_devices_list:
+                tasks_controller.add_device_mig_task(online_devices_list, snode.cluster_id)
             return True
 
 
@@ -2135,6 +2142,8 @@ def shutdown_storage_node(node_id, force=False):
 
 
 def suspend_storage_node(node_id, force=False):
+    logger.error("Please use 'sn shutdown --force' instead")
+    return False
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
     if not snode:
@@ -2633,7 +2642,7 @@ def deploy(ifname, isolate_cores=False):
     return f"{dev_ip}:5000"
 
 
-def start_storage_node_api_container(node_ip):
+def start_storage_node_api_container(node_ip, cluster_ip=None):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
     # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
@@ -2644,6 +2653,11 @@ def start_storage_node_api_container(node_ip):
     # create the api container
     utils.remove_container(node_docker, '/SNodeAPI')
 
+    if cluster_ip is not None:
+        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
+    else:
+        log_config = LogConfig(type=LogConfig.types.JOURNALD)
+
     node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
         "python simplyblock_web/node_webapp.py storage_node",
@@ -2651,6 +2665,7 @@ def start_storage_node_api_container(node_ip):
         privileged=True,
         name="SNodeAPI",
         network_mode="host",
+        log_config=log_config,
         volumes=[
             '/etc/simplyblock:/etc/simplyblock',
             '/etc/foundationdb:/etc/foundationdb',

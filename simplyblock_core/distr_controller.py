@@ -101,6 +101,15 @@ def send_dev_status_event(device, status, target_node=None):
             logger.warning("Failed to send event update")
 
 
+def is_multi_node_per_host(node):
+    db_controller = DBController()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
+    for sn in snodes:
+        if node.get_id() != sn.get_id() and sn.mgmt_ip == node.mgmt_ip:
+            return True
+    return False
+
+
 def disconnect_device(device):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(device.cluster_id)
@@ -155,8 +164,10 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 "UUID": dev.get_id(),
                 "bdev_name": name,
                 "status": dev_status,
-                "physical_label": dev.physical_label
             }
+            if is_multi_node_per_host(snode):
+                dev_map[dev.cluster_device_order]["physical_label"] = dev.physical_label
+
             if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                 dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": -1}
             else:
