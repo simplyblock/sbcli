@@ -684,6 +684,7 @@ class CLIWrapperBase:
         grafana_endpoint = args.grafana_endpoint
         enable_node_affinity = args.enable_node_affinity
         qpair_count = args.qpair_count
+        client_qpair_count = args.client_qpair_count
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
@@ -694,14 +695,15 @@ class CLIWrapperBase:
         ingress_host_source = args.ingress_host_source
         dns_name = args.dns_name
         is_single_node = args.is_single_node
+        fabric = args.fabric
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring,
-            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, is_single_node)
+            qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring,
+            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

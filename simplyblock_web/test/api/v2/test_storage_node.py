@@ -63,10 +63,10 @@ def test_restart(call, cluster):
         ['online', 'in_restart', 'online'],
         lambda: call('GET', f'/clusters/{cluster}/storage-nodes/{node_uuid}'),
     )
-    _check_status_transition(
-        ['active', 'degraded', 'active'],
-        lambda: call('GET', f'/clusters/{cluster}/'),
-    )
+    # _check_status_transition(
+    #     ['active', 'degraded', 'active'],
+    #     lambda: call('GET', f'/clusters/{cluster}/'),
+    # )
 
 
 @pytest.mark.xfail

@@ -265,7 +265,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="TCP"):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -308,6 +308,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         return False, f"Pool not found: {pool_id_or_name}"
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
+
+    if (fabric == "TCP" and not cl.fabric_tcp) or (fabric == "RDMA" and not cl.fabric_rdma):
+        return False,  f"Fabric not available in cluster: {fabric}"
+
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
 
@@ -421,6 +425,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
     lvol.lvol_priority_class = lvol_priority_class
+    lvol.fabric = fabric
 
     if namespace:
         master_lvol = db_controller.get_lvol_by_id(namespace)
@@ -667,11 +672,10 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         # add listeners
         logger.info("adding listeners")
         for iface in snode.data_nics:
-            if iface.ip4_address:
-                tr_type = iface.get_transport_type()
+            if iface.ip4_address and lvol.fabric==iface.trtype:
                 logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
                 ret, err = rpc_client.nvmf_subsystem_add_listener(
-                    lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana_state)
+                    lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state)
                 if not ret:
                     if err and "code" in err and err["code"] == -32602:
                         logger.warning("listener already exists")
@@ -730,15 +734,14 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     # add listeners
     logger.info("adding listeners")
     for iface in snode.data_nics:
-        if iface.ip4_address:
-            tr_type = iface.get_transport_type()
+        if iface.ip4_address and lvol.fabric==iface.trtype:
             if not ana_state:
                 ana_state = "non_optimized"
                 if lvol.node_id == snode.get_id():
                     ana_state = "optimized"
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             logger.info(f"Setting ANA state: {ana_state}")
-            ret = rpc_client.listeners_create(lvol.nqn, tr_type, iface.ip4_address, lvol.subsys_port, ana_state)
+            ret = rpc_client.listeners_create(lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state)
 
     return True, None
 
@@ -1214,8 +1217,9 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
 
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
-            transport = nic.get_transport_type().lower()
+            transport = nic.trtype.lower()
             ip = nic.ip4_address
             port = lvol.subsys_port
             out.append({
@@ -1226,11 +1230,11 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 "nqn": lvol.nqn,
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 "ctrl-loss-tmo": ctrl_loss_tmo,
-                "nr-io-queues": constants.LVOL_NVME_CONNECT_NR_IO_QUEUES,
+                "nr-io-queues": cluster.client_qpair_count,
                 "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                            f"--ctrl-loss-tmo={ctrl_loss_tmo} "
-                           f"--nr-io-queues={constants.LVOL_NVME_CONNECT_NR_IO_QUEUES} "
+                           f"--nr-io-queues={cluster.client_qpair_count} "
                            f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
                            f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
             })

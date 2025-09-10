@@ -528,23 +528,18 @@ def bind_device_to_spdk(body: utils.DeviceParams):
     noiommu_parameter = vfio_module / 'parameters' / 'enable_unsafe_noiommu_mode'
     driver_name = None
 
-    if pci_utils.driver_loaded('vfio-pci'):
-        if iommu_group.exists():
-            driver_name = 'vfio-pci'
-        elif noiommu_parameter.exists():
-            if noiommu_parameter.read_text().strip() == 'N':
-                noiommu_parameter.write_text('1')
-            driver_name = 'vfio-pci'
-        elif pci_utils.driver_loaded('uio_pci_generic'):
-            driver_name = 'uio_pci_generic'
-        else:
-            return utils.get_response_error(
-                'SPDK PCI drivers are not fully loaded and device lacks IOMMU group', 500
-            )
+    if pci_utils.driver_loaded('vfio-pci') and iommu_group.exists():
+        driver_name = 'vfio-pci'
     elif pci_utils.driver_loaded('uio_pci_generic'):
         driver_name = 'uio_pci_generic'
+    elif pci_utils.driver_loaded('vfio-pci') and noiommu_parameter.exists():
+        if noiommu_parameter.read_text().strip() == 'N':
+            noiommu_parameter.write_text('1')
+        driver_name = 'vfio-pci'
     else:
-        return utils.get_response_error('SPDK PCI drivers are not loaded', 500)
+        return utils.get_response_error(
+            'SPDK PCI drivers are not fully loaded and device lacks IOMMU group', 500
+        )
 
     pci_utils.ensure_driver(body.device_pci, driver_name, override=True)
     return utils.get_response(True)

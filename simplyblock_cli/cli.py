@@ -106,7 +106,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--journal-partition', help='1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space.', type=int, default=1, dest='partitions')
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=int, default=3, dest='jm_percent')
-        argument = subcommand.add_argument('--data-nics', help='Storage network interface name(s). Can be more than one.', type=str, dest='data_nics', nargs='+')
+        argument = subcommand.add_argument('--data-nics', help='Storage network interface names. currently one interface is supported.', type=str, dest='data_nics', nargs='+')
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='Size of device per storage node', type=str, dest='partition_size')
         if self.developer_mode:
@@ -361,7 +361,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--ingress-host-source', help='Ingress host source: \'hostip\' for node IP, \'loadbalancer\' for external LB, or \'dns\' for custom domain', type=str, default='hostip', dest='ingress_host_source', choices=['hostip','loadbalancer','dns',])
         argument = subcommand.add_argument('--dns-name', help='Fully qualified DNS name to use as the Ingress host (required if --ingress-host-source=dns)', type=str, default='', dest='dns_name')
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
-        argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
+        argument = subcommand.add_argument('--fabric', help='fabric: tcp, rdma or both (specify: tcp, rdma)', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         if self.developer_mode:
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size')
         if self.developer_mode:
@@ -372,6 +372,8 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default', dest='disable_monitoring', action='store_true')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
+        argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=32, dest='qpair_count')
+        argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -389,8 +391,10 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enables node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
+        argument = subcommand.add_argument('--fabric', help='fabric: tcp, rdma or both (specify: tcp, rdma)', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         argument = subcommand.add_argument('--is-single-node', help='For single node clusters only', default=False, dest='is_single_node', action='store_true')
-        argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
+        argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=32, dest='qpair_count')
+        argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size')
         if self.developer_mode:
@@ -548,6 +552,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='ha_type', choices=['single','default','ha',])
+        argument = subcommand.add_argument('--fabric', help='tcp or rdma (tcp is default). Cluster must support chosen fabric.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         argument = subcommand.add_argument('--lvol-priority-class', help='Logical volume priority class', type=int, default=0, dest='lvol_priority_class')
         argument = subcommand.add_argument('--namespace', help='Set logical volume namespace for k8s clients', type=str, dest='namespace')
         if self.developer_mode:
