@@ -86,6 +86,7 @@ jobs:
       npcs: ${{ github.event.inputs.npcs }}
       bs: ${{ github.event.inputs.bs }}
       chunk_bs: ${{ github.event.inputs.chunk_bs }}
+      k8s_snode: false
 
   e2e:
     runs-on: self-hosted
