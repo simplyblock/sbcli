@@ -51,6 +51,7 @@ spec:
             readOnly: true
           - name: fdb-config
             mountPath: /etc/foundationdb
+            
         resources:
           requests:
             cpu: "100m"
