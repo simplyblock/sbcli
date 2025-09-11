@@ -151,7 +151,7 @@ def get_nodes_config():
     })}}},
 })
 def get_info():
-    return {
+    return utils.get_response({
         "cluster_id": get_cluster_id(),
 
         "hostname": HOSTNAME,
@@ -174,7 +174,7 @@ def get_info():
 
         "cloud_instance": CLOUD_INFO,
         "nodes_config": get_nodes_config(),
-    }
+    })
 
 
 @api.post('/join_swarm', responses={
