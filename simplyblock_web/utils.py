@@ -28,6 +28,30 @@ def response_schema(result_schema: dict) -> dict:
     }
 
 
+def _to_jsonable(obj):
+    """Recursively convert objects to JSON-serializable structures.
+
+    - Pydantic BaseModel -> dict via model_dump()
+    - dict -> dict with values converted
+    - list/tuple -> list with items converted
+    - set/frozenset -> list with items converted
+    Otherwise returned as-is.
+    """
+    if isinstance(obj, BaseModel):
+        # Pydantic v2: model_dump; v1: dict()
+        try:
+            return obj.model_dump()
+        except AttributeError:
+            return obj.dict()
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        return [_to_jsonable(v) for v in obj]
+    return obj
+
+
 def get_response(data, error=None, http_code=None):
     resp = {
         "status": True,
@@ -41,7 +65,7 @@ def get_response(data, error=None, http_code=None):
         else:
             return jsonify(resp)
     if data is not None:
-        resp['results'] = data
+        resp['results'] = _to_jsonable(data)
     return jsonify(resp)
 
 
