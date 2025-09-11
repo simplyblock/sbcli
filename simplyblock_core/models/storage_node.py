@@ -243,7 +243,7 @@ class StorageNode(BaseNodeObject):
                 if primary_node.active_rdma and iface.trtype=="RDMA":
                    ip_lst.append((iface.ip4_address,iface.trtype))
                 else:
-                   if not primary_node.active_rdma and primary_node.active_tcp and iface.trype=="TCP":
+                   if not primary_node.active_rdma and primary_node.active_tcp and iface.trtype=="TCP":
                        ip_lst.append((iface.ip4_address, iface.trtype))
                    else:
                        raise ValueError(f"{primary_node.get_id()} has no active fabric.")
