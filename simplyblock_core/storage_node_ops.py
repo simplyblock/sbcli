@@ -3031,6 +3031,8 @@ def recreate_lvstore_on_sec(secondary_node):
         if err:
             logger.error(f"Failed to recreate lvstore on node {secondary_node.get_id()}")
             logger.error(err)
+            primary_node.lvstore_status = "ready"
+            primary_node.write_to_db()
             return False
 
         ### 2- create lvols nvmf subsystems
