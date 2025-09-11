@@ -1,9 +1,9 @@
 # coding=utf-8
-
+import time
 from typing import List
 from uuid import uuid4
 
-from simplyblock_core import utils
+from simplyblock_core import utils, constants
 from simplyblock_core.models.base_model import BaseNodeObject
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -232,20 +232,47 @@ class StorageNode(BaseNodeObject):
             raise ValueError(f"HubLVol of primary node {primary_node.get_id()} is not present")
 
         rpc_client = self.rpc_client()
+        name = primary_node.hublvol.bdev_name
+        remote_bdev = None
+        for bdev in rpc_client.get_bdevs():
+            if bdev.startswith(name):
+                logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
+                remote_bdev = bdev
+                break
 
-        remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
+        if not remote_bdev:
+            ret = rpc_client.bdev_nvme_controller_list(name)
+            if ret:
+                for controller in ret[0]["ctrlrs"]:
+                    controller_state = controller["state"]
+                    logger.info(f"Controller found: {name}, status: {controller_state}")
+                    raise Exception(f"Controller without bdev: {name}, status is {controller_state}")
 
-        if not rpc_client.get_bdevs(remote_bdev):
             ip_lst = []
             for ip in (iface.ip4_address for iface in primary_node.data_nics):
                 ip_lst.append(ip)
             multipath = bool(len(ip_lst) > 1)
             for ip in ip_lst:
                 ret = rpc_client.bdev_nvme_attach_controller_tcp(
-                        primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
+                        name, primary_node.hublvol.nqn,
                         ip, primary_node.hublvol.nvmf_port, multipath=multipath)
+                if not remote_bdev and ret and isinstance(ret, list):
+                    remote_bdev = ret[0]
                 if not ret and not multipath:
                     logger.warning(f'Failed to connect to hublvol on {ip}')
+
+            bdev_found = False
+            start_time = time.time_ns()
+            while start_time + (constants.NVME_TCP_CONNECT_TIMEOUT_MS * 1000000 * 2) < time.time_ns():
+                ret = rpc_client.get_bdevs(remote_bdev)
+                if ret:
+                    bdev_found = True
+                    break
+                else:
+                    time.sleep(0.5)
+
+            if bdev_found:
+                raise Exception('Timeout while waiting for bdev to appear after controller attach')
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
@@ -253,12 +280,10 @@ class StorageNode(BaseNodeObject):
                 subsystem_port=primary_node.lvol_subsys_port,
                 secondary=True,
         ):
-            pass
-            # raise RPCException('Failed to set secondary lvstore options')
+            raise RPCException('Failed to set secondary lvstore options')
 
         if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
-            pass
-            # raise RPCException('Failed to connect secondary lvstore to primary')
+            raise RPCException('Failed to connect secondary lvstore to primary')
 
     def create_alceml(self, name, nvme_bdev, uuid, **kwargs):
         logger.info(f"Adding {name}")

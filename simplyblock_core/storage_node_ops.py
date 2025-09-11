@@ -56,12 +56,7 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
         for controller in ret[0]["ctrlrs"]:
             controller_state = controller["state"]
             logger.info(f"Controller found: {name}, status: {controller_state}")
-            if controller_state == "deleting":
-                raise RuntimeError(f"Controller: {name}, status is {controller_state}")
-
-        if reattach:
-            rpc_client.bdev_nvme_detach_controller(name)
-            time.sleep(1)
+            raise RuntimeError(f"Controller without bdev: {name}, status is {controller_state}")
 
     bdev_name = None
     for ip in device.nvmf_ip.split(","):
@@ -79,13 +74,14 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
         logger.error(msg)
         raise RuntimeError(msg)
     bdev_found = False
-    for i in range(5):
+    start_time = time.time_ns()
+    while start_time + (constants.NVME_TCP_CONNECT_TIMEOUT_MS*1000000*2) < time.time_ns():
         ret = rpc_client.get_bdevs(bdev_name)
         if ret:
             bdev_found = True
             break
         else:
-            time.sleep(1)
+            time.sleep(0.5)
 
     if not bdev_found:
         logger.error("Bdev not found after 5 attempts")
