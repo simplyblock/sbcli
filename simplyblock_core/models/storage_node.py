@@ -100,6 +100,7 @@ class StorageNode(BaseNodeObject):
     nvmf_port: int = 4420
     physical_label: int = 0
     hublvol: HubLVol = None
+    lvol_sync_del_queue: List[str] = []
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
