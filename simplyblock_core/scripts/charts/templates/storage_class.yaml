@@ -8,3 +8,17 @@ volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
 reclaimPolicy: Retain
 {{- end }}
+
+---
+{{- if .Values.monitoring.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: openebs-jiva
+provisioner: jiva.csi.openebs.io
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  replicaCount: "3"
+{{- end }}

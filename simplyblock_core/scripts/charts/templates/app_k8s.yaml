@@ -1,132 +1,132 @@
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: simplyblock-fdb-server
-  namespace: {{ .Release.Namespace }}
-spec:
-  selector:
-    matchLabels:
-      app: simplyblock-fdb-server
-  template:
-    metadata:
-      labels:
-        app: simplyblock-fdb-server
-      annotations:
-        log-collector/enabled: "true"
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
-      containers:
-      - name: fdb-server
-        image: foundationdb/foundationdb:7.3.42
-        ports:
-        - containerPort: 4500
-        env:
-        - name: PUBLIC_IP
-          valueFrom:
-            fieldRef:
-              fieldPath: status.hostIP
-        - name: SIMPLYBLOCK_LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: LOG_LEVEL
-        - name: FDB_CLUSTER_FILE_CONTENTS
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: FDB_CLUSTER_FILE_CONTENTS
-        - name: FDB_CLUSTER_FILE
-          value: "/etc/foundationdb/fdb.cluster"
-        - name: FDB_NETWORKING_MODE
-          value: "container"
-        volumeMounts:
-          - name: fdb-data
-            mountPath: /var/fdb/data
-          - name: fdb-logs
-            mountPath: /var/fdb/logs
-          - name: fdb-entrypoint                     
-            mountPath: /var/fdb/scripts
-            readOnly: true
-          - name: fdb-config
-            mountPath: /etc/foundationdb
+# ---
+# apiVersion: apps/v1
+# kind: DaemonSet
+# metadata:
+#   name: simplyblock-fdb-server
+#   namespace: {{ .Release.Namespace }}
+# spec:
+#   selector:
+#     matchLabels:
+#       app: simplyblock-fdb-server
+#   template:
+#     metadata:
+#       labels:
+#         app: simplyblock-fdb-server
+#       annotations:
+#         log-collector/enabled: "true"
+#     spec:
+#       nodeSelector:
+#         simplyblock.io/role: mgmt-plane
+#       containers:
+#       - name: fdb-server
+#         image: foundationdb/foundationdb:7.3.42
+#         ports:
+#         - containerPort: 4500
+#         env:
+#         - name: PUBLIC_IP
+#           valueFrom:
+#             fieldRef:
+#               fieldPath: status.hostIP
+#         - name: SIMPLYBLOCK_LOG_LEVEL
+#           valueFrom:
+#             configMapKeyRef:
+#               name: simplyblock-config
+#               key: LOG_LEVEL
+#         - name: FDB_CLUSTER_FILE_CONTENTS
+#           valueFrom:
+#             configMapKeyRef:
+#               name: simplyblock-config
+#               key: FDB_CLUSTER_FILE_CONTENTS
+#         - name: FDB_CLUSTER_FILE
+#           value: "/etc/foundationdb/fdb.cluster"
+#         - name: FDB_NETWORKING_MODE
+#           value: "container"
+#         volumeMounts:
+#           - name: fdb-data
+#             mountPath: /var/fdb/data
+#           - name: fdb-logs
+#             mountPath: /var/fdb/logs
+#           - name: fdb-entrypoint                     
+#             mountPath: /var/fdb/scripts
+#             readOnly: true
+#           - name: fdb-config
+#             mountPath: /etc/foundationdb
             
-        resources:
-          requests:
-            cpu: "100m"
-            memory: "512Mi"
-          limits:
-            cpu: "500m"
-            memory: "2Gi"
-      volumes:
-      - name: fdb-entrypoint                         
-        configMap:
-          name: simplyblock-fdb-entrypoint-script
-          defaultMode: 0777
-      - name: fdb-data
-        hostPath:
-          path: /var/lib/foundationdb/data
-          type: DirectoryOrCreate
-      - name: fdb-logs
-        hostPath:
-          path: /var/log/foundationdb
-          type: DirectoryOrCreate
-      - name: fdb-tls
-        hostPath:
-          path: /var/lib/foundationdb/tls
-          type: DirectoryOrCreate
-      - name: fdb-config
-        hostPath:
-          path: /var/foundationdb
-      hostNetwork: true
+#         resources:
+#           requests:
+#             cpu: "100m"
+#             memory: "512Mi"
+#           limits:
+#             cpu: "500m"
+#             memory: "2Gi"
+#       volumes:
+#       - name: fdb-entrypoint                         
+#         configMap:
+#           name: simplyblock-fdb-entrypoint-script
+#           defaultMode: 0777
+#       - name: fdb-data
+#         hostPath:
+#           path: /var/lib/foundationdb/data
+#           type: DirectoryOrCreate
+#       - name: fdb-logs
+#         hostPath:
+#           path: /var/log/foundationdb
+#           type: DirectoryOrCreate
+#       - name: fdb-tls
+#         hostPath:
+#           path: /var/lib/foundationdb/tls
+#           type: DirectoryOrCreate
+#       - name: fdb-config
+#         hostPath:
+#           path: /var/foundationdb
+#       hostNetwork: true
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-fdb-backup-agent
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-fdb-backup-agent
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-      labels:
-        app: simplyblock-fdb-backup-agent
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane 
-      containers:
-      - name: fdb-backup-agent
-        image: foundationdb/foundationdb:7.3.42
-        command: ["/usr/bin/backup_agent", "-C", "/etc/foundationdb/fdb.cluster"]
-        env:
-        - name: FDB_CLUSTER_FILE
-          value: "/etc/foundationdb/fdb.cluster"
-        - name: FDB_CLUSTER_FILE_CONTENTS
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: FDB_CLUSTER_FILE_CONTENTS
-        volumeMounts:
-          - name: foundationdb
-            mountPath: /etc/foundationdb
-        resources:
-          requests:
-            cpu: "100m"
-            memory: "256Mi"
-          limits:
-            cpu: "250m"
-            memory: "1Gi"
-      volumes:
-      - name: foundationdb
-        hostPath:
-          path: /var/foundationdb
+# ---
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: simplyblock-fdb-backup-agent
+#   namespace: {{ .Release.Namespace }}
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: simplyblock-fdb-backup-agent
+#   template:
+#     metadata:
+#       annotations:
+#         log-collector/enabled: "true"
+#       labels:
+#         app: simplyblock-fdb-backup-agent
+#     spec:
+#       nodeSelector:
+#         simplyblock.io/role: mgmt-plane 
+#       containers:
+#       - name: fdb-backup-agent
+#         image: foundationdb/foundationdb:7.3.42
+#         command: ["/usr/bin/backup_agent", "-C", "/etc/foundationdb/fdb.cluster"]
+#         env:
+#         - name: FDB_CLUSTER_FILE
+#           value: "/etc/foundationdb/fdb.cluster"
+#         - name: FDB_CLUSTER_FILE_CONTENTS
+#           valueFrom:
+#             configMapKeyRef:
+#               name: simplyblock-config
+#               key: FDB_CLUSTER_FILE_CONTENTS
+#         volumeMounts:
+#           - name: foundationdb
+#             mountPath: /etc/foundationdb
+#         resources:
+#           requests:
+#             cpu: "100m"
+#             memory: "256Mi"
+#           limits:
+#             cpu: "250m"
+#             memory: "1Gi"
+#       volumes:
+#       - name: foundationdb
+#         hostPath:
+#           path: /var/foundationdb
 ---
 apiVersion: apps/v1
 kind: DaemonSet
