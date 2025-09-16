@@ -455,6 +455,8 @@ class CLIWrapperBase:
         distr_vuid = args.distr_vuid
         with_snapshot = args.snapshot
         lvol_priority_class = args.lvol_priority_class
+        ndcs = args.ndcs
+        npcs = args.npcs
         results, error = lvol_controller.add_lvol_ha(
             name, size, host_id, ha_type, pool, comp, crypto,
             distr_vuid,
@@ -468,7 +470,7 @@ class CLIWrapperBase:
             crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace, 
-            max_namespace_per_subsys=args.max_namespace_per_subsys)
+            max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs)
         if results:
             return results
         else:

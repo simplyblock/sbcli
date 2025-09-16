@@ -265,7 +265,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="TCP"):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="TCP", ndcs=0, npcs=0):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -450,6 +450,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.subsys_port = host_node.lvol_subsys_port
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
+    lvol.npcs = npcs or 0
+    lvol.ndcs = ndcs or 0
 
     lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
     if lvol_count > host_node.max_lvol:
@@ -467,6 +469,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             "lvol_priority_class": 0
         }
     }
+
+    if ndcs or npcs:
+        lvol_dict["params"]["ndcs"] = ndcs
+        lvol_dict["params"]["npcs"] = npcs
 
     if cl.enable_qos and lvol.lvol_priority_class > 0:
         lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
@@ -1154,12 +1160,13 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "HA": lvol.ha_type,
             "BlobID": lvol.blobid or "",
             "LVolUUID": lvol.lvol_uuid or "",
-            # "Priority": lvol.lvol_priority_class,
             "Status": lvol.status,
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
         })
+        if lvol.ndcs or lvol.npcs:
+            data.append({"Mode": f"{lvol.ndcs}x{lvol.npcs}"})
     for snap, count in snap_dict.items():
         ref_snap = db_controller.get_snapshot_by_id(snap)
         ref_snap.ref_count = count
