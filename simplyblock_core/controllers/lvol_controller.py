@@ -657,6 +657,16 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         if not ret:
             return False, "Failed to add bdev to ublk"
 
+        for iface in snode.data_nics:
+            if iface.ip4_address:
+                tr_type = iface.get_transport_type()
+                if tr_type == "TCP":
+                    ret = rpc_client.iscsi_create_portal_group(1, iface.ip4_address, str(lvol.subsys_port))
+        ret = rpc_client.iscsi_create_initiator_group(2, ["ANY"], ["ANY"])
+        ret = rpc_client.iscsi_create_target_node(lvol.get_id(), 2, 1, lvol.top_bdev)
+
+        return True, None
+
     if not lvol.namespace:
         if is_primary:
             min_cntlid = 1
@@ -1225,22 +1235,32 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
             transport = nic.get_transport_type().lower()
             ip = nic.ip4_address
             port = lvol.subsys_port
-            out.append({
-                "ns_id": lvol.ns_id,
-                "transport": transport,
-                "ip": ip,
-                "port": port,
-                "nqn": lvol.nqn,
-                "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
-                "ctrl-loss-tmo": ctrl_loss_tmo,
-                "nr-io-queues": cluster.client_qpair_count,
-                "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
-                "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
-                           f"--ctrl-loss-tmo={ctrl_loss_tmo} "
-                           f"--nr-io-queues={cluster.client_qpair_count} "
-                           f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
-                           f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
-            })
+            if lvol.with_iscsi:
+                out.append({
+                    "ip": ip,
+                    "port": port,
+                    "nqn": lvol.nqn,
+                    "connect": f"iscsiadm -m discovery -t sendtargets -p {ip}:{port}"
+                               " ; "
+                               f"iscsiadm -m node -T {lvol.nqn} -p {ip}:{port} --login"
+                })
+            else:
+                out.append({
+                    "ns_id": lvol.ns_id,
+                    "transport": transport,
+                    "ip": ip,
+                    "port": port,
+                    "nqn": lvol.nqn,
+                    "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
+                    "ctrl-loss-tmo": ctrl_loss_tmo,
+                    "nr-io-queues": cluster.client_qpair_count,
+                    "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
+                    "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
+                               f"--ctrl-loss-tmo={ctrl_loss_tmo} "
+                               f"--nr-io-queues={cluster.client_qpair_count} "
+                               f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
+                               f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
+                })
     return out
 
 
