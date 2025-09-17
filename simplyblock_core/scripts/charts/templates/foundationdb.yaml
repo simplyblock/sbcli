@@ -301,7 +301,7 @@ spec:
               runAsUser: 0
       volumeClaimTemplate:
         spec:
-          storageClassName: openebs-jiva
+          storageClassName: sbcli-openebs-jiva-csi-sc
           accessModes:
             - ReadWriteOnce
           resources:
