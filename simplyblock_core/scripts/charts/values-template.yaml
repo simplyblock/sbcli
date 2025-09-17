@@ -31,7 +31,14 @@ image:
 
 openebs:
   enabled: true
-  
+
+jiva:
+  enabled: true
+  openebsLocalpv:
+    enabled: false
+  storageClass:
+    enabled: false
+
 mongodb:
   architecture: replicaset
   fullnameOverride: "simplyblock-mongodb"
