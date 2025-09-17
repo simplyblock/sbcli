@@ -31,11 +31,7 @@ image:
 
 openebs:
   enabled: true
-openebsJiva:
-  replicaCount: 3
-  defaultStorageClass: true
-  basePath: /var/openebs
-
+  
 mongodb:
   architecture: replicaset
   fullnameOverride: "simplyblock-mongodb"
