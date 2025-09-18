@@ -101,15 +101,19 @@ class TestClusterBase:
             )
             sleep_n_sec(2)
             self.ssh_obj.set_aio_max_nr(node)
-        if self.client_machines:
-            self.client_machines = self.client_machines.strip().split(" ")
-            for client in self.client_machines:
-                self.logger.info(f"**Connecting to client machine** - {client}")
-                self.ssh_obj.connect(
-                    address=client,
-                    bastion_server_address=self.bastion_server,
-                )
-                sleep_n_sec(2)
+        if not self.client_machines:
+            self.client_machines = f"{self.mgmt_nodes[0]}"
+        
+        self.client_machines = self.client_machines.strip().split(" ")
+        for client in self.client_machines:
+            self.logger.info(f"**Connecting to client machine** - {client}")
+            self.ssh_obj.connect(
+                address=client,
+                bastion_server_address=self.bastion_server,
+            )
+            sleep_n_sec(2)
+
+        
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
