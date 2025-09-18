@@ -306,7 +306,7 @@ spec:
             - ReadWriteOnce
           resources:
             requests:
-              storage: 16G
+              storage: 5G
   routing:
     defineDNSLocalityFields: true
   sidecarContainer:
