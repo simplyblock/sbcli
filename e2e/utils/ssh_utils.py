@@ -1917,6 +1917,7 @@ class RunnerK8sLog:
         self._monitor_thread = None
         self._monitor_stop_flag = threading.Event()
         self._pod_container_map = {}
+        self.logger = setup_logger(__name__)
 
         # Ensure log directory exists
         os.makedirs(self.log_dir, exist_ok=True)
@@ -1948,8 +1949,10 @@ class RunnerK8sLog:
             list: A list of running pod names.
         """
         try:
+            self.logger.info("getting running pods: ")
             cmd = ["kubectl", "get", "pods", "-n", self.namespace, "--no-headers", "-o", "custom-columns=:metadata.name"]
             output = subprocess.check_output(cmd, universal_newlines=True).strip()
+            self.logger.info(f"getting running pods: {output}")
             return output.split("\n") if output else []
         except subprocess.CalledProcessError as e:
             print(f"Error fetching running pods: {e}")
@@ -1981,7 +1984,7 @@ class RunnerK8sLog:
 
         for pod in pods:
             # Filter pods based on prefixes
-            if not (pod.startswith("storage-node-ds") or pod.startswith("snode-spdk-deployment") or pod.startswith("storage-node-handler-")):
+            if not (pod.startswith(("simplyblock-csi-controller", "simplyblock-csi-node", "simplyblock-mgmt-api-job", "simplyblock-storage-node-controller", "simplyblock-storage-node-ds", "snode-spdk-pod"))):
                 continue
 
             # Get all containers in the pod
@@ -1989,7 +1992,7 @@ class RunnerK8sLog:
             try:
                 containers = subprocess.check_output(container_list_cmd, universal_newlines=True).strip().split()
             except subprocess.CalledProcessError as e:
-                print(f"Error fetching containers for pod {pod}: {e}")
+                self.logger.info(f"Error fetching containers for pod {pod}: {e}")
                 continue
 
             for container in containers:
@@ -2005,9 +2008,10 @@ class RunnerK8sLog:
                     "bash", "-c",
                     f"kubectl logs --follow {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
                 ]
+                self.logger.info(" ".join(command_logs))
 
                 subprocess.Popen(command_logs)
-                print(f"Started logging for pod '{pod}', container '{container}' ({outage_type}), logs stored at {log_file}.")
+                self.logger.info(f"Started logging for pod '{pod}', container '{container}' ({outage_type}), logs stored at {log_file}.")
 
 
     def stop_logging(self):
