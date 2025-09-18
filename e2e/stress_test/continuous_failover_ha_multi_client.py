@@ -307,34 +307,34 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
         if outage_type == "graceful_shutdown":
-            # self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            # self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
-            # sleep_n_sec(10)
-            # self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            # self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=4000)
+            self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
+            sleep_n_sec(10)
+            self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=4000)
             max_retries = 10
             retry_delay = 10  # seconds
             # Retry mechanism for suspending the node
-            # for attempt in range(max_retries):
-            #     try:
-            #         if attempt == max_retries - 1:
-            #             self.logger.info("[CHECK] Suspending Node via CLI as via API Fails.")
-            #             self.ssh_obj.suspend_node(node=self.mgmt_nodes[0],
-            #                                       node_id=self.current_outage_node)
-            #         else:
-            #             self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            #         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=1000)
-            #         break  # Exit loop if successful
-            #     except Exception as _:
-            #         if attempt < max_retries - 2:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node. Retrying in {retry_delay} seconds...")
-            #             sleep_n_sec(retry_delay)
-            #         elif attempt < max_retries - 1:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node via API. Retrying in {retry_delay} seconds via CMD...")
-            #             sleep_n_sec(retry_delay)
-            #         else:
-            #             self.logger.info("Max retries reached. Failed to suspend node.")
-            #             raise  # Rethrow the last exception
+            for attempt in range(max_retries):
+                try:
+                    if attempt == max_retries - 1:
+                        self.logger.info("[CHECK] Suspending Node via CLI as via API Fails.")
+                        self.ssh_obj.suspend_node(node=self.mgmt_nodes[0],
+                                                  node_id=self.current_outage_node)
+                    else:
+                        self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=1000)
+                    break  # Exit loop if successful
+                except Exception as _:
+                    if attempt < max_retries - 2:
+                        self.logger.info(f"Attempt {attempt + 1} failed to suspend node. Retrying in {retry_delay} seconds...")
+                        sleep_n_sec(retry_delay)
+                    elif attempt < max_retries - 1:
+                        self.logger.info(f"Attempt {attempt + 1} failed to suspend node via API. Retrying in {retry_delay} seconds via CMD...")
+                        sleep_n_sec(retry_delay)
+                    else:
+                        self.logger.info("Max retries reached. Failed to suspend node.")
+                        raise  # Rethrow the last exception
 
             sleep_n_sec(10)  # Wait before shutting down
 
@@ -802,7 +802,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         if attempt >= 30:
                             raise Exception("FIO not killed on clone")
                         attempt += 1
-                        sleep_n_sec(10)
+                        sleep_n_sec(20)
                     
                     sleep_n_sec(10)
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
@@ -840,7 +840,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 if attempt >= 30:
                     raise Exception("FIO not killed on lvols")
                 attempt += 1
-                sleep_n_sec(10)
+                sleep_n_sec(20)
 
             sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")

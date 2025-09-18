@@ -54,7 +54,7 @@ class SshUtils:
             is_bastion_server: bool = False):
         """Connect to cluster nodes"""
         # --- prep usernames list ---
-        default_users = ["ec2-user", "ubuntu", "root"]
+        default_users = ["ec2-user", "ubuntu", "rocky", "root"]
         if getattr(self, "ssh_user", None):
             if isinstance(self.ssh_user, (list, tuple)):
                 usernames = list(self.ssh_user)
@@ -1902,7 +1902,7 @@ class RunnerK8sLog:
         - get_running_pods(): Fetches all currently running pods in a namespace.
     """
 
-    def __init__(self, namespace="simplyblk", log_dir="/var/logs", test_name="test_run"):
+    def __init__(self, namespace="simplyblock", log_dir="/var/logs", test_name="test_run"):
         """
         Initialize the RunnerLog class.
 

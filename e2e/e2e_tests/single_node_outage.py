@@ -145,7 +145,7 @@ class TestSingleNodeOutage(TestClusterBase):
         
         timestamp = int(datetime.now().timestamp())
 
-        # self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
+        self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
         try:
             self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=True)
         except Exception as _:
@@ -396,7 +396,7 @@ class TestHASingleNodeOutage(TestClusterBase):
         for i in range(2):
             timestamp = int(datetime.now().timestamp())
             sleep_n_sec(30)
-            # self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
+            self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
             try:
                 self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=True)
             except Exception as _:
