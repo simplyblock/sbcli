@@ -1,4 +1,4 @@
-foundationdb==7.3.63
+foundationdb==7.1.26
 requests
 prettytable>=3.10.0
 docker

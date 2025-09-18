@@ -27,7 +27,7 @@ fi
 
 if [[ 1 == $(yum info foundationdb-clients &> /dev/null ; echo $?) ]]
 then
-  sudo yum install -y https://github.com/apple/foundationdb/releases/download/7.3.3/foundationdb-clients-7.3.3-1.el7.x86_64.rpm
+  sudo yum install -y https://github.com/apple/foundationdb/releases/download/7.1.26/foundationdb-clients-7.1.26-1.el7.x86_64.rpm
 fi
 
 sudo mkdir -p /etc/foundationdb/data /etc/foundationdb/logs
