@@ -177,8 +177,11 @@ spec:
         - name: FLASK_ENV
           value: "production"
         volumeMounts:
-        - name: fdb-config
+        # - name: fdb-config
+        # #   mountPath: /etc/foundationdb
+        - name: fdb-cluster-file
           mountPath: /etc/foundationdb
+          subPath: fdb.cluster
         resources:
           requests:
             cpu: "100m"
@@ -187,9 +190,15 @@ spec:
             cpu: "500m"
             memory: "2Gi"
       volumes:
-      - name: fdb-config
-        hostPath:
-          path: /var/foundationdb
+      # - name: fdb-config
+      #   hostPath:
+      #     path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 ---
 apiVersion: apps/v1
 kind: Deployment
