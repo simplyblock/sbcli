@@ -167,7 +167,7 @@ spec:
         # - name: fdb-config
         # #   mountPath: /etc/foundationdb
         - name: fdb-cluster-file
-          mountPath: /etc/foundationdb
+          mountPath: /etc/foundationdb/fdb.cluster
           subPath: fdb.cluster
         resources:
           requests:
