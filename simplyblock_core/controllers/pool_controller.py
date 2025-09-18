@@ -86,7 +86,7 @@ def set_pool_value_if_above(pool, key, value):
     current_value = getattr(pool, key)
     if value > current_value:
         setattr(pool, key, value)
-    elif value == -1:
+    elif value <= 0:
         setattr(pool, key, 0)
     else:
         msg = f"{key}: {value} can't be less than current value: {current_value}"
@@ -128,6 +128,26 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
     max_rw_mbytes = max_rw_mbytes or 0
     max_r_mbytes = max_r_mbytes or 0
     max_w_mbytes = max_w_mbytes or 0
+
+    if max_rw_iops < 0:
+        msg = "max_rw_iops can not be negative"
+        logger.error(msg)
+        return False, msg
+
+    if max_rw_mbytes < 0:
+        msg = "max_rw_mbytes can not be negative"
+        logger.error(msg)
+        return False, msg
+
+    if max_r_mbytes < 0:
+        msg = "max_r_mbytes can not be negative"
+        logger.error(msg)
+        return False, msg
+
+    if max_w_mbytes < 0:
+        msg = "max_w_mbytes can not be negative"
+        logger.error(msg)
+        return False, msg
 
     # Check for QoS conflict
     if (max_rw_iops + max_rw_mbytes + max_r_mbytes + max_w_mbytes) > 0:

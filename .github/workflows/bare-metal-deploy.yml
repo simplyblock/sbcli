@@ -38,7 +38,7 @@ on:
       k8s_snode:
         description: "Run snode on k8s"
         required: false
-        default: false
+        default: true
         type: boolean
 
     outputs:
@@ -62,7 +62,6 @@ jobs:
   
   k8s:
     runs-on: ${{ inputs.runs_on }}
-    if: ${{ inputs.k8s_snode == true }}
     steps:
     - name: Checkout deployment tooling
       uses: actions/checkout@v4
@@ -125,10 +124,13 @@ jobs:
     - name: setup Credentials
       if: ${{ inputs.k8s_snode == true }}
       run: |
+        cd deploy/bare-metal
+        eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
+        
         mkdir -p $HOME/.kube
         KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
-        scp -i "$KEY" -o StrictHostKeyChecking=no root@${MNODE}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
-        sed -i "s/127.0.0.1/${MNODE}/g" $HOME/.kube/config
+        scp -i "$KEY" -o StrictHostKeyChecking=no root@${MNODES}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
+        sed -i "s/127.0.0.1/${MNODES}/g" $HOME/.kube/config
 
         kubectl create secret docker-registry regcred \
           --docker-server=https://index.docker.io/v1/ \
@@ -136,9 +138,24 @@ jobs:
           --docker-password=${SECRET} \
           --docker-email=a@b.com
         kubectl patch serviceaccount default --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+
+        # Create namespace simplyblock
+        kubectl create namespace simplyblock
+
+        # Create the secret in namespace simplyblock
+        kubectl create secret docker-registry regcred \
+          --docker-server=https://index.docker.io/v1/ \
+          --docker-username=hamdysimplyblock \
+          --docker-password=${SECRET} \
+          --docker-email=a@b.com \
+          -n simplyblock
+
+        # Patch the default service account in namespace simplyblock
+        kubectl patch serviceaccount default \
+          -n simplyblock \
+          --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
       env:
         SECRET: ${{ secrets.docker_pass }}
-        MNODE: "192.168.10.111"
 
     - name: Deploy cluster 
       id: deployment
@@ -146,8 +163,17 @@ jobs:
         cd deploy/bare-metal
         eval $(python3 inventory.py inventory/${{ inputs.cluster }}.yml)
 
-        # Reset device partitions
         KEY="$HOME/.ssh/simplyblock-us-east-2.pem"
+
+        # install helm on mgmt node
+        ssh -i $KEY -o StrictHostKeyChecking=no root@$MNODES "
+          sudo yum install -y tar
+          curl -fsSL -o /root/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 /root/get_helm.sh
+          /root/get_helm.sh
+        "
+
+        # Reset device partitions
         for node in $STORAGE_PRIVATE_IPS; do
           echo "restart node $node"
           ssh -i $KEY -o StrictHostKeyChecking=no root@$node "

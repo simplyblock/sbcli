@@ -100,6 +100,8 @@ class StorageNode(BaseNodeObject):
     nvmf_port: int = 4420
     physical_label: int = 0
     hublvol: HubLVol = None  # type: ignore[assignment]
+    active_tcp: bool = True
+    active_rdma: bool = False
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -237,13 +239,19 @@ class StorageNode(BaseNodeObject):
 
         if not rpc_client.get_bdevs(remote_bdev):
             ip_lst = []
-            for ip in (iface.ip4_address for iface in primary_node.data_nics):
-                ip_lst.append(ip)
+            for iface in primary_node.data_nics:
+                if primary_node.active_rdma and iface.trtype=="RDMA":
+                   ip_lst.append((iface.ip4_address,iface.trtype))
+                else:
+                   if not primary_node.active_rdma and primary_node.active_tcp and iface.trtype=="TCP":
+                       ip_lst.append((iface.ip4_address, iface.trtype))
+                   else:
+                       raise ValueError(f"{primary_node.get_id()} has no active fabric.")
             multipath = bool(len(ip_lst) > 1)
-            for ip in ip_lst:
-                ret = rpc_client.bdev_nvme_attach_controller_tcp(
+            for (ip,tr_type) in ip_lst:
+                ret = rpc_client.bdev_nvme_attach_controller(
                         primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                        ip, primary_node.hublvol.nvmf_port, multipath=multipath)
+                        ip, primary_node.hublvol.nvmf_port,tr_type,multipath=multipath)
                 if not ret and not multipath:
                     logger.warning(f'Failed to connect to hublvol on {ip}')
 

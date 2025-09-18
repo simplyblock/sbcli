@@ -60,12 +60,16 @@ class Cluster(BaseModel):
     prov_cap_crit: int = 190
     prov_cap_warn: int = 180
     qpair_count: int = 32
+    fabric_tcp: bool = True
+    fabric_rdma: bool = False
+    client_qpair_count: int = 3
     secret: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
     tls: bool = False
     is_re_balancing: bool = False
     full_page_unmap: bool = True
+    is_single_node: bool = False
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

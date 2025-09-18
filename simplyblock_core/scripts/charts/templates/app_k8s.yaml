@@ -51,6 +51,7 @@ spec:
             readOnly: true
           - name: fdb-config
             mountPath: /etc/foundationdb
+            
         resources:
           requests:
             cpu: "100m"
@@ -604,7 +605,51 @@ spec:
       - name: foundationdb
         hostPath:
           path: /var/foundationdb
-
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-snapshot-monitor
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-snapshot-monitor
+  template:
+    metadata:
+      annotations:
+        log-collector/enabled: "true"
+      labels:
+        app: simplyblock-snapshot-monitor
+    spec:
+      nodeSelector:
+        simplyblock.io/role: mgmt-plane
+      containers:
+      - name: snapshot-monitor
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["python", "simplyblock_core/services/snapshot_monitor.py"]
+        env:
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        volumeMounts:
+        - mountPath: /etc/foundationdb
+          name: foundationdb
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "250m"
+            memory: "1Gi"
+      volumes:
+      - name: foundationdb
+        hostPath:
+          path: /var/foundationdb
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -11,7 +11,7 @@ import sys
 import uuid
 import time
 import socket
-from typing import Union
+from typing import Union, Any, Optional, Tuple
 from kubernetes import client, config
 from kubernetes.client import ApiException
 import docker
@@ -1775,6 +1775,16 @@ def get_k8s_batch_client():
     config.load_incluster_config()
     return client.BatchV1Api()
 
+def get_storage_node_api_log_type(mgmt_ip, name):
+    try:
+        node_docker = docker.DockerClient(base_url=f"tcp://{mgmt_ip}:2375", version="auto", timeout=60 * 5)
+        container = node_docker.containers.get(name)
+        log_config = container.attrs["HostConfig"]["LogConfig"]
+        if log_config and log_config["Type"]:
+            return log_config["Type"]
+    except (docker.errors.NotFound, docker.errors.DockerException, Exception):
+        pass
+
 def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
     try:
         container = client.containers.get(name)
@@ -1881,3 +1891,22 @@ def label_node_as_mgmt_plane(node_name: str):
     except ApiException as e:
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
+
+def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[Tuple[str, str]]:
+
+    if isinstance(node_info, (bytes, bytearray)):
+        try:
+            node_info = json.loads(node_info.decode("utf-8"))
+        except Exception:
+            return None
+
+    if isinstance(iface_names, str):
+        iface_names = [iface_names]
+
+    for iface in iface_names:
+        iface_info = node_info.get("network_interface", {}).get(iface, {})
+        ip = iface_info.get("ip")
+        if ip:
+            return ip, iface
+
+    return None  
