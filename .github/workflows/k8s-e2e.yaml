@@ -140,8 +140,8 @@ jobs:
       - name: Set parameters based on branch and input
         run: |
           if [[ "${GITHUB_REF##*/}" == *"pre-release"* ]]; then
-            echo "Branch is pre-release. Setting SBCLI_CMD to sbcli-pre."
-            echo "SBCLI_CMD=sbcli-pre" >> $GITHUB_ENV
+            echo "Branch is pre-release. Setting SBCLI_CMD to sbctl"
+            echo "SBCLI_CMD=sbctl" >> $GITHUB_ENV
           elif [[ "${GITHUB_REF##*/}" == "sbcli" ]]; then
             echo "Branch is sbcli. Setting SBCLI_CMD to sbcli."
             echo "SBCLI_CMD=sbcli" >> $GITHUB_ENV
