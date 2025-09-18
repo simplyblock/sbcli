@@ -146,19 +146,6 @@ spec:
     spec:
       nodeSelector:
         simplyblock.io/role: mgmt-plane 
-      initContainers:
-      - name: init-fdb
-        image: busybox:1.28
-        command: ['sh', '-c', 'mkdir -p /etc/foundationdb && chmod 755 /etc/foundationdb && echo "$FDB_CLUSTER_FILE_CONTENTS" > /etc/foundationdb/fdb.cluster']
-        env:
-        - name: FDB_CLUSTER_FILE_CONTENTS
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: FDB_CLUSTER_FILE_CONTENTS
-        volumeMounts:
-        - name: fdb-config
-          mountPath: /etc/foundationdb
       containers:
       - name: webappapi
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
