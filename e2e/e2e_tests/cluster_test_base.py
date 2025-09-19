@@ -51,6 +51,7 @@ class TestClusterBase:
         self.bs = kwargs.get("bs", 4096)
         self.chunk_bs = kwargs.get("chunk_bs", 4096)
         self.k8s_test = kwargs.get("k8s_run", False)
+        self.talos_test = kwargs.get("run_talos", False)
         self.pool_name = "test_pool"
         self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = f"/mnt/test_location"
@@ -93,14 +94,15 @@ class TestClusterBase:
             )
             sleep_n_sec(2)
             self.ssh_obj.set_aio_max_nr(node)
-        for node in self.storage_nodes:
-            self.logger.info(f"**Connecting to storage nodes** - {node}")
-            self.ssh_obj.connect(
-                address=node,
-                bastion_server_address=self.bastion_server,
-            )
-            sleep_n_sec(2)
-            self.ssh_obj.set_aio_max_nr(node)
+        if not self.talos_test:
+            for node in self.storage_nodes:
+                self.logger.info(f"**Connecting to storage nodes** - {node}")
+                self.ssh_obj.connect(
+                    address=node,
+                    bastion_server_address=self.bastion_server,
+                )
+                sleep_n_sec(2)
+                self.ssh_obj.set_aio_max_nr(node)
         if not self.client_machines:
             self.client_machines = f"{self.mgmt_nodes[0]}"
         
@@ -112,8 +114,6 @@ class TestClusterBase:
                 bastion_server_address=self.bastion_server,
             )
             sleep_n_sec(2)
-
-        
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
@@ -154,33 +154,34 @@ class TestClusterBase:
             )
             self.ec2_resource = session.resource('ec2')
 
-        for node in self.storage_nodes:
-            self.ssh_obj.delete_old_folders(
-                node=node,
-                folder_path=os.path.join(Path.home(), "container-logs"),
-                days=3
-            )
-            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
-            containers = self.ssh_obj.get_running_containers(node_ip=node)
-            self.container_nodes[node] = containers
-            self.ssh_obj.check_tmux_installed(node_ip=node)
-            self.ssh_obj.exec_command(node=node,
-                                    command="sudo tmux kill-server")
-            
-            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=self.docker_logs_path)
+        if not self.talos_test:
+            for node in self.storage_nodes:
+                self.ssh_obj.delete_old_folders(
+                    node=node,
+                    folder_path=os.path.join(Path.home(), "container-logs"),
+                    days=3
+                )
+                self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+                containers = self.ssh_obj.get_running_containers(node_ip=node)
+                self.container_nodes[node] = containers
+                self.ssh_obj.check_tmux_installed(node_ip=node)
+                self.ssh_obj.exec_command(node=node,
+                                        command="sudo tmux kill-server")
+                
+                self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=self.docker_logs_path)
 
-            if not self.k8s_test:
-                self.ssh_obj.start_docker_logging(node_ip=node,
-                                                containers=containers,
-                                                log_dir=self.docker_logs_path,
-                                                test_name=self.test_name
-                                                )
+                if not self.k8s_test:
+                    self.ssh_obj.start_docker_logging(node_ip=node,
+                                                    containers=containers,
+                                                    log_dir=self.docker_logs_path,
+                                                    test_name=self.test_name
+                                                    )
 
-            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
-            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                    log_dir=self.docker_logs_path)
-            if not self.k8s_test:
-                self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
+                self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
+                self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
+                                                        log_dir=self.docker_logs_path)
+                if not self.k8s_test:
+                    self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
         
         if self.k8s_test:
             self.runner_k8s_log.start_logging()
@@ -261,9 +262,10 @@ class TestClusterBase:
             'echo "net.ipv4.tcp_retries2=8" | sudo tee -a /etc/sysctl.conf',
             'sudo sysctl -p'
         ]
-        for node in self.storage_nodes:
-            for cmd in sysctl_commands:
-                self.ssh_obj.exec_command(node, cmd)
+        if not self.talos_test:
+            for node in self.storage_nodes:
+                for cmd in sysctl_commands:
+                    self.ssh_obj.exec_command(node, cmd)
         for cmd in sysctl_commands:
             for node in self.fio_node:
                 self.ssh_obj.exec_command(node, cmd)
@@ -281,24 +283,26 @@ class TestClusterBase:
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.state*", recursive=True)
         # self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
         self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
-        for node in self.storage_nodes:
-            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/[0-9]*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*core*.zst", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
+        if not self.talos_test:
+            for node in self.storage_nodes:
+                self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/[0-9]*", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*core*.zst", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
 
     def stop_docker_logs_collect(self):
-        for node in self.storage_nodes:
-            self.ssh_obj.stop_container_log_monitor(node)
-            pids = self.ssh_obj.find_process_name(
-                node=node,
-                process_name="docker logs --follow",
-                return_pid=True
-            )
-            for pid in pids:
-                self.ssh_obj.kill_processes(node=node, pid=pid)
+        if not self.talos_test:
+            for node in self.storage_nodes:
+                self.ssh_obj.stop_container_log_monitor(node)
+                pids = self.ssh_obj.find_process_name(
+                    node=node,
+                    process_name="docker logs --follow",
+                    return_pid=True
+                )
+                for pid in pids:
+                    self.ssh_obj.kill_processes(node=node, pid=pid)
         
         for node in self.mgmt_nodes:
             self.ssh_obj.stop_container_log_monitor(node)
@@ -382,19 +386,19 @@ class TestClusterBase:
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")
+        if not self.talos_test:
+            for node in self.storage_nodes:
+                self.ssh_obj.exec_command(node=node,
+                                        command="sudo tmux kill-server")
+                result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node, 
+                                                                        log_dir=self.docker_logs_path, 
+                                                                        test_name=self.test_name)
 
-        for node in self.storage_nodes:
-            self.ssh_obj.exec_command(node=node,
-                                      command="sudo tmux kill-server")
-            result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node, 
-                                                                     log_dir=self.docker_logs_path, 
-                                                                     test_name=self.test_name)
-
-            for file, lines in result.items():
-                if lines:
-                    self.logger.info(f"\n{file}:")
-                    for line in lines:
-                        self.logger.info(f"  -> {line}")
+                for file, lines in result.items():
+                    if lines:
+                        self.logger.info(f"\n{file}:")
+                        for line in lines:
+                            self.logger.info(f"  -> {line}")
 
         for node in self.fio_node:
             self.ssh_obj.exec_command(node=node,
@@ -763,12 +767,13 @@ class TestClusterBase:
         )
     
     def check_core_dump(self):
-        for node in self.storage_nodes:
-            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-            self.logger.info(f"Files in /etc/simplyblock: {files}")
-            if "core" in files and "tmp_cores" not in files:
-                cur_date = datetime.now().strftime("%Y-%m-%d")
-                self.logger.info(f"Core file found on storage node {node} at {cur_date}")
+        if not self.talos_test:
+            for node in self.storage_nodes:
+                files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                self.logger.info(f"Files in /etc/simplyblock: {files}")
+                if "core" in files and "tmp_cores" not in files:
+                    cur_date = datetime.now().strftime("%Y-%m-%d")
+                    self.logger.info(f"Core file found on storage node {node} at {cur_date}")
         
         for node in self.mgmt_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
