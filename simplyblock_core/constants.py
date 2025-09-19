@@ -19,7 +19,7 @@ def get_config_var(name, default=None):
     return default
 
 
-KVD_DB_VERSION = 730
+KVD_DB_VERSION = 710
 KVD_DB_FILE_PATH = os.getenv('FDB_CLUSTER_FILE', '/etc/foundationdb/fdb.cluster')
 KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
