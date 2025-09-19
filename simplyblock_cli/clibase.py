@@ -170,7 +170,7 @@ class CLIWrapperBase:
         return storage_ops.remove_storage_node(args.node_id, args.force_remove)
 
     def storage_node__list(self, sub_command, args):
-        return storage_ops.list_storage_nodes(args.json, args.cluster_id)
+        return storage_ops.list_storage_nodes(args.json, args.cluster_id, args.with_labels)
 
     def storage_node__get(self, sub_command, args):
         return storage_ops.get(args.node_id)

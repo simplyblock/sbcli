@@ -2021,7 +2021,7 @@ def restart_storage_node(
             return True
 
 
-def list_storage_nodes(is_json, cluster_id=None):
+def list_storage_nodes(is_json, cluster_id=None, with_labels=False):
     db_controller = DBController()
     if cluster_id:
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
@@ -2047,7 +2047,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 online_devices += 1
         lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
-        data.append({
+        node_data = {
             "UUID": node.uuid,
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
@@ -2065,9 +2065,18 @@ def list_storage_nodes(is_json, cluster_id=None):
             # "JM VUID": node.jm_vuid,
             # "Ext IP": node.cloud_instance_public_ip,
             "Secondary node ID": node.secondary_node_id,
-
-        })
-
+        }
+        if with_labels:
+            labels = ""
+            try:
+                rgn = node.labels["regions"][0]["label"]
+                dc = node.labels["regions"][0]["data_centers"][0]["label"]
+                rck = node.labels["regions"][0]["data_centers"][0]["racks"][0]["label"]
+                labels = f"{rgn},{dc},{rck}"
+            except Exception as e:
+                logger.debug("Failed to get labels")
+            node_data.update({"Labels": labels})
+        data.append(node_data)
     if not data:
         return output
 

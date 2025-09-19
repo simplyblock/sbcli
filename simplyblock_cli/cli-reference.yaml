@@ -244,6 +244,11 @@ commands:
             dest: json
             type: bool
             action: store_true
+          - name: "--with-labels"
+            help: "Print node labels"
+            dest: with_labels
+            type: bool
+            action: store_true
       - name: get
         help: "Gets a storage node's information"
         arguments:
