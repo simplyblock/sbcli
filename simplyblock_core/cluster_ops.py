@@ -364,8 +364,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Deploying helm stack > Done")
 
         k8s_config.load_kube_config()
-        apps_v1 = k8s_client.AppsV1Api()
-        apps_v1.patch_namespaced_service(
+        v1 = k8s_client.CoreV1Api()
+        v1.patch_namespaced_service(
             name=constants.FDB_SERVICE_NAME,
             namespace=constants.K8S_NAMESPACE,
             body=constants.fdb_service_patch
