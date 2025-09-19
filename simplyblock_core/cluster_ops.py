@@ -374,7 +374,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info(f"Service '{constants.FDB_SERVICE_NAME}' patched successfully in namespace '{constants.K8S_NAMESPACE}'.")
 
         logger.info("Retrieving foundationdb connection string...")
-        fdb_cluster_string = utils.get_fdb_cluster_string()
+        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
 
         db_connection = f"{fdb_cluster_string}@{dev_ip}:4500"
         scripts.set_db_config(db_connection)
