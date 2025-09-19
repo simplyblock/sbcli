@@ -540,46 +540,98 @@ class SshUtils:
         output, error = self.exec_command(node=node, command=cmd)
         return output
     
-    def stop_spdk_process(self, node, rpc_port):
-        """Stops spdk process and waits until spdk_* containers are either exited or no longer listed.
-        
-        If containers are not killed within 20 seconds, the kill command is retried.
-        A maximum of 50 kill attempts is allowed.
-
-        Args:
-            node (str): Node IP
+    def stop_spdk_process(self,node, rpc_port, k8s=False,
+                            namespace="simplyblock", kubecontext=None, timeout=180):
         """
+        Stops SPDK process:
+        - k8s=True  -> deletes pod 'snode-spdk-pod-{rpc_port}' locally with kubectl and waits until deleted
+        - k8s=False -> hits your local snode kill endpoint over SSH (existing behavior)
+
+        Returns:
+            str: last command's stdout (best-effort)
+        """
+        def _fmt(cmd_argv):
+            # Pretty shell-equivalent string for logs
+            def q(s): return s if s.isalnum() or s in "-_./:={}" else repr(s)
+            return " ".join(q(x) for x in cmd_argv)
+
+        def run_local(cmd_argv, check=False):
+            self.logger.info(f"[kubectl] { _fmt(cmd_argv) }")
+            proc = subprocess.run(
+                cmd_argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=check
+            )
+            if proc.stdout.strip():
+                self.logger.info(f"[stdout] {proc.stdout.strip()}")
+            if proc.stderr.strip():
+                self.logger.info(f"[stderr] {proc.stderr.strip()}")
+            if check and proc.returncode != 0:
+                raise RuntimeError(f"Command failed ({proc.returncode}): {_fmt(cmd_argv)}\nSTDERR: {proc.stderr.strip()}")
+            return proc.stdout.strip(), proc.stderr.strip(), proc.returncode
+
+        if k8s:
+            pod = f"snode-spdk-pod-{rpc_port}"
+            base = ["kubectl"]
+            if kubecontext:
+                base += ["--context", kubecontext]
+
+            # 1) Graceful delete
+            delete_cmd = base + ["-n", namespace, "delete", "pod", pod, "--ignore-not-found"]
+            out, err, rc = run_local(delete_cmd)
+
+            # 2) Wait for deletion (fast path)
+            wait_cmd = base + ["-n", namespace, "wait", "--for=delete", f"pod/{pod}", "--timeout=60s"]
+            _, wait_err, wait_rc = run_local(wait_cmd)
+
+            if wait_rc != 0:
+                # 3) Poll until gone (up to timeout)
+                start = time.time()
+                while time.time() - start < timeout:
+                    get_cmd = base + ["-n", namespace, "get", "pod", pod, "-o", "name"]
+                    gout, gerr, grc = run_local(get_cmd)
+                    if grc != 0 and ("NotFound" in gerr or "not found" in gerr.lower()):
+                        return out or gout
+                    if gout.strip() == "":
+                        return out
+                    time.sleep(2)
+
+                # 4) Force delete + short wait
+                force_cmd = base + ["-n", namespace, "delete", "pod", pod, "--grace-period=0", "--force", "--ignore-not-found"]
+                fout, ferr, frc = run_local(force_cmd)
+                run_local(base + ["-n", namespace, "wait", "--for=delete", f"pod/{pod}", "--timeout=30s"])
+                return fout or out
+
+            return out  # deleted during kubectl wait
+
+        # -------- non-k8s (existing Docker path over SSH) --------
         max_attempts = 50
         attempt = 0
-
         kill_cmd = f"curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
+        self.logger.info(f"[ssh] {kill_cmd}")
         output, error = self.exec_command(node=node, command=kill_cmd)
-        # record the time when the kill command was last sent
         last_kill_time = time.time()
 
         while attempt < max_attempts:
-            # Command to check the status of containers matching "spdk_"
             status_cmd = "sudo docker ps -a --filter 'name=spdk_' --format '{{.Status}}'"
+            self.logger.info(f"[ssh] {status_cmd}")
             status_output, err = self.exec_command(node=node, command=status_cmd)
             status_output = status_output.strip()
 
-            # If no containers found, exit the loop
             if not status_output:
                 break
 
-            statuses = status_output.splitlines()
-            # Determine if every container is in an "Exited" state (e.g., "Exited (0)")
-            all_exited = all("Exited" in status for status in statuses)
-            if all_exited:
+            if all("Exited" in s for s in status_output.splitlines()):
                 break
 
-            # If 20 seconds have passed since the last kill command, retry the kill command.
             if time.time() - last_kill_time >= 20:
+                self.logger.info(f"[ssh] retry kill: {kill_cmd}")
                 output, error = self.exec_command(node=node, command=kill_cmd)
                 last_kill_time = time.time()
                 attempt += 1
 
-            # Wait a short period before checking again
             time.sleep(2)
 
         return output
