@@ -1151,7 +1151,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         if records:
             size_used = records[0].size_used
 
-        data.append({
+        lvol_data = {
             "Id": lvol.uuid,
             "Name": lvol.lvol_name,
             "Size": utils.humanbytes(lvol.size),
@@ -1164,9 +1164,11 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
-        })
+        }
         if lvol.ndcs or lvol.npcs:
-            data.append({"Mode": f"{lvol.ndcs}x{lvol.npcs}"})
+            lvol_data.update({"Mode": f"{lvol.ndcs}x{lvol.npcs}"})
+        data.append(lvol_data)
+
     for snap, count in snap_dict.items():
         ref_snap = db_controller.get_snapshot_by_id(snap)
         ref_snap.ref_count = count
