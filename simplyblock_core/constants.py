@@ -243,3 +243,23 @@ prometheus_patch = {
         "replicas": 3,
     }
 }
+
+cluster_labels_example = {
+  "regions": [
+    {
+      "name": "Europe",
+      "label": "eu",
+      "data_centers": [
+        {
+          "name": "Frankfurt DC1",
+          "label": "eu-fra1",
+          "racks": [
+            { "name": "Rack 01",
+              "label": "rack-01",
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

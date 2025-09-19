@@ -127,6 +127,9 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap')
+        argument = subcommand.add_argument('--region-label', help='Region label from cluster labels, example: eu', type=str, dest='region_label')
+        argument = subcommand.add_argument('--data-center-label', help='Data center label from region defined in --region-label, example: eu-fra1', type=str, dest='dc_label')
+        argument = subcommand.add_argument('--rack-label', help='rack label from data center defined in --data-center-label, example: rack-01', type=str, dest='rack_label')
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
@@ -373,6 +376,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=32, dest='qpair_count')
         argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
+        argument = subcommand.add_argument('--labels', help='Regions data (labels) either as json or path to json file', type=str, dest='labels')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -402,6 +406,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, default: true', type=bool, default=False, dest='enable_qos')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
+        argument = subcommand.add_argument('--labels', help='Regions data (labels) either as json or path to json file', type=str, dest='labels')
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')

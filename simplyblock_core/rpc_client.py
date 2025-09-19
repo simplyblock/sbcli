@@ -514,7 +514,7 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=True):
+                            full_page_unmap=True, physical_labels=""):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -556,6 +556,8 @@ class RPCClient:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
+        if physical_labels:
+            params["physical_labels"] = physical_labels
         return self._request("bdev_distrib_create", params)
 
     def bdev_lvol_delete_lvstore(self, name):

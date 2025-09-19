@@ -218,11 +218,33 @@ def parse_protocols(input_str: str):
         "rdma": "rdma" in parts,
     }
 
+
+def validate_labels_dict(labels):
+    if not isinstance(labels, dict):
+        return False
+    if "regions" not in labels or not labels["regions"]:
+        return False
+    for region in labels["regions"]:
+        if "label" not in region or not region["label"]:
+            return False
+        if "data_centers" not in region or not region["data_centers"]:
+            return False
+        for data_center in region["data_centers"]:
+            if "label" not in data_center or not data_center["label"]:
+                return False
+            if "racks" not in data_center or not data_center["racks"]:
+                return False
+            for rack in data_center["racks"]:
+                if "label" not in rack or not rack["label"]:
+                    return False
+    return True
+
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name,
-                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node) -> str:
+                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, labels) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -230,6 +252,23 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if ingress_host_source == "dns":
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns")
+
+    if labels:
+        try:
+            labels = json.loads(labels)
+        except Exception as e:
+            logger.warning(f"Failed to parse labels as string, trying to open as file")
+            try:
+                with open(labels, "r") as f:
+                    labels = json.loads(f.read())
+            except Exception as e:
+                msg = "Failed to parse labels as json file or json string"
+                logger.error(msg)
+                raise ValueError(msg)
+        if not validate_labels_dict(labels):
+            msg = f"Failed to parse labels, example value: {constants.cluster_labels_example}"
+            logger.error(msg)
+            raise ValueError(msg)
 
     logger.info("Installing dependencies...")
     scripts.install_deps(mode)
@@ -331,6 +370,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
+    if labels:
+        cluster.labels = labels
 
     if mode == "docker": 
         if not disable_monitoring:
@@ -439,7 +480,8 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node, name) -> str:
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node,
+                name, labels) -> str:
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -447,6 +489,23 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+
+    if labels:
+        try:
+            labels = json.loads(labels)
+        except Exception as e:
+            logger.warning(f"Failed to parse labels as string, trying to open as file")
+            try:
+                with open(labels, "r") as f:
+                    labels = json.loads(f.read())
+            except Exception as e:
+                msg = "Failed to parse labels as json file or json string"
+                logger.error(msg)
+                raise ValueError(msg)
+        if not validate_labels_dict(labels):
+            msg = f"Failed to parse labels, example value: {constants.cluster_labels_example}"
+            logger.error(msg)
+            raise ValueError(msg)
 
     logger.info("Adding new cluster")
     cluster = Cluster()
@@ -484,6 +543,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cluster.prov_cap_warn = prov_cap_warn
     if prov_cap_crit and prov_cap_crit > 0:
         cluster.prov_cap_crit = prov_cap_crit
+    if labels:
+        cluster.labels = labels
 
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())

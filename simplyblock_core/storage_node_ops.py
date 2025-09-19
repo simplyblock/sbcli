@@ -799,12 +799,34 @@ def ifc_is_roce(nic):
                     return True
     return False
 
+
+def validate_node_labels(region_label, dc_label, rack_label, cluster_labels):
+    all_regions = [r['label'] for r in cluster_labels['regions']]
+    if region_label not in all_regions:
+        logger.error(f'Invalid region label: {region_label}')
+        return False
+
+    for region in cluster_labels['regions']:
+        if region['label'] == region_label:
+            data_centers = [r['label'] for r in region['data_centers']]
+            if dc_label not in data_centers:
+                logger.error(f'Invalid data center label: {dc_label}')
+                return False
+            for data_center in region['data_centers']:
+                if data_center['label'] == dc_label:
+                    racks = [r['label'] for r in data_center['racks']]
+                    if rack_label not in racks:
+                        logger.error(f'Invalid rack label: {rack_label}')
+                        return False
+    return True
+
+
 def add_node(cluster_id, node_addr, iface_name,data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3):
+             partition_size="", ha_jm_count=3, region_label="", dc_label="", rack_label=""):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1112,6 +1134,23 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             snode.physical_label = 0
         else:
             snode.physical_label = get_next_physical_device_order(snode)
+
+        if region_label:
+            if not validate_node_labels(region_label, dc_label, rack_label):
+                logger.error("Invalid node labels")
+                return False
+            node_labels = {}
+            for region in cluster.labels['regions']:
+                if region['label'] == region_label:
+                    for data_center in region['data_centers']:
+                        if data_center['label'] == dc_label:
+                            for rack in data_center['racks']:
+                                if rack['label'] == rack_label:
+                                    data_center["racks"] = [rack]
+                                    region["data_centers"] = [data_center]
+                                    node_labels = {"regions": [region]}
+
+            snode.labels = node_labels
 
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent

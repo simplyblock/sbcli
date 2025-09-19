@@ -134,6 +134,9 @@ class CLIWrapperBase:
         enable_ha_jm = args.enable_ha_jm
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
+        region_label = args.region_label
+        dc_label = args.dc_label
+        rack_label = args.rack_label
 
         out = storage_ops.add_node(
             cluster_id=cluster_id,
@@ -153,6 +156,9 @@ class CLIWrapperBase:
             id_device_by_nqn=args.id_device_by_nqn,
             partition_size=args.partition_size,
             ha_jm_count=ha_jm_count,
+            region_label=region_label,
+            dc_label=dc_label,
+            rack_label=rack_label,
         )
 
         return out
@@ -646,6 +652,7 @@ class CLIWrapperBase:
         distr_chunk_bs = args.distr_chunk_bs
         ha_type = args.ha_type
         name = args.name
+        labels = args.labels
 
         enable_node_affinity = args.enable_node_affinity
         qpair_count = args.qpair_count
@@ -658,7 +665,8 @@ class CLIWrapperBase:
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node, name)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node,
+            name, labels)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -694,6 +702,7 @@ class CLIWrapperBase:
         dns_name = args.dns_name
         is_single_node = args.is_single_node
         fabric = args.fabric
+        labels = args.labels
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
@@ -701,7 +710,7 @@ class CLIWrapperBase:
             ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, 
-            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node)
+            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, labels)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
