@@ -363,15 +363,15 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                                 str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
         logger.info("Deploying helm stack > Done")
 
-        k8s_config.load_kube_config()
-        v1 = k8s_client.CoreV1Api()
-        v1.patch_namespaced_service(
-            name=constants.FDB_SERVICE_NAME,
-            namespace=constants.K8S_NAMESPACE,
-            body=constants.fdb_service_patch
-        )
+        # k8s_config.load_kube_config()
+        # v1 = k8s_client.CoreV1Api()
+        # v1.patch_namespaced_service(
+        #     name=constants.FDB_SERVICE_NAME,
+        #     namespace=constants.K8S_NAMESPACE,
+        #     body=constants.fdb_service_patch
+        # )
 
-        logger.info(f"Service '{constants.FDB_SERVICE_NAME}' patched successfully in namespace '{constants.K8S_NAMESPACE}'.")
+        # logger.info(f"Service '{constants.FDB_SERVICE_NAME}' patched successfully in namespace '{constants.K8S_NAMESPACE}'.")
 
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
