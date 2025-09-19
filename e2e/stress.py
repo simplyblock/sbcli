@@ -111,7 +111,8 @@ def main():
                         npcs=args.npcs,
                         bs=args.bs,
                         chunk_bs=args.chunk_bs,
-                        k8s_run=args.run_k8s)
+                        k8s_run=args.run_k8s,
+                        run_talos=args.run_talos)
         try:
             test_obj.setup()
             if i == 0:
