@@ -536,8 +536,10 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     for node in online_nodes:
         if cluster.is_single_node or len(online_nodes) <= 2:
             node.physical_label = 0
-        else:
+        elif node.physical_label == 0:
             node.physical_label = storage_node_ops.get_next_physical_device_order(node)
+        for dev in node.nvme_devices:
+            dev.physical_label = node.physical_label
         node.write_to_db()
 
     records = db_controller.get_cluster_capacity(cluster)
