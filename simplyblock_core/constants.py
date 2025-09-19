@@ -251,8 +251,8 @@ fdb_service_patch = {
         "ports": [
             {
                 "name": "fdb",
-                "port": 4500,
-                "targetPort": 4500,
+                "port": 4501,
+                "targetPort": 4501,
                 "protocol": "TCP"
             }
         ]
