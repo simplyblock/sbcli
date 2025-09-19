@@ -448,8 +448,8 @@ class SbcliUtils:
             "max_w_mbytes": str(max_w_mbytes),
         }
         if distr_ndcs != 0 and distr_npcs != 0:
-            body["ndcs"] = str(distr_ndcs)
-            body["npcs"] = str(distr_ndcs)
+            body["ndcs"] = int(distr_ndcs)
+            body["npcs"] = int(distr_ndcs)
             body["bs"] = str(distr_bs)
             body["chunk_bs"] = str(distr_chunk_bs)
         if host_id:
