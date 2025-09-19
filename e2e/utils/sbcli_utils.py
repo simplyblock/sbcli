@@ -1,5 +1,3 @@
-
-import json
 import requests
 from http import HTTPStatus
 from logger_config import setup_logger
@@ -488,7 +486,12 @@ class SbcliUtils:
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
                 break
             if attempt % 12 == 0:
-                cur_state = self.get_lvol_details(lvol_id=lvol_id)[0]["status"]
+                try:
+                    cur_state = self.get_lvol_details(lvol_id=lvol_id)[0]["status"]
+                except Exception as _:
+                    self.logger.info(f"Lvol {lvol_name} is not in the lvol list as error. Checking again!")
+                    lvols = self.list_lvols()
+                    continue
                 if cur_state == "online":
                     self.logger.info(f"Lvol {lvol_name} in online state. Retrying Delete!")
                     data = self.delete_request(api_url=f"/lvol/{lvol_id}")

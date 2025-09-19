@@ -29,7 +29,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 20
+        self.total_lvols = 40
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
@@ -801,7 +801,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         if attempt >= 30:
                             raise Exception("FIO not killed on clone")
                         attempt += 1
-                        sleep_n_sec(10)
+                        sleep_n_sec(20)
                     
                     sleep_n_sec(10)
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
@@ -839,7 +839,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 if attempt >= 30:
                     raise Exception("FIO not killed on lvols")
                 attempt += 1
-                sleep_n_sec(10)
+                sleep_n_sec(20)
 
             sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")

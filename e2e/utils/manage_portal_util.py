@@ -45,7 +45,7 @@ ENVIRONMENTS_BY_SUFFIX = {
     ".66":  "7cf92329-67fd-489c-875d-4a2f9d7959e1",  # lab-small-07
     ".81":  "519cab3a-1f9f-421a-a99e-2436a8a82dd4",  # lab-small-08
     ".146": "36da12fe-1710-42ff-b457-1b525d296504",  # lab-small-09
-    # "AWS": "57ac99d9-cab7-4f7c-b841-b88f09ab0d43",
+    "AWS": "57ac99d9-cab7-4f7c-b841-b88f09ab0d43",
     # "GCP": "b2801ab7-b1bd-48d2-84a1-54580fbef478",
 }
 
@@ -59,12 +59,12 @@ def resolve_environment_id_from_ip(mgmt_ip: str) -> Optional[str]:
     try:
         last_octet = mgmt_ip.strip().split(".")[-1]
         suffix = f".{last_octet}"
-        return ENVIRONMENTS_BY_SUFFIX.get(suffix)
+        return ENVIRONMENTS_BY_SUFFIX.get(suffix, ENVIRONMENTS_BY_SUFFIX["AWS"])
     except Exception:
         return None
 
 def detect_fe_be_tags(ssh_obj, client_ip: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-    cmd = "docker images --digests --format '{{.Repository}} {{.Tag}} {{.Digest}}'"
+    cmd = "sudo docker images --digests --format '{{.Repository}} {{.Tag}} {{.Digest}}'"
     out, _ = ssh_obj.exec_command(client_ip, cmd)
 
     fe_branch = fe_commit = be_branch = be_commit = None

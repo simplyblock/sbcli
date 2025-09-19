@@ -72,9 +72,9 @@ class TestSingleNodeFailure(TestClusterBase):
 
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
         for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+            self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
 
-        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
         disk_use = None
         self.logger.info("Initial vs final disk:")
         self.logger.info(f"Initial: {initial_devices}")
@@ -84,15 +84,15 @@ class TestSingleNodeFailure(TestClusterBase):
                 self.logger.info(f"Using disk: /dev/{device.strip()}")
                 disk_use = f"/dev/{device.strip()}"
                 break
-        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.unmount_path(node=self.client_machines[0],
                                   device=disk_use)
-        self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
+        self.ssh_obj.format_disk(node=self.client_machines[0],
                                  device=disk_use)
-        self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.mount_path(node=self.client_machines[0],
                                 device=disk_use,
                                 mount_path=self.mount_path)
 
-        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, self.mount_path, self.log_path,),
+        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.client_machines[0], None, self.mount_path, self.log_path,),
                                        kwargs={"name": "fio_run_1",
                                                "runtime": 500,
                                                "debug": self.fio_debug,
@@ -222,7 +222,7 @@ class TestSingleNodeFailure(TestClusterBase):
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
         
-        self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+        self.common_utils.manage_fio_threads(node=self.client_machines[0],
                                                         threads=[fio_thread1],
                                                         timeout=1000)
         
@@ -232,8 +232,8 @@ class TestSingleNodeFailure(TestClusterBase):
         snapshot_id_2 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                      snapshot_name=f"{self.snapshot_name}_2")
         
-        lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
-        original_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
+        lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=self.mount_path)
+        original_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
 
         clone_mount_file = f"{self.mount_path}_cl"
 
@@ -245,12 +245,12 @@ class TestSingleNodeFailure(TestClusterBase):
                                snapshot_id=snapshot_id_2,
                                clone_name=f"{self.lvol_name}_cl_2")
         
-        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_1")
         for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+            self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
         
-        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
         disk_use = None
         self.logger.info("Initial vs final disk:")
         self.logger.info(f"Initial: {initial_devices}")
@@ -260,18 +260,18 @@ class TestSingleNodeFailure(TestClusterBase):
                 self.logger.info(f"Using disk: /dev/{device.strip()}")
                 disk_use = f"/dev/{device.strip()}"
                 break
-        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.unmount_path(node=self.client_machines[0],
                                   device=disk_use)
-        self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.mount_path(node=self.client_machines[0],
                                 device=disk_use,
                                 mount_path=f"{clone_mount_file}_1")
         
         initial_devices = final_devices
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_2")
         for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+            self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
         
-        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
         disk_use = None
         self.logger.info("Initial vs final disk:")
         self.logger.info(f"Initial: {initial_devices}")
@@ -281,13 +281,13 @@ class TestSingleNodeFailure(TestClusterBase):
                 self.logger.info(f"Using disk: /dev/{device.strip()}")
                 disk_use = f"/dev/{device.strip()}"
                 break
-        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.unmount_path(node=self.client_machines[0],
                                   device=disk_use)
-        self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.mount_path(node=self.client_machines[0],
                                 device=disk_use,
                                 mount_path=f"{clone_mount_file}_2")
 
-        self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
+        self.common_utils.validate_fio_test(node=self.client_machines[0],
                                             log_file=self.log_path)
         
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
@@ -296,8 +296,8 @@ class TestSingleNodeFailure(TestClusterBase):
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
                                      new_size="30G")
         
-        clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=f"{clone_mount_file}_2")
-        final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
+        clone_files = self.ssh_obj.find_files(self.client_machines[0], directory=f"{clone_mount_file}_2")
+        final_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], clone_files)
 
         self.logger.info(f"Original checksum: {original_checksum}")
         self.logger.info(f"Final checksum: {final_checksum}")
@@ -311,8 +311,8 @@ class TestSingleNodeFailure(TestClusterBase):
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
                                      new_size="30G")
 
-        lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=self.mount_path)
-        final_lvl_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
+        lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=self.mount_path)
+        final_lvl_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
         final_lvl_checksum = set(final_lvl_checksum.values())
 
         assert original_checksum == final_lvl_checksum, "Checksum mismatch for lvol before and after clone"
@@ -461,14 +461,14 @@ class TestHASingleNodeFailure(TestClusterBase):
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
 
-        end_time = self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+        end_time = self.common_utils.manage_fio_threads(node=self.client_machines[0],
                                                         threads=self.fio_threads,
                                                         timeout=1000)
 
         for i in range(3):
             lvol_name = f"LVOL_{i}"
 
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],
+            self.common_utils.validate_fio_test(node=self.client_machines[0],
                                                 log_file=self.log_path+f"_{lvol_name}")
 
             total_fio_runtime = end_time - self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]
@@ -494,7 +494,7 @@ class TestHASingleNodeFailure(TestClusterBase):
             host_id=host_id
         )
 
-        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
 
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
@@ -503,9 +503,9 @@ class TestHASingleNodeFailure(TestClusterBase):
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
 
         for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+            self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
 
-        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
         disk_use = None
         self.logger.info("Initial vs final disk:")
         self.logger.info(f"Initial: {initial_devices}")
@@ -515,16 +515,16 @@ class TestHASingleNodeFailure(TestClusterBase):
                 self.logger.info(f"Using disk: /dev/{device.strip()}")
                 disk_use = f"/dev/{device.strip()}"
                 break
-        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.unmount_path(node=self.client_machines[0],
                                   device=disk_use)
-        self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
+        self.ssh_obj.format_disk(node=self.client_machines[0],
                                  device=disk_use, fs_type='xfs')
-        self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+        self.ssh_obj.mount_path(node=self.client_machines[0],
                                 device=disk_use,
                                 mount_path=mount_path)
 
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test,
-                                       args=(self.mgmt_nodes[0], None, mount_path, log_path,),
+                                       args=(self.client_machines[0], None, mount_path, log_path,),
                                        kwargs={"name": f"fio_run_{lvol_name}",
                                                "runtime": self.fio_runtime,
                                                "debug": self.fio_debug})
