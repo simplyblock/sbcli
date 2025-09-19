@@ -1910,3 +1910,21 @@ def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[
             return ip, iface
 
     return None  
+
+def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
+    config.load_kube_config()
+    v1 = client.CoreV1Api()
+
+    try:
+        cm = v1.read_namespaced_config_map(configmap_name, namespace)
+        cluster_file = cm.data.get("cluster-file") if cm.data else None
+        if cluster_file:
+            prefix = cluster_file.split("@", 1)[0]
+            logger.info(f"fdb cluster connection string: {prefix}")
+            return prefix
+        else:
+            logger.info("cluster-file not found in ConfigMap.")
+            return None
+    except client.exceptions.ApiException as e:
+        logger.error(f"Failed to read ConfigMap: {e}")
+        return None

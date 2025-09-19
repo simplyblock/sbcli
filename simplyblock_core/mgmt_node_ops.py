@@ -157,6 +157,10 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
                         logger.info(f"Container status: {status}, Is Running: {is_running}")
                     break
 
+            logger.info("Configuring Double DB...")
+            time.sleep(3)
+            scripts.set_db_config_double()
+            
         elif mode == "kubernetes":
             config.load_kube_config()
             v1 = k8s_client.CoreV1Api()
@@ -236,10 +240,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
                         logger.info("pod is not running, waiting...")
                         time.sleep(3)
                         retries -= 1
-                            
-        logger.info("Configuring Double DB...")
-        time.sleep(3)
-        scripts.set_db_config_double()
+
 
     logger.info("Node joined the cluster")
     return node_id

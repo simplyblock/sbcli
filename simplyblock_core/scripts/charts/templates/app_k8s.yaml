@@ -164,8 +164,6 @@ spec:
         - name: FLASK_ENV
           value: "production"
         volumeMounts:
-        # - name: fdb-config
-        # #   mountPath: /etc/foundationdb
         - name: fdb-cluster-file
           mountPath: /etc/foundationdb/fdb.cluster
           subPath: fdb.cluster
@@ -177,9 +175,6 @@ spec:
             cpu: "500m"
             memory: "2Gi"
       volumes:
-      # - name: fdb-config
-      #   hostPath:
-      #     path: /var/foundationdb
       - name: fdb-cluster-file
         configMap:
           name: simplyblock-fdb-cluster-config
@@ -218,8 +213,9 @@ spec:
               name: simplyblock-config
               key: LOG_LEVEL
         volumeMounts:
-        - name: fdb-config
-          mountPath: /etc/foundationdb
+        - name: fdb-cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+          subPath: fdb.cluster
         resources:
           requests:
             cpu: "100m"
@@ -228,9 +224,12 @@ spec:
             cpu: "250m"
             memory: "1Gi"
       volumes:
-      - name: fdb-config
-        hostPath:
-          path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
       
 ---
 apiVersion: apps/v1
@@ -266,8 +265,9 @@ spec:
                 name: simplyblock-config
                 key: LOG_LEVEL
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -276,9 +276,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 apiVersion: apps/v1
@@ -312,8 +315,9 @@ spec:
                 name: simplyblock-config
                 key: LOG_LEVEL
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -322,9 +326,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 apiVersion: apps/v1
@@ -358,8 +365,9 @@ spec:
                 name: simplyblock-config
                 key: LOG_LEVEL
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -368,9 +376,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 apiVersion: apps/v1
@@ -404,8 +415,9 @@ spec:
               name: simplyblock-config
               key: LOG_LEVEL
         volumeMounts:
-        - name: foundationdb
-          mountPath: /etc/foundationdb
+        - name: fdb-cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+          subPath: fdb.cluster
         resources:
           requests:
             cpu: "100m"
@@ -414,9 +426,12 @@ spec:
             cpu: "250m"
             memory: "1Gi"
       volumes:
-      - name: foundationdb
-        hostPath:
-          path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 apiVersion: apps/v1
@@ -450,8 +465,9 @@ spec:
               name: simplyblock-config
               key: LOG_LEVEL
         volumeMounts:
-        - mountPath: /etc/foundationdb
-          name: foundationdb
+        - name: fdb-cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+          subPath: fdb.cluster
         resources:
           requests:
             cpu: "100m"
@@ -460,9 +476,12 @@ spec:
             cpu: "250m"
             memory: "1Gi"
       volumes:
-      - name: foundationdb
-        hostPath:
-          path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 apiVersion: apps/v1
@@ -496,8 +515,9 @@ spec:
               name: simplyblock-config
               key: LOG_LEVEL
         volumeMounts:
-        - mountPath: /etc/foundationdb
-          name: foundationdb
+        - name: fdb-cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+          subPath: fdb.cluster
         resources:
           requests:
             cpu: "100m"
@@ -506,9 +526,12 @@ spec:
             cpu: "250m"
             memory: "1Gi"
       volumes:
-      - name: foundationdb
-        hostPath:
-          path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 apiVersion: apps/v1
@@ -542,8 +565,9 @@ spec:
                 name: simplyblock-config
                 key: LOG_LEVEL
         volumeMounts:
-        - mountPath: /etc/foundationdb
-          name: foundationdb
+        - name: fdb-cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+          subPath: fdb.cluster
         resources:
           requests:
             cpu: "100m"
@@ -552,9 +576,12 @@ spec:
             cpu: "250m"
             memory: "1Gi"
       volumes:
-      - name: foundationdb
-        hostPath:
-          path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 apiVersion: apps/v1
@@ -588,8 +615,9 @@ spec:
               name: simplyblock-config
               key: LOG_LEVEL
         volumeMounts:
-        - mountPath: /etc/foundationdb
-          name: foundationdb
+        - name: fdb-cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+          subPath: fdb.cluster
         resources:
           requests:
             cpu: "100m"
@@ -598,9 +626,12 @@ spec:
             cpu: "250m"
             memory: "1Gi"
       volumes:
-      - name: foundationdb
-        hostPath:
-          path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -633,8 +664,9 @@ spec:
               name: simplyblock-config
               key: LOG_LEVEL
         volumeMounts:
-        - mountPath: /etc/foundationdb
-          name: foundationdb
+        - name: fdb-cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+          subPath: fdb.cluster
         resources:
           requests:
             cpu: "100m"
@@ -643,9 +675,12 @@ spec:
             cpu: "250m"
             memory: "1Gi"
       volumes:
-      - name: foundationdb
-        hostPath:
-          path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -680,8 +715,9 @@ spec:
             - name: LOG_DELETION_INTERVAL
               value: "${LOG_DELETION_INTERVAL}"
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -690,9 +726,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 apiVersion: apps/v1
@@ -726,8 +765,9 @@ spec:
                   name: simplyblock-config
                   key: LOG_LEVEL
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -736,9 +776,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 apiVersion: apps/v1
@@ -772,8 +815,9 @@ spec:
                   name: simplyblock-config
                   key: LOG_LEVEL
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -782,9 +826,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -817,8 +864,9 @@ spec:
                   name: simplyblock-config
                   key: LOG_LEVEL
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -827,9 +875,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -860,8 +911,9 @@ spec:
                   name: simplyblock-config
                   key: LOG_LEVEL
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -870,9 +922,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -905,8 +960,9 @@ spec:
                   name: simplyblock-config
                   key: LOG_LEVEL
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -915,9 +971,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -950,8 +1009,9 @@ spec:
                   name: simplyblock-config
                   key: LOG_LEVEL
           volumeMounts:
-            - name: foundationdb
-              mountPath: /etc/foundationdb
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
           resources:
             requests:
               cpu: "100m"
@@ -960,9 +1020,12 @@ spec:
               cpu: "250m"
               memory: "1Gi"
       volumes:
-        - name: foundationdb
-          hostPath:
-            path: /var/foundationdb
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 
 ---
 

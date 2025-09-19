@@ -16,9 +16,6 @@ log:
   level: "${LOG_LEVEL}"
   maxNumberIndex: "${MAX_NUMBER_OF_INDICES}"
 
-foundationdb:
-  fdbClusterFileContent: "${FDB_CLUSTER_FILE_CONTENTS}"
-
 grafana:
   endpoint: "${GRAFANA_ENDPOINT}"
   contactPoint: "${CONTACT_POINT}"

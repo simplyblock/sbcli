@@ -165,6 +165,7 @@ OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongodb"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
 PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
+FDB_SERVICE_NAME = "simplyblock-fdb-cluster"
 
 os_env_patch = [
     {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},
@@ -241,5 +242,18 @@ graylog_patch = {
 prometheus_patch = {
     "spec": {
         "replicas": 3,
+    }
+}
+
+fdb_service_patch = {
+    "spec": {
+        "ports": [
+            {
+                "name": "fdb",
+                "port": 4500,
+                "targetPort": 4500,
+                "protocol": "TCP"
+            }
+        ]
     }
 }

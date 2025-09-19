@@ -240,7 +240,6 @@ subjects:
 
 ##### cluster file #################
 ---
-
 apiVersion: apps.foundationdb.org/v1beta2
 kind: FoundationDBCluster
 metadata:
@@ -275,7 +274,10 @@ spec:
             resources:
               requests:
                 cpu: 100m
-                memory: 128Mi
+                memory: 512Mi
+            env:
+              - name: FDB_PORT
+                value: "4500"
             securityContext:
               runAsUser: 0
           - name: foundationdb-kubernetes-sidecar
