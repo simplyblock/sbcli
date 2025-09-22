@@ -141,6 +141,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-webappapi
     spec:
