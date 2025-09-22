@@ -802,23 +802,52 @@ def ifc_is_roce(nic):
 
 def validate_node_labels(region_label, dc_label, rack_label, cluster_labels):
     all_regions = [r['label'] for r in cluster_labels['regions']]
-    if region_label not in all_regions:
-        logger.error(f'Invalid region label: {region_label}')
-        return False
+    if region_label and region_label not in all_regions:
+        raise ValueError(f'Invalid region label: {region_label}')
+
+    if not region_label and not dc_label and rack_label:
+        for region in cluster_labels['regions']:
+            for data_center in region['data_centers']:
+                for placement in data_center['placement_groups']:
+                    if placement['label'] == rack_label:
+                        return region, data_center, placement
+
+    if not region_label and dc_label and not rack_label:
+        for region in cluster_labels['regions']:
+            for data_center in region['data_centers']:
+                if len(data_center['placement_groups']) == 1:
+                    return region, data_center, data_center['placement_groups'][0]
+                else:
+                    raise ValueError(f'Data center label: {dc_label}, has more than one placement group')
+
+    if  region_label and not dc_label and not rack_label:
+        for region in cluster_labels['regions']:
+            if region['label'] == region_label:
+                if len(region['data_centers']) == 1:
+                    data_center = region['data_centers'][0]
+                    if len(data_center['placement_groups']) == 1:
+                        return region, data_center, data_center['placement_groups'][0]
+                    else:
+                        raise ValueError(f'Data center label: {dc_label}, has more than one placement group')
+                else:
+                    raise ValueError(f'Region label: {region_label}, has more than one data center')
 
     for region in cluster_labels['regions']:
         if region['label'] == region_label:
             data_centers = [r['label'] for r in region['data_centers']]
             if dc_label not in data_centers:
-                logger.error(f'Invalid data center label: {dc_label}')
-                return False
+                raise ValueError(f'Invalid data center label: {dc_label}')
             for data_center in region['data_centers']:
                 if data_center['label'] == dc_label:
                     racks = [r['label'] for r in data_center['racks']]
                     if rack_label not in racks:
-                        logger.error(f'Invalid rack label: {rack_label}')
-                        return False
-    return True
+                        raise ValueError(f'Invalid rack label: {rack_label}')
+                    else:
+                        for rack in data_center['racks']:
+                            if rack['label'] == rack_label:
+                                return region, data_center, data_center['racks']
+
+    raise ValueError('Failed to parse node labels')
 
 
 def add_node(cluster_id, node_addr, iface_name,data_nics_list,
@@ -1135,22 +1164,16 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         else:
             snode.physical_label = get_next_physical_device_order(snode)
 
-        if region_label:
-            if not validate_node_labels(region_label, dc_label, rack_label):
+        if region_label or dc_label or rack_label:
+            try:
+                region, data_center, rack = validate_node_labels(region_label, dc_label, rack_label, cluster.labels)
+                data_center["racks"] = [rack]
+                region["data_centers"] = [data_center]
+                node_labels = {"regions": [region]}
+                snode.labels = node_labels
+            except Exception as e:
                 logger.error("Invalid node labels")
                 return False
-            node_labels = {}
-            for region in cluster.labels['regions']:
-                if region['label'] == region_label:
-                    for data_center in region['data_centers']:
-                        if data_center['label'] == dc_label:
-                            for rack in data_center['racks']:
-                                if rack['label'] == rack_label:
-                                    data_center["racks"] = [rack]
-                                    region["data_centers"] = [data_center]
-                                    node_labels = {"regions": [region]}
-
-            snode.labels = node_labels
 
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent

@@ -245,17 +245,20 @@ prometheus_patch = {
 }
 
 cluster_labels_example = {
+  "type": "REGION",
   "regions": [
     {
       "name": "Europe",
       "label": "eu",
-      "data_centers": [
+      "type": "DATA_CENTER",
+      "children": [
         {
           "name": "Frankfurt DC1",
           "label": "eu-fra1",
-          "racks": [
+          "type": "PLACEMENT_GROUP",
+          "children": [
             { "name": "Rack 01",
-              "label": "rack-01",
+              "label": "eu-fr-rack-01",
             }
           ]
         }
