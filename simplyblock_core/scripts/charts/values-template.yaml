@@ -40,15 +40,6 @@ mongodb:
   name: "simplyblock-mongodb"
   deployment_name: "simplyblock-mongodb"
   useStatefulSet: true
-  auth:
-    enabled: false
-  replicaCount: 1
-  persistence:
-    enabled: true
-    accessModes:
-      - ReadWriteOnce
-    storageClass: openebs-local-hostpath
-    size: 5Gi
   resources:
     requests:
       cpu: 100m

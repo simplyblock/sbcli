@@ -1,8 +1,8 @@
 apiVersion: mongodbcommunity.mongodb.com/v1
 kind: MongoDBCommunity
 metadata:
-  name: my-mongo
-  namespace: simplyblock
+  name: simplyblock-mongo
+  namespace: {{ .Release.Namespace }}
 spec:
   members: 3
   type: ReplicaSet
