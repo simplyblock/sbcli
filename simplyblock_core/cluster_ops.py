@@ -227,14 +227,14 @@ def validate_labels_dict(labels):
     for region in labels["regions"]:
         if "label" not in region or not region["label"]:
             return False
-        if "data_centers" not in region or not region["data_centers"]:
+        if "children" not in region or not region["children"]:
             return False
-        for data_center in region["data_centers"]:
+        for data_center in region["children"]:
             if "label" not in data_center or not data_center["label"]:
                 return False
-            if "racks" not in data_center or not data_center["racks"]:
+            if "children" not in data_center or not data_center["children"]:
                 return False
-            for rack in data_center["racks"]:
+            for rack in data_center["children"]:
                 if "label" not in rack or not rack["label"]:
                     return False
     return True
