@@ -1,0 +1,24 @@
+apiVersion: mongodbcommunity.mongodb.com/v1
+kind: MongoDBCommunity
+metadata:
+  name: my-mongo
+  namespace: simplyblock
+spec:
+  members: 3
+  type: ReplicaSet
+  version: "7.0.5"
+  persistent: true
+  statefulSet:
+    spec:
+      volumeClaimTemplates:
+        - metadata:
+            name: data-volume
+          spec:
+            accessModes: [ "ReadWriteOnce" ]
+            storageClassName: openebs-jiva
+            resources:
+              requests:
+                storage: 5Gi
+  security:
+    authentication:
+      modes: ["SCRAM"]

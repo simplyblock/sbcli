@@ -37,8 +37,8 @@ jiva:
     enabled: false
 
 mongodb:
-  architecture: replicaset
-  fullnameOverride: "simplyblock-mongodb"
+  name: "simplyblock-mongodb"
+  deployment_name: "simplyblock-mongodb"
   useStatefulSet: true
   auth:
     enabled: false
