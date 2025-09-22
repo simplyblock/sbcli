@@ -198,6 +198,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-storage-node-monitor
     spec:
@@ -248,6 +250,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-mgmt-node-monitor
     spec:
@@ -300,6 +304,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-lvol-stats-collector
     spec:
@@ -350,6 +356,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-main-distr-event-collector
     spec:
@@ -400,6 +408,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-capacity-and-stats-collector
     spec:
@@ -450,6 +460,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-capacity-monitor
     spec:
@@ -500,6 +512,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-health-check
     spec:
@@ -550,6 +564,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-device-monitor
     spec:
@@ -600,6 +616,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-lvol-monitor
     spec:
@@ -649,6 +667,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-snapshot-monitor
     spec:
@@ -698,6 +718,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-cleanupfdb
     spec:
@@ -750,6 +772,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-restart
     spec:
@@ -800,6 +824,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-migration
     spec:
@@ -849,6 +875,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-failed-migration
     spec:
@@ -896,6 +924,10 @@ spec:
       app: simplyblock-tasks-runner-cluster-status
   template:
     metadata:
+      annotations:
+        log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-cluster-status
     spec:
@@ -945,6 +977,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-new-device-migration
     spec:
@@ -994,6 +1028,8 @@ spec:
     metadata:
       annotations:
         log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-node-add-runner
     spec:
