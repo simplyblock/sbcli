@@ -78,5 +78,7 @@ rm -rf "$DIR"/charts/charts "$DIR"/charts/Chart.lock "$DIR"/charts/requirements.
   --namespace $K8S_NAMESPACE \
   --create-namespace
 
-/usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace $K8S_NAMESPACE --timeout=500s
-
+for kind in ds deploy sts; do
+  /usr/local/bin/kubectl get $kind -n "$K8S_NAMESPACE" -o name \
+  | xargs -r -n1 /usr/local/bin/kubectl rollout status -n "$K8S_NAMESPACE" --timeout=500s
+done
