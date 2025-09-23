@@ -226,6 +226,7 @@ spec:
   minimumUptimeSecondsForBounce: 60
   processCounts:
     cluster_controller: 1
+    log: 0 
     stateless: -1
   processes:
     general:
