@@ -7,7 +7,6 @@ spec:
   members: 3
   type: ReplicaSet
   version: "7.0.5"
-  persistent: true
   statefulSet:
     spec:
       volumeClaimTemplates:
@@ -22,3 +21,24 @@ spec:
   security:
     authentication:
       modes: ["SCRAM"]
+  users:
+    - name: my-user
+      db: admin
+      passwordSecretRef:
+        name: my-user-password
+      roles:
+        - name: clusterAdmin
+          db: admin
+        - name: userAdminAnyDatabase
+          db: admin
+      scramCredentialsSecretName: my-scram
+  additionalMongodConfig:
+    storage.wiredTiger.engineConfig.journalCompressor: zlib
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-user-password
+type: Opaque
+stringData:
+  password: {{ .Values.cluster.secret }}
