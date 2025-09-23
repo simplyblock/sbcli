@@ -209,30 +209,29 @@ mongodb_patch = {
     }
 }
 
-graylog_env_patch = [
-    {
-        "name": "GRAYLOG_MONGODB_URI",
-        "value": (
-            "mongodb://simplyblock-mongodb-headless:27017/graylog?replicaSet=rs0"
-            "mongodb://my-user:{{ .Values.cluster.secret }}@simplyblock-mongo-svc:27017/graylog?replicaSet=rs0"
-        )
-    }
-]
+# graylog_env_patch = [
+#     {
+#         "name": "GRAYLOG_MONGODB_URI",
+#         "value": (
+#             "mongodb://my-user:{{ .Values.cluster.secret }}@simplyblock-mongo-svc:27017/graylog?replicaSet=rs0"
+#         )
+#     }
+# ]
 
-graylog_patch = {
-    "spec": {
-        "template": {
-            "spec": {
-                "containers": [
-                    {
-                        "name": "graylog",
-                        "env": graylog_env_patch
-                    }
-                ]
-            }
-        }
-    }
-}
+# graylog_patch = {
+#     "spec": {
+#         "template": {
+#             "spec": {
+#                 "containers": [
+#                     {
+#                         "name": "graylog",
+#                         "env": graylog_env_patch
+#                     }
+#                 ]
+#             }
+#         }
+#     }
+# }
 
 prometheus_patch = {
     "spec": {

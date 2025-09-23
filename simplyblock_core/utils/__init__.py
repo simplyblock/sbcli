@@ -1928,3 +1928,31 @@ def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
     except client.exceptions.ApiException as e:
         logger.error(f"Failed to read ConfigMap: {e}")
         return None
+
+def build_graylog_patch(cluster_secret: str) -> dict:
+    graylog_env_patch = [
+        {
+            "name": "GRAYLOG_MONGODB_URI",
+            "value": (
+                f"mongodb://my-user:{cluster_secret}"
+                "@simplyblock-mongo-svc:27017/graylog"
+                "?replicaSet=rs0"
+            )
+        }
+    ]
+
+    graylog_patch = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "graylog",
+                            "env": graylog_env_patch
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    return graylog_patch

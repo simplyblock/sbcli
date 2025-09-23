@@ -197,10 +197,12 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             else:
                 raise TimeoutError("MongoDB pods did not become ready in time.")
 
+            graylog_patch = utils.build_graylog_patch(cluster_secret)
+            
             response = apps_v1.patch_namespaced_deployment(
                 name=constants.GRAYLOG_STATEFULSET_NAME,
                 namespace=constants.K8S_NAMESPACE,
-                body=constants.graylog_patch
+                body=graylog_patch
             )
 
             logger.info("Patched Graylog MongoDB URI for replicaset support")
