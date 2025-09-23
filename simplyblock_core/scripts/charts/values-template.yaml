@@ -26,9 +26,6 @@ image:
     tag: "${SIMPLYBLOCK_TAG}"
     pullPolicy: "Always"
 
-openebs:
-  enabled: true
-
 jiva:
   enabled: true
   openebsLocalpv:
@@ -39,7 +36,6 @@ jiva:
 mongodb:
   name: "simplyblock-mongodb"
   deployment_name: "simplyblock-mongodb"
-  useStatefulSet: true
   resources:
     requests:
       cpu: 100m
@@ -71,7 +67,7 @@ opensearch:
   antiAffinity: "hard"
   persistence:
     enabled: true
-    storageClass: openebs-local-hostpath
+    storageClass: openebs-jiva
     size: 10Gi
 
   resources:
@@ -136,7 +132,7 @@ prometheus:
     persistentVolume:
       enabled: true
       size: 5Gi
-      storageClass: openebs-local-hostpath
+      storageClass: openebs-jiva
     extraArgs:
       storage.tsdb.min-block-duration: 2h
       storage.tsdb.max-block-duration: 2h
