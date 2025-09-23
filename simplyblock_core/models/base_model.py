@@ -2,6 +2,7 @@
 import pprint
 
 import json
+import time
 from inspect import ismethod
 import sys
 from typing import Mapping, Type
@@ -124,17 +125,31 @@ class BaseModel(object):
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         if not kv_store:
             return []
-        try:
-            objects = []
-            prefix = self.get_db_id(id)
-            for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
-                objects.append(self.__class__().from_dict(json.loads(v)))
-            return objects
-        except Exception:
-            from simplyblock_core import utils
-            logger = utils.get_logger(__name__)
-            logger.exception('Error reading from FDB')
-            return []
+
+        from simplyblock_core import utils
+        logger = utils.get_logger(__name__)
+
+        retries = 3
+        delay = 1 
+
+        for attempt in range(1, retries + 1):
+            try:
+                objects = []
+                prefix = self.get_db_id(id)
+                for k, v in kv_store.get_range_startswith(
+                    prefix.strip().encode("utf-8"), limit=limit, reverse=reverse
+                ):
+                    objects.append(self.__class__().from_dict(json.loads(v)))
+                return objects
+
+            except Exception as e:
+                logger.warning(
+                    f"Attempt {attempt} failed while reading from FDB: {e}"
+                )
+                if attempt == retries:
+                    logger.exception("Error reading from FDB after retries")
+                    return []
+                time.sleep(delay)
 
     def get_last(self, kv_store):
         id = self.get_db_id(" ")
@@ -144,17 +159,31 @@ class BaseModel(object):
         return None
 
     def write_to_db(self, kv_store=None):
+        from simplyblock_core import utils
+        logger = utils.get_logger(__name__)
+
         if not kv_store:
             from simplyblock_core.db_controller import DBController
             kv_store = DBController().kv_store
-        try:
-            prefix = self.get_db_id()
-            st = json.dumps(self.to_dict())
-            kv_store.set(prefix.encode(), st.encode())
-            return True
-        except Exception as e:
-            print(f"Error Writing to FDB! {e}")
-            exit(1)
+
+        retries = 3
+        delay = 1
+
+        for attempt in range(1, retries + 1):
+            try:
+                prefix = self.get_db_id()
+                st = json.dumps(self.to_dict())
+                kv_store.set(prefix.encode(), st.encode())
+                return True
+
+            except Exception as e:
+                logger.warning(
+                    f"Attempt {attempt} failed while writing to FDB: {e}"
+                )
+                if attempt == retries:
+                    logger.exception("Error writing to FDB after retries")
+                    return False
+                time.sleep(delay)
 
     def remove(self, kv_store):
         prefix = self.get_db_id()
