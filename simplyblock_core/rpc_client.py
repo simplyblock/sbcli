@@ -1167,12 +1167,13 @@ class RPCClient:
         return self._request("jc_get_jm_status", params)
 
     def bdev_distrib_check_inflight_io(self, jm_vuid):
-        """
-        output: boolean value
-            'True': It means we have in-flight IOs in the target distrib group
-            'False': there is no in-flight IO
-        """
         params = {
             "jm_vuid": jm_vuid,
         }
         return self._request("bdev_distrib_check_inflight_io", params)
+
+    def alceml_set_qos_weights(self, qos_weights):
+        params = {
+            "qos_weights": qos_weights,
+        }
+        return self._request("alceml_set_qos_weights", params)

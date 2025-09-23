@@ -215,3 +215,5 @@ prometheus_patch = {
     }
 }
 
+
+qos_class_weights = [60, 15, 0, 10 , 5,  0, 10, 0 ]
