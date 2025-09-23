@@ -165,6 +165,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             config.load_kube_config()
             v1 = k8s_client.CoreV1Api()
             apps_v1 = k8s_client.AppsV1Api()
+            api_cr = k8s_client.CustomObjectsApi()
                         
             response = apps_v1.patch_namespaced_stateful_set(
                 name=constants.OS_STATEFULSET_NAME,
@@ -174,7 +175,10 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
             logger.info(f"Patched StatefulSet {constants.OS_STATEFULSET_NAME}: {response.status.replicas} replicas")
 
-            response = apps_v1.patch_namespaced_stateful_set(
+            response = api_cr.patch_namespaced_custom_object(
+                group="mongodbcommunity.mongodb.com",
+                version="v1",
+                plural="mongodbcommunity", 
                 name=constants.MONGODB_STATEFULSET_NAME,
                 namespace=constants.K8S_NAMESPACE,
                 body=constants.mongodb_patch

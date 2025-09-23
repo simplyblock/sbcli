@@ -1760,13 +1760,13 @@ def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
     ready_pods = 0
     pods = k8s_core_v1.list_namespaced_pod(
         namespace=namespace,
-        label_selector="app.kubernetes.io/name=mongodb"
+        label_selector="app=simplyblock-mongo-svc"
     ).items
 
     for pod in pods:
         statuses = pod.status.container_statuses or []
         for status in statuses:
-            if status.name == "mongodb" and status.ready:
+            if status.name == "mongod" and status.ready:
                 ready_pods += 1
 
     return ready_pods == expected_replicas

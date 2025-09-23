@@ -4,7 +4,7 @@ metadata:
   name: simplyblock-mongo
   namespace: {{ .Release.Namespace }}
 spec:
-  members: 3
+  members: 1
   type: ReplicaSet
   version: "7.0.5"
   statefulSet:

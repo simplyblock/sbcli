@@ -162,7 +162,7 @@ LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
 K8S_NAMESPACE = "simplyblock"
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
-MONGODB_STATEFULSET_NAME = "simplyblock-mongodb"
+MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
 PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
 FDB_SERVICE_NAME = "simplyblock-fdb-cluster"
@@ -203,16 +203,9 @@ os_patch = {
     }
 }
 
-mongodb_command_patch = [
-    "mongod",
-    "--replSet", "rs0",
-    "--bind_ip_all",
-    "--dbpath", "/bitnami/mongodb"
-]
-
 mongodb_patch = {
     "spec": {
-        "replicas": 3,
+        "members": 3,
     }
 }
 
@@ -221,6 +214,7 @@ graylog_env_patch = [
         "name": "GRAYLOG_MONGODB_URI",
         "value": (
             "mongodb://simplyblock-mongodb-headless:27017/graylog?replicaSet=rs0"
+            "mongodb://my-user:{{ .Values.cluster.secret }}@simplyblock-mongo-svc:27017/graylog?replicaSet=rs0"
         )
     }
 ]
