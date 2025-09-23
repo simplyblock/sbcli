@@ -184,7 +184,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
                 body=constants.mongodb_patch
             )
 
-            logger.info(f"Patched StatefulSet {constants.MONGODB_STATEFULSET_NAME}: {response.status.replicas} replicas")
+            logger.info(f"Patched MongoDB CR {constants.MONGODB_STATEFULSET_NAME}")
             max_wait = 300 
             interval = 5
             waited = 0
@@ -214,39 +214,6 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             )
 
             logger.info(f"Patched StatefulSet {constants.PROMETHEUS_STATEFULSET_NAME}: {response.status.replicas} replicas")
-
-            current_node = utils.get_node_name_by_ip(dev_ip)
-            logger.info(f"Waiting for FDB pod on this node: {current_node} to be active...")
-            fdb_cont = None
-            retries = 30
-            while retries > 0 and fdb_cont is None:
-                logger.info(f"Looking for FDB pod on node {current_node}...")
-                pods = v1.list_namespaced_pod(namespace=constants.K8S_NAMESPACE, label_selector="app=simplyblock-fdb-server").items
-                for pod in pods:
-                    if pod.spec.node_name == current_node:
-                        fdb_cont = pod
-                        break
-
-                if fdb_cont:
-                    logger.info("FDB pod found")
-                    break
-                else:
-                    retries -= 1
-                    time.sleep(5)
-                    
-            if not fdb_cont:
-                logger.warning(f"FDB pod was not found on node {current_node}...")
-            else:
-                retries = 10
-                while retries > 0:
-                    if pod.status.phase == "Running":
-                        logger.info(f"FDB pod is running: {pod.metadata.name}")
-                        break
-                    else:
-                        logger.info("pod is not running, waiting...")
-                        time.sleep(3)
-                        retries -= 1
-
 
     logger.info("Node joined the cluster")
     return node_id
