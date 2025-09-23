@@ -12,7 +12,7 @@ from simplyblock_core import cluster_ops, utils, db_controller
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller
+    tasks_controller, qos_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster
@@ -626,6 +626,15 @@ class CLIWrapperBase:
 
         success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
         return details
+
+    def qos__add(self, sub_command, args):
+        return qos_controller.add_class(args.name, args.weight)
+
+    def qos__list(self, sub_command, args):
+        return qos_controller.list_classes()
+
+    def qos__delete(self, sub_command, args):
+        return qos_controller.delete_class(args.name)
 
     def storage_node_list_devices(self, args):
         node_id = args.node_id

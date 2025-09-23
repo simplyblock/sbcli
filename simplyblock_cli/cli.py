@@ -27,6 +27,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
+        self.init_qos()
         super().__init__()
 
     def init_storage_node(self):
@@ -756,6 +757,29 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
 
 
+    def init_qos(self):
+        subparser = self.add_command('qos', 'qos commands')
+        self.init_qos__add(subparser)
+        self.init_qos__list(subparser)
+        self.init_qos__delete(subparser)
+
+
+    def init_qos__add(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add', 'Creates a new QOS class')
+        subcommand.add_argument('name', help='QOS class name', type=str)
+        subcommand.add_argument('weight', help='QOS class weight', type=int)
+
+    def init_qos__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'Lists all qos classes')
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str, default='')
+        argument = subcommand.add_argument('--json', help='Print json output', dest='json', action='store_true')
+
+    def init_qos__delete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete', 'Delete a class')
+        subcommand.add_argument('name', help='QOS class name', type=str)
+        argument = subcommand.add_argument('--force', help='Force remove', dest='force', action='store_true')
+
+
     def run(self):
         args = self.parser.parse_args()
         if args.debug:
@@ -1072,6 +1096,17 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['qos']:
+                sub_command = args_dict['qos']
+                if sub_command in ['add']:
+                    ret = self.qos__add(sub_command, args)
+                elif sub_command in ['list']:
+                    ret = self.qos__list(sub_command, args)
+                elif sub_command in ['delete']:
+                    ret = self.qos__delete(sub_command, args)
                 else:
                     self.parser.print_help()
 
