@@ -23,10 +23,12 @@ spec:
       modes: ["SCRAM"]
   users:
     - name: my-user
-      db: admin
+      db: graylog
       passwordSecretRef:
         name: my-user-password
       roles:
+        - name: readWrite
+            db: graylog
         - name: clusterAdmin
           db: admin
         - name: userAdminAnyDatabase
