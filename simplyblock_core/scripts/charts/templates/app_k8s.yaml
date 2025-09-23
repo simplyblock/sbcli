@@ -1,132 +1,3 @@
-# ---
-# apiVersion: apps/v1
-# kind: DaemonSet
-# metadata:
-#   name: simplyblock-fdb-server
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   selector:
-#     matchLabels:
-#       app: simplyblock-fdb-server
-#   template:
-#     metadata:
-#       labels:
-#         app: simplyblock-fdb-server
-#       annotations:
-#         log-collector/enabled: "true"
-#     spec:
-#       nodeSelector:
-#         simplyblock.io/role: mgmt-plane
-#       containers:
-#       - name: fdb-server
-#         image: foundationdb/foundationdb:7.3.42
-#         ports:
-#         - containerPort: 4500
-#         env:
-#         - name: PUBLIC_IP
-#           valueFrom:
-#             fieldRef:
-#               fieldPath: status.hostIP
-#         - name: SIMPLYBLOCK_LOG_LEVEL
-#           valueFrom:
-#             configMapKeyRef:
-#               name: simplyblock-config
-#               key: LOG_LEVEL
-#         - name: FDB_CLUSTER_FILE_CONTENTS
-#           valueFrom:
-#             configMapKeyRef:
-#               name: simplyblock-config
-#               key: FDB_CLUSTER_FILE_CONTENTS
-#         - name: FDB_CLUSTER_FILE
-#           value: "/etc/foundationdb/fdb.cluster"
-#         - name: FDB_NETWORKING_MODE
-#           value: "container"
-#         volumeMounts:
-#           - name: fdb-data
-#             mountPath: /var/fdb/data
-#           - name: fdb-logs
-#             mountPath: /var/fdb/logs
-#           - name: fdb-entrypoint                     
-#             mountPath: /var/fdb/scripts
-#             readOnly: true
-#           - name: fdb-config
-#             mountPath: /etc/foundationdb
-            
-#         resources:
-#           requests:
-#             cpu: "100m"
-#             memory: "512Mi"
-#           limits:
-#             cpu: "500m"
-#             memory: "2Gi"
-#       volumes:
-#       - name: fdb-entrypoint                         
-#         configMap:
-#           name: simplyblock-fdb-entrypoint-script
-#           defaultMode: 0777
-#       - name: fdb-data
-#         hostPath:
-#           path: /var/lib/foundationdb/data
-#           type: DirectoryOrCreate
-#       - name: fdb-logs
-#         hostPath:
-#           path: /var/log/foundationdb
-#           type: DirectoryOrCreate
-#       - name: fdb-tls
-#         hostPath:
-#           path: /var/lib/foundationdb/tls
-#           type: DirectoryOrCreate
-#       - name: fdb-config
-#         hostPath:
-#           path: /var/foundationdb
-#       hostNetwork: true
-
-# ---
-# apiVersion: apps/v1
-# kind: Deployment
-# metadata:
-#   name: simplyblock-fdb-backup-agent
-#   namespace: {{ .Release.Namespace }}
-# spec:
-#   replicas: 1
-#   selector:
-#     matchLabels:
-#       app: simplyblock-fdb-backup-agent
-#   template:
-#     metadata:
-#       annotations:
-#         log-collector/enabled: "true"
-#       labels:
-#         app: simplyblock-fdb-backup-agent
-#     spec:
-#       nodeSelector:
-#         simplyblock.io/role: mgmt-plane 
-#       containers:
-#       - name: fdb-backup-agent
-#         image: foundationdb/foundationdb:7.3.42
-#         command: ["/usr/bin/backup_agent", "-C", "/etc/foundationdb/fdb.cluster"]
-#         env:
-#         - name: FDB_CLUSTER_FILE
-#           value: "/etc/foundationdb/fdb.cluster"
-#         - name: FDB_CLUSTER_FILE_CONTENTS
-#           valueFrom:
-#             configMapKeyRef:
-#               name: simplyblock-config
-#               key: FDB_CLUSTER_FILE_CONTENTS
-#         volumeMounts:
-#           - name: foundationdb
-#             mountPath: /etc/foundationdb
-#         resources:
-#           requests:
-#             cpu: "100m"
-#             memory: "256Mi"
-#           limits:
-#             cpu: "250m"
-#             memory: "1Gi"
-#       volumes:
-#       - name: foundationdb
-#         hostPath:
-#           path: /var/foundationdb
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -145,9 +16,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-webappapi
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane 
+    spec:       
       containers:
       - name: webappapi
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -203,8 +72,6 @@ spec:
       labels:
         app: simplyblock-storage-node-monitor
     spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane 
       containers:
       - name: storage-node-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -255,8 +122,6 @@ spec:
       labels:
         app: simplyblock-mgmt-node-monitor
     spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
       containers:
         - name: mgmt-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -309,8 +174,6 @@ spec:
       labels:
         app: simplyblock-lvol-stats-collector
     spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
       containers:
         - name: lvol-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -360,9 +223,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-main-distr-event-collector
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: main-distr-event-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -412,9 +273,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-capacity-and-stats-collector
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
       - name: capacity-and-stats-collector
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -465,8 +324,7 @@ spec:
       labels:
         app: simplyblock-capacity-monitor
     spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+      
       containers:
       - name: capacity-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -516,9 +374,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-health-check
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
       - name: health-check
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -568,9 +424,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-device-monitor
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
       - name: device-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -620,9 +474,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-lvol-monitor
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
       - name: lvol-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -671,9 +523,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-snapshot-monitor
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:     
       containers:
       - name: snapshot-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -722,9 +572,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-cleanupfdb
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: cleanupfdb
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -776,9 +624,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-restart
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:     
       containers:
         - name: tasks-runner-restart
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -828,9 +674,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-migration
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: tasks-runner-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -879,9 +723,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-failed-migration
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: tasks-runner-failed-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -930,9 +772,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-cluster-status
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: tasks-runner-cluster-status
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -981,9 +821,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-new-device-migration
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: tasks-runner-new-device-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -1032,9 +870,7 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-node-add-runner
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: tasks-node-addrunner
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -1082,9 +918,7 @@ spec:
     metadata:
       labels:
         app: simplyblock-fluent-bit
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: fluent-bit
           image: fluent/fluent-bit:1.8.11

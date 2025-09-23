@@ -53,16 +53,11 @@ mongodb:
                 values:
                   - mongodb
           topologyKey: "kubernetes.io/hostname"
-  nodeSelector:
-    simplyblock.io/role: mgmt-plane
 
 opensearch:
   fullnameOverride: "simplyblock-opensearch"
   singleNode: true
   replicas: 1
-
-  nodeSelector:
-    simplyblock.io/role: mgmt-plane
 
   antiAffinity: "hard"
   persistence:
@@ -104,8 +99,6 @@ prometheus:
     podLabels:
       app: simplyblock-prometheus
     podAnnotations: {}
-    nodeSelector:
-      simplyblock.io/role: mgmt-plane
     affinity:
       podAntiAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:

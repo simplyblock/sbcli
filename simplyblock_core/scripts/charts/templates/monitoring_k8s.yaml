@@ -14,9 +14,7 @@ spec:
     metadata:
       labels:
         app: simplyblock-graylog
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       securityContext:
         runAsUser: 0
         runAsGroup: 0
@@ -116,9 +114,7 @@ spec:
     metadata:
       labels:
         app: simplyblock-thanos-store
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: thanos-store
           image: thanosio/thanos:v0.31.0
@@ -157,9 +153,7 @@ spec:
     metadata:
       labels:
         app: simplyblock-thanos-query
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: thanos-query
           image: thanosio/thanos:v0.31.0
@@ -192,8 +186,7 @@ spec:
       labels:
         app: simplyblock-thanos-compactor
     spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+      
       containers:
         - name: thanos-compactor
           image: thanosio/thanos:v0.31.0
@@ -239,9 +232,7 @@ spec:
     metadata:
       labels:
         app: simplyblock-node-exporter
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       containers:
         - name: node-exporter
           image: prom/node-exporter:v1.7.0
@@ -302,9 +293,7 @@ spec:
     metadata:
       labels:
         app: simplyblock-grafana
-    spec:
-      nodeSelector:
-        simplyblock.io/role: mgmt-plane
+    spec:      
       securityContext:
         fsGroup: 472
         supplementalGroups:
