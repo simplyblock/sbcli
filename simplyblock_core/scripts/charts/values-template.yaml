@@ -26,6 +26,8 @@ image:
     tag: "${SIMPLYBLOCK_TAG}"
     pullPolicy: "Always"
 
+openebs:
+  enabled: true
 jiva:
   enabled: true
   openebsLocalpv:
