@@ -28,7 +28,7 @@ spec:
         name: my-user-password
       roles:
         - name: readWrite
-            db: graylog
+          db: graylog
         - name: clusterAdmin
           db: admin
         - name: userAdminAnyDatabase
