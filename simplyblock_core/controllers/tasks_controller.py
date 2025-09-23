@@ -205,8 +205,9 @@ def cancel_task(task_id):
 def get_subtasks(master_task_id):
     master_task = db.get_task_by_id(master_task_id)
     data = []
+    tasks = {t.uuid: t for t in db.get_job_tasks(master_task.cluster_id)}
     for sub_task_id in master_task.sub_tasks:
-        sub_task = db.get_task_by_id(sub_task_id)
+        sub_task = tasks[sub_task_id]
         if sub_task.max_retry > 0:
             retry = f"{sub_task.retry}/{sub_task.max_retry}"
         else:
