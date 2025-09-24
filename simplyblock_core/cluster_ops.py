@@ -296,7 +296,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.cli_pass = cli_pass
     cluster.secret = utils.generate_string(20)
     cluster.grafana_secret = cluster.secret
-    #cluster.db_connection = db_connection
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
