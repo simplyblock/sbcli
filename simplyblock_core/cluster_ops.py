@@ -552,6 +552,13 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         set_cluster_status(cl_id, ols_status)
         raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
 
+    for node in online_nodes:
+        if cluster.is_single_node or len(online_nodes) <= 2:
+            node.physical_label = 0
+        else:
+            node.physical_label = storage_node_ops.get_next_physical_device_order(node)
+        node.write_to_db()
+
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
