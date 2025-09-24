@@ -281,8 +281,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
         current_node = utils.get_node_name_by_ip(dev_ip)
         utils.label_node_as_mgmt_plane(current_node)
-        db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
-        scripts.set_db_config(db_connection)
 
     if not cli_pass:
         cli_pass = utils.generate_string(10)
@@ -298,7 +296,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.cli_pass = cli_pass
     cluster.secret = utils.generate_string(20)
     cluster.grafana_secret = cluster.secret
-    cluster.db_connection = db_connection
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
@@ -342,6 +339,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                                 log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
         logger.info("Deploying swarm stack > Done")
 
+        logger.info("Configuring DB...")
+        scripts.set_db_config_single()
+        logger.info("Configuring DB > Done")
+
     elif mode == "kubernetes":
         if not contact_point:
             contact_point = 'https://hooks.slack.com/services/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' 
@@ -355,13 +356,15 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, db_connection, constants.K8S_NAMESPACE, 
+                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE, 
                                 str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
         logger.info("Deploying helm stack > Done")
 
-    logger.info("Configuring DB...")
-    scripts.set_db_config_single()
-    logger.info("Configuring DB > Done")
+        logger.info("Retrieving foundationdb connection string...")
+        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
+
+        db_connection = f"{fdb_cluster_string}@{dev_ip}:4501"
+        scripts.set_db_config(db_connection)
 
     if not disable_monitoring:
         _set_max_result_window(dev_ip)
@@ -370,6 +373,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
+    cluster.db_connection = db_connection
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
     db_controller = DBController()

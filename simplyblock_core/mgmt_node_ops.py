@@ -157,10 +157,15 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
                         logger.info(f"Container status: {status}, Is Running: {is_running}")
                     break
 
+            logger.info("Configuring Double DB...")
+            time.sleep(3)
+            scripts.set_db_config_double()
+            
         elif mode == "kubernetes":
             config.load_kube_config()
             v1 = k8s_client.CoreV1Api()
             apps_v1 = k8s_client.AppsV1Api()
+            api_cr = k8s_client.CustomObjectsApi()
                         
             response = apps_v1.patch_namespaced_stateful_set(
                 name=constants.OS_STATEFULSET_NAME,
@@ -170,13 +175,16 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
             logger.info(f"Patched StatefulSet {constants.OS_STATEFULSET_NAME}: {response.status.replicas} replicas")
 
-            response = apps_v1.patch_namespaced_stateful_set(
+            response = api_cr.patch_namespaced_custom_object(
+                group="mongodbcommunity.mongodb.com",
+                version="v1",
+                plural="mongodbcommunity", 
                 name=constants.MONGODB_STATEFULSET_NAME,
                 namespace=constants.K8S_NAMESPACE,
                 body=constants.mongodb_patch
             )
 
-            logger.info(f"Patched StatefulSet {constants.MONGODB_STATEFULSET_NAME}: {response.status.replicas} replicas")
+            logger.info(f"Patched MongoDB CR {constants.MONGODB_STATEFULSET_NAME}")
             max_wait = 300 
             interval = 5
             waited = 0
@@ -189,10 +197,12 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             else:
                 raise TimeoutError("MongoDB pods did not become ready in time.")
 
+            graylog_patch = utils.build_graylog_patch(cluster_secret)
+            
             response = apps_v1.patch_namespaced_deployment(
                 name=constants.GRAYLOG_STATEFULSET_NAME,
                 namespace=constants.K8S_NAMESPACE,
-                body=constants.graylog_patch
+                body=graylog_patch
             )
 
             logger.info("Patched Graylog MongoDB URI for replicaset support")
@@ -204,42 +214,6 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             )
 
             logger.info(f"Patched StatefulSet {constants.PROMETHEUS_STATEFULSET_NAME}: {response.status.replicas} replicas")
-
-            current_node = utils.get_node_name_by_ip(dev_ip)
-            logger.info(f"Waiting for FDB pod on this node: {current_node} to be active...")
-            fdb_cont = None
-            retries = 30
-            while retries > 0 and fdb_cont is None:
-                logger.info(f"Looking for FDB pod on node {current_node}...")
-                pods = v1.list_namespaced_pod(namespace=constants.K8S_NAMESPACE, label_selector="app=simplyblock-fdb-server").items
-                for pod in pods:
-                    if pod.spec.node_name == current_node:
-                        fdb_cont = pod
-                        break
-
-                if fdb_cont:
-                    logger.info("FDB pod found")
-                    break
-                else:
-                    retries -= 1
-                    time.sleep(5)
-                    
-            if not fdb_cont:
-                logger.warning(f"FDB pod was not found on node {current_node}...")
-            else:
-                retries = 10
-                while retries > 0:
-                    if pod.status.phase == "Running":
-                        logger.info(f"FDB pod is running: {pod.metadata.name}")
-                        break
-                    else:
-                        logger.info("pod is not running, waiting...")
-                        time.sleep(3)
-                        retries -= 1
-                            
-        logger.info("Configuring Double DB...")
-        time.sleep(3)
-        scripts.set_db_config_double()
 
     logger.info("Node joined the cluster")
     return node_id

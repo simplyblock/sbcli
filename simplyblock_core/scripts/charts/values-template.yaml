@@ -16,9 +16,6 @@ log:
   level: "${LOG_LEVEL}"
   maxNumberIndex: "${MAX_NUMBER_OF_INDICES}"
 
-foundationdb:
-  fdbClusterFileContent: "${FDB_CLUSTER_FILE_CONTENTS}"
-
 grafana:
   endpoint: "${GRAFANA_ENDPOINT}"
   contactPoint: "${CONTACT_POINT}"
@@ -31,20 +28,16 @@ image:
 
 openebs:
   enabled: true
+jiva:
+  enabled: true
+  openebsLocalpv:
+    enabled: false
+  storageClass:
+    enabled: false
 
 mongodb:
-  architecture: replicaset
-  fullnameOverride: "simplyblock-mongodb"
-  useStatefulSet: true
-  auth:
-    enabled: false
-  replicaCount: 1
-  persistence:
-    enabled: true
-    accessModes:
-      - ReadWriteOnce
-    storageClass: openebs-local-hostpath
-    size: 5Gi
+  name: "simplyblock-mongodb"
+  deployment_name: "simplyblock-mongodb"
   resources:
     requests:
       cpu: 100m
@@ -62,21 +55,16 @@ mongodb:
                 values:
                   - mongodb
           topologyKey: "kubernetes.io/hostname"
-  nodeSelector:
-    simplyblock.io/role: mgmt-plane
 
 opensearch:
   fullnameOverride: "simplyblock-opensearch"
   singleNode: true
   replicas: 1
 
-  nodeSelector:
-    simplyblock.io/role: mgmt-plane
-
   antiAffinity: "hard"
   persistence:
     enabled: true
-    storageClass: openebs-local-hostpath
+    storageClass: openebs-jiva
     size: 10Gi
 
   resources:
@@ -113,8 +101,6 @@ prometheus:
     podLabels:
       app: simplyblock-prometheus
     podAnnotations: {}
-    nodeSelector:
-      simplyblock.io/role: mgmt-plane
     affinity:
       podAntiAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:
@@ -141,7 +127,7 @@ prometheus:
     persistentVolume:
       enabled: true
       size: 5Gi
-      storageClass: openebs-local-hostpath
+      storageClass: openebs-jiva
     extraArgs:
       storage.tsdb.min-block-duration: 2h
       storage.tsdb.max-block-duration: 2h

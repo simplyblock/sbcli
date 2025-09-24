@@ -1760,13 +1760,13 @@ def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
     ready_pods = 0
     pods = k8s_core_v1.list_namespaced_pod(
         namespace=namespace,
-        label_selector="app.kubernetes.io/name=mongodb"
+        label_selector="app=simplyblock-mongo-svc"
     ).items
 
     for pod in pods:
         statuses = pod.status.container_statuses or []
         for status in statuses:
-            if status.name == "mongodb" and status.ready:
+            if status.name == "mongod" and status.ready:
                 ready_pods += 1
 
     return ready_pods == expected_replicas
@@ -1910,3 +1910,49 @@ def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[
             return ip, iface
 
     return None  
+
+def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
+    config.load_kube_config()
+    v1 = client.CoreV1Api()
+
+    try:
+        cm = v1.read_namespaced_config_map(configmap_name, namespace)
+        cluster_file = cm.data.get("cluster-file") if cm.data else None
+        if cluster_file:
+            prefix = cluster_file.split("@", 1)[0]
+            logger.info(f"fdb cluster connection string: {prefix}")
+            return prefix
+        else:
+            logger.info("cluster-file not found in ConfigMap.")
+            return None
+    except client.exceptions.ApiException as e:
+        logger.error(f"Failed to read ConfigMap: {e}")
+        return None
+
+def build_graylog_patch(cluster_secret: str) -> dict:
+    graylog_env_patch = [
+        {
+            "name": "GRAYLOG_MONGODB_URI",
+            "value": (
+                f"mongodb://admin:{cluster_secret}"
+                "@simplyblock-mongo-svc:27017/graylog"
+                "?replicaSet=rs0"
+            )
+        }
+    ]
+
+    graylog_patch = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "graylog",
+                            "env": graylog_env_patch
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    return graylog_patch
