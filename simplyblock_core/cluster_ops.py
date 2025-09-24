@@ -281,8 +281,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
         current_node = utils.get_node_name_by_ip(dev_ip)
         utils.label_node_as_mgmt_plane(current_node)
-        # db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
-        # scripts.set_db_config(db_connection)
 
     if not cli_pass:
         cli_pass = utils.generate_string(10)
@@ -362,16 +360,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                                 log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE, 
                                 str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
         logger.info("Deploying helm stack > Done")
-
-        # k8s_config.load_kube_config()
-        # v1 = k8s_client.CoreV1Api()
-        # v1.patch_namespaced_service(
-        #     name=constants.FDB_SERVICE_NAME,
-        #     namespace=constants.K8S_NAMESPACE,
-        #     body=constants.fdb_service_patch
-        # )
-
-        # logger.info(f"Service '{constants.FDB_SERVICE_NAME}' patched successfully in namespace '{constants.K8S_NAMESPACE}'.")
 
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
