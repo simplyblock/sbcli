@@ -1934,7 +1934,7 @@ def build_graylog_patch(cluster_secret: str) -> dict:
         {
             "name": "GRAYLOG_MONGODB_URI",
             "value": (
-                f"mongodb://my-user:{cluster_secret}"
+                f"mongodb://admin:{cluster_secret}"
                 "@simplyblock-mongo-svc:27017/graylog"
                 "?replicaSet=rs0"
             )

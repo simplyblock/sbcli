@@ -22,10 +22,10 @@ spec:
     authentication:
       modes: ["SCRAM"]
   users:
-    - name: my-user
+    - name: admin
       db: graylog
       passwordSecretRef:
-        name: my-user-password
+        name: admin-password
       roles:
         - name: readWrite
           db: graylog
@@ -40,7 +40,7 @@ spec:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: my-user-password
+  name: admin-password
 type: Opaque
 stringData:
   password: {{ .Values.cluster.secret }}
