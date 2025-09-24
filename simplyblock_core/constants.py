@@ -215,15 +215,3 @@ prometheus_patch = {
     }
 }
 
-fdb_service_patch = {
-    "spec": {
-        "ports": [
-            {
-                "name": "fdb",
-                "port": 4501,
-                "targetPort": 4501,
-                "protocol": "TCP"
-            }
-        ]
-    }
-}
