@@ -1,0 +1,17 @@
+{{- if and .Values.observability.grafanaDashboards.enabled .Values.observability.grafanaDashboards.dashboards }}
+{{- range $name, $dashboard := .Values.observability.grafanaDashboards.dashboards }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-%s-dashboard" $.Release.Name $name | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: simplyblock
+spec: {}
+data:
+  {{ $name }}.json: |
+{{ $dashboard | indent 4 }}
+---
+{{- end }}
+{{- end }}

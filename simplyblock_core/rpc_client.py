@@ -1,4 +1,6 @@
 import json
+import time
+from contextlib import contextmanager
 from json import JSONDecodeError
 from typing import Any, Optional
 
@@ -7,11 +9,27 @@ from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedi
 import jsonschema
 from jsonschema.exceptions import ValidationError
 
-from simplyblock_core import utils, constants
+from simplyblock_core import utils, constants, telemetry
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 logger = utils.get_logger()
+
+
+@contextmanager
+def _rpc_operation(client: "RPCClient", method: str):
+    start_time = time.perf_counter()
+    attributes = {
+        "rpc.system": "json-rpc",
+        "rpc.method": method,
+        "net.peer.name": client.ip_address,
+        "net.peer.port": client.port,
+        "server.address": client.ip_address,
+        "server.port": client.port,
+        "url.full": client.url,
+    }
+    with telemetry.start_span(f"rpc.{method}", **attributes) as span:
+        yield span, start_time
 
 
 _response_schema = {
@@ -108,64 +126,128 @@ class RPCClient:
         payload = {'id': 1, 'method': method}
         if params:
             payload['params'] = params
-        try:
-            logger.debug("Requesting method: %s, params: %s", method, params)
-            response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
-        except Exception as e:
-            logger.error(e)
-            return False, str(e)
-
-        ret_code = response.status_code
-        ret_content = response.content
-        logger.debug("Response: status_code: %s", ret_code)
-
-        result = None
-        error = None
-        if ret_code == 200:
+        with _rpc_operation(self, method) as (span, start_time):
+            success = True
+            status_code = None
             try:
-                data = response.json()
-                if method != "bdev_get_bdevs":
-                    logger.debug("Response json: %s", json.dumps(data))
-            except Exception:
-                logger.debug("Response ret_content: %s", ret_content)
-                return ret_content, None
+                logger.debug("Requesting method: %s, params: %s", method, params)
+                response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
+                status_code = response.status_code
+                if span.is_recording():
+                    span.set_attribute("http.status_code", status_code)
+            except Exception as exc:
+                success = False
+                telemetry.mark_span_failure(span, exc)
+                telemetry.record_external_call(
+                    name=f"spdk.{method}",
+                    duration_sec=time.perf_counter() - start_time,
+                    status_code=status_code,
+                    success=False,
+                )
+                logger.error(exc)
+                return False, str(exc)
 
-            if 'result' in data:
-                result = data['result']
-            if 'error' in data:
-                error = data['error']
-            if result is not None or error is not None:
-                return result, error
-            else:
+            ret_content = response.content
+            logger.debug("Response: status_code: %s", status_code)
+
+            if status_code == 200:
+                try:
+                    data = response.json()
+                    if method != "bdev_get_bdevs":
+                        logger.debug("Response json: %s", json.dumps(data))
+                except Exception:
+                    logger.debug("Response ret_content: %s", ret_content)
+                    telemetry.record_external_call(
+                        name=f"spdk.{method}",
+                        duration_sec=time.perf_counter() - start_time,
+                        status_code=status_code,
+                        success=success,
+                    )
+                    return ret_content, None
+
+                result = data.get('result')
+                error = data.get('error')
+                if error is not None:
+                    success = False
+                if result is not None or error is not None:
+                    telemetry.record_external_call(
+                        name=f"spdk.{method}",
+                        duration_sec=time.perf_counter() - start_time,
+                        status_code=status_code,
+                        success=success,
+                    )
+                    return result, error
+                telemetry.record_external_call(
+                    name=f"spdk.{method}",
+                    duration_sec=time.perf_counter() - start_time,
+                    status_code=status_code,
+                    success=success,
+                )
                 return data, None
 
-        else:
-            logger.error("Invalid http status : %s", ret_code)
+            success = False
+            logger.error("Invalid http status : %s", status_code)
+            telemetry.record_external_call(
+                name=f"spdk.{method}",
+                duration_sec=time.perf_counter() - start_time,
+                status_code=status_code,
+                success=False,
+            )
 
         return None, None
 
     def _request3(self, method: str, **kwargs):
         logger.debug("Requesting method: %s, params: %s", method, kwargs)
-        try:
-            response = self.session.post(self.url, data=json.dumps({
-                'id': 1,
-                'method': method,
-                'params': kwargs,
-            }), timeout=self.timeout)
-            response.raise_for_status()
-            data = response.json()
-            _response_validator.validate(data)
-        except (
-                ConnectionError, Timeout, TooManyRedirects, HTTPError,  # requests
-                JSONDecodeError,  # json
-                ValidationError,  # jsonschema
-        ) as e:
-            raise RPCException('Request failed') from e
+        with _rpc_operation(self, method) as (span, start_time):
+            status_code = None
+            try:
+                response = self.session.post(
+                    self.url,
+                    data=json.dumps({
+                        'id': 1,
+                        'method': method,
+                        'params': kwargs,
+                    }),
+                    timeout=self.timeout,
+                )
+                status_code = response.status_code
+                if span.is_recording():
+                    span.set_attribute("http.status_code", status_code)
+                response.raise_for_status()
+                data = response.json()
+                _response_validator.validate(data)
+            except (
+                    ConnectionError, Timeout, TooManyRedirects, HTTPError,  # requests
+                    JSONDecodeError,  # json
+                    ValidationError,  # jsonschema
+            ) as exc:
+                telemetry.mark_span_failure(span, exc)
+                telemetry.record_external_call(
+                    name=f"spdk.{method}",
+                    duration_sec=time.perf_counter() - start_time,
+                    status_code=status_code,
+                    success=False,
+                )
+                raise RPCException('Request failed') from exc
 
-        if (error := data.get('error')) is not None:
-            raise RPCException(**error)
+            if (error := data.get('error')) is not None:
+                exc = RPCException(**error)
+                telemetry.mark_span_failure(span, exc)
+                telemetry.record_external_call(
+                    name=f"spdk.{method}",
+                    duration_sec=time.perf_counter() - start_time,
+                    status_code=status_code,
+                    success=False,
+                )
+                raise exc
 
-        return data['result']
+            telemetry.record_external_call(
+                name=f"spdk.{method}",
+                duration_sec=time.perf_counter() - start_time,
+                status_code=status_code,
+                success=True,
+            )
+            return data['result']
 
 
     def get_version(self):

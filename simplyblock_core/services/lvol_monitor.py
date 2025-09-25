@@ -11,9 +11,9 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
-logger = utils.get_logger(__name__)
+utils.init_observability(service_name="lvol-monitor")
 
-utils.init_sentry_sdk(__name__)
+logger = utils.get_logger(__name__)
 
 def set_lvol_status(lvol, status):
     if lvol.status != status:

@@ -24,3 +24,8 @@ flask-openapi3
 jsonschema
 fastapi
 uvicorn
+opentelemetry-api
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-requests

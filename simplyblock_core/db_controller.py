@@ -1,10 +1,12 @@
 # coding=utf-8
 import os.path
+import time
+from contextlib import contextmanager
 
 import fdb
 from typing import List
 
-from simplyblock_core import constants
+from simplyblock_core import constants, telemetry
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -17,6 +19,31 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode
+
+
+@contextmanager
+def _db_operation(operation: str):
+    start_time = time.perf_counter()
+    with telemetry.start_span(
+        f"db.{operation}",
+        **{"db.system": "foundationdb", "db.operation": operation},
+    ) as span:
+        try:
+            yield
+        except Exception as exc:
+            telemetry.record_db_operation(
+                name=operation,
+                duration_sec=time.perf_counter() - start_time,
+                success=False,
+            )
+            telemetry.mark_span_failure(span, exc)
+            raise
+        else:
+            telemetry.record_db_operation(
+                name=operation,
+                duration_sec=time.perf_counter() - start_time,
+                success=True,
+            )
 
 
 
@@ -48,156 +75,176 @@ class DBController(metaclass=Singleton):
             print(e)
 
     def get_storage_nodes(self) -> List[StorageNode]:
-        ret = StorageNode().read_from_db(self.kv_store)
-        ret = sorted(ret, key=lambda x: x.create_dt)
-        return ret
+        with _db_operation("get_storage_nodes"):
+            ret = StorageNode().read_from_db(self.kv_store)
+            ret = sorted(ret, key=lambda x: x.create_dt)
+            return ret
 
     def get_storage_nodes_by_cluster_id(self, cluster_id) -> List[StorageNode]:
-        ret = StorageNode().read_from_db(self.kv_store)
-        nodes = []
-        for n in ret:
-            if n.cluster_id == cluster_id:
-                nodes.append(n)
-        return sorted(nodes, key=lambda x: x.create_dt)
+        with _db_operation("get_storage_nodes_by_cluster_id"):
+            ret = StorageNode().read_from_db(self.kv_store)
+            nodes = []
+            for n in ret:
+                if n.cluster_id == cluster_id:
+                    nodes.append(n)
+            return sorted(nodes, key=lambda x: x.create_dt)
 
     def get_storage_nodes_by_system_id(self, system_id) -> List[StorageNode]:
-        return [
-            node for node
-            in StorageNode().read_from_db(self.kv_store)
-            if node.system_uuid == system_id
-        ]
+        with _db_operation("get_storage_nodes_by_system_id"):
+            return [
+                node for node
+                in StorageNode().read_from_db(self.kv_store)
+                if node.system_uuid == system_id
+            ]
 
     def get_storage_nodes_by_hostname(self, hostname) -> List[StorageNode]:
-        return [
-            node for node
-            in self.get_storage_nodes()
-            if node.hostname == hostname
-        ]
+        with _db_operation("get_storage_nodes_by_hostname"):
+            return [
+                node for node
+                in self.get_storage_nodes()
+                if node.hostname == hostname
+            ]
 
     def get_storage_node_by_id(self, id) -> StorageNode:
-        ret = StorageNode().read_from_db(self.kv_store, id)
-        if len(ret) == 0:
-            raise KeyError(f'StorageNode {id} not found')
-        return ret[0]
+        with _db_operation("get_storage_node_by_id"):
+            ret = StorageNode().read_from_db(self.kv_store, id)
+            if len(ret) == 0:
+                raise KeyError(f'StorageNode {id} not found')
+            return ret[0]
 
     def get_storage_device_by_id(self, id) -> NVMeDevice:
-        nodes = self.get_storage_nodes()
-        try:
-            return next(
-                device
-                for node in nodes
-                for device in node.nvme_devices
-                if device.get_id() == id
-            )
-        except StopIteration:
-            raise KeyError(f'Device {id} not found')
+        with _db_operation("get_storage_device_by_id"):
+            nodes = self.get_storage_nodes()
+            try:
+                return next(
+                    device
+                    for node in nodes
+                    for device in node.nvme_devices
+                    if device.get_id() == id
+                )
+            except StopIteration:
+                raise KeyError(f'Device {id} not found')
 
 
     def get_pools(self, cluster_id=None) -> List[Pool]:
-        pools = []
-        if cluster_id:
-            for pool in Pool().read_from_db(self.kv_store):
-                if pool.cluster_id == cluster_id:
-                    pools.append(pool)
-        else:
-            pools = Pool().read_from_db(self.kv_store)
-        return pools
+        with _db_operation("get_pools"):
+            pools = []
+            if cluster_id:
+                for pool in Pool().read_from_db(self.kv_store):
+                    if pool.cluster_id == cluster_id:
+                        pools.append(pool)
+            else:
+                pools = Pool().read_from_db(self.kv_store)
+            return pools
 
     def get_pool_by_id(self, id) -> Pool:
-        ret = Pool().read_from_db(self.kv_store, id)
-        if not ret:
-            raise KeyError(f'Pool {id} not found')
-        return ret[0]
+        with _db_operation("get_pool_by_id"):
+            ret = Pool().read_from_db(self.kv_store, id)
+            if not ret:
+                raise KeyError(f'Pool {id} not found')
+            return ret[0]
 
     def get_pool_by_name(self, name) -> Pool:
-        pools = Pool().read_from_db(self.kv_store)
-        for pool in pools:
-            if pool.pool_name == name:
-                return pool
-        raise KeyError(f'Pool {name} not found')
+        with _db_operation("get_pool_by_name"):
+            pools = Pool().read_from_db(self.kv_store)
+            for pool in pools:
+                if pool.pool_name == name:
+                    return pool
+            raise KeyError(f'Pool {name} not found')
 
     def get_lvols(self, cluster_id=None) -> List[LVol]:
-        lvols = self.get_all_lvols()
-        if not cluster_id:
-            return lvols
+        with _db_operation("get_lvols"):
+            lvols = self.get_all_lvols()
+            if not cluster_id:
+                return lvols
 
-        node_ids=[]
-        cluster_lvols = []
-        for node in self.get_storage_nodes_by_cluster_id(cluster_id):
-            node_ids.append(node.get_id())
+            node_ids=[]
+            cluster_lvols = []
+            for node in self.get_storage_nodes_by_cluster_id(cluster_id):
+                node_ids.append(node.get_id())
 
-        for lvol in lvols:
-            if lvol.node_id in node_ids:
-                cluster_lvols.append(lvol)
+            for lvol in lvols:
+                if lvol.node_id in node_ids:
+                    cluster_lvols.append(lvol)
 
-        return cluster_lvols
+            return cluster_lvols
 
     def get_all_lvols(self) -> List[LVol]:
-        lvols = LVol().read_from_db(self.kv_store)
-        return sorted(lvols, key=lambda x: x.create_dt)
+        with _db_operation("get_all_lvols"):
+            lvols = LVol().read_from_db(self.kv_store)
+            return sorted(lvols, key=lambda x: x.create_dt)
 
     def get_lvols_by_node_id(self, node_id) -> List[LVol]:
-        lvols = []
-        for lvol in self.get_lvols():
-            if lvol.node_id == node_id:
-                lvols.append(lvol)
-        return sorted(lvols, key=lambda x: x.create_dt)
+        with _db_operation("get_lvols_by_node_id"):
+            lvols = []
+            for lvol in self.get_lvols():
+                if lvol.node_id == node_id:
+                    lvols.append(lvol)
+            return sorted(lvols, key=lambda x: x.create_dt)
 
     def get_lvols_by_pool_id(self, pool_id) -> List[LVol]:
-        lvols = []
-        for lvol in self.get_lvols():
-            if lvol.pool_uuid == pool_id:
-                lvols.append(lvol)
-        return sorted(lvols, key=lambda x: x.create_dt)
+        with _db_operation("get_lvols_by_pool_id"):
+            lvols = []
+            for lvol in self.get_lvols():
+                if lvol.pool_uuid == pool_id:
+                    lvols.append(lvol)
+            return sorted(lvols, key=lambda x: x.create_dt)
 
     def get_hostnames_by_pool_id(self, pool_id) -> List[str]:
-        lvols = self.get_lvols_by_pool_id(pool_id)
-        hostnames = []
-        for lv in lvols:
-            if (lv.hostname not in hostnames):
-                hostnames.append(lv.hostname)
-        return hostnames
+        with _db_operation("get_hostnames_by_pool_id"):
+            lvols = self.get_lvols_by_pool_id(pool_id)
+            hostnames = []
+            for lv in lvols:
+                if (lv.hostname not in hostnames):
+                    hostnames.append(lv.hostname)
+            return hostnames
 
     def get_snapshots(self) -> List[SnapShot]:
-        ret = SnapShot().read_from_db(self.kv_store)
-        return ret
+        with _db_operation("get_snapshots"):
+            return SnapShot().read_from_db(self.kv_store)
 
     def get_snapshot_by_id(self, id) -> SnapShot:
-        ret = SnapShot().read_from_db(self.kv_store, id)
-        if not ret:
-            raise KeyError(f'Snapshot {id} not found')
-        return ret[0]
+        with _db_operation("get_snapshot_by_id"):
+            ret = SnapShot().read_from_db(self.kv_store, id)
+            if not ret:
+                raise KeyError(f'Snapshot {id} not found')
+            return ret[0]
 
     def get_lvol_by_id(self, id) -> LVol:
-        lvols = LVol().read_from_db(self.kv_store, id=id)
-        if not lvols:
-            raise KeyError(f'LVol {id} not found')
-        return lvols[0]
+        with _db_operation("get_lvol_by_id"):
+            lvols = LVol().read_from_db(self.kv_store, id=id)
+            if not lvols:
+                raise KeyError(f'LVol {id} not found')
+            return lvols[0]
 
     def get_lvol_by_name(self, lvol_name) -> LVol:
-        for lvol in self.get_lvols():
-            if lvol.lvol_name == lvol_name:
-                return lvol
-        raise KeyError(f'LVol {lvol_name} not found')
+        with _db_operation("get_lvol_by_name"):
+            for lvol in self.get_lvols():
+                if lvol.lvol_name == lvol_name:
+                    return lvol
+            raise KeyError(f'LVol {lvol_name} not found')
 
     def get_mgmt_node_by_id(self, id) -> MgmtNode:
-        ret = MgmtNode().read_from_db(self.kv_store, id)
-        if not ret:
-            raise KeyError(f'ManagementNode {id} not found')
-        return ret[0]
+        with _db_operation("get_mgmt_node_by_id"):
+            ret = MgmtNode().read_from_db(self.kv_store, id)
+            if not ret:
+                raise KeyError(f'ManagementNode {id} not found')
+            return ret[0]
 
     def get_mgmt_nodes(self, cluster_id=None) -> List[MgmtNode]:
-        nodes = MgmtNode().read_from_db(self.kv_store)
-        if cluster_id:
-            nodes = [n for n in nodes if n.cluster_id == cluster_id]
-        return sorted(nodes, key=lambda x: x.create_dt)
+        with _db_operation("get_mgmt_nodes"):
+            nodes = MgmtNode().read_from_db(self.kv_store)
+            if cluster_id:
+                nodes = [n for n in nodes if n.cluster_id == cluster_id]
+            return sorted(nodes, key=lambda x: x.create_dt)
 
     def get_mgmt_node_by_hostname(self, hostname) -> MgmtNode:
-        nodes = self.get_mgmt_nodes()
-        for node in nodes:
-            if node.hostname == hostname:
-                return node
-        raise KeyError(f'No management node found for hostname {hostname}')
+        with _db_operation("get_mgmt_node_by_hostname"):
+            nodes = self.get_mgmt_nodes()
+            for node in nodes:
+                if node.hostname == hostname:
+                    return node
+            raise KeyError(f'No management node found for hostname {hostname}')
 
     def get_lvol_stats(self, lvol, limit=20) -> List[LVolStatObject]:
         if isinstance(lvol, str):

@@ -11,13 +11,13 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.snode_client import SNodeClient
 
+utils.init_observability(service_name="storage-node-monitor")
+
 logger = utils.get_logger(__name__)
 
 
 # get DB controller
 db = db_controller.DBController()
-
-utils.init_sentry_sdk()
 
 
 def is_new_migrated_node(cluster_id, node):

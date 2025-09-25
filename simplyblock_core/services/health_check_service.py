@@ -10,10 +10,9 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, db_controller, distr_controller, storage_node_ops
 
+utils.init_observability(service_name="health-check-service")
+
 logger = utils.get_logger(__name__)
-
-
-utils.init_sentry_sdk()
 
 def set_node_health_check(snode, health_check_status):
     snode = db.get_storage_node_by_id(snode.get_id())
@@ -249,4 +248,3 @@ while True:
             set_node_health_check(snode, bool(health_check_status))
 
     time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
-

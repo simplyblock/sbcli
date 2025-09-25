@@ -1,0 +1,26 @@
+{{- if .Values.observability.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ printf "%s-telemetry-pods" .Release.Name }}
+  namespace: {{ .Values.observability.podMonitor.namespace | default .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: simplyblock
+    {{- range $key, $value := .Values.observability.podMonitor.labels }}
+    {{ $key }}: {{ $value }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- range $key, $value := .Values.observability.podMonitor.selectorLabels }}
+      {{ $key }}: {{ $value }}
+      {{- end }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  podMetricsEndpoints:
+    - port: {{ .Values.observability.serviceMonitor.endpoints | first | default dict | get "port" "http" }}
+      path: {{ .Values.observability.serviceMonitor.endpoints | first | default dict | get "path" "/metrics" }}
+      interval: {{ .Values.observability.podMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.observability.podMonitor.scrapeTimeout | default "10s" }}
+{{- end }}

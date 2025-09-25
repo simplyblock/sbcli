@@ -25,6 +25,10 @@ spec:
         - containerPort: 5000
         command: ["python", "simplyblock_web/app.py"]
         env:
+        {{- range $name, $value := .Values.telemetry.env }}
+        - name: {{ $name }}
+          value: "{{ $value }}"
+        {{- end }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -78,6 +82,10 @@ spec:
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/storage_node_monitor.py"]
         env:
+        {{- range $name, $value := .Values.telemetry.env }}
+        - name: {{ $name }}
+          value: "{{ $value }}"
+        {{- end }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -128,6 +136,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/mgmt_node_monitor.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
           - name: BACKEND_TYPE
             value: "k8s"
           - name: SIMPLYBLOCK_LOG_LEVEL
@@ -180,6 +192,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/lvol_stat_collector.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
           - name: SIMPLYBLOCK_LOG_LEVEL
             valueFrom:
               configMapKeyRef:
@@ -230,6 +246,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/main_distr_event_collector.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
           - name: SIMPLYBLOCK_LOG_LEVEL
             valueFrom:
               configMapKeyRef:
@@ -280,6 +300,10 @@ spec:
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/capacity_and_stats_collector.py"]
         env:
+        {{- range $name, $value := .Values.telemetry.env }}
+        - name: {{ $name }}
+          value: "{{ $value }}"
+        {{- end }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -331,6 +355,10 @@ spec:
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/cap_monitor.py"]
         env:
+        {{- range $name, $value := .Values.telemetry.env }}
+        - name: {{ $name }}
+          value: "{{ $value }}"
+        {{- end }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -381,6 +409,10 @@ spec:
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/health_check_service.py"]
         env:
+        {{- range $name, $value := .Values.telemetry.env }}
+        - name: {{ $name }}
+          value: "{{ $value }}"
+        {{- end }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -431,6 +463,10 @@ spec:
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/device_monitor.py"]
         env:
+        {{- range $name, $value := .Values.telemetry.env }}
+        - name: {{ $name }}
+          value: "{{ $value }}"
+        {{- end }}
           - name: SIMPLYBLOCK_LOG_LEVEL
             valueFrom:
               configMapKeyRef:
@@ -481,6 +517,10 @@ spec:
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/lvol_monitor.py"]
         env:
+        {{- range $name, $value := .Values.telemetry.env }}
+        - name: {{ $name }}
+          value: "{{ $value }}"
+        {{- end }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -530,6 +570,10 @@ spec:
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/snapshot_monitor.py"]
         env:
+        {{- range $name, $value := .Values.telemetry.env }}
+        - name: {{ $name }}
+          value: "{{ $value }}"
+        {{- end }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -579,6 +623,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/workers/cleanup_foundationdb.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
@@ -631,6 +679,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_restart.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
@@ -681,6 +733,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_migration.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
@@ -730,6 +786,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_failed_migration.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
@@ -779,6 +839,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_cluster_status.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
@@ -828,6 +892,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_new_dev_migration.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
@@ -877,6 +945,10 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_node_add.py"]
           env:
+          {{- range $name, $value := .Values.telemetry.env }}
+          - name: {{ $name }}
+            value: "{{ $value }}"
+          {{- end }}
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:

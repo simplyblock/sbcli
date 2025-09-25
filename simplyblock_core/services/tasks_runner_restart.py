@@ -7,13 +7,12 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
+utils.init_observability(service_name="tasks-runner-restart")
 
 logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
-
-utils.init_sentry_sdk()
 
 
 def _get_node_unavailable_devices_count(node_id):

@@ -161,7 +161,6 @@ class CLIWrapper(CLIWrapperBase):
 
 
 def main():
-    utils.init_sentry_sdk()
+    utils.init_observability(service_name="cli-wrapper")
     cli = CLIWrapper()
     cli.run()
-

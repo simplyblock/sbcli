@@ -1,0 +1,29 @@
+{{- if .Values.observability.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ printf "%s-telemetry" .Release.Name }}
+  namespace: {{ .Values.observability.serviceMonitor.namespace | default .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: simplyblock
+    {{- range $key, $value := .Values.observability.serviceMonitor.labels }}
+    {{ $key }}: {{ $value }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- range $key, $value := .Values.observability.serviceMonitor.selectorLabels }}
+      {{ $key }}: {{ $value }}
+      {{- end }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    {{- range .Values.observability.serviceMonitor.endpoints }}
+    - port: {{ .port | default "http" }}
+      path: {{ .path | default "/metrics" }}
+      scheme: {{ .scheme | default "http" }}
+      interval: {{ $.Values.observability.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ $.Values.observability.serviceMonitor.scrapeTimeout | default "10s" }}
+    {{- end }}
+{{- end }}

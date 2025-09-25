@@ -9,9 +9,9 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 
-logger = utils.get_logger(__name__)
+utils.init_observability(service_name="main-distr-event-collector")
 
-utils.init_sentry_sdk()
+logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()

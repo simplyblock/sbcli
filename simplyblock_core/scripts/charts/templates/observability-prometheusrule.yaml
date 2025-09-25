@@ -1,0 +1,15 @@
+{{- if and .Values.observability.prometheusRule.enabled .Values.observability.prometheusRule.groups }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ printf "%s-alerts" .Release.Name }}
+  namespace: {{ .Values.observability.prometheusRule.namespace | default .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: simplyblock
+    {{- range $key, $value := .Values.observability.prometheusRule.labels }}
+    {{ $key }}: {{ $value }}
+    {{- end }}
+spec:
+  groups:
+{{ toYaml .Values.observability.prometheusRule.groups | indent 4 }}
+{{- end }}

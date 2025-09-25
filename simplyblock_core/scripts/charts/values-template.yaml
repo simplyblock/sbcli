@@ -10,6 +10,39 @@ cluster:
 monitoring:
   enabled: ${ENABLE_MONITORING}
 
+telemetry:
+  env: {}
+
+observability:
+  serviceMonitor:
+    enabled: false
+    namespace: ""
+    labels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+    selectorLabels:
+      app: simplyblock-webappapi
+    endpoints:
+      - port: http
+        path: /metrics
+        scheme: http
+  podMonitor:
+    enabled: false
+    namespace: ""
+    labels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+    selectorLabels:
+      app: simplyblock-webappapi
+  grafanaDashboards:
+    enabled: false
+    dashboards: {}
+  prometheusRule:
+    enabled: false
+    namespace: ""
+    labels: {}
+    groups: []
+
 log:
   deletionInterval: "${LOG_DELETION_INTERVAL}"
   retentionPeriod: "${RETENTION_PERIOD}"

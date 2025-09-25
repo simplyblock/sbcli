@@ -7,7 +7,6 @@ import random
 import re
 import string
 import subprocess
-import sys
 import uuid
 import time
 import socket
@@ -602,31 +601,17 @@ def decimal_to_hex_power_of_2(decimal_number):
     return hex_result
 
 
-def get_logger(name=""):
-    # first configure a root logger
+def get_logger(name: str = ""):
+    """Return a logger configured with Simplyblock telemetry defaults."""
+    from simplyblock_core import telemetry
+
+    telemetry.ensure_initialized()
     logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
-    logg = logging.getLogger()
 
-    log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
-
-    try:
-        logg.setLevel(log_level.upper() if log_level else constants.LOG_LEVEL)
-    except ValueError as e:
-        logg.warning(f'Invalid SIMPLYBLOCK_LOG_LEVEL: {str(e)}')
-        logg.setLevel(constants.LOG_LEVEL)
-
-    if not logg.hasHandlers():
-        logger_handler = logging.StreamHandler(stream=sys.stdout)
-        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-        logg.addHandler(logger_handler)
-        # gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-        # logg.addHandler(gelf_handler)
-
-    if name:
-        logg = logging.getLogger(f"root.{name}")
-        logg.propagate = True
-
-    return logg
+    logger_name = name or "simplyblock"
+    logger_obj = logging.getLogger(logger_name)
+    logger_obj.propagate = True
+    return logger_obj
 
 
 def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[int, int]:
@@ -980,24 +965,18 @@ def load_config(file_path):
         config = json.load(f)
     return config
 
-def init_sentry_sdk(name=None):
-    # import sentry_sdk
-    # params = {
-    #     "dsn": constants.SENTRY_SDK_DNS,
-    #     # Set traces_sample_rate to 1.0 to capture 100%
-    #     # of transactions for tracing.
-    #     "traces_sample_rate": 1.0,
-    #     # Add request headers and IP for users,
-    #     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
-    #     "send_default_pii": True,
-    # }
-    # if name:
-    #     params["server_name"] = name
-    # sentry_sdk.init(**params)
-    # # from sentry_sdk import set_level
-    # # set_level("critical")
+def init_observability(service_name: str | None = None, *, auto_instrument_requests: bool = True):
+    from simplyblock_core import telemetry
 
-    return True
+    return telemetry.init_observability(
+        service_name=service_name,
+        auto_instrument_requests=auto_instrument_requests,
+    )
+
+
+def init_sentry_sdk(name=None):
+    # Backwards compatibility wrapper around the new telemetry initializer.
+    return init_observability(service_name=name)
 
 
 def get_numa_cores():

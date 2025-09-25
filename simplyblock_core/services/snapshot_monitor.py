@@ -10,9 +10,9 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
-logger = utils.get_logger(__name__)
+utils.init_observability(service_name="snapshot-monitor")
 
-utils.init_sentry_sdk(__name__)
+logger = utils.get_logger(__name__)
 
 
 def set_snapshot_health_check(snap, health_check_status):
