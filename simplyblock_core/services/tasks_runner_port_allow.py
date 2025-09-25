@@ -110,7 +110,7 @@ while True:
                                         bdev_names=list(node_bdev_names), reattach=False)
 
                                     remote_devices.append(dev)
-                            if not remote_devices:
+                            if not remote_devices and len(nodes) > 2:
                                 msg = "Node unable to connect to remote devs, retry task"
                                 logger.info(msg)
                                 task.function_result = msg
