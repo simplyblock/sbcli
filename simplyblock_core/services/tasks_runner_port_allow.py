@@ -124,7 +124,7 @@ while True:
 
                             logger.info("connect to remote JM devices")
                             remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
-                            if not remote_jm_devices or len(remote_jm_devices) < 2:
+                            if (not remote_jm_devices or len(remote_jm_devices) < 2) and len(nodes) > 2:
                                 msg = "Node unable to connect to remote JMs, retry task"
                                 logger.info(msg)
                                 task.function_result = msg
