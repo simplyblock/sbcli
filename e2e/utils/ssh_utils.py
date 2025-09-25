@@ -74,8 +74,10 @@ class SshUtils:
         # Helper to store/replace a connection
         def _store(host, client):
             if self.ssh_connections.get(host):
-                try: self.ssh_connections[host].close()
-                except Exception: pass
+                try:
+                    self.ssh_connections[host].close()
+                except Exception:
+                    pass
             self.ssh_connections[host] = client
 
         # ---------- direct connection ----------
@@ -104,8 +106,10 @@ class SshUtils:
                 except Exception as e:
                     last_err = e
                     self.logger.info(f"Direct login failed for '{user}': {repr(e)}")
-                    try: ssh.close()
-                    except Exception: pass
+                    try:
+                        ssh.close()
+                    except Exception:
+                        pass
             raise Exception(f"All usernames failed for {address}. Last error: {repr(last_err)}")
 
         # ---------- connect to bastion ----------
@@ -177,10 +181,14 @@ class SshUtils:
             except Exception as e:
                 last_err = e
                 self.logger.info(f"Target login failed for '{user}': {repr(e)}")
-                try: target_ssh.close()
-                except Exception: pass
-                try: channel.close()
-                except Exception: pass
+                try:
+                    target_ssh.close()
+                except Exception:
+                    pass
+                try:
+                    channel.close()
+                except Exception:
+                    pass
 
         raise Exception(
             f"Tunnel established, but all usernames failed for target {address}. Last error: {repr(last_err)}"
