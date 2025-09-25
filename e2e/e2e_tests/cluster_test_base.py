@@ -53,7 +53,7 @@ class TestClusterBase:
         self.k8s_test = kwargs.get("k8s_run", False)
         self.pool_name = "test_pool"
         self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
-        self.mount_path = f"/mnt/test_location"
+        self.mount_path = "/mnt/test_location"
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)

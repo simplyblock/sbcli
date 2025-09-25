@@ -1923,11 +1923,9 @@ def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
             logger.info(f"fdb cluster connection string: {prefix}")
             return prefix
         else:
-            logger.info("cluster-file not found in ConfigMap.")
-            return None
+            raise ValueError("cluster-file not found in ConfigMap")
     except client.exceptions.ApiException as e:
-        logger.error(f"Failed to read ConfigMap: {e}")
-        return None
+        raise ValueError(f"Failed to read ConfigMap: {e}")
 
 def build_graylog_patch(cluster_secret: str) -> dict:
     graylog_env_patch = [
