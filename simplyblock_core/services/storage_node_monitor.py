@@ -200,13 +200,13 @@ def set_node_online(node):
                 device_controller.device_set_online(dev.get_id())
 
         # start migration tasks on node online status change
+        online_devices_list = []
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 logger.info("Adding task to device data migration")
-                task_id = tasks_controller.add_device_mig_task(dev.get_id())
-                if task_id:
-                    logger.info(f"Task id: {task_id}")
-
+                online_devices_list.append(dev.get_id())
+        if online_devices_list:
+            tasks_controller.add_device_mig_task(online_devices_list, node.cluster_id)
 
 def set_node_offline(node, set_devs_offline=False):
     if node.status != StorageNode.STATUS_UNREACHABLE:

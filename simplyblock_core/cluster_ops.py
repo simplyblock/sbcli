@@ -186,7 +186,7 @@ def _set_max_result_window(cluster_ip, max_window=100000):
     if not reachable:
         logger.error(f"Failed to update settings for existing indices: {response.text}")
         return False
-    
+
     url_template = f"http://{cluster_ip}/opensearch/_template/all_indices_template"
     payload_template = json.dumps({
         "index_patterns": ["*"],
@@ -226,7 +226,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
-        
+
     if ingress_host_source == "dns":
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns")
@@ -235,7 +235,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    if mode == "docker": 
+    if mode == "docker":
         if not ifname:
             ifname = "eth0"
 
@@ -260,7 +260,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
         c.swarm.init(dev_ip)
         logger.info("Configuring docker swarm > Done")
-        
+
         hostname = socket.gethostname()
         current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
         if current_node:
@@ -270,7 +270,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             current_spec["Labels"] = current_labels
 
             current_node.update(current_spec)
-            
+
             logger.info(f"Labeled node '{hostname}' with app=graylog")
         else:
             logger.warning("Could not find current node for labeling")
@@ -329,7 +329,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
 
-    if mode == "docker": 
+    if mode == "docker":
         if not disable_monitoring:
             utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
 
@@ -345,18 +345,18 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     elif mode == "kubernetes":
         if not contact_point:
-            contact_point = 'https://hooks.slack.com/services/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' 
+            contact_point = 'https://hooks.slack.com/services/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'
 
         if not tls_secret:
             tls_secret = ''
-        
+
         if not dns_name:
             dns_name= ''
-            
+
         logger.info("Deploying helm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE, 
+                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE,
                                 str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
         logger.info("Deploying helm stack > Done")
 
@@ -1155,7 +1155,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     logger.info(f"{sbcli} upgraded")
 
     logger.info("Updating mgmt cluster")
-    if cluster.mode == "docker": 
+    if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
@@ -1165,16 +1165,31 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
         if mgmt_image:
             service_image = mgmt_image
+        service_names = []
         for service in cluster_docker.services.list():
             if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
             "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 logger.info(f"Updating service {service.name}")
                 service.update(image=service_image, force_update=True)
+                service_names.append(service.attrs['Spec']['Name'])
 
-    elif cluster.mode == "kubernetes": 
+        if "app_SnapshotMonitor" not in service_names:
+            logger.info("Creating snapshot monitor service")
+            cluster_docker.services.create(
+                image=service_image,
+                command="python simplyblock_core/services/snapshot_monitor.py",
+                name="app_SnapshotMonitor",
+                mounts=["/etc/foundationdb:/etc/foundationdb"],
+                env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
+                networks=["host"],
+                constraints=["node.role == manager"]
+            )
+        logger.info("Done updating mgmt cluster")
+
+    elif cluster.mode == "kubernetes":
         k8s_config.load_kube_config()
         apps_v1 = k8s_client.AppsV1Api()
-        
+
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
         image_parts = "/".join(image_without_tag.split("/")[-2:])
         service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
@@ -1217,7 +1232,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     if mgmt_only:
         return
 
-    if cluster.mode == "docker": 
+    if cluster.mode == "docker":
         logger.info("Updating spdk image on storage nodes")
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
