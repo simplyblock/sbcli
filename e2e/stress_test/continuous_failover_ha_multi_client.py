@@ -347,7 +347,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                    node_id=self.current_outage_node,
                                                    force=True)
                     else:
-                        self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+                        self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503],
+                                                       force=True)
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=1000)
                     break  # Exit loop if successful
                 except Exception as _:
