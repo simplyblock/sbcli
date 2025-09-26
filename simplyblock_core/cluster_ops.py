@@ -22,6 +22,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.qos import QOSClass
 from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, NodeStatObject, DeviceStatObject
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -378,6 +379,15 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.create_dt = str(datetime.datetime.now())
     db_controller = DBController()
     cluster.write_to_db(db_controller.kv_store)
+
+    # create default qos class
+    qos_class = QOSClass()
+    qos_class.uuid = str(uuid.uuid4())
+    qos_class.cluster_id = cluster.uuid
+    qos_class.index_id = 0
+    qos_class.name = "Default"
+    qos_class.weight = 100
+    qos_class.write_to_db()
 
     cluster_events.cluster_create(cluster)
 

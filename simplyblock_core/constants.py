@@ -215,5 +215,4 @@ prometheus_patch = {
     }
 }
 
-
-qos_class_weights = [60, 15, 0, 10 , 5,  0, 10, 0 ]
+qos_class_meta_and_migration_weight_percent = 25

@@ -20,7 +20,7 @@ from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller, health_controller, tcp_ports_events
+    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.iface import IFace
@@ -1255,22 +1255,14 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
 
         snode.write_to_db(kv_store)
 
-        # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-        #     logger.warning(
-        #         f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
-        #
-        #     logger.info("Setting node status to Active")
-        #     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
-        #
-        #     logger.info("Make other nodes connect to the node devices")
-        #     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-        #     for node in snodes:
-        #         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-        #             continue
-        #         node.remote_devices = _connect_to_remote_devs(node)
-        #         node.write_to_db(kv_store)
-        #
-        #     continue
+        # set qos values if found
+        qos_classes = db_controller.get_qos(cluster_id)
+        if len(qos_classes) > 1:
+            logger.info("Setting Alcemls QOS weights")
+            ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
+            if not ret:
+              logger.error(f"Failed to set Alcemls QOS")
+              return False
 
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         old_status = snode.status
@@ -1840,6 +1832,15 @@ def restart_storage_node(
             return False
 
     snode.write_to_db()
+
+    # set qos values if found
+    qos_classes = db_controller.get_qos(snode.cluster_id)
+    if len(qos_classes) > 1:
+        logger.info("Setting Alcemls QOS weights")
+        ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
+        if not ret:
+            logger.error(f"Failed to set Alcemls QOS")
+            return False
 
     logger.info("Connecting to remote devices")
     try:
