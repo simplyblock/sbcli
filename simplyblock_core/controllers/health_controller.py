@@ -1,5 +1,4 @@
 # coding=utf-8
-import time
 
 from typing import Any
 from logging import DEBUG, ERROR, INFO
