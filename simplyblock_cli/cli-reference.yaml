@@ -1849,6 +1849,12 @@ commands:
             help: "QOS class weight"
             dest: weight
             type: int
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+            required: false
+            default: ""
       - name: list
         help: "Lists all qos classes"
         arguments:

@@ -315,6 +315,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
 
+    if lvol_priority_class > 0:
+        class_found = False
+        for qos_class in db_controller.get_qos(cl.uuid):
+            if qos_class.class_id == lvol_priority_class:
+                class_found = True
+        if not class_found:
+            return False, f"QOS class not found: {lvol_priority_class}"
+
     if uid:
         for lvol in db_controller.get_lvols():
             if lvol.get_id() == uid:

@@ -768,6 +768,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'add', 'Creates a new QOS class')
         subcommand.add_argument('name', help='QOS class name', type=str)
         subcommand.add_argument('weight', help='QOS class weight', type=int)
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str, default='')
 
     def init_qos__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all qos classes')

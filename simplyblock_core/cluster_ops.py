@@ -384,7 +384,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     qos_class = QOSClass()
     qos_class.uuid = str(uuid.uuid4())
     qos_class.cluster_id = cluster.uuid
-    qos_class.index_id = 0
+    qos_class.class_id = 0
     qos_class.name = "Default"
     qos_class.weight = 100
     qos_class.write_to_db()

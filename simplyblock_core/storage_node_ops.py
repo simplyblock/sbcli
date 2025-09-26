@@ -1245,6 +1245,14 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
                 logger.error("Failed to prepare cluster devices")
                 return False
 
+        # set qos values if enabled
+        if cluster.enable_qos:
+            logger.info("Setting Alcemls QOS weights")
+            ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
+            if not ret:
+              logger.error(f"Failed to set Alcemls QOS")
+              return False
+
         logger.info("Connecting to remote devices")
         remote_devices = _connect_to_remote_devs(snode)
         snode.remote_devices = remote_devices
@@ -1254,15 +1262,6 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
         snode.write_to_db(kv_store)
-
-        # set qos values if found
-        qos_classes = db_controller.get_qos(cluster_id)
-        if len(qos_classes) > 1:
-            logger.info("Setting Alcemls QOS weights")
-            ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
-            if not ret:
-              logger.error(f"Failed to set Alcemls QOS")
-              return False
 
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         old_status = snode.status
@@ -1833,9 +1832,8 @@ def restart_storage_node(
 
     snode.write_to_db()
 
-    # set qos values if found
-    qos_classes = db_controller.get_qos(snode.cluster_id)
-    if len(qos_classes) > 1:
+    # set qos values if enabled
+    if cluster.enable_qos:
         logger.info("Setting Alcemls QOS weights")
         ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
         if not ret:

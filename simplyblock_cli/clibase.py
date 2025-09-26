@@ -628,7 +628,7 @@ class CLIWrapperBase:
         return details
 
     def qos__add(self, sub_command, args):
-        return qos_controller.add_class(args.name, args.weight)
+        return qos_controller.add_class(args.name, args.weight, args.cluster_id)
 
     def qos__list(self, sub_command, args):
         return qos_controller.list_classes()
