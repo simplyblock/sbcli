@@ -91,16 +91,16 @@ def add_device_mig_task(device_id_list, cluster_id):
                 logger.info(f"Task found, skip adding new task: {task.get_id()}")
                 return False
 
-        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status == StorageNode.STATUS_REMOVED:
-                continue
+    for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status == StorageNode.STATUS_REMOVED:
+            continue
 
-            for bdev in node.lvstore_stack:
-                if bdev['type'] == "bdev_distr":
-                    task_id = _add_task(JobSchedule.FN_DEV_MIG, cluster_id, node.get_id(), device.get_id(),
-                              max_retry=-1, function_params={'distr_name': bdev['name']}, send_to_cluster_log=False)
-                    if task_id:
-                        sub_tasks.append(task_id)
+        for bdev in node.lvstore_stack:
+            if bdev['type'] == "bdev_distr":
+                task_id = _add_task(JobSchedule.FN_DEV_MIG, cluster_id, node.get_id(), device.get_id(),
+                          max_retry=-1, function_params={'distr_name': bdev['name']}, send_to_cluster_log=False)
+                if task_id:
+                    sub_tasks.append(task_id)
     if sub_tasks:
         task_obj = JobSchedule()
         task_obj.uuid = str(uuid.uuid4())
