@@ -306,20 +306,22 @@ while True:
                     if passed:
                         set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
-                    for snap in db.get_snapshots_by_node_id(snode.get_id()):
-                        present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
-                        set_snapshot_health_check(snap, present)
-                        passed &= present
+            if snode.lvstore_status == "ready":
 
-                    snode = db.get_storage_node_by_id(snode.get_id())
-                    if snode.status == StorageNode.STATUS_ONLINE:
-                        not_deleted = []
-                        for bdev_name in snode.lvol_sync_del_queue:
-                            ret = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
-                            if not ret:
-                                logger.error(f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
-                                not_deleted.append(bdev_name)
-                        snode.lvol_sync_del_queue = not_deleted
-                        snode.write_to_db()
+                for snap in db.get_snapshots_by_node_id(snode.get_id()):
+                    present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
+                    set_snapshot_health_check(snap, present)
+
+                snode = db.get_storage_node_by_id(snode.get_id())
+                if snode.status == StorageNode.STATUS_ONLINE:
+                    not_deleted = []
+                    for bdev_name in snode.lvol_sync_del_queue:
+                        logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
+                        ret = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
+                        if not ret:
+                            logger.error(f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
+                            not_deleted.append(bdev_name)
+                    snode.lvol_sync_del_queue = not_deleted
+                    snode.write_to_db()
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
