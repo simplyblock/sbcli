@@ -63,7 +63,7 @@ def get_next_cluster_status(cluster_id):
         node_online_devices = 0
         node_offline_devices = 0
 
-        if node.status == StorageNode.STATUS_IN_CREATION:
+        if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED]:
             continue
 
         if node.status == StorageNode.STATUS_ONLINE:
@@ -278,6 +278,12 @@ while True:
             node_rpc_check = health_controller._check_node_rpc(
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+
+            if ping_check and node_api_check and spdk_process and not node_rpc_check:
+                time.sleep(3)
+                node_rpc_check = health_controller._check_node_rpc(
+                    snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+                logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
             node_port_check = True
 
