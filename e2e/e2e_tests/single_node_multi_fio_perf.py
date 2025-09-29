@@ -63,16 +63,16 @@ class TestLvolFioBase(TestClusterBase):
                     size=config['size'],
                 )
 
-            initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+            initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
 
             # Get LVOL connection string
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+                self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
 
             # Identify the newly connected device
             sleep_n_sec(10)
-            final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+            final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
             disk_use = None
 
             for device in final_devices:
@@ -82,12 +82,12 @@ class TestLvolFioBase(TestClusterBase):
                     break
 
             # Unmount, format, and mount the device
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use)
+            self.ssh_obj.unmount_path(node=self.client_machines[0], device=disk_use)
             mount_path = None
             if config["mount"]:
-                self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use)
+                self.ssh_obj.format_disk(node=self.client_machines[0], device=disk_use)
                 mount_path = f"{Path.home()}/test_location_{lvol_name}"
-                self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_path)
+                self.ssh_obj.mount_path(node=self.client_machines[0], device=disk_use, mount_path=mount_path)
 
             # Store device information
             self.lvol_devices[lvol_name] = {"Device": disk_use, "MountPath": mount_path}
@@ -97,7 +97,7 @@ class TestLvolFioBase(TestClusterBase):
         self.logger.info(f"Starting FIO test on {lvol_name} with readwrite={readwrite}")
         fio_thread = threading.Thread(
             target=self.ssh_obj.run_fio_test,
-            args=(self.mgmt_nodes[0], device, mount_path, None),
+            args=(self.client_machines[0], device, mount_path, None),
             kwargs={
                 "name": f"fio_{lvol_name}",
                 "rw": readwrite,
@@ -121,7 +121,7 @@ class TestLvolFioBase(TestClusterBase):
         """Validate the FIO output for IOPS and MB/s."""
 
         log_file = f"{Path.home()}/{lvol_name}_log.json"
-        output = self.ssh_obj.read_file(node=self.mgmt_nodes[0], file_name=log_file)
+        output = self.ssh_obj.read_file(node=self.client_machines[0], file_name=log_file)
         fio_result = ""
         self.logger.info(f"FIO output for {lvol_name}: {output}")
 
@@ -187,16 +187,16 @@ class TestLvolFioBase(TestClusterBase):
         self.logger.info("Starting cleanup of LVOLs")
         for config in lvol_configs:
             lvol_name = config['lvol_name']
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], 
+            self.ssh_obj.unmount_path(node=self.client_machines[0],
                                       device=self.lvol_devices[lvol_name]['MountPath'])
-            self.ssh_obj.remove_dir(node=self.mgmt_nodes[0], 
+            self.ssh_obj.remove_dir(node=self.client_machines[0], 
                                     dir_path=self.lvol_devices[lvol_name]['MountPath'])
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
-            subsystems = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0], 
+            subsystems = self.ssh_obj.get_nvme_subsystems(node=self.client_machines[0], 
                                                           nqn_filter=lvol_id)
             for subsys in subsystems:
                 self.logger.info(f"Disconnecting NVMe subsystem: {subsys}")
-                self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=subsys)
+                self.ssh_obj.disconnect_nvme(node=self.client_machines[0], nqn_grep=subsys)
             self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
         self.logger.info("Cleanup completed")
 
@@ -244,7 +244,7 @@ class TestLvolFioNpcs0(TestLvolFioBase):
                                                     readwrite="write"))
 
             self.common_utils.manage_fio_threads(
-                node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
+                node=self.client_machines[0], threads=fio_threads, timeout=600
             )
             for thread in fio_threads:
                 thread.join()
@@ -307,7 +307,7 @@ class TestLvolFioNpcs1(TestLvolFioBase):
                                                     readwrite="write"))
 
             self.common_utils.manage_fio_threads(
-                node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
+                node=self.client_machines[0], threads=fio_threads, timeout=600
             )
 
             for thread in fio_threads:
@@ -373,7 +373,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
                                                     readwrite="write"))
 
             self.common_utils.manage_fio_threads(
-                node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
+                node=self.client_machines[0], threads=fio_threads, timeout=600
             )
 
             for thread in fio_threads:
@@ -421,7 +421,7 @@ class TestLvolFioNpcsCustom(TestLvolFioBase):
                                                 readwrite="write"))
 
         self.common_utils.manage_fio_threads(
-            node=self.mgmt_nodes[0], threads=fio_threads, timeout=600
+            node=self.client_machines[0], threads=fio_threads, timeout=600
         )
 
         for thread in fio_threads:

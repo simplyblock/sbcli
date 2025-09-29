@@ -91,7 +91,7 @@ def task_runner(task):
         qos_high_priority = False
         if db.get_cluster_by_id(snode.cluster_id).enable_qos:
             qos_high_priority = True
-        rsp = rpc_client.distr_migration_to_primary_start(device.cluster_device_order, distr_name, qos_high_priority)
+        rsp = rpc_client.distr_migration_expansion_start(distr_name, qos_high_priority)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task, retry later"
@@ -127,14 +127,13 @@ logger.info("Starting Tasks runner...")
 
 def update_master_task(task):
     master_task = None
-    tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-    for t in tasks:
+    tasks = {t.uuid: t for t in db.get_job_tasks(cl.get_id(), reverse=False)}
+    for t in tasks.values():
         if task.uuid in t.sub_tasks:
             master_task = t
             break
 
     def _set_master_task_status(master_task, status):
-        master_task = db.get_task_by_id(master_task.uuid)
         if master_task.status != status:
             logger.info(f"_set_master_task_status: {status}")
             master_task.status = status
@@ -150,7 +149,7 @@ def update_master_task(task):
     }
     if master_task:
         for sub_task_id in master_task.sub_tasks:
-            sub_task = db.get_task_by_id(sub_task_id)
+            sub_task = tasks[sub_task_id]
             status_map[sub_task.status] = status_map.get(sub_task.status, 0) + 1
 
         logger.info(f"master_task.sub_tasks: {len(master_task.sub_tasks)}")

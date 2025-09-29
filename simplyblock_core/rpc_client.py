@@ -364,7 +364,7 @@ class RPCClient:
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
-            "cluster_sz": cluster_sz,
+            "cluster_sz": cluster_sz*4,
             "clear_method": clear_method,
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
         }

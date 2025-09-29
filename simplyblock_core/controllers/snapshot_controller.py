@@ -286,7 +286,6 @@ def delete(snapshot_uuid, force_delete=False):
             snap.status = SnapShot.STATUS_IN_DELETION
             snap.deletion_status = snode.get_id()
             snap.write_to_db(db_controller.kv_store)
-            snapshot_events.snapshot_delete(snap)
         else:
             msg = f"Host node is not online {snode.get_id()}"
             logger.error(msg)
@@ -343,11 +342,10 @@ def delete(snapshot_uuid, force_delete=False):
         snap.deletion_status = primary_node.get_id()
         snap.status = SnapShot.STATUS_IN_DELETION
         snap.write_to_db(db_controller.kv_store)
-        snapshot_events.snapshot_delete(snap)
 
     try:
         base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
-        if base_lvol.deleted is True:
+        if base_lvol and base_lvol.deleted is True:
             lvol_controller.delete_lvol(base_lvol.get_id())
     except KeyError:
         pass
