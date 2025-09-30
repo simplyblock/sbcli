@@ -21,6 +21,7 @@ class TestLvolQOSBase(TestClusterBase):
         self.lvol_devices = {}
         self.mount_path = "/mnt/"
 
+    def create_pools(self, bw=False):
         pools = self.sbcli_utils.list_storage_pools()
         assert self.pool_name not in list(pools.keys()), \
             f"Pool {self.pool_name} present in list of pools post delete: {pools}"
@@ -28,13 +29,19 @@ class TestLvolQOSBase(TestClusterBase):
         assert f"{self.pool_name}_qos" not in list(pools.keys()), \
             f"Pool {self.pool_name}_qos present in list of pools post delete: {pools}"
 
-        self.sbcli_utils.add_storage_pool(
-            pool_name=f"{self.pool_name}_qos",
-            cluster_id=self.cluster_id,
-            max_rw_iops=6000,
-            max_r_mbytes=90,
-            max_w_mbytes=90
-        )
+        if bw:
+            self.sbcli_utils.add_storage_pool(
+                pool_name=f"{self.pool_name}_qos",
+                cluster_id=self.cluster_id,
+                max_r_mbytes=90,
+                max_w_mbytes=90
+            )
+        else:
+            self.sbcli_utils.add_storage_pool(
+                pool_name=f"{self.pool_name}_qos",
+                cluster_id=self.cluster_id,
+                max_rw_iops=6000
+            )
 
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name,
@@ -47,8 +54,8 @@ class TestLvolQOSBase(TestClusterBase):
         
         assert f"{self.pool_name}_qos" in list(pools.keys()), \
             f"Pool {self.pool_name}_qos not present in list of pools post add: {pools}"
-
-    def create_lvols(self, lvol_configs, pool_qos=False):
+    
+    def create_lvols(self, lvol_configs, pool_qos=False, bw=False):
         """
         Create multiple LVOLs, connect them, and mount them 
         based on the provided configurations.
@@ -76,14 +83,21 @@ class TestLvolQOSBase(TestClusterBase):
                         size=config['size'],
                     )
                 else:
-                    self.sbcli_utils.add_lvol(
-                        lvol_name=lvol_name,
-                        pool_name=self.pool_name,
-                        size=config['size'],
-                        max_rw_iops=2000,
-                        max_r_mbytes=50,
-                        max_w_mbytes=50
-                    )
+                    if bw:
+                        self.sbcli_utils.add_lvol(
+                            lvol_name=lvol_name,
+                            pool_name=self.pool_name,
+                            size=config['size'],
+                            max_r_mbytes=50,
+                            max_w_mbytes=50
+                        )
+                    else:
+                        self.sbcli_utils.add_lvol(
+                            lvol_name=lvol_name,
+                            pool_name=self.pool_name,
+                            size=config['size'],
+                            max_rw_iops=2000
+                        )
 
 
             initial_devices = self.ssh_obj.get_devices(node=self.fio_node[0])
@@ -139,7 +153,7 @@ class TestLvolQOSBase(TestClusterBase):
         fio_thread.start()
         return fio_thread
 
-    def validate_fio_output(self, pool_qos_lvols_config, lvol_qos_config):
+    def validate_fio_output(self, pool_qos_lvols_config, lvol_qos_config, bw=False):
         """Validate the FIO output for IOPS and MB/s."""
         total_qos_iops = 0
         total_qos_read_bw = 0
@@ -203,11 +217,14 @@ class TestLvolQOSBase(TestClusterBase):
             log_file.write(f"Total QOS IOPS: {total_qos_iops}, Read BW: "
                            f"{total_qos_read_bw} MiB/s, Write BW: {total_qos_write_bw} MiB/s")
 
-        assert  10000 < total_qos_iops < 12300 , \
-            f"Total IOPS {total_qos_iops} can not be more than 12300, should not be less than 10000"
+        if bw:
+            assert 200 < read_bw_mib < 250, f"Read BW {total_qos_read_bw} out of range (200-250 MiB/s)"
+            assert 200 < write_bw_mib < 250, f"Write BW {total_qos_write_bw} out of range (200-250 MiB/s)"
+        else:
+            assert  10000 < total_qos_iops < 12300 , \
+                f"Total IOPS {total_qos_iops} can not be more than 12300, should not be less than 10000"
 
-        assert 200 < read_bw_mib < 250, f"Read BW {total_qos_read_bw} out of range (200-250 MiB/s)"
-        assert 200 < write_bw_mib < 250, f"Write BW {total_qos_write_bw} out of range (200-250 MiB/s)"
+        
 
     def cleanup_lvols(self, lvol_configs):
         """Unmount, remove directory, and delete LVOLs for cleanup."""
@@ -228,7 +245,7 @@ class TestLvolQOSBase(TestClusterBase):
         self.logger.info("Cleanup completed")
 
 
-class TestLvolFioQOSCombined(TestLvolQOSBase):
+class TestLvolFioQOSBW(TestLvolQOSBase):
     """
     Test class for LVOLs with QOS setting from pool level and lvol level
     """
@@ -247,10 +264,12 @@ class TestLvolFioQOSCombined(TestLvolQOSBase):
             {"lvol_name": "lvol_non_qos2", "size": "4G", "mount": True},
             {"lvol_name": "lvol_non_qos3", "size": "4G", "mount": True},
         ]
+
+        self.create_pools(bw=True)
         
         # Create LVOLs
         self.create_lvols(pool_qos_lvol_configs, pool_qos=True)
-        self.create_lvols(lvol_configs)
+        self.create_lvols(lvol_configs, bw=True)
 
         # Run FIO tests
         fio_threads = []
@@ -271,7 +290,59 @@ class TestLvolFioQOSCombined(TestLvolQOSBase):
             thread.join()
 
         # Validate FIO outputs
-        self.validate_fio_output(pool_qos_lvol_configs, lvol_configs)
+        self.validate_fio_output(pool_qos_lvol_configs, lvol_configs, bw=True)
+
+        # Cleanup after running FIO
+        self.cleanup_lvols(lvol_configs)
+        self.cleanup_lvols(pool_qos_lvol_configs)
+
+        self.logger.info("Test Case Passed.")
+
+class TestLvolFioQOSIOPS(TestLvolQOSBase):
+    """
+    Test class for LVOLs with QOS setting from pool level and lvol level
+    """
+
+    def run(self):
+        """Custom test scenario without requiring ndcs or npcs."""
+        # Define custom test configurations that don't require ndcs or npcs
+        pool_qos_lvol_configs = [
+            {"lvol_name": "lvol_qos1", "size": "4G", "mount": True},
+            {"lvol_name": "lvol_qos2", "size": "4G", "mount": True},
+            {"lvol_name": "lvol_qos3", "size": "4G", "mount": True},
+        ]
+
+        lvol_configs = [
+            {"lvol_name": "lvol_non_qos1", "size": "4G", "mount": True},
+            {"lvol_name": "lvol_non_qos2", "size": "4G", "mount": True},
+            {"lvol_name": "lvol_non_qos3", "size": "4G", "mount": True},
+        ]
+        
+        self.create_pools(bw=False)
+        # Create LVOLs
+        self.create_lvols(pool_qos_lvol_configs, pool_qos=True)
+        self.create_lvols(lvol_configs, bw=False)
+
+        # Run FIO tests
+        fio_threads = []
+        for lvol_config in pool_qos_lvol_configs:
+            fio_threads.append(self.run_fio_on_lvol(lvol_config["lvol_name"],
+                                                    mount_path=self.lvol_devices[lvol_config["lvol_name"]]["MountPath"],
+                                                    readwrite="randrw"))
+        for lvol_config in lvol_configs:
+            fio_threads.append(self.run_fio_on_lvol(lvol_config["lvol_name"],
+                                                    mount_path=self.lvol_devices[lvol_config["lvol_name"]]["MountPath"],
+                                                    readwrite="randrw"))
+
+        self.common_utils.manage_fio_threads(
+            node=self.fio_node[0], threads=fio_threads, timeout=600
+        )
+
+        for thread in fio_threads:
+            thread.join()
+
+        # Validate FIO outputs
+        self.validate_fio_output(pool_qos_lvol_configs, lvol_configs, bw=False)
 
         # Cleanup after running FIO
         self.cleanup_lvols(lvol_configs)
