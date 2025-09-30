@@ -280,10 +280,13 @@ while True:
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
             if ping_check and node_api_check and spdk_process and not node_rpc_check:
-                time.sleep(3)
-                node_rpc_check = health_controller._check_node_rpc(
-                    snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
-                logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+                start_time = time.time()
+                while time.time() < start_time + 60:
+                    node_rpc_check = health_controller._check_node_rpc(
+                        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+                    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+                    if node_rpc_check:
+                        break
 
             node_port_check = True
 
