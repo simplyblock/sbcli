@@ -13,6 +13,9 @@ from e2e_tests.single_node_reboot import (
 from e2e_tests.single_node_multi_fio_perf import (
     TestLvolFioNpcs0, TestLvolFioNpcs1, TestLvolFioNpcs2, TestLvolFioNpcsCustom
 )
+
+from e2e_tests.single_node_qos import TestLvolFioQOSCombined
+
 from e2e_tests.single_node_resize import TestSingleNodeResizeLvolCone
 
 from e2e_tests.multi_lvol_run_fio import TestManyLvolSameNode
@@ -67,6 +70,7 @@ ALL_TESTS = [
     TestRebootNodeHost,
     TestMgmtNodeReboot,
     FioWorkloadTest,
+    TestLvolFioQOSCombined,
     TestMultiFioSnapshotDowntime,
     TestManyLvolSameNode,
     TestBatchLVOLsLimit,
@@ -86,6 +90,7 @@ def get_all_tests(custom=True, ha_test=False):
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
+        TestLvolFioQOSCombined,
         TestSingleNodeOutage,
         # TestSingleNodeReboot,
         # TestHASingleNodeReboot,
