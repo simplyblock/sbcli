@@ -19,6 +19,7 @@ class TestLvolQOSBase(TestClusterBase):
         super().setup()
 
         self.lvol_devices = {}
+        self.mount_path = "/mnt/"
 
         pools = self.sbcli_utils.list_storage_pools()
         assert self.pool_name not in list(pools.keys()), \
@@ -85,16 +86,16 @@ class TestLvolQOSBase(TestClusterBase):
                     )
 
 
-            initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+            initial_devices = self.ssh_obj.get_devices(node=self.fio_node[0])
 
             # Get LVOL connection string
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+                self.ssh_obj.exec_command(node=self.fio_node[0], command=connect_str)
 
             # Identify the newly connected device
             sleep_n_sec(10)
-            final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+            final_devices = self.ssh_obj.get_devices(node=self.fio_node[0])
             disk_use = None
 
             for device in final_devices:
@@ -104,12 +105,12 @@ class TestLvolQOSBase(TestClusterBase):
                     break
 
             # Unmount, format, and mount the device
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use)
+            self.ssh_obj.unmount_path(node=self.fio_node[0], device=disk_use)
             mount_path = None
             if config["mount"]:
-                self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use)
+                self.ssh_obj.format_disk(node=self.fio_node[0], device=disk_use)
                 mount_path = f"{Path.home()}/test_location_{lvol_name}"
-                self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=disk_use, mount_path=mount_path)
+                self.ssh_obj.mount_path(node=self.fio_node[0], device=disk_use, mount_path=mount_path)
 
             # Store device information
             self.lvol_devices[lvol_name] = {"Device": disk_use, "MountPath": mount_path}
@@ -213,16 +214,16 @@ class TestLvolQOSBase(TestClusterBase):
         self.logger.info("Starting cleanup of LVOLs")
         for config in lvol_configs:
             lvol_name = config['lvol_name']
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], 
+            self.ssh_obj.unmount_path(node=self.fio_node[0], 
                                       device=self.lvol_devices[lvol_name]['MountPath'])
-            self.ssh_obj.remove_dir(node=self.mgmt_nodes[0], 
+            self.ssh_obj.remove_dir(node=self.fio_node[0], 
                                     dir_path=self.lvol_devices[lvol_name]['MountPath'])
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
-            subsystems = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0], 
+            subsystems = self.ssh_obj.get_nvme_subsystems(node=self.fio_node[0], 
                                                           nqn_filter=lvol_id)
             for subsys in subsystems:
                 self.logger.info(f"Disconnecting NVMe subsystem: {subsys}")
-                self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=subsys)
+                self.ssh_obj.disconnect_nvme(node=self.fio_node[0], nqn_grep=subsys)
             self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
         self.logger.info("Cleanup completed")
 
