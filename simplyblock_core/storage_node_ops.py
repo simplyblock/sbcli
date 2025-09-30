@@ -1974,10 +1974,13 @@ def restart_storage_node(
                     logger.error("RPC failed bdev_lvol_set_qos_limit")
                     return False
 
+            online_devices_list = []
             for dev in snode.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
                     logger.info(f"Starting migration task for device {dev.get_id()}")
-                    tasks_controller.add_device_mig_task(dev.get_id())
+                    online_devices_list.append(dev.get_id())
+            if online_devices_list:
+                tasks_controller.add_device_mig_task(online_devices_list, snode.cluster_id)
             return True
 
 
@@ -3030,6 +3033,8 @@ def recreate_lvstore_on_sec(secondary_node):
         if err:
             logger.error(f"Failed to recreate lvstore on node {secondary_node.get_id()}")
             logger.error(err)
+            primary_node.lvstore_status = "ready"
+            primary_node.write_to_db()
             return False
 
         ### 2- create lvols nvmf subsystems
