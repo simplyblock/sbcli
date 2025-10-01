@@ -114,7 +114,7 @@ class SNodeClient:
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
-        return True
+        return True, None
         # params = {
         #     "cluster_ip": cluster_ip,
         #     "cluster_id": cluster_id,
