@@ -2678,6 +2678,7 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
         environment=[
             f"DOCKER_IP={node_ip}",
             "WITHOUT_CLOUD_INFO=True",
+            "SIMPLYBLOCK_LOG_LEVEL=DEBUG",
         ]
     )
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")

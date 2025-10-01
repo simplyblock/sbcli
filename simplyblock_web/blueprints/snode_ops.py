@@ -245,6 +245,7 @@ def spdk_process_kill(query: _RPCPortQuery):
     })}}},
 })
 def spdk_process_is_up(query: _RPCPortQuery):
+    logger.debug("function:spdk_process_is_up start")
     try:
         node_docker = get_docker_client()
         for cont in node_docker.containers.list(all=True):
@@ -252,12 +253,14 @@ def spdk_process_is_up(query: _RPCPortQuery):
             if cont.attrs['Name'] == f"/spdk_{query.rpc_port}":
                 status = cont.attrs['State']["Status"]
                 is_running = cont.attrs['State']["Running"]
+                logger.debug("function:spdk_process_is_up end")
                 if is_running:
                     return utils.get_response(True)
                 else:
                     return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
     except Exception as e:
         logger.error(e)
+    logger.debug("function:spdk_process_is_up end")
     return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
 
 
@@ -315,15 +318,18 @@ def delete_cluster_id():
 
 
 def get_node_lsblk():
+    logger.debug("function:get_node_lsblk start")
     out, err, rc = shell_utils.run_command("lsblk -J")
     if rc != 0:
         logger.error(err)
         return []
     data = json.loads(out)
+    logger.debug("function:get_node_lsblk end")
     return data
 
 
 def get_nodes_config():
+    logger.debug("function:get_nodes_config start")
     file_path = constants.NODES_CONFIG_FILE
     try:
         # Open and read the JSON file
@@ -340,6 +346,7 @@ def get_nodes_config():
         for i in range(len(nodes_config.get("nodes"))):
             if not core_utils.validate_node_config(nodes_config.get("nodes")[i]):
                 return {}
+        logger.debug("function:get_nodes_config end")
         return nodes_config
 
     except FileNotFoundError:
@@ -357,7 +364,8 @@ def get_nodes_config():
     })}}},
 })
 def get_info():
-    return utils.get_response({
+    logger.debug("function:get_info start")
+    resp = utils.get_response({
         "cluster_id": get_cluster_id(),
 
         "hostname": HOSTNAME,
@@ -383,6 +391,8 @@ def get_info():
         "lsblk": get_node_lsblk(),
         "nodes_config": get_nodes_config(),
     })
+    logger.debug("function:get_info end")
+    return resp
 
 
 class _JoinSwarmParams(BaseModel):
