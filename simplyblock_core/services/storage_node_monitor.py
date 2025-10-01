@@ -351,16 +351,15 @@ while True:
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
-                    # set devices unavailable
-                    for dev in snode.nvme_devices:
-                        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                            device_controller.device_set_unavailable(dev.get_id())
 
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
                                           Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
-                        set_node_offline(snode, set_devs_offline=not spdk_process)
+                        if not spdk_process and not node_rpc_check:
+                            logger.info("ping is fine, snodeapi is fine, But no spdk process and no rpc check, "
+                                        "So that we set device offline")
+                        set_node_offline(snode, set_devs_offline=(not spdk_process and not node_rpc_check))
                         tasks_controller.add_node_to_auto_restart(snode)
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
