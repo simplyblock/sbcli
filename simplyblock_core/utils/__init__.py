@@ -85,6 +85,7 @@ def get_nvme_info(dev_name):
 
 
 def get_nics_data():
+    logger.debug("function:get_nics_data start")
     out, err, rc = shell_utils.run_command("ip -j address show")
     if rc != 0:
         logger.error(err)
@@ -113,6 +114,7 @@ def get_nics_data():
                 altname_info = iface
                 altname_info["name"] = altname
                 iface_list[altname] = altname_info
+    logger.debug("function:get_nics_data end")
     return iface_list
 
 

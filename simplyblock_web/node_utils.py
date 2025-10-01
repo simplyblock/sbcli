@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 def get_spdk_pcie_list() -> List[PCIAddress]:
     """
     Get a list of PCIe devices bound to SPDK-compatible drivers.
-    
+
     Returns:
         List[PCIAddress]: List of PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
     """
@@ -66,7 +66,7 @@ def get_spdk_pcie_list() -> List[PCIAddress]:
 def get_nvme_pcie_list() -> List[PCIAddress]:
     """
     Get a list of NVMe PCIe devices.
-    
+
     Returns:
         List[PCIAddress]: List of NVMe PCIe addresses (e.g., ['0000:00:1e.0', '0000:00:1f.0'])
     """
@@ -76,7 +76,7 @@ def get_nvme_pcie_list() -> List[PCIAddress]:
 def get_nvme_pcie() -> List[Tuple[str, Tuple[int, int]]]:
     """
     Get a list of NVMe PCIe devices with their vendor and device IDs.
-    
+
     Returns:
         List[Tuple[str, Tuple[int, int]]]: List of tuples containing
             (pci_address, (vendor_id, device_id))
@@ -90,40 +90,41 @@ def get_nvme_pcie() -> List[Tuple[str, Tuple[int, int]]]:
 def get_nvme_devices() -> List[NVMeDevice]:
     """
     Get detailed information about NVMe devices in the system.
-    
+
     Returns:
         List[NVMeDevice]: A list of dictionaries containing NVMe device information
     """
+    logger.debug("function:get_nvme_devices start")
     out, err, rc = shell_utils.run_command("nvme list -v -o json")
     if rc != 0:
         logger.error("Error getting nvme list: %s", err)
         return []
-        
+
     try:
         data = json.loads(out)
     except json.JSONDecodeError as e:
         logger.error("Failed to parse NVMe device list: %s", e)
         return []
-        
+
     logger.debug("NVMe device list: %s", data)
     devices: List[NVMeDevice] = []
-    
+
     if not data or 'Devices' not in data or not data['Devices']:
         return devices
-        
+
     for dev in data['Devices'][0].get('Subsystems', []):
         if not dev.get('Controllers'):
             continue
-            
+
         controller = dev['Controllers'][0]
         namespace = None
-        
+
         # Try to get namespace from device first, then from controller
         if dev.get('Namespaces'):
             namespace = dev['Namespaces'][0]
         elif controller and controller.get('Namespaces'):
             namespace = controller['Namespaces'][0]
-            
+
         if namespace:
             data = {
                 'nqn': dev.get('SubsystemNQN', ''),
@@ -139,7 +140,8 @@ def get_nvme_devices() -> List[NVMeDevice]:
             }
             device = NVMeDevice(**data)
             devices.append(device)
-            
+    logger.debug("function:get_nvme_devices end")
+
     return devices
 
 
@@ -148,12 +150,14 @@ def get_spdk_devices():
 
 
 def _get_mem_info():
-    out, _, rc = shell_utils.run_command("cat /proc/meminfo")
+    logger.debug("function:_get_mem_info start")
+    out, err, rc = shell_utils.run_command("cat /proc/meminfo")
 
     if rc != 0:
         raise ValueError('Failed to get memory info')
 
     entry_regex = r'^(?P<name>[\w\(\)]+):\s+(?P<size>\d+)( (?P<kb>kB))?'
+    logger.debug("function:_get_mem_info end")
 
     return {
             m.group('name'): int(m.group('size')) * (1024 if m.group('kb') else 1)
