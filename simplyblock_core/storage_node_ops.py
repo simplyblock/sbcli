@@ -3042,13 +3042,24 @@ def recreate_lvstore(snode, force=False):
             sec_node.write_to_db()
             time.sleep(3)
 
-            fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
-            try:
-                ### 3- block secondary port
-                fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
+            fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=20, retry=1)
+            port_block_done = False
+            for i in range(3):
+                try:
+                    ### 3- block secondary port
+                    ret, err = fw_api.firewall_set_port(
+                        snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
+                    if ret:
+                        port_block_done = True
+                        break
+                except Exception as e:
+                    logger.error(e)
+
+            if port_block_done:
                 tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
-            except Exception as e:
-                logger.error(e)
+            else:
+                logger.error(f"Failed to block port { snode.lvol_subsys_port} on node: {sec_node.get_id()}")
+                return False
 
             time.sleep(0.5)
             ### 4- set leadership to false
