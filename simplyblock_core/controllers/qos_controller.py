@@ -5,6 +5,7 @@ import uuid
 
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.qos import QOSClass
 
 logger = logging.getLogger()
@@ -29,6 +30,11 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
             logger.error("cluster_id is required")
             return False
 
+    cluster = db.get_cluster_by_id(cluster_id)
+    if cluster.status != Cluster.STATUS_UNREADY:
+        logger.error("cluster already activated!")
+        return False
+
     qos_classes = db.get_qos(cluster_id)
     if len(qos_classes) >= 6:
         logger.error("Can not add more than 6 qos classes")
@@ -47,7 +53,6 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
     qos_class.weight = weight
     qos_class.write_to_db()
 
-    cluster = db.get_cluster_by_id(cluster_id)
     cluster.enable_qos = True
     cluster.write_to_db()
     return True
