@@ -35,7 +35,7 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
         return False
 
     for qos_class in qos_classes:
-        if qos_class.name == name:
+        if qos_class.class_name == name:
             logger.error("qos_class already exists")
             return False
 
@@ -43,7 +43,7 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
     qos_class.uuid = str(uuid.uuid4())
     qos_class.cluster_id = cluster_id
     qos_class.class_id = get_next_index_id(cluster_id)
-    qos_class.name = name
+    qos_class.class_name = name
     qos_class.weight = weight
     qos_class.write_to_db()
 
@@ -60,7 +60,7 @@ def list_classes(cluster_id=None, is_json=False):
         data.append({
             "UUID": qos_class.uuid,
             "Class ID": qos_class.class_id,
-            "Name": qos_class.name,
+            "Name": qos_class.class_name,
             "Weight": qos_class.weight,
             "Cluster ID": qos_class.cluster_id,
         })
