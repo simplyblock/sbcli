@@ -218,11 +218,11 @@ class TestLvolQOSBase(TestClusterBase):
                            f"{total_qos_read_bw} MiB/s, Write BW: {total_qos_write_bw} MiB/s")
 
         if bw:
-            assert 200 < read_bw_mib < 250, f"Read BW {total_qos_read_bw} out of range (200-250 MiB/s)"
-            assert 200 < write_bw_mib < 250, f"Write BW {total_qos_write_bw} out of range (200-250 MiB/s)"
+            assert 20 < read_bw_mib < 50, f"Read BW {total_qos_read_bw} out of range (20-50 MiB/s)"
+            assert 20 < write_bw_mib < 50, f"Write BW {total_qos_write_bw} out of range (20-50 MiB/s)"
         else:
-            assert  10000 < total_qos_iops < 12300 , \
-                f"Total IOPS {total_qos_iops} can not be more than 12300, should not be less than 10000"
+            assert  4000 < total_qos_iops < 6500 , \
+                f"Total IOPS {total_qos_iops} can not be more than 4000, should not be less than 6500"
 
         
 
