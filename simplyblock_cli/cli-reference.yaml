@@ -969,12 +969,6 @@ commands:
             type: int
             default: 4
             private: true
-          - name: "--enable-qos"
-            help: "Enable qos bdev for storage nodes, default: true"
-            dest: enable_qos
-            type: bool
-            default: false
-            private: true
           - name: "--strict-node-anti-affinity"
             help: >
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
@@ -1870,8 +1864,9 @@ commands:
             help: "QOS class name"
             dest: name
             type: str
-          - name: "--force"
-            help: "Force remove"
-            dest: force
-            type: bool
-            action: store_true
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+            required: false
+            default: ""

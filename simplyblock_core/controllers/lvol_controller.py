@@ -476,7 +476,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         }
     }
 
-    if cl.enable_qos and lvol.lvol_priority_class > 0:
+    if cl.is_qos_set() and lvol.lvol_priority_class > 0:
         lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
 
     lvol.bdev_stack = [lvol_dict]

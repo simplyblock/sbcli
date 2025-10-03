@@ -2,6 +2,7 @@
 
 from typing import List
 
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -81,3 +82,11 @@ class Cluster(BaseModel):
         data = super(Cluster, self).get_clean_dict()
         data['status_code'] = self.get_status_code()
         return data
+
+    def is_qos_set(self) -> bool:
+        db_controller = DBController()
+        qos_classes = db_controller.get_qos(self.get_id())
+        if len(qos_classes) > 1:
+            return True
+        return False
+

@@ -631,10 +631,10 @@ class CLIWrapperBase:
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)
 
     def qos__list(self, sub_command, args):
-        return qos_controller.list_classes()
+        return qos_controller.list_classes(args.cluster_id, args.json)
 
     def qos__delete(self, sub_command, args):
-        return qos_controller.delete_class(args.name)
+        return qos_controller.delete_class(args.name, args.cluster_id)
 
     def storage_node_list_devices(self, args):
         node_id = args.node_id
@@ -660,14 +660,13 @@ class CLIWrapperBase:
         qpair_count = args.qpair_count
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
-        enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
         is_single_node = args.is_single_node
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node, name)
+            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -694,7 +693,6 @@ class CLIWrapperBase:
         client_qpair_count = args.client_qpair_count
         max_queue_size = args.max_queue_size
         inflight_io_threshold = args.inflight_io_threshold
-        enable_qos = args.enable_qos
         disable_monitoring = args.disable_monitoring
         strict_node_anti_affinity = args.strict_node_anti_affinity
         name = args.name
@@ -709,7 +707,7 @@ class CLIWrapperBase:
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
-            qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, 
+            qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring,
             strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node)
 
     def query_yes_no(self, question, default="yes"):

@@ -30,13 +30,17 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
             logger.error("cluster_id is required")
             return False
 
+    if not cluster_id:
+        logger.error("cluster_id is required")
+        return False
+
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status != Cluster.STATUS_UNREADY:
-        logger.error("cluster already activated!")
+        logger.error(f"cluster must be in state UNREADY, current status is {cluster.status}")
         return False
 
     qos_classes = db.get_qos(cluster_id)
-    if len(qos_classes) >= 6:
+    if len(qos_classes) >= 7:
         logger.error("Can not add more than 6 qos classes")
         return False
 
@@ -48,7 +52,10 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
     qos_class = QOSClass()
     qos_class.uuid = str(uuid.uuid4())
     qos_class.cluster_id = cluster_id
-    qos_class.class_id = get_next_index_id(cluster_id)
+    if name == "Default":
+        qos_class.class_id = 0
+    else:
+        qos_class.class_id = get_next_index_id(cluster_id)
     qos_class.class_name = name
     qos_class.weight = weight
     qos_class.write_to_db()
@@ -58,6 +65,7 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
 
 def list_classes(cluster_id=None, is_json=False):
     classes = db.get_qos(cluster_id)
+    classes = sorted(classes, key=lambda x: x.class_id)
     data = []
     for qos_class in classes:
         data.append({
@@ -74,8 +82,36 @@ def list_classes(cluster_id=None, is_json=False):
         return utils.print_table(data)
 
 
-def delete_class(name):
-    pass
+def delete_class(name, cluster_id):
+    if not name:
+        logger.error("name is required")
+        return False
+
+    if not cluster_id:
+        clusters = db.get_clusters()
+        if clusters and len(clusters) == 1:
+            cluster_id = clusters[0].uuid
+        else:
+            logger.error("cluster_id is required")
+            return False
+
+    if not cluster_id:
+        logger.error("cluster_id is required")
+        return False
+
+    cluster = db.get_cluster_by_id(cluster_id)
+    if cluster.status != Cluster.STATUS_UNREADY:
+        logger.error(f"cluster must be in state UNREADY, current status is {cluster.status}")
+        return False
+
+    qos_classes = db.get_qos(cluster_id)
+    for qos_class in qos_classes:
+        if qos_class.class_name == name:
+            qos_class.remove(db.kv_store)
+            return True
+
+    logger.error(f"qos_class {name} not found")
+    return False
 
 
 def get_qos_weights_list(cluster_id=None):
@@ -86,6 +122,10 @@ def get_qos_weights_list(cluster_id=None):
         total_weight += qos_class.weight
         if qos_class.class_id == 0:
             default_class = qos_class
+
+    if not default_class:
+        msg = "QOS Default class was not found, please create a new one with name Default."
+        raise ValueError(msg)
 
     meta_class_w = constants.qos_class_meta_and_migration_weight_percent
     # add default and meta classes (0,1)
