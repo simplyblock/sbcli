@@ -69,13 +69,13 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             assert lvol_name in list(lvols.keys()), \
                 f"Lvol {lvol_name} is not present in list of lvols post add: {lvols}"
 
-            initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+            initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+                self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
 
-            final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+            final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
             disk_use = None
             self.logger.info("Initial vs final disk:")
             self.logger.info(f"Initial: {initial_devices}")
@@ -85,15 +85,15 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                     self.logger.info(f"Using disk: /dev/{device.strip()}")
                     disk_use = f"/dev/{device.strip()}"
                     break
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+            self.ssh_obj.unmount_path(node=self.client_machines[0],
                                     device=disk_use)
-            self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
+            self.ssh_obj.format_disk(node=self.client_machines[0],
                                     device=disk_use)
-            self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+            self.ssh_obj.mount_path(node=self.client_machines[0],
                                     device=disk_use,
                                     mount_path=mount_path)
 
-            fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, mount_path, log_path,),
+            fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.client_machines[0], None, mount_path, log_path,),
                                         kwargs={"name": f"fio_run_{i}",
                                                 "runtime": 350,
                                                 "time_based": True,
@@ -122,12 +122,12 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             assert clone_name in list(clone.keys()), \
                 f"Clone {clone_name} is not present in list of lvols post add: {lvols}"
             
-            initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+            initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
             for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+                self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
             
-            final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+            final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
             disk_use = None
             self.logger.info("Initial vs final disk:")
             self.logger.info(f"Initial: {initial_devices}")
@@ -137,13 +137,13 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                     self.logger.info(f"Using disk: /dev/{device.strip()}")
                     disk_use = f"/dev/{device.strip()}"
                     break
-            self.ssh_obj.unmount_path(node=self.mgmt_nodes[0],
+            self.ssh_obj.unmount_path(node=self.client_machines[0],
                                     device=disk_use)
-            self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+            self.ssh_obj.mount_path(node=self.client_machines[0],
                                     device=disk_use,
                                     mount_path=mount_path)
             
-            fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.mgmt_nodes[0], None, mount_path, log_path,),
+            fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.client_machines[0], None, mount_path, log_path,),
                                         kwargs={"name": f"fio_run_cl_{i}",
                                                 "runtime": 350,
                                                 "time_based": True,
@@ -181,15 +181,15 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             
         lvol_size = lvol_size + 20
         
-        self.common_utils.manage_fio_threads(node=self.mgmt_nodes[0],
+        self.common_utils.manage_fio_threads(node=self.client_machines[0],
                                              threads=fio_threads,
                                              timeout=1000)
         
         for i in range(1,6):
             log_path = f"{self.log_path}_{i}"
             cl_log_path = f"{self.log_path}_cl_{i}"
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],log_file=log_path)
-            self.common_utils.validate_fio_test(node=self.mgmt_nodes[0],log_file=cl_log_path)
+            self.common_utils.validate_fio_test(node=self.client_machines[0],log_file=log_path)
+            self.common_utils.validate_fio_test(node=self.client_machines[0],log_file=cl_log_path)
         
         lvol_check_sum = {}
         
@@ -199,11 +199,11 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             mount_path = f"{self.mount_path}_{i}"
             cl_mount_path = f"{self.mount_path}_cl_{i}"
             
-            lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=mount_path)
-            original_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
+            lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=mount_path)
+            original_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
 
-            clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=cl_mount_path)
-            cl_original_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
+            clone_files = self.ssh_obj.find_files(self.client_machines[0], directory=cl_mount_path)
+            cl_original_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], clone_files)
 
             lvol_check_sum[lvol_name] = original_checksum
             lvol_check_sum[clone_name] = cl_original_checksum
@@ -230,11 +230,11 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 if "core.react" in files:
                     raise Exception("Core file present after clone resize! Not continuing resize!!")
             
-            lvol_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=mount_path)
-            final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], lvol_files)
+            lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=mount_path)
+            final_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
 
-            clone_files = self.ssh_obj.find_files(self.mgmt_nodes[0], directory=cl_mount_path)
-            cl_final_checksum = self.ssh_obj.generate_checksums(self.mgmt_nodes[0], clone_files)
+            clone_files = self.ssh_obj.find_files(self.client_machines[0], directory=cl_mount_path)
+            cl_final_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], clone_files)
 
             original_checksum = lvol_check_sum[lvol_name]
             cl_original_checksum = lvol_check_sum[clone_name]

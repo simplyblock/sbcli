@@ -19,15 +19,12 @@ export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
 export CONTACT_POINT=${11}
-export DB_CONNECTION=${12}
-export K8S_NAMESPACE=${13}
-export DISABLE_MONITORING=${14}
-export TLS_SECRET=${15}
-export INGRESS_HOST_SOURCE=${16}
-export DNS_NAME=${17}
+export K8S_NAMESPACE=${12}
+export DISABLE_MONITORING=${13}
+export TLS_SECRET=${14}
+export INGRESS_HOST_SOURCE=${15}
+export DNS_NAME=${16}
 export DIR="$(dirname "$(realpath "$0")")"
-export FDB_CLUSTER_FILE_CONTENTS=${DB_CONNECTION}
-
 
 if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then
    export MAX_NUMBER_OF_INDICES=${LOG_DELETION_INTERVAL%d}
@@ -81,5 +78,7 @@ rm -rf "$DIR"/charts/charts "$DIR"/charts/Chart.lock "$DIR"/charts/requirements.
   --namespace $K8S_NAMESPACE \
   --create-namespace
 
-/usr/local/bin/kubectl wait --for=condition=Ready pod --all --namespace $K8S_NAMESPACE --timeout=300s
-
+for kind in ds deploy sts; do
+  /usr/local/bin/kubectl get $kind -n "$K8S_NAMESPACE" -o name \
+  | xargs -r -n1 /usr/local/bin/kubectl rollout status -n "$K8S_NAMESPACE" --timeout=500s
+done

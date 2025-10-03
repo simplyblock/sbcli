@@ -63,7 +63,7 @@ def get_next_cluster_status(cluster_id):
         node_online_devices = 0
         node_offline_devices = 0
 
-        if node.status == StorageNode.STATUS_IN_CREATION:
+        if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED]:
             continue
 
         if node.status == StorageNode.STATUS_ONLINE:
@@ -200,13 +200,13 @@ def set_node_online(node):
                 device_controller.device_set_online(dev.get_id())
 
         # start migration tasks on node online status change
+        online_devices_list = []
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 logger.info("Adding task to device data migration")
-                task_id = tasks_controller.add_device_mig_task(dev.get_id())
-                if task_id:
-                    logger.info(f"Task id: {task_id}")
-
+                online_devices_list.append(dev.get_id())
+        if online_devices_list:
+            tasks_controller.add_device_mig_task(online_devices_list, node.cluster_id)
 
 def set_node_offline(node, set_devs_offline=False):
     if node.status != StorageNode.STATUS_UNREACHABLE:
@@ -278,6 +278,15 @@ while True:
             node_rpc_check = health_controller._check_node_rpc(
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+
+            if ping_check and node_api_check and spdk_process and not node_rpc_check:
+                start_time = time.time()
+                while time.time() < start_time + 60:
+                    node_rpc_check = health_controller._check_node_rpc(
+                        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+                    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+                    if node_rpc_check:
+                        break
 
             node_port_check = True
 

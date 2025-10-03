@@ -5,7 +5,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.controllers import health_controller
+from simplyblock_core.controllers import health_controller, snapshot_events
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
@@ -49,6 +49,7 @@ def process_snap_delete_finish(snap, leader_node):
                 logger.error(f"Failed to delete lvol from sec node: {secondary_node.get_id()}")
                 # what to do here ?
 
+    snapshot_events.snapshot_delete(snap)
     snap.remove(db.kv_store)
 
 

@@ -114,18 +114,20 @@ class SNodeClient:
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
-        params = {
-            "cluster_ip": cluster_ip,
-            "cluster_id": cluster_id,
-            "join_token": join_token,
-            "db_connection": db_connection}
-        return self._request("POST", "join_swarm", params)
+        return True, None
+        # params = {
+        #     "cluster_ip": cluster_ip,
+        #     "cluster_id": cluster_id,
+        #     "join_token": join_token,
+        #     "db_connection": db_connection}
+        # return self._request("POST", "join_swarm", params)
 
     def spdk_process_kill(self, rpc_port):
         return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port})
 
     def leave_swarm(self):
-        return self._request("GET", "leave_swarm")
+        return True
+        # return self._request("GET", "leave_swarm")
 
     def make_gpt_partitions(self, nbd_device, jm_percent, num_partitions, partition_percent):
         params = {
