@@ -123,7 +123,7 @@ class TestLvolQOSBase(TestClusterBase):
             mount_path = None
             if config["mount"]:
                 self.ssh_obj.format_disk(node=self.fio_node[0], device=disk_use)
-                mount_path = f"{Path.home()}/test_location_{lvol_name}"
+                mount_path = f"{self.mount_path}/test_location_{lvol_name}"
                 self.ssh_obj.mount_path(node=self.fio_node[0], device=disk_use, mount_path=mount_path)
 
             # Store device information
@@ -218,8 +218,8 @@ class TestLvolQOSBase(TestClusterBase):
                            f"{total_qos_read_bw} MiB/s, Write BW: {total_qos_write_bw} MiB/s")
 
         if bw:
-            assert 20 < read_bw_mib < 50, f"Read BW {total_qos_read_bw} out of range (20-50 MiB/s)"
-            assert 20 < write_bw_mib < 50, f"Write BW {total_qos_write_bw} out of range (20-50 MiB/s)"
+            assert 20 < total_qos_read_bw < 50, f"Read BW {total_qos_read_bw} out of range (20-50 MiB/s)"
+            assert 20 < total_qos_write_bw < 50, f"Write BW {total_qos_write_bw} out of range (20-50 MiB/s)"
         else:
             assert  4000 < total_qos_iops < 6500 , \
                 f"Total IOPS {total_qos_iops} can not be more than 4000, should not be less than 6500"
