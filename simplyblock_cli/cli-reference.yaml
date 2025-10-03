@@ -813,12 +813,6 @@ commands:
             type: int
             default: 4
             private: true
-          - name: "--enable-qos"
-            help: "Enable qos bdev for storage nodes, true by default"
-            dest: enable_qos
-            type: bool
-            default: false
-            private: true
           - name: "--disable-monitoring"
             help: "Disable monitoring stack, false by default"
             dest: disable_monitoring
