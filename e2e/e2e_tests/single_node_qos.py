@@ -33,14 +33,14 @@ class TestLvolQOSBase(TestClusterBase):
             self.sbcli_utils.add_storage_pool(
                 pool_name=f"{self.pool_name}_qos",
                 cluster_id=self.cluster_id,
-                max_r_mbytes=90,
-                max_w_mbytes=90
+                max_r_mbytes=10,
+                max_w_mbytes=10
             )
         else:
             self.sbcli_utils.add_storage_pool(
                 pool_name=f"{self.pool_name}_qos",
                 cluster_id=self.cluster_id,
-                max_rw_iops=6000
+                max_rw_iops=3000
             )
 
         self.sbcli_utils.add_storage_pool(
@@ -88,15 +88,15 @@ class TestLvolQOSBase(TestClusterBase):
                             lvol_name=lvol_name,
                             pool_name=self.pool_name,
                             size=config['size'],
-                            max_r_mbytes=50,
-                            max_w_mbytes=50
+                            max_r_mbytes=10,
+                            max_w_mbytes=10
                         )
                     else:
                         self.sbcli_utils.add_lvol(
                             lvol_name=lvol_name,
                             pool_name=self.pool_name,
                             size=config['size'],
-                            max_rw_iops=2000
+                            max_rw_iops=1000
                         )
 
 
