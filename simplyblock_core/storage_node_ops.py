@@ -3149,8 +3149,8 @@ def recreate_lvstore(snode, force=False):
             try:
                 sec_node.connect_to_hublvol(snode)
             except Exception as e:
-                logger.error("Error establishing hublvol: %s", e)
-                # return False
+                logger.error("Error connecting to hublvol: %s", e)
+                return False
             ### 8- allow secondary port
 
             fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)

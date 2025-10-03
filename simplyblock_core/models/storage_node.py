@@ -255,11 +255,11 @@ class StorageNode(BaseNodeObject):
                 secondary=True,
         ):
             pass
-            # raise RPCException('Failed to set secondary lvstore options')
+            raise RPCException('Failed to set secondary lvstore options')
 
         if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
             pass
-            # raise RPCException('Failed to connect secondary lvstore to primary')
+            raise RPCException('Failed to connect secondary lvstore to primary')
 
     def create_alceml(self, name, nvme_bdev, uuid, **kwargs):
         logger.info(f"Adding {name}")
