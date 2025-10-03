@@ -13,6 +13,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.port_stat import PortStat
+from simplyblock_core.models.qos import QOSClass
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
@@ -298,3 +299,13 @@ class DBController(metaclass=Singleton):
             if node.secondary_node_id == node_id and node.lvstore:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
+
+    def get_qos(self, cluster_id=None) -> List[QOSClass]:
+        classes = []
+        if cluster_id:
+            for qos in QOSClass().read_from_db(self.kv_store):
+                if qos.cluster_id == cluster_id:
+                    classes.append(qos)
+        else:
+            classes = QOSClass().read_from_db(self.kv_store)
+        return classes

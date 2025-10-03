@@ -99,7 +99,7 @@ def task_runner(task):
         distr_name = task.function_params["distr_name"]
 
         qos_high_priority = False
-        if db.get_cluster_by_id(snode.cluster_id).enable_qos:
+        if db.get_cluster_by_id(snode.cluster_id).is_qos_set():
             qos_high_priority = True
         rsp = rpc_client.distr_migration_expansion_start(distr_name, qos_high_priority)
         if not rsp:
