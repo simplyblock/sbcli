@@ -774,7 +774,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_qos__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Delete a class')
         subcommand.add_argument('name', help='QOS class name', type=str)
-        argument = subcommand.add_argument('--force', help='Force remove', dest='force', action='store_true')
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str, default='')
 
 
     def run(self):

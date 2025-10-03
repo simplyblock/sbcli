@@ -45,7 +45,6 @@ class Cluster(BaseModel):
     distr_ndcs: int = 0
     distr_npcs: int = 0
     enable_node_affinity: bool = False
-    enable_qos: bool = False
     grafana_endpoint: str = ""
     mode: str = ""
     grafana_secret: str = ""
