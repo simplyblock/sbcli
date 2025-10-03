@@ -100,6 +100,8 @@ def get_qos_weights_list(cluster_id=None):
 
     # count all weights and assign the reset of a 100 to the default
     lst[0] = 100-sum(lst[1:])
+    for i in range(8-len(lst)):
+        lst.append(0)
     return lst
 
 
