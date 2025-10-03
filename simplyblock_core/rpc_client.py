@@ -1176,3 +1176,48 @@ class RPCClient:
             "jm_vuid": jm_vuid,
         }
         return self._request("bdev_distrib_check_inflight_io", params)
+
+    def bdev_lvol_create_poller_group(self, cpu_mask):
+        params = {
+            "cpu_mask": cpu_mask,
+        }
+        return self._request("bdev_lvol_create_poller_group", params)
+
+    def bdev_lvol_transfer(self, lvol_name, offset, cluster_batch, gateway, operation):
+        # --operation {migrate,replicate}
+        params = {
+            "lvol_name": lvol_name,
+            "offset": offset,
+            "cluster_batch": cluster_batch,
+            "gateway": gateway,
+            "operation": operation,
+        }
+        return self._request("bdev_lvol_transfer", params)
+
+    def bdev_lvol_transfer_stat(self, lvol_name):
+        """
+        example:
+            ./rpc.py bdev_lvol_transfer_stat lvs_raid0_lvol/snapshot_1
+            {
+                "transfer_state": "No process",
+                "offset": 0
+            }
+            transfer_state values:
+                - No process
+                - In progress
+                - Failed
+                - Done
+        """
+        params = {
+            "lvol_name": lvol_name,
+        }
+        return self._request("bdev_lvol_transfer_stat", params)
+
+    def bdev_lvol_convert(self, lvol_name):
+        """
+        convert lvol to snapshot
+        """
+        params = {
+            "lvol_name": lvol_name,
+        }
+        return self._request("bdev_lvol_convert", params)

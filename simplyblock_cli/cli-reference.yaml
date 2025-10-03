@@ -1267,6 +1267,15 @@ commands:
             help: "Name"
             dest: name
             type: str
+      - name: add-replication
+        help: Assigns the snapshot replication target cluster
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+
   - name: "volume"
     help: "Logical volume commands"
     aliases:
