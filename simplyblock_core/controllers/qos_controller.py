@@ -53,8 +53,6 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
     qos_class.weight = weight
     qos_class.write_to_db()
 
-    cluster.enable_qos = True
-    cluster.write_to_db()
     return True
 
 
