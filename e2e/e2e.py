@@ -157,6 +157,7 @@ def main():
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
         try:
+            test_obj.teardown()
             if not args.run_k8s:
                 test_obj.stop_docker_logs_collect()
             else:
@@ -164,7 +165,6 @@ def main():
             test_obj.fetch_all_nodes_distrib_log()
             if i == (len(test_class_run) - 1) or check_for_dumps():
                 test_obj.collect_management_details()
-            test_obj.teardown()
             # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
