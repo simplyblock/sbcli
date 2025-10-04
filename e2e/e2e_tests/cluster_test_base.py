@@ -383,19 +383,6 @@ class TestClusterBase:
         """
         self.logger.info("Inside teardown function")
 
-        for node in self.storage_nodes:
-            self.ssh_obj.exec_command(node=node,
-                                      command="sudo tmux kill-server")
-            result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node, 
-                                                                     log_dir=self.docker_logs_path, 
-                                                                     test_name=self.test_name)
-
-            for file, lines in result.items():
-                if lines:
-                    self.logger.info(f"\n{file}:")
-                    for line in lines:
-                        self.logger.info(f"  -> {line}")
-
         for node in self.fio_node:
             self.ssh_obj.exec_command(node=node,
                                       command="sudo tmux kill-server")
@@ -403,7 +390,6 @@ class TestClusterBase:
             self.ssh_obj.kill_processes(node=node,
                                         process_name="fio")
         
-
         retry_check = 100
         while retry_check:
             exit_while = True
@@ -465,6 +451,20 @@ class TestClusterBase:
                 ssh.close()
         except Exception as _:
             self.logger.info(traceback.format_exc())
+
+        for node in self.storage_nodes:
+            self.ssh_obj.exec_command(node=node,
+                                      command="sudo tmux kill-server")
+            result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node, 
+                                                                     log_dir=self.docker_logs_path, 
+                                                                     test_name=self.test_name)
+
+            for file, lines in result.items():
+                if lines:
+                    self.logger.info(f"\n{file}:")
+                    for line in lines:
+                        self.logger.info(f"  -> {line}")
+
         try:
             if self.ec2_resource:
                 instance_id = self.common_utils.get_instance_id_by_name(ec2_resource=self.ec2_resource,
