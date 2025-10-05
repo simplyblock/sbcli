@@ -2,7 +2,6 @@
 
 from typing import List
 
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -83,6 +82,8 @@ class Cluster(BaseModel):
         return data
 
     def is_qos_set(self) -> bool:
+        # Import is here is to avoid circular import dependency
+        from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         qos_classes = db_controller.get_qos(self.get_id())
         if len(qos_classes) > 1:
