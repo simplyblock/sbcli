@@ -222,7 +222,7 @@ class TestLvolQOSBase(TestClusterBase):
             assert 20 < total_qos_write_bw < 50, f"Write BW {total_qos_write_bw} out of range (20-50 MiB/s)"
         else:
             assert  4000 < total_qos_iops < 6500 , \
-                f"Total IOPS {total_qos_iops} can not be more than 4000, should not be less than 6500"
+                f"Total IOPS {total_qos_iops} can not be more than 6500, should not be less than 4000"
 
         
 
