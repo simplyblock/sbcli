@@ -307,11 +307,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
         if outage_type == "graceful_shutdown":
-            self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
+            # self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+            # self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
             sleep_n_sec(10)
-            self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=4000)
+            # self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
+            # self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=4000)
             max_retries = 10
             retry_delay = 10  # seconds
             # Retry mechanism for suspending the node
