@@ -674,6 +674,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new storage pool')
         subcommand.add_argument('name', help='New pool name', type=str)
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
+        subcommand.add_argument('qos_host', help='Node UUID for QoS pool', type=str)
         argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G, 0. Default: 0', type=size_type(), default='0', dest='pool_max')
         argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G, 0. Default: 0', type=size_type(), default='0', dest='lvol_max')
         argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second', type=int, dest='max_rw_iops')

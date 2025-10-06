@@ -22,7 +22,7 @@ def _generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id):
+def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id, qos_host=None):
     db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
@@ -39,6 +39,12 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     except KeyError:
         logger.error(f"Cluster not found: {cluster_id}")
         return False
+
+    if qos_host:
+        node = db_controller.get_storage_node_by_id(qos_host)
+        if not node:
+            logger.error(f"Node not found: {qos_host}")
+            return False
 
     pool_max = pool_max or 0
     lvol_max = lvol_max or 0
@@ -64,6 +70,14 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.max_rw_mbytes_per_sec = max_rw_mbytes
     pool.max_r_mbytes_per_sec = max_r_mbytes
     pool.max_w_mbytes_per_sec = max_w_mbytes
+    if pool.has_qos() and not qos_host:
+        logger.error("In case of QoS pool then param '--qos-host' must be used")
+        return False
+    if not pool.has_qos() and qos_host:
+        logger.error("Param '--qos-host' must be used with at least one QoS parameter e.g: '--max-rw-iops'")
+        return False
+
+    pool.qos_host = qos_host
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_add(pool)
