@@ -9,7 +9,7 @@ import time
 import uuid
 
 from simplyblock_core import utils
-from simplyblock_core.controllers import pool_events
+from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.rpc_client import RPCClient
@@ -71,8 +71,13 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.max_r_mbytes_per_sec = max_r_mbytes
     pool.max_w_mbytes_per_sec = max_w_mbytes
     if pool.has_qos() and not qos_host:
-        logger.error("In case of QoS pool then param '--qos-host' must be used")
-        return False
+        next_nodes = lvol_controller._get_next_3_nodes(cluster_id)
+        if next_nodes:
+            qos_host = next_nodes[0].get_id()
+        else:
+            logger.error("Could not find online nodes")
+            return False
+
     if not pool.has_qos() and qos_host:
         logger.error("Param '--qos-host' must be used with at least one QoS parameter e.g: '--max-rw-iops'")
         return False
