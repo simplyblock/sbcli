@@ -736,6 +736,7 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
         passed &= check_subsystem(lvol.nqn, nqns=node_lvols_nqns, ns_uuid=lvol.uuid)
 
     except Exception as e:
+        logger.error(e)
         return False
 
     return passed
