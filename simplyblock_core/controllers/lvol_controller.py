@@ -600,7 +600,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
-    connect_lvol_to_pool(lvol.uuid)
+    if pool.has_qos():
+        connect_lvol_to_pool(lvol.uuid)
 
     # set QOS
     if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
