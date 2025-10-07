@@ -28,3 +28,17 @@ class SnapShot(BaseModel):
     vuid: int = 0
     deletion_status: str = ""
     status: str = ""
+
+
+class SnapshotReplication(BaseModel):
+
+    STATUS_NEW = 'new'
+    STATUS_IN_PROGRESS = 'in-progress'
+    STATUS_IN_DONE = 'done'
+    STATUS_IN_FAILED = 'failed'
+
+    snapshot: SnapShot = None
+    source_cluster_id: str = ""
+    target_cluster_id: str = ""
+    status: str = ""
+    date: str = ""

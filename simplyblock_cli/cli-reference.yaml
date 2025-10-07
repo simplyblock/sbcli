@@ -1275,7 +1275,11 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
-
+          - name: "--timeout"
+            help: "Snapshot replication network timeout"
+            dest: timeout
+            type: int
+            default: "3600"
   - name: "volume"
     help: "Logical volume commands"
     aliases:
