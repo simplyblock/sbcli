@@ -1675,6 +1675,7 @@ commands:
             help: "Node UUID for QoS pool"
             dest: qos_host
             type: str
+            required: false
       - name: set
         help: "Sets a storage pool's attributes"
         arguments:
