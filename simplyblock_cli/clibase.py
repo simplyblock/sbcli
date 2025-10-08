@@ -390,6 +390,10 @@ class CLIWrapperBase:
         cluster_ops.set_secret(args.cluster_id, args.secret)
         return True
 
+    def cluster__update_fabric(self, sub_command, args):
+        cluster_ops.set_fabric(args.cluster_id, args.fabric)
+        return True
+
     def cluster__check(self, sub_command, args):
         cluster_id = args.cluster_id
         return health_controller.check_cluster(cluster_id)
@@ -468,7 +472,8 @@ class CLIWrapperBase:
             crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace, 
-            max_namespace_per_subsys=args.max_namespace_per_subsys)
+            max_namespace_per_subsys=args.max_namespace_per_subsys,
+            fabric=args.fabric)
         if results:
             return results
         else:

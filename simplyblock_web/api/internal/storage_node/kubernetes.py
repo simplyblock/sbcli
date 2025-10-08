@@ -583,3 +583,8 @@ def apply_config():
     return utils.get_response(True)
 
 api.post('/bind_device_to_spdk')(snode_ops.bind_device_to_spdk)
+
+api.get('/ifc_is_tcp')(snode_ops.ifc_is_tcp)
+
+api.get('/ifc_is_roce')(snode_ops.ifc_is_roce)
+

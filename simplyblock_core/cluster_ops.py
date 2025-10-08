@@ -1081,6 +1081,15 @@ def set_secret(cluster_id, secret) -> None:
     cluster.write_to_db(db_controller.kv_store)
 
 
+def set_fabric(cluster_id, fabric) -> None:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    protocols = parse_protocols(fabric)
+    cluster.fabric_tcp = protocols["tcp"]
+    cluster.fabric_rdma = protocols["rdma"]
+    cluster.write_to_db(db_controller.kv_store)
+
+
 def change_cluster_name(cluster_id, new_name) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)
     old_name = cluster.cluster_name
