@@ -246,6 +246,7 @@ def list_pools(is_json, cluster_id=None):
             "LVol Max Size": utils.humanbytes(pool.lvol_max_size),
             "LVols": f"{len(lvs)}",
             "QOS": f"{pool.has_qos()}",
+            "QOS Host": f"{pool.qos_host}",
             "Status": pool.status,
         })
 
