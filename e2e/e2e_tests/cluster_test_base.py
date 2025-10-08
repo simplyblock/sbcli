@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 import boto3
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils, RunnerK8sLog
@@ -247,6 +249,8 @@ class TestClusterBase:
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
+        self.start_root_monitor()
+
         sleep_n_sec(120)
 
     def configure_sysctl_settings(self):
@@ -390,6 +394,8 @@ class TestClusterBase:
             self.ssh_obj.kill_processes(node=node,
                                         process_name="fio")
         
+        self.stop_root_monitor()
+        
         retry_check = 100
         while retry_check:
             exit_while = True
@@ -475,6 +481,110 @@ class TestClusterBase:
         except Exception as e:
             self.logger.info(f"Error while deleting instance: {e}")
             self.logger.info(traceback.format_exc())
+
+    def _get_all_nodes(self):
+        """Return ordered, de-duplicated list of mgmt + storage nodes."""
+        nodes = []
+        if getattr(self, "mgmt_nodes", None):
+            nodes.extend(self.mgmt_nodes)
+        if getattr(self, "storage_nodes", None):
+            nodes.extend(self.storage_nodes)
+        seen = set()
+        ordered = []
+        for n in nodes:
+            if n not in seen:
+                seen.add(n)
+                ordered.append(n)
+        return ordered
+
+    def cleanup_root_when_high_usage(self, threshold: int = None):
+        """
+        For each mgmt/storage node, if /root usage >= threshold,
+        delete /root/distrib_* , /root/bdev_* , and /etc/simplyblock/LVS_* ONLY on that node.
+
+        threshold: percentage int. Default from env ROOT_DISK_THRESHOLD or 80.
+        """
+        thr = threshold if threshold is not None else int(os.getenv("ROOT_DISK_THRESHOLD", "80"))
+
+        def _get_root_usage_pct(node: str) -> int:
+            # POSIX-safe: df -P /root -> 2nd line, 5th col (Use%)
+            cmd = r"df -P /root | awk 'NR==2{print $5}' | tr -dc '0-9'"
+            out, _ = self.ssh_obj.exec_command(node=node, command=cmd, supress_logs=True)
+            s = (out or "").strip()
+            try:
+                return int(s)
+            except Exception:
+                self.logger.warning(f"Could not parse /root usage for {node!r} from output: {out!r}")
+                return -1
+
+        for node in self._get_all_nodes():
+            used = _get_root_usage_pct(node)
+            if used < 0:
+                self.logger.warning(f"[{node}] Skipping cleanup (unknown /root usage).")
+                continue
+
+            if used >= thr:
+                self.logger.warning(f"[{node}] /root usage {used}% >= {thr}%. Cleaning heavy files...")
+                # Safe deletes (handles both files/dirs, globs allowed)
+                self.ssh_obj.delete_file_dir(node=node, entity="/root/distrib_*", recursive=True)
+                self.ssh_obj.delete_file_dir(node=node, entity="/root/bdev_*", recursive=True)
+                self.ssh_obj.delete_file_dir(node=node, entity="/etc/simplyblock/LVS_*", recursive=True)
+
+                # Recheck
+                used_after = _get_root_usage_pct(node)
+                if used_after >= 0:
+                    self.logger.info(f"[{node}] /root usage after cleanup: {used_after}% (was {used}%)")
+                else:
+                    self.logger.info(f"[{node}] Cleanup done; could not re-check usage.")
+            else:
+                self.logger.info(f"[{node}] /root usage {used}% < {thr}%. No cleanup needed.")
+
+    def start_root_monitor(self, interval_minutes: int = None, threshold: int = None):
+        """
+        Start a background thread that checks /root usage periodically
+        and cleans if usage >= threshold on a per-node basis.
+
+        interval_minutes: int, default from env ROOT_MONITOR_INTERVAL_MIN or 60
+        threshold: int %, default from env ROOT_DISK_THRESHOLD or 80
+        """
+        if hasattr(self, "_root_monitor_thread") and getattr(self, "_root_monitor_thread").is_alive():
+            self.logger.info("Root monitor already running; skipping start.")
+            return
+
+        poll_mins = interval_minutes if interval_minutes is not None else int(os.getenv("ROOT_MONITOR_INTERVAL_MIN", "60"))
+        thr = threshold if threshold is not None else int(os.getenv("ROOT_DISK_THRESHOLD", "80"))
+
+        self._root_monitor_stop = threading.Event()
+
+        def _monitor_loop():
+            self.logger.info(
+                f"[RootMonitor] Started. interval={poll_mins}m threshold={thr}% nodes={len(self._get_all_nodes())}"
+            )
+            while not self._root_monitor_stop.is_set():
+                try:
+                    self.cleanup_root_when_high_usage(thr)
+                except Exception as e:
+                    self.logger.error(f"[RootMonitor] Error during cleanup: {e}")
+                # Sleep in 10s slices so we can stop promptly
+                total = poll_mins * 60
+                step = 10
+                waited = 0
+                while waited < total and not self._root_monitor_stop.is_set():
+                    time.sleep(step)
+                    waited += step
+            self.logger.info("[RootMonitor] Exiting.")
+
+        t = threading.Thread(target=_monitor_loop, name="RootMonitor", daemon=True)
+        t.start()
+        self._root_monitor_thread = t
+
+    def stop_root_monitor(self):
+        """Gracefully stop the background /root monitor."""
+        if hasattr(self, "_root_monitor_stop") and self._root_monitor_stop:
+            self._root_monitor_stop.set()
+        if hasattr(self, "_root_monitor_thread") and self._root_monitor_thread:
+            self._root_monitor_thread.join(timeout=5)
+        self.logger.info("Stopped background root monitor.")
 
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
