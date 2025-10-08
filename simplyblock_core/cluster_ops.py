@@ -1100,6 +1100,15 @@ def set_secret(cluster_id, secret) -> None:
     cluster.write_to_db(db_controller.kv_store)
 
 
+def set_fabric(cluster_id, fabric) -> None:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    protocols = parse_protocols(fabric)
+    cluster.fabric_tcp = protocols["tcp"]
+    cluster.fabric_rdma = protocols["rdma"]
+    cluster.write_to_db(db_controller.kv_store)
+
+
 def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
