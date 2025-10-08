@@ -207,14 +207,22 @@ def _recreate_jm_stack_on_raid(jm_device: JMDevice, snode: StorageNode, after_re
 
         for iface in snode.data_nics:
             if iface.ip4_address:
-                tr_type = iface.get_transport_type()
+                tr_type = iface.trtype
                 logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                 ret = rpc_client.listeners_create(subsystem_nqn, tr_type, iface.ip4_address, snode.nvmf_port)
 
     return True
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
+    db_controller = DBController()
+    cluster_jm_ids = []
+    for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        for d in n.jm_devices:
+            cluster_jm_ids.append(d.uuid)
     jm_uuid = str(uuid.uuid4())
+    while jm_uuid in cluster_jm_ids:
+        jm_uuid = str(uuid.uuid4())
+
     raid_bdev = f"raid_jm_{jm_uuid}"
     if len(jm_nvme_bdevs) > 1:
         raid_level = "1"
@@ -706,7 +714,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
                 logger.error(f"Failed to create alceml bdev: {jm_device.alceml_bdev}")
                 return False
 
-            jm_bdev = f"jm_{snode.get_id()}"
+            jm_bdev = jm_device.jm_bdev
             ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask)
             if not ret:
                 logger.error(f"Failed to create {jm_bdev}")
@@ -732,7 +740,6 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
                 for iface in snode.data_nics:
                     if iface.ip4_address:
-
                         logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                         ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
 
