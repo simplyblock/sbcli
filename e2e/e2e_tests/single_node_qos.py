@@ -292,6 +292,12 @@ class TestLvolFioQOSBW(TestLvolQOSBase):
         # Validate FIO outputs
         self.validate_fio_output(pool_qos_lvol_configs, lvol_configs, bw=True)
 
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=f"{self.base_cmd} lvol list")
+        
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=f"{self.base_cmd} pool list")
+
         # Cleanup after running FIO
         self.cleanup_lvols(lvol_configs)
         self.cleanup_lvols(pool_qos_lvol_configs)
@@ -343,6 +349,12 @@ class TestLvolFioQOSIOPS(TestLvolQOSBase):
 
         # Validate FIO outputs
         self.validate_fio_output(pool_qos_lvol_configs, lvol_configs, bw=False)
+
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=f"{self.base_cmd} lvol list")
+        
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=f"{self.base_cmd} pool list")
 
         # Cleanup after running FIO
         self.cleanup_lvols(lvol_configs)
