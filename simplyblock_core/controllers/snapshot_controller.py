@@ -200,6 +200,7 @@ def add(lvol_id, snapshot_name):
     snap.snap_bdev = f"{lvol.lvs_name}/{snap_bdev_name}"
     snap.created_at = int(time.time())
     snap.lvol = lvol
+    snap.fabric = lvol.fabric
     snap.vuid = snap_vuid
     snap.status = SnapShot.STATUS_ONLINE
 
@@ -449,6 +450,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.vuid = snap.lvol.vuid
     lvol.snapshot_name = snap.snap_bdev
     lvol.subsys_port = snap.lvol.subsys_port
+    lvol.fabric = snap.fabric
 
     if pvc_name:
         lvol.pvc_name = pvc_name

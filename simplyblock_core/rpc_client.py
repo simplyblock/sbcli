@@ -656,8 +656,7 @@ class RPCClient:
             "trsvcid": str(trsvcid),
             "subnqn": nqn,
         }
-        if trtype=="TCP":
-            params.update({"adrfam": "ipv4"})
+        params.update({"adrfam": "ipv4"})
         if multipath:
             params["multipath"] = "failover"
         else:
@@ -715,7 +714,7 @@ class RPCClient:
             "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
             "transport_ack_timeout": constants.ACK_TO,
-            "action_on_timeout" : "abort"
+            "action_on_timeout": "abort"
         }
         return self._request("bdev_nvme_set_options", params)
 
