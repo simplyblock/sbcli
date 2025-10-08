@@ -114,6 +114,7 @@ def add_lvol():
         | namespace       | the LVol namespace for k8s
         | uid             | use this UUID for this LVol
         | pvc_name        | set PVC name for this LVol
+        | fabric          | Lvol fabric
     """""
 
     cl_data = request.get_json()
@@ -159,6 +160,7 @@ def add_lvol():
     namespace = utils.get_value_or_default(cl_data, "namespace", None)
     uid = utils.get_value_or_default(cl_data, "uid", None)
     pvc_name = utils.get_value_or_default(cl_data, "pvc_name", None)
+    fabric = utils.get_value_or_default(cl_data, "fabric", "tcp")
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -183,7 +185,8 @@ def add_lvol():
         lvol_priority_class=lvol_priority_class,
         namespace=namespace,
         uid=uid,
-        pvc_name=pvc_name
+        pvc_name=pvc_name,
+        fabric=fabric
     )
 
     return utils.get_response(ret, error, http_code=400)

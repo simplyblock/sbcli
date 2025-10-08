@@ -10,7 +10,9 @@ from typing import List, Optional, Union
 
 import cpuinfo
 import docker
+import psutil
 import requests
+import socket
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
@@ -591,3 +593,47 @@ def set_hugepages():
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)
+
+
+class NicQuery(BaseModel):
+    nic: str
+
+
+@api.get('/ifc_is_roce', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def ifc_is_roce(query: NicQuery):
+    try:
+        nic = query.nic
+        rdma_path = "/sys/class/infiniband/"
+        if not os.path.exists(rdma_path):
+            return utils.get_response(False)
+
+        for rdma_dev in os.listdir(rdma_path):
+            net_path = os.path.join(rdma_path, rdma_dev, "device/net")
+            if os.path.exists(net_path):
+                for iface in os.listdir(net_path):
+                    if iface == nic:
+                        return utils.get_response(True)
+    except Exception as e:
+        logger.error(e)
+    return utils.get_response(False)
+
+
+@api.get('/ifc_is_tcp', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def ifc_is_tcp(query: NicQuery):
+    try:
+        nic = query.nic
+        addrs = psutil.net_if_addrs().get(nic, [])
+        for addr in addrs:
+            if addr.family == socket.AF_INET:
+                return utils.get_response(True)
+    except Exception as e:
+        logger.error(e)
+    return utils.get_response(False)

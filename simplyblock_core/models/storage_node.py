@@ -125,13 +125,28 @@ class StorageNode(BaseNodeObject):
                     logger.error("fFailed to create subsystem for {nqn}")
                     raise RPCException(f'Failed to create subsystem for {nqn}')
 
-            for ip in (iface.ip4_address for iface in self.data_nics):
-                rpc_client.listeners_create(
+            for iface in self.data_nics:
+                ip = iface.ip4_address
+                if self.active_rdma:
+                    if iface.trtype != "RDMA":
+                        logger.info(f"Skipping as the RDMA is enabled")
+                        continue
+                    rpc_client.listeners_create(
                         nqn=nqn,
-                        trtype='TCP',
+                        trtype="RDMA",
                         traddr=ip,
                         trsvcid=port,
-                )
+                    )
+                else:
+                    if iface.trtype != "TCP":
+                        logger.info(f"Skipping as the TCP is only enabled")
+                        continue
+                    rpc_client.listeners_create(
+                        nqn=nqn,
+                        trtype="TCP",
+                        traddr=ip,
+                        trsvcid=port,
+                    )
 
             rpc_client.nvmf_subsystem_add_ns(
                     nqn=nqn,
@@ -244,9 +259,10 @@ class StorageNode(BaseNodeObject):
                 if primary_node.active_rdma and iface.trtype=="RDMA":
                    ip_lst.append((iface.ip4_address,iface.trtype))
                 else:
-                   if not primary_node.active_rdma and primary_node.active_tcp and iface.trype=="TCP":
+                   if not primary_node.active_rdma and primary_node.active_tcp and iface.trtype=="TCP":
                        ip_lst.append((iface.ip4_address, iface.trtype))
                    else:
+                       # you may continue here for other nics
                        raise ValueError(f"{primary_node.get_id()} has no active fabric.")
             multipath = bool(len(ip_lst) > 1)
             for (ip,tr_type) in ip_lst:
