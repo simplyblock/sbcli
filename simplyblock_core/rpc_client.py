@@ -576,8 +576,7 @@ class RPCClient:
             "subnqn": nqn,
             "fabrics_connect_timeout_us": 100000
         }
-        if trtype=="TCP":
-            params.update({"adrfam": "ipv4"})
+        params.update({"adrfam": "ipv4"})
         if multipath:
             params["multipath"] = "failover"
         else:

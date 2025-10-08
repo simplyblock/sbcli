@@ -393,6 +393,10 @@ class CLIWrapperBase:
         cluster_ops.set_secret(args.cluster_id, args.secret)
         return True
 
+    def cluster__update_fabric(self, sub_command, args):
+        cluster_ops.set_fabric(args.cluster_id, args.fabric)
+        return True
+
     def cluster__check(self, sub_command, args):
         cluster_id = args.cluster_id
         return health_controller.check_cluster(cluster_id)
@@ -464,7 +468,8 @@ class CLIWrapperBase:
             crypto_key1=args.crypto_key1,
             crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
-            uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace)
+            uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace, fabric=args.fabric)
+
         if results:
             return results
         else:
@@ -698,11 +703,12 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
+        fabric = args.fabric
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, fabric)
 
     def cluster_deploy(self, args):
         grafana_endpoint = ""
@@ -821,7 +827,6 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         enable_qos = args.enable_qos
         strict_node_anti_affinity = args.strict_node_anti_affinity
-
         fabric = args.fabric
 
         return cluster_ops.create_cluster(

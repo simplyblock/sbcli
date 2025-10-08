@@ -338,7 +338,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
             cli_pass, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity)
+            qpair_count, max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, fabric="tcp")
 
     time.sleep(5)
 
@@ -376,7 +376,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
                 crypto_key1=crypto_key1,
                 crypto_key2=crypto_key2,
                 lvol_priority_class=lvol_priority_class,
-                uid=None, pvc_name=None, namespace=None)
+                uid=None, pvc_name=None, namespace=None, fabric="tcp")
 
     if not lvol_uuid:
         raise ValueError(f"lvol creation failed {msg}")
@@ -426,7 +426,7 @@ def deploy_cluster(storage_nodes,test,ha_type,distr_ndcs,distr_npcs,enable_qos,i
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity) -> str:
+                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, fabric="tcp") -> str:
     db_controller = DBController()
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -469,6 +469,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cluster.prov_cap_warn = prov_cap_warn
     if prov_cap_crit and prov_cap_crit > 0:
         cluster.prov_cap_crit = prov_cap_crit
+    protocols = parse_protocols(fabric)
+    cluster.fabric_tcp = protocols["tcp"]
+    cluster.fabric_rdma = protocols["rdma"]
 
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
@@ -1097,6 +1100,15 @@ def set_secret(cluster_id, secret) -> None:
     _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
 
     cluster.secret = secret
+    cluster.write_to_db(db_controller.kv_store)
+
+
+def set_fabric(cluster_id, fabric) -> None:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    protocols = parse_protocols(fabric)
+    cluster.fabric_tcp = protocols["tcp"]
+    cluster.fabric_rdma = protocols["rdma"]
     cluster.write_to_db(db_controller.kv_store)
 
 
