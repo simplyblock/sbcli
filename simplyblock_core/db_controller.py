@@ -308,4 +308,4 @@ class DBController(metaclass=Singleton):
                     classes.append(qos)
         else:
             classes = QOSClass().read_from_db(self.kv_store)
-        return classes
+        return sorted(classes, key=lambda x: x.class_id)
