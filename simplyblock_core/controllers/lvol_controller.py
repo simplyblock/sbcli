@@ -265,7 +265,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, fabric="TCP"):
+                uid=None, pvc_name=None, namespace=None, fabric="tcp"):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -306,7 +306,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
 
-    if (fabric == "TCP" and not cl.fabric_tcp) or (fabric == "RDMA" and not cl.fabric_rdma):
+    if (fabric == "tcp" and not cl.fabric_tcp) or (fabric == "rdma" and not cl.fabric_rdma):
         return False,  f"Fabric not available in cluster: {fabric}"
 
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
@@ -439,6 +439,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+    secondary_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+    attr_name = f"active_{fabric}"
+    is_active_primary = getattr(host_node, attr_name)
+    is_active_secondary = getattr(secondary_node, attr_name)
+    if not is_active_primary:
+        return False, f"Primary node fabric {fabric} is not active"
+    if not is_active_secondary:
+        return False, f"Secondary node fabric {fabric} is not active"
 
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
@@ -668,10 +676,19 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         # add listeners
         logger.info("adding listeners")
         for iface in snode.data_nics:
-            if iface.ip4_address and lvol.fabric==iface.trtype:
+            if iface.ip4_address and lvol.fabric==iface.trtype.lower():
                 logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
                 ret, err = rpc_client.nvmf_subsystem_add_listener(
                     lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state)
+                if not ret:
+                    if err and "code" in err and err["code"] == -32602:
+                        logger.warning("listener already exists")
+                    else:
+                        return False, f"Failed to create listener for {lvol.get_id()}"
+            elif lvol.fabric == "tcp" and snode.active_tcp:
+                logger.info("adding listener for %s on IP %s, fabric TCP" % (lvol.nqn, iface.ip4_address))
+                ret, err = rpc_client.nvmf_subsystem_add_listener(
+                        lvol.nqn, "TCP", iface.ip4_address, lvol.subsys_port, ana_state)
                 if not ret:
                     if err and "code" in err and err["code"] == -32602:
                         logger.warning("listener already exists")
@@ -730,7 +747,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     # add listeners
     logger.info("adding listeners")
     for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric==iface.trtype:
+        if iface.ip4_address and lvol.fabric==iface.trtype.lower():
             if not ana_state:
                 ana_state = "non_optimized"
                 if lvol.node_id == snode.get_id():
@@ -1229,9 +1246,13 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
         for nic in snode.data_nics:
-            transport = nic.trtype.lower()
             ip = nic.ip4_address
             port = lvol.subsys_port
+            transport = "tcp"
+            if nic.ip4_address and lvol.fabric == nic.trtype.lower():
+                transport = nic.trtype.lower()
+
+
             out.append({
                 "transport": transport,
                 "ip": ip,

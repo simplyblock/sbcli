@@ -237,6 +237,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'nvmf_ip': IP,
         'nvmf_port': snode.nvmf_port,
         'nvmf_multipath': multipath,
+        'node_id': snode.get_id(),
     })
 
 
@@ -322,6 +323,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'nvmf_ip': IP,
         'nvmf_port': snode.nvmf_port,
         'nvmf_multipath': multipath,
+        'node_id': snode.get_id(),
     })
 
 
@@ -990,25 +992,30 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         active_rdma=False
         fabric_tcp = cluster.fabric_tcp
         fabric_rdma = cluster.fabric_rdma
-        names = node_config.get("nic_ports") or data_nics_list or [mgmt_iface]
+        names = node_config.get("nic_ports") or data_nics_list
+        logger.info(f"fabric_tcp is {fabric_tcp}")
+        logger.info(f"fabric_rdma is {fabric_rdma}")
+        logger.debug(f"Data nics ports are: {names}")
         for nic in names:
             device = node_info['network_interface'][nic]
             base_ifc_cfg={
                       'uuid': str(uuid.uuid4()),
-                      'if_name': device['name'],
+                      'if_name': nic,
                       'ip4_address': device['ip'],
                       'status': device['status'],
                        'net_type': device['net_type'],}
-            if fabric_tcp and ifc_is_tcp(nic):
-                cfg = base_ifc_cfg.copy()
-                cfg['trtype'] = "TCP"
-                data_nics.append(IFace(cfg))
-                active_tcp=True
-            if fabric_rdma and ifc_is_roce(nic):
+            if fabric_rdma and snode_api.ifc_is_roce(nic):
                 cfg = base_ifc_cfg.copy()
                 cfg['trtype'] = "RDMA"
                 data_nics.append(IFace(cfg))
                 active_rdma=True
+                if fabric_tcp and snode_api.ifc_is_tcp(nic):
+                    active_tcp = True
+            elif fabric_tcp and snode_api.ifc_is_tcp(nic):
+                cfg = base_ifc_cfg.copy()
+                cfg['trtype'] = "TCP"
+                data_nics.append(IFace(cfg))
+                active_tcp = True
 
         if not active_tcp and not active_rdma:
             logger.error("No usable storage network interface found.")
@@ -1504,7 +1511,7 @@ def restart_storage_node(
                 data_nics.append(
                     IFace({
                         'uuid': str(uuid.uuid4()),
-                        'if_name': device['name'],
+                        'if_name': nic,
                         'ip4_address': device['ip'],
                         'status': device['status'],
                         'net_type': device['net_type']}))
@@ -1534,9 +1541,25 @@ def restart_storage_node(
                         snode_api.bind_device_to_spdk(dev['address'])
         else:
             node_ip = None
+    active_tcp=False
+    active_rdma=False
+    fabric_tcp = cluster.fabric_tcp
+    fabric_rdma = cluster.fabric_rdma
+    snode_api = SNodeClient(snode.api_endpoint, timeout=5 * 60, retry=3)
+    for nic in snode.data_nics:
+        if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
+            nic.trtype = "RDMA"
+            active_rdma=True
+            if fabric_tcp and snode_api.ifc_is_tcp(nic["if_name"]):
+                active_tcp = True
+        elif fabric_tcp and snode_api.ifc_is_tcp(nic["if_name"]):
+            nic.trtype = "TCP"
+            active_tcp = True
+    snode.active_tcp=active_tcp
+    snode.active_rdma=active_rdma
+
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
-    snode_api = SNodeClient(snode.api_endpoint, timeout=5 * 60, retry=3)
     node_info, _ = snode_api.info()
     logger.debug(f"Node info: {node_info}")
 
@@ -1713,10 +1736,17 @@ def restart_storage_node(
         return False
 
     qpair = cluster.qpair_count
-    ret = rpc_client.transport_create("TCP", qpair)
-    if not ret:
-        logger.error(f"Failed to create transport TCP with qpair: {qpair}")
-        return False
+    req_cpu_count = len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask))
+    if cluster.fabric_tcp:
+        ret = rpc_client.transport_create("TCP", qpair, 512*(req_cpu_count+1))
+        if not ret:
+            logger.error(f"Failed to create transport TCP with qpair: {qpair}")
+            return False
+    if cluster.fabric_rdma:
+        ret = rpc_client.transport_create("RDMA", qpair, 512*(req_cpu_count+1))
+        if not ret:
+            logger.error(f"Failed to create transport RDMA with qpair: {qpair}")
+            return False
 
     # 7- set jc singleton mask
     if snode.jc_singleton_mask:

@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from simplyblock_core import constants, shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
-from .snode_ops import bind_device_to_spdk, delete_gpt_partitions_for_dev
+from . import snode_ops
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -254,7 +254,7 @@ class _DeviceParams(BaseModel):
     device_pci: str
 
 
-api.post('/delete_dev_gpt_partitions')(delete_gpt_partitions_for_dev)
+api.post('/delete_dev_gpt_partitions')(snode_ops.delete_gpt_partitions_for_dev)
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
@@ -602,4 +602,9 @@ def apply_config():
 
     return utils.get_response(True)
 
-api.post('/bind_device_to_spdk')(bind_device_to_spdk)
+api.post('/bind_device_to_spdk')(snode_ops.bind_device_to_spdk)
+
+api.get('/ifc_is_tcp')(snode_ops.ifc_is_tcp)
+
+api.get('/ifc_is_roce')(snode_ops.ifc_is_roce)
+
