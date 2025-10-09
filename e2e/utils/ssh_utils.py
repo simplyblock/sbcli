@@ -347,8 +347,9 @@ class SshUtils:
             node (str): Node to perform ssh operation on
             device (str): Device path
         """
-        command = f"sudo umount {device}"
-        self.exec_command(node, command)
+        if "/mnt/nfs_share" not in device:
+            command = f"sudo umount {device}"
+            self.exec_command(node, command)
     
     def get_devices(self, node):
         """Get devices on a machine
@@ -601,9 +602,11 @@ class SshUtils:
 
     def remove_dir(self, node, dir_path):
         """Remove directory on the node."""
-        cmd = f"sudo rm -rf {dir_path}"
-        output, error = self.exec_command(node=node, command=cmd)
-        return output, error
+        if "/mnt/nfs_share" not in dir_path:
+            cmd = f"sudo rm -rf {dir_path}"
+            output, error = self.exec_command(node=node, command=cmd)
+            return output, error
+        return None, None
 
     def disconnect_nvme(self, node, nqn_grep):
         """Disconnect NVMe device on the node."""
