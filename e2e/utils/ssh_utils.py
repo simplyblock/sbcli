@@ -1923,18 +1923,18 @@ class SshUtils:
                     print(f"[HOST] NFS already mounted at {mount_point}")
             else:
                 # --- remote node check ---
-                result = self.run_command(node, check_cmd, get_output=True)
+                result, _ = self.exec_command(node, check_cmd)
                 if not result.strip():
-                    self.log_info(f"[{node}] NFS not mounted — mounting now...")
-                    self.run_command(node, mount_cmd)
+                    self.logger.info(f"[{node}] NFS not mounted — mounting now...")
+                    self.exec_command(node, mount_cmd)
                 else:
-                    self.log_info(f"[{node}] NFS already mounted at {mount_point}")
+                    self.logger.info(f"[{node}] NFS already mounted at {mount_point}")
         except Exception as e:
             msg = f"[{node if not is_local else 'HOST'}] Error while ensuring NFS mount: {e}"
             if is_local:
                 print(msg)
             else:
-                self.log_error(msg)
+                self.logger.error(msg)
 
 
 
