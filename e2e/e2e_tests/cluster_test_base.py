@@ -132,6 +132,7 @@ class TestClusterBase:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         # fresh folder per run on NFS:
         self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
+        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
         
         self.runner_k8s_log = RunnerK8sLog(
                 log_dir=self.docker_logs_path,
@@ -168,6 +169,7 @@ class TestClusterBase:
             self.ec2_resource = session.resource('ec2')
 
         self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+        self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
         for node in self.storage_nodes:
             node_log_dir = os.path.join(self.docker_logs_path, node)
             self.ssh_obj.delete_old_folders(

@@ -145,7 +145,7 @@ class TestLvolQOSBase(TestClusterBase):
                 "time_based": True,
                 "runtime": 100,
                 "output_format": "json",
-                "output_file": f"{Path.home()}/{lvol_name}_log.json",
+                "output_file": f"{self.log_path}/{lvol_name}_log.json",
                 "nrfiles": 5,
                 "debug": self.fio_debug
             }
@@ -162,7 +162,7 @@ class TestLvolQOSBase(TestClusterBase):
         for lvol_configs in [pool_qos_lvols_config, lvol_qos_config]:
             for config in lvol_configs:
                 lvol_name = config["lvol_name"]
-                log_file = f"{Path.home()}/{lvol_name}_log.json"
+                log_file = f"{self.log_path}/{lvol_name}_log.json"
                 output = self.ssh_obj.read_file(node=self.fio_node[0], file_name=log_file)
                 fio_result = ""
                 self.logger.info(f"FIO output for {lvol_name}: {output}")
@@ -223,8 +223,6 @@ class TestLvolQOSBase(TestClusterBase):
         else:
             assert  4000 < total_qos_iops < 6500 , \
                 f"Total IOPS {total_qos_iops} can not be more than 6500, should not be less than 4000"
-
-        
 
     def cleanup_lvols(self, lvol_configs):
         """Unmount, remove directory, and delete LVOLs for cleanup."""
