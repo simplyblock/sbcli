@@ -1,4 +1,5 @@
 ### simplyblock e2e tests
+import os
 import json
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -222,7 +223,7 @@ class TestSingleNodeReboot(TestClusterBase):
                 self.ssh_obj.restart_docker_logging(
                     node_ip=node,
                     containers=self.container_nodes[node],
-                    log_dir=self.docker_logs_path,
+                    log_dir=os.path.join(self.docker_logs_path, node),
                     test_name=self.test_name
                 )
         else:
@@ -465,7 +466,7 @@ class TestHASingleNodeReboot(TestClusterBase):
                     self.ssh_obj.restart_docker_logging(
                         node_ip=node,
                         containers=self.container_nodes[node],
-                        log_dir=self.docker_logs_path,
+                        log_dir=os.path.join(self.docker_logs_path, node),
                         test_name=self.test_name
                     )
             else:

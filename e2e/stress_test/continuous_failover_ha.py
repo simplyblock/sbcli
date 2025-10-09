@@ -451,7 +451,7 @@ class RandomFailoverTest(TestLvolHACluster):
                 self.ssh_obj.restart_docker_logging(
                     node_ip=node,
                     containers=self.container_nodes[node_ip],
-                    log_dir=self.docker_logs_path,
+                    log_dir=os.path.join(self.docker_logs_path, node),
                     test_name=self.test_name
                 )
         else:
