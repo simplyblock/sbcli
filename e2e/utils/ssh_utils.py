@@ -1911,18 +1911,33 @@ class SshUtils:
         """
         check_cmd = f"mount | grep -w '{mount_point}'"
         mount_cmd = f"sudo mkdir -p {mount_point} && sudo mount -t nfs {nfs_server}:{nfs_path} {mount_point}"
+        install_check_cmd = "dnf list installed nfs-utils >/dev/null 2>&1"
+        install_cmd = "sudo dnf install -y nfs-utils"
 
         try:
             if is_local:
                 # --- local host check ---
+                if subprocess.run(install_check_cmd, shell=True).returncode != 0:
+                    self.logger.info(f"[HOST] nfs-utils not found — installing...")
+                    subprocess.run(install_cmd, shell=True, check=True)
+                else:
+                    self.logger.info(f"[HOST] nfs-utils already installed.")
+
                 result = subprocess.run(check_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 if result.returncode != 0:
-                    print(f"[HOST] NFS not mounted — mounting {nfs_server}:{nfs_path}...")
+                    self.logger.info(f"[HOST] NFS not mounted — mounting {nfs_server}:{nfs_path}...")
                     subprocess.run(mount_cmd, shell=True, check=True)
                 else:
-                    print(f"[HOST] NFS already mounted at {mount_point}")
+                    self.logger.info(f"[HOST] NFS already mounted at {mount_point}")
             else:
                 # --- remote node check ---
+                pkg_check = self.run_command(node, install_check_cmd, get_output=False, ignore_error=True)
+                if pkg_check is None or pkg_check.strip() == "":
+                    self.log_info(f"[{node}] Installing nfs-utils...")
+                    self.run_command(node, install_cmd)
+                else:
+                    self.log_info(f"[{node}] nfs-utils already installed.")
+
                 result, _ = self.exec_command(node, check_cmd)
                 if not result.strip():
                     self.logger.info(f"[{node}] NFS not mounted — mounting now...")
@@ -1932,7 +1947,7 @@ class SshUtils:
         except Exception as e:
             msg = f"[{node if not is_local else 'HOST'}] Error while ensuring NFS mount: {e}"
             if is_local:
-                print(msg)
+                self.logger.info(msg)
             else:
                 self.logger.error(msg)
 
