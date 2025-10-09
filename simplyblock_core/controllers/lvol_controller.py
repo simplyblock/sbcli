@@ -832,6 +832,11 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    ret = rpc_client.bdev_lvol_remove_from_group(pool.numeric_id, [lvol.top_bdev])
+    if not ret:
+        logger.error("RPC failed bdev_lvol_remove_from_group")
+
     subsystem = rpc_client.subsystem_list(lvol.nqn)
     # 1- remove subsystem
     if subsystem:
