@@ -733,8 +733,9 @@ class TestClusterBase:
         for node in self.fio_node:
             mount_points = self.ssh_obj.get_mount_points(node=node, base_path=base_path)
             for mount_point in mount_points:
-                self.logger.info(f"Unmounting {mount_point}")
-                self.ssh_obj.unmount_path(node=node, device=mount_point)
+                if "/mnt/nfs_share" not in mount_point:
+                    self.logger.info(f"Unmounting {mount_point}")
+                    self.ssh_obj.unmount_path(node=node, device=mount_point)
 
     def remove_mount_dirs(self):
         """ Remove all mount point directories """
@@ -742,8 +743,9 @@ class TestClusterBase:
         for node in self.fio_node:
             mount_dirs = self.ssh_obj.get_mount_points(node=node, base_path=self.mount_path)
             for mount_dir in mount_dirs:
-                self.logger.info(f"Removing directory {mount_dir}")
-                self.ssh_obj.remove_dir(node=node, dir_path=mount_dir)
+                if "/mnt/nfs_share" not in mount_dir:
+                    self.logger.info(f"Removing directory {mount_dir}")
+                    self.ssh_obj.remove_dir(node=node, dir_path=mount_dir)
     
     def disconnect_lvol(self, lvol_device):
         """Disconnects the logical volume."""
