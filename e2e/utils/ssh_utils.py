@@ -1911,7 +1911,7 @@ class SshUtils:
         """
         check_cmd = f"mount | grep -w '{mount_point}'"
         mount_cmd = f"sudo mkdir -p {mount_point} && sudo mount -t nfs {nfs_server}:{nfs_path} {mount_point}"
-        install_check_cmd = "dnf list installed nfs-utils >/dev/null 2>&1"
+        install_check_cmd = "dnf list installed nfs-util"
         install_cmd = "sudo dnf install -y nfs-utils"
 
         try:
@@ -1931,12 +1931,12 @@ class SshUtils:
                     self.logger.info(f"[HOST] NFS already mounted at {mount_point}")
             else:
                 # --- remote node check ---
-                pkg_check = self.run_command(node, install_check_cmd, get_output=False, ignore_error=True)
+                pkg_check, error = self.exec_command(node, install_check_cmd)
                 if pkg_check is None or pkg_check.strip() == "":
-                    self.log_info(f"[{node}] Installing nfs-utils...")
-                    self.run_command(node, install_cmd)
+                    self.logger.info(f"[{node}] Installing nfs-utils...")
+                    self.exec_command(node, install_cmd)
                 else:
-                    self.log_info(f"[{node}] nfs-utils already installed.")
+                    self.logger.info(f"[{node}] nfs-utils already installed.")
 
                 result, _ = self.exec_command(node, check_cmd)
                 if not result.strip():
