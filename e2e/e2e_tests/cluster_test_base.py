@@ -343,54 +343,56 @@ class TestClusterBase:
                 self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"],
                                                 logs_path=self.docker_logs_path)
 
-    def collect_management_details(self):
+    def collect_management_details(self, post_teardown=False):
+        suffix = "_pre_teardown" if not post_teardown else "_post_teardown"
+
         base_path = os.path.join(self.docker_logs_path, self.mgmt_nodes[0])
-        cmd = f"{self.base_cmd} cluster list >& {base_path}/cluster_list.txt"
+        cmd = f"{self.base_cmd} cluster list >& {base_path}/cluster_list{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster status {self.cluster_id} >& {base_path}/cluster_status.txt"
+        cmd = f"{self.base_cmd} cluster status {self.cluster_id} >& {base_path}/cluster_status{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster get-logs {self.cluster_id} --limit 0 >& {base_path}/cluster_get_logs.txt"
+        cmd = f"{self.base_cmd} cluster get-logs {self.cluster_id} --limit 0 >& {base_path}/cluster_get_logs{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0 >& {base_path}/cluster_list_tasks.txt"
+        cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0 >& {base_path}/cluster_list_tasks{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} sn list >& {base_path}/sn_list.txt"
+        cmd = f"{self.base_cmd} sn list >& {base_path}/sn_list{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
-        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity.txt"
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=cmd)
-        
-        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity.txt"
+        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster show {self.cluster_id} >& {base_path}/cluster_show.txt"
+        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} lvol list >& {base_path}/lvol_list.txt"
+        cmd = f"{self.base_cmd} cluster show {self.cluster_id} >& {base_path}/cluster_show{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} snapshot list >& {base_path}/snapshot_list.txt"
+        cmd = f"{self.base_cmd} lvol list >& {base_path}/lvol_list{suffix}.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} snapshot list >& {base_path}/snapshot_list{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         node=1
         for result in storage_nodes['results']:
-            cmd = f"{self.base_cmd} sn list-devices {result['uuid']} >& {base_path}/node{node}_list_devices.txt"
+            cmd = f"{self.base_cmd} sn list-devices {result['uuid']} >& {base_path}/node{node}_list_devices{suffix}.txt"
             self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
-            cmd = f"{self.base_cmd} sn check {result['uuid']} >& {base_path}/node{node}_check.txt"
+            cmd = f"{self.base_cmd} sn check {result['uuid']} >& {base_path}/node{node}_check{suffix}.txt"
             self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
             node+=1
@@ -402,7 +404,7 @@ class TestClusterBase:
             cmd = f"dmesg -T >& {base_path}/dmesg_{node}.txt"
             self.ssh_obj.exec_command(node, cmd)
             
-    def teardown(self):
+    def teardown(self, delete_lvols=True):
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")
@@ -436,47 +438,44 @@ class TestClusterBase:
             self.logger.info("FIO did not exit completely after kill and wait. "
                              "Some hanging mount points could be present. "
                              "Needs manual cleanup.")
-        
-        try:
-            lvols = self.sbcli_utils.list_lvols()
-            self.unmount_all(base_path=self.mount_path)
-            self.unmount_all(base_path="/mnt/")
-            sleep_n_sec(2)
-            for node in self.fio_node:
-                self.ssh_obj.unmount_path(node=node,
-                                          device=self.mount_path)
-            sleep_n_sec(2)
-            if lvols is not None:
-                for _, lvol_id in lvols.items():
-                    lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-                    nqn = lvol_details[0]["nqn"]
-                    for node in self.fio_node:
-                        self.ssh_obj.unmount_path(node=node,
-                                                  device=self.mount_path)
-                        sleep_n_sec(2)
-                        self.ssh_obj.exec_command(node=node,
-                                                  command=f"sudo nvme disconnect -n {nqn}")
-                        sleep_n_sec(2)
-                self.disconnect_lvols()
+        if delete_lvols:
+            try:
+                lvols = self.sbcli_utils.list_lvols()
+                self.unmount_all(base_path=self.mount_path)
+                self.unmount_all(base_path="/mnt/")
                 sleep_n_sec(2)
-                self.sbcli_utils.delete_all_lvols()
+                for node in self.fio_node:
+                    self.ssh_obj.unmount_path(node=node,
+                                            device=self.mount_path)
                 sleep_n_sec(2)
-            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-            sleep_n_sec(2)
-            self.sbcli_utils.delete_all_storage_pools()
-            sleep_n_sec(2)
-            latest_util = self.get_latest_cluster_util()
-            size_used = latest_util["size_used"]
-            is_less_than_500mb = size_used < 500 * 1024 * 1024
-            if not is_less_than_500mb:
-                raise Exception("Cluster capacity more than 500MB after cleanup!!")
-            for node in self.fio_node:
-                self.ssh_obj.remove_dir(node, "/mnt/*")
-            for node, ssh in self.ssh_obj.ssh_connections.items():
-                self.logger.info(f"Closing node ssh connection for {node}")
-                ssh.close()
-        except Exception as _:
-            self.logger.info(traceback.format_exc())
+                if lvols is not None:
+                    for _, lvol_id in lvols.items():
+                        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+                        nqn = lvol_details[0]["nqn"]
+                        for node in self.fio_node:
+                            self.ssh_obj.unmount_path(node=node,
+                                                    device=self.mount_path)
+                            sleep_n_sec(2)
+                            self.ssh_obj.exec_command(node=node,
+                                                    command=f"sudo nvme disconnect -n {nqn}")
+                            sleep_n_sec(2)
+                    self.disconnect_lvols()
+                    sleep_n_sec(2)
+                    self.sbcli_utils.delete_all_lvols()
+                    sleep_n_sec(2)
+                self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_storage_pools()
+                sleep_n_sec(2)
+                latest_util = self.get_latest_cluster_util()
+                size_used = latest_util["size_used"]
+                is_less_than_500mb = size_used < 500 * 1024 * 1024
+                if not is_less_than_500mb:
+                    raise Exception("Cluster capacity more than 500MB after cleanup!!")
+                for node in self.fio_node:
+                    self.ssh_obj.remove_dir(node, "/mnt/*")
+            except Exception as _:
+                self.logger.info(traceback.format_exc())
 
         for node in self.storage_nodes:
             self.ssh_obj.exec_command(node=node,
@@ -490,6 +489,13 @@ class TestClusterBase:
                     self.logger.info(f"\n{file}:")
                     for line in lines:
                         self.logger.info(f"  -> {line}")
+        
+        self.ssh_obj.copy_logs_and_configs_to_nfs(
+                logs_path=self.docker_logs_path, storage_nodes=self.storage_nodes
+            )
+        for node, ssh in self.ssh_obj.ssh_connections.items():
+            self.logger.info(f"Closing node ssh connection for {node}")
+            ssh.close()
 
         try:
             if self.ec2_resource:
@@ -501,6 +507,11 @@ class TestClusterBase:
         except Exception as e:
             self.logger.info(f"Error while deleting instance: {e}")
             self.logger.info(traceback.format_exc())
+
+    def get_logs_path(self):
+        """Print logs path on nfs
+        """
+        self.logger.info(f"Logs Path: {self.docker_logs_path}")
 
     def _get_all_nodes(self):
         """Return ordered, de-duplicated list of mgmt + storage nodes."""
