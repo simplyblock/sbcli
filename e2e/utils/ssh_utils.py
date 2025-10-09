@@ -1953,7 +1953,30 @@ class SshUtils:
                 self.logger.info(msg)
             else:
                 self.logger.error(msg)
+    
+    
+    def copy_logs_and_configs_to_nfs(self, logs_path, storage_nodes):
+        """
+        Copies host ./logs folder and /etc/simplyblock folders from storage nodes
+        into a new run-specific folder under /mnt/nfs_share.
+        """
 
+        # --- 1) Copy host logs ---
+        print(f"[HOST] Copying ./logs → {logs_path}/host-logs")
+        subprocess.run(["sudo", "mkdir", "-p", f"{logs_path}/host-logs"], check=True)
+        subprocess.run(["sudo", "cp", "-r", "./logs/.", f"{logs_path}/host-logs/"], check=False)
+
+        # --- 2) Copy /etc/simplyblock from each storage node ---
+        for node in storage_nodes:
+            node_folder = os.path.join(logs_path, node)
+            print(f"[{node}] Copying /etc/simplyblock → {node_folder}/etc-simplyblock")
+            cmd = (
+                f"sudo mkdir -p '{node_folder}/etc-simplyblock' && "
+                f"sudo cp -r /etc/simplyblock/* '{node_folder}/etc-simplyblock/' || true"
+            )
+            self.exec_command(node, cmd)
+
+        print(f"\n All logs and /etc/simplyblock configs copied to: {logs_path}\n")
 
 
 class RunnerK8sLog:
