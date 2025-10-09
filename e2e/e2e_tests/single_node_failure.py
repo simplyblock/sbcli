@@ -484,7 +484,7 @@ class TestHASingleNodeFailure(TestClusterBase):
     def add_lvol_and_run_fio(self, lvol_name):
         self.lvol_name = lvol_name
         mount_path = self.mount_path+f"_{lvol_name}"
-        log_path = self.log_path+f"_{lvol_name}"
+        log_path = self.log_path+f"_{lvol_name}.log"
 
         host_id = self.sbcli_utils.get_node_without_lvols()
 
