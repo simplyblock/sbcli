@@ -404,7 +404,7 @@ class TestClusterBase:
             cmd = f"dmesg -T >& {base_path}/dmesg_{node}.txt"
             self.ssh_obj.exec_command(node, cmd)
             
-    def teardown(self, delete_lvols=True):
+    def teardown(self, delete_lvols=True, close_ssh=True):
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")
@@ -493,9 +493,10 @@ class TestClusterBase:
         self.ssh_obj.copy_logs_and_configs_to_nfs(
                 logs_path=self.docker_logs_path, storage_nodes=self.storage_nodes
             )
-        for node, ssh in self.ssh_obj.ssh_connections.items():
-            self.logger.info(f"Closing node ssh connection for {node}")
-            ssh.close()
+        if close_ssh:
+            for node, ssh in self.ssh_obj.ssh_connections.items():
+                self.logger.info(f"Closing node ssh connection for {node}")
+                ssh.close()
 
         try:
             if self.ec2_resource:

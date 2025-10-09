@@ -127,7 +127,7 @@ def main():
             test_obj.fetch_all_nodes_distrib_log()
             if i == (len(test_class_run) - 1):
                 test_obj.collect_management_details()
-            test_obj.teardown(delete_lvols=False)
+            test_obj.teardown(delete_lvols=False, close_ssh=True)
             # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
