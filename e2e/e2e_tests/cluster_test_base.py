@@ -14,6 +14,7 @@ import string
 import random
 
 
+
 def generate_random_sequence(length):
     letters = string.ascii_uppercase  # A-Z
     numbers = string.digits  # 0-9
@@ -56,6 +57,7 @@ class TestClusterBase:
         self.pool_name = "test_pool"
         self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = "/mnt/test_location"
+        self.nfs_log_base = os.environ.get("NFS_LOG_BASE", "/mnt/nfs_share")
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
@@ -115,13 +117,22 @@ class TestClusterBase:
             )
             sleep_n_sec(2)
 
+        nfs_server = "10.10.10.140"
+        nfs_path = "/srv/nfs_share"
+        nfs_mount_point = "/mnt/nfs_share"
+
+        for node in self.storage_nodes + self.mgmt_nodes + self.client_machines:
+            self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
         
+        self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         # Construct the logs path with test name and timestamp
-        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # fresh folder per run on NFS:
+        self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
+        
         self.runner_k8s_log = RunnerK8sLog(
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
@@ -156,31 +167,33 @@ class TestClusterBase:
             )
             self.ec2_resource = session.resource('ec2')
 
+        self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
         for node in self.storage_nodes:
+            node_log_dir = os.path.join(self.docker_logs_path, node)
             self.ssh_obj.delete_old_folders(
                 node=node,
-                folder_path=os.path.join(Path.home(), "container-logs"),
-                days=3
+                folder_path=self.nfs_log_base,
+                days=10
             )
-            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+            self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
             self.ssh_obj.check_tmux_installed(node_ip=node)
             self.ssh_obj.exec_command(node=node,
                                     command="sudo tmux kill-server")
             
-            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=node_log_dir)
 
             if not self.k8s_test:
                 self.ssh_obj.start_docker_logging(node_ip=node,
                                                 containers=containers,
-                                                log_dir=self.docker_logs_path,
+                                                log_dir=node_log_dir,
                                                 test_name=self.test_name
                                                 )
 
-            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                    log_dir=self.docker_logs_path)
+                                                    log_dir=node_log_dir)
             if not self.k8s_test:
                 self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
         
@@ -198,27 +211,28 @@ class TestClusterBase:
         for node in self.mgmt_nodes:
             self.ssh_obj.delete_old_folders(
                 node=node,
-                folder_path=os.path.join(Path.home(), "container-logs"),
-                days=3
+                folder_path=self.nfs_log_base,
+                days=10
             )
-            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+            node_log_dir = os.path.join(self.docker_logs_path, node)
+            self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
             self.ssh_obj.check_tmux_installed(node_ip=node)
             self.ssh_obj.exec_command(node=node,
                                     command="sudo tmux kill-server")
             
-            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=node_log_dir)
 
             self.ssh_obj.start_docker_logging(node_ip=node,
                                               containers=containers,
-                                              log_dir=self.docker_logs_path,
+                                              log_dir=node_log_dir,
                                               test_name=self.test_name
                                               )
 
-            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                     log_dir=self.docker_logs_path)
+                                                     log_dir=node_log_dir)
         # for node in self.mgmt_nodes:
         #     self.ssh_obj.monitor_container_logs(
         #         node_ip=node,
@@ -230,20 +244,21 @@ class TestClusterBase:
         for node in self.fio_node:
             self.ssh_obj.delete_old_folders(
                 node=node,
-                folder_path=os.path.join(Path.home(), "container-logs"),
-                days=3
+                folder_path=self.nfs_log_base,
+                days=10
             )
+            node_log_dir = os.path.join(self.docker_logs_path, node)
 
-            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+            self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
 
             self.ssh_obj.check_tmux_installed(node_ip=node)
 
             self.ssh_obj.exec_command(node=node,
                                       command="sudo tmux kill-server")
             self.ssh_obj.start_tcpdump_logging(node_ip=node,
-                                               log_dir=self.docker_logs_path)
+                                               log_dir=node_log_dir)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                     log_dir=self.docker_logs_path)
+                                                     log_dir=node_log_dir)
         
         self.fetch_all_nodes_distrib_log()
 
@@ -323,10 +338,11 @@ class TestClusterBase:
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         for result in storage_nodes['results']:
             if result['is_secondary_node'] is False:
-                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"])
+                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"],
+                                                logs_path=self.docker_logs_path)
 
     def collect_management_details(self):
-        base_path = Path.home()
+        base_path = os.path.join(self.docker_logs_path, self.mgmt_nodes[0])
         cmd = f"{self.base_cmd} cluster list >& {base_path}/cluster_list.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
@@ -377,7 +393,9 @@ class TestClusterBase:
 
             node+=1
         for node in self.fio_node:
+            base_path = os.path.join(self.docker_logs_path, node)
             cmd = f"journalctl -k >& {base_path}/jounalctl_{node}.txt"
+
             self.ssh_obj.exec_command(node, cmd)
             cmd = f"dmesg -T >& {base_path}/dmesg_{node}.txt"
             self.ssh_obj.exec_command(node, cmd)

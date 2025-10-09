@@ -1341,7 +1341,7 @@ class SshUtils:
             self.logger.error(f"Failed to dump lvstore on {node_ip}: {e}")
             return None
         
-    def fetch_distrib_logs(self, storage_node_ip, storage_node_id):
+    def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path):
         """
         Fetch distrib names using bdev_get_bdevs RPC, generate and execute RPC JSON,
         and copy logs from SPDK container.
@@ -1377,7 +1377,7 @@ class SshUtils:
         # self.logger.info(f"Saved raw bdev_get_bdevs output to {raw_output_path}")
 
         timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
-        remote_output_path = f"{Path.home()}/bdev_output_{storage_node_ip}_{timestamp}.json"
+        remote_output_path = f"{logs_path}/bdev_output_{storage_node_ip}_{timestamp}.json"
 
         # 1. Run to capture output into a variable (for parsing)
         bdev_cmd = f"sudo docker exec {container_name} bash -c 'python spdk/scripts/rpc.py bdev_get_bdevs'"
@@ -1896,6 +1896,46 @@ class SshUtils:
     def make_node_primary(self, node_ip, node_id):
         make_primary_cmd = f"{self.base_cmd} --dev -d storage-node make-primary {node_id}"
         self.exec_command(node_ip, make_primary_cmd)
+
+    def ensure_nfs_mounted(self, node, nfs_server, nfs_path, mount_point, is_local = False):
+        """
+        Ensures that the NFS share is mounted on the given node (or locally if is_local=True).
+        If not mounted, it creates the mount point and mounts automatically.
+
+        Args:
+            node (str): Node IP or name (ignored if is_local=True)
+            nfs_server (str): NFS server IP (e.g., 10.10.10.140)
+            nfs_path (str): Exported NFS path (e.g., /srv/nfs_share)
+            mount_point (str): Local mount directory (e.g., /mnt/nfs_share)
+            is_local (bool): If True, runs commands on the host itself
+        """
+        check_cmd = f"mount | grep -w '{mount_point}'"
+        mount_cmd = f"sudo mkdir -p {mount_point} && sudo mount -t nfs {nfs_server}:{nfs_path} {mount_point}"
+
+        try:
+            if is_local:
+                # --- local host check ---
+                result = subprocess.run(check_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode != 0:
+                    print(f"[HOST] NFS not mounted — mounting {nfs_server}:{nfs_path}...")
+                    subprocess.run(mount_cmd, shell=True, check=True)
+                else:
+                    print(f"[HOST] NFS already mounted at {mount_point}")
+            else:
+                # --- remote node check ---
+                result = self.run_command(node, check_cmd, get_output=True)
+                if not result.strip():
+                    self.log_info(f"[{node}] NFS not mounted — mounting now...")
+                    self.run_command(node, mount_cmd)
+                else:
+                    self.log_info(f"[{node}] NFS already mounted at {mount_point}")
+        except Exception as e:
+            msg = f"[{node if not is_local else 'HOST'}] Error while ensuring NFS mount: {e}"
+            if is_local:
+                print(msg)
+            else:
+                self.log_error(msg)
+
 
 
 class RunnerK8sLog:
