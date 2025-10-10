@@ -184,32 +184,34 @@ class TestLvolQOSBase(TestClusterBase):
                 # fio_result = json.loads(output)
                 self.logger.info(f"FIO output for {lvol_name}: {fio_result}")
 
-                job = fio_result['jobs'][0]
-                job_name = job['job options']['name']
-                file_name = job['job options'].get("directory", job['job options'].get("filename", None))
-                read_iops = job['read']['iops']
-                write_iops = job['write']['iops']
-                total_iops = read_iops + write_iops
-                disk_name = fio_result['disk_util'][0]['name']
+                jobs = fio_result['jobs']
+                i = 0
+                for job in jobs:
+                    job_name = job['job options']['name']
+                    file_name = job['job options'].get("directory", job['job options'].get("filename", None))
+                    read_iops = job['read']['iops']
+                    write_iops = job['write']['iops']
+                    total_iops = read_iops + write_iops
+                    disk_name = fio_result['disk_util'][0]['name']
 
-                read_bw_kb = job['read']['bw']
-                write_bw_kb = job['write']['bw']
-                trim_bw_kb = job['trim']['bw']
-                read_bw_mib = read_bw_kb / 1024
-                write_bw_mib = write_bw_kb / 1024
-                trim_bw_mib = trim_bw_kb / 1024
-                total_qos_iops += total_iops
-                total_qos_read_bw += read_bw_mib
-                total_qos_write_bw += write_bw_mib
+                    read_bw_kb = job['read']['bw']
+                    write_bw_kb = job['write']['bw']
+                    trim_bw_kb = job['trim']['bw']
+                    read_bw_mib = read_bw_kb / 1024
+                    write_bw_mib = write_bw_kb / 1024
+                    trim_bw_mib = trim_bw_kb / 1024
+                    total_qos_iops += total_iops
+                    total_qos_read_bw += read_bw_mib
+                    total_qos_write_bw += write_bw_mib
 
-                # Write LVOL details to the text file
-                with open(os.path.join("logs" ,"fio_test_results.log"),
-                          "a", encoding="utf-8") as log_file:
-                    log_file.write(f"LVOL: {lvol_name}, Total IOPS: {total_iops}, Read BW: "
-                                   f"{read_bw_mib} MiB/s, Write BW: {write_bw_mib} MiB/s, "
-                                   f"Trim BW: {trim_bw_mib} MiB/s\n\n")
+                    # Write LVOL details to the text file
+                    with open(os.path.join("logs" ,"fio_test_results.log"),
+                            "a", encoding="utf-8") as log_file:
+                        log_file.write(f"LVOL: {lvol_name}, Job={i+1},  Total IOPS: {total_iops}, Read BW: "
+                                    f"{read_bw_mib} MiB/s, Write BW: {write_bw_mib} MiB/s, "
+                                    f"Trim BW: {trim_bw_mib} MiB/s\n\n")
+                    i+=1
                     
-
             self.logger.info(f"Performing validation for FIO job: {job_name} on device: "
                             f"{disk_name} mounted on: {file_name}")
             
