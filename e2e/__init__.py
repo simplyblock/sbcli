@@ -53,6 +53,7 @@ from stress_test.continuous_failover_ha import RandomFailoverTest
 from stress_test.continuous_failover_ha_multi_client import RandomMultiClientFailoverTest
 from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
 from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailoverTest
+from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
 
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade
@@ -143,6 +144,7 @@ def get_stress_tests():
         RandomMultiClientFailoverTest,
         RandomMultiClientMultiFailoverTest,
         RandomMultiGeometryFailoverTest,
+        RandomMultiClient2NodeFailoverTest,
     ]
     return tests
 
