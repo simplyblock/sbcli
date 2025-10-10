@@ -154,78 +154,160 @@ class TestLvolQOSBase(TestClusterBase):
         fio_thread.start()
         return fio_thread
 
-    def validate_fio_output(self, pool_qos_lvols_config, lvol_qos_config, bw=False):
-        """Validate the FIO output for IOPS and MB/s."""
-        total_qos_iops = 0
-        total_qos_read_bw = 0
-        total_qos_write_bw = 0
+    # def validate_fio_output(self, pool_qos_lvols_config, lvol_qos_config, bw=False):
+    #     """Validate the FIO output for IOPS and MB/s."""
+    #     total_qos_iops = 0
+    #     total_qos_read_bw = 0
+    #     total_qos_write_bw = 0
 
-        for lvol_configs in [pool_qos_lvols_config, lvol_qos_config]:
-            for config in lvol_configs:
-                lvol_name = config["lvol_name"]
-                log_file = f"{self.log_path}/{lvol_name}_log.json"
-                output = self.ssh_obj.read_file(node=self.fio_node[0], file_name=log_file)
-                fio_result = ""
-                self.logger.info(f"FIO output for {lvol_name}: {output}")
+    #     for lvol_configs in [pool_qos_lvols_config, lvol_qos_config]:
+    #         for config in lvol_configs:
+    #             lvol_name = config["lvol_name"]
+    #             log_file = f"{self.log_path}/{lvol_name}_log.json"
+    #             output = self.ssh_obj.read_file(node=self.fio_node[0], file_name=log_file)
+    #             fio_result = ""
+    #             self.logger.info(f"FIO output for {lvol_name}: {output}")
 
-                start_index = output.find('{')  # Find the first opening brace
-                if start_index != -1:
-                    json_content = output[start_index:]  # Extract everything starting from the JSON
-                    try:
-                        self.logger.info(f"Removed str FIO output for {lvol_name}: {fio_result}")
-                        # Parse the extracted JSON
-                        fio_result = json.loads(json_content)
-                    except json.JSONDecodeError as e:
-                        print(f"Error decoding JSON: {e}")
-                        return None
-                else:
-                    print("No JSON content found in the file.")
-                    return None
-                # fio_result = json.loads(output)
-                self.logger.info(f"FIO output for {lvol_name}: {fio_result}")
+    #             start_index = output.find('{')  # Find the first opening brace
+    #             if start_index != -1:
+    #                 json_content = output[start_index:]  # Extract everything starting from the JSON
+    #                 try:
+    #                     self.logger.info(f"Removed str FIO output for {lvol_name}: {fio_result}")
+    #                     # Parse the extracted JSON
+    #                     fio_result = json.loads(json_content)
+    #                 except json.JSONDecodeError as e:
+    #                     print(f"Error decoding JSON: {e}")
+    #                     return None
+    #             else:
+    #                 print("No JSON content found in the file.")
+    #                 return None
+    #             # fio_result = json.loads(output)
+    #             self.logger.info(f"FIO output for {lvol_name}: {fio_result}")
 
-                jobs = fio_result['jobs']
-                i = 0
-                for job in jobs:
-                    job_name = job['job options']['name']
-                    file_name = job['job options'].get("directory", job['job options'].get("filename", None))
-                    read_iops = job['read']['iops']
-                    write_iops = job['write']['iops']
-                    total_iops = read_iops + write_iops
-                    disk_name = fio_result['disk_util'][0]['name']
+    #             jobs = fio_result['jobs']
+    #             i = 0
+    #             for job in jobs:
+    #                 job_name = job['job options']['name']
+    #                 file_name = job['job options'].get("directory", job['job options'].get("filename", None))
+    #                 read_iops = job['read']['iops']
+    #                 write_iops = job['write']['iops']
+    #                 total_iops = read_iops + write_iops
+    #                 disk_name = fio_result['disk_util'][0]['name']
 
-                    read_bw_kb = job['read']['bw']
-                    write_bw_kb = job['write']['bw']
-                    trim_bw_kb = job['trim']['bw']
-                    read_bw_mib = read_bw_kb / 1024
-                    write_bw_mib = write_bw_kb / 1024
-                    trim_bw_mib = trim_bw_kb / 1024
-                    total_qos_iops += total_iops
-                    total_qos_read_bw += read_bw_mib
-                    total_qos_write_bw += write_bw_mib
+    #                 read_bw_kb = job['read']['bw']
+    #                 write_bw_kb = job['write']['bw']
+    #                 trim_bw_kb = job['trim']['bw']
+    #                 read_bw_mib = read_bw_kb / 1024
+    #                 write_bw_mib = write_bw_kb / 1024
+    #                 trim_bw_mib = trim_bw_kb / 1024
+    #                 total_qos_iops += total_iops
+    #                 total_qos_read_bw += read_bw_mib
+    #                 total_qos_write_bw += write_bw_mib
 
-                    # Write LVOL details to the text file
-                    with open(os.path.join("logs" ,"fio_test_results.log"),
-                            "a", encoding="utf-8") as log_file:
-                        log_file.write(f"LVOL: {lvol_name}, Job={i+1},  Total IOPS: {total_iops}, Read BW: "
-                                    f"{read_bw_mib} MiB/s, Write BW: {write_bw_mib} MiB/s, "
-                                    f"Trim BW: {trim_bw_mib} MiB/s\n\n")
-                    i+=1
+    #                 # Write LVOL details to the text file
+    #                 with open(os.path.join("logs" ,"fio_test_results.log"),
+    #                         "a", encoding="utf-8") as log_file:
+    #                     log_file.write(f"LVOL: {lvol_name}, Job={i+1},  Total IOPS: {total_iops}, Read BW: "
+    #                                 f"{read_bw_mib} MiB/s, Write BW: {write_bw_mib} MiB/s, "
+    #                                 f"Trim BW: {trim_bw_mib} MiB/s\n\n")
+    #                 i+=1
                     
-            self.logger.info(f"Performing validation for FIO job: {job_name} on device: "
-                            f"{disk_name} mounted on: {file_name}")
+    #         self.logger.info(f"Performing validation for FIO job: {job_name} on device: "
+    #                         f"{disk_name} mounted on: {file_name}")
             
-        with open(os.path.join("logs" ,"fio_test_results.log"),
-                  "a", encoding="utf-8") as log_file:
-            log_file.write(f"Total QOS IOPS: {total_qos_iops}, Read BW: "
-                           f"{total_qos_read_bw} MiB/s, Write BW: {total_qos_write_bw} MiB/s")
+    #     with open(os.path.join("logs" ,"fio_test_results.log"),
+    #               "a", encoding="utf-8") as log_file:
+    #         log_file.write(f"Total QOS IOPS: {total_qos_iops}, Read BW: "
+    #                        f"{total_qos_read_bw} MiB/s, Write BW: {total_qos_write_bw} MiB/s")
 
+    #     if bw:
+    #         assert 20 < total_qos_read_bw < 50, f"Read BW {total_qos_read_bw} out of range (20-50 MiB/s)"
+    #         assert 20 < total_qos_write_bw < 50, f"Write BW {total_qos_write_bw} out of range (20-50 MiB/s)"
+    #     else:
+    #         assert  4000 < total_qos_iops < 6500 , \
+    #             f"Total IOPS {total_qos_iops} can not be more than 6500, should not be less than 4000"
+
+    def _first_complete_json(self, s: str) -> str | None:
+        start = s.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        for i, ch in enumerate(s[start:], start):
+            if ch == '{': depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return s[start:i+1]
+        return None  # not complete yet
+
+    def _read_complete_json(self, node, path, retries=15, sleep_s=0.2):
+        raw = ""
+        for _ in range(retries):
+            raw = self.ssh_obj.read_file(node=node, file_name=path) or ""
+            js = self._first_complete_json(raw)
+            if js:
+                try:
+                    return json.loads(js)
+                except json.JSONDecodeError:
+                    pass
+            sleep_n_sec(sleep_s)
+        return None  # give up after retries
+
+    def validate_fio_output(self, pool_qos_lvols_config, lvol_qos_config, bw=False):
+        total_qos_iops = 0.0
+        total_qos_read_bw = 0.0
+        total_qos_write_bw = 0.0
+        errors = []
+
+        for cfg in [*(pool_qos_lvols_config or []), *(lvol_qos_config or [])]:
+            lvol_name = cfg["lvol_name"]
+            log_file = f"{self.log_path}/{lvol_name}_log.json"
+
+            fio_result = self._read_complete_json(self.fio_node[0], log_file)
+            if not fio_result:
+                errors.append(f"{lvol_name}: JSON incomplete or invalid")
+                continue
+
+            jobs = fio_result.get("jobs") or []
+            if not jobs:
+                errors.append(f"{lvol_name}: no jobs in JSON")
+                continue
+
+            for idx, job in enumerate(jobs, 1):
+                r_iops = float(job.get("read", {}).get("iops", 0))
+                w_iops = float(job.get("write", {}).get("iops", 0))
+                total_iops = r_iops + w_iops
+
+                # use *_bytes to get exact MiB/s
+                r_mib = int(job.get("read", {}).get("bw_bytes", 0)) / (1024**2)
+                w_mib = int(job.get("write", {}).get("bw_bytes", 0)) / (1024**2)
+                t_mib = int(job.get("trim", {}).get("bw_bytes", 0)) / (1024**2)
+
+                total_qos_iops     += total_iops
+                total_qos_read_bw  += r_mib
+                total_qos_write_bw += w_mib
+
+                with open(os.path.join("logs","fio_test_results.log"), "a", encoding="utf-8") as lf:
+                    lf.write(
+                        f"LVOL: {lvol_name}, Job={idx},  Total IOPS: {total_iops}, "
+                        f"Read BW: {r_mib} MiB/s, Write BW: {w_mib} MiB/s, Trim BW: {t_mib} MiB/s\n\n"
+                    )
+
+        # Write totals and any warnings no matter what happened above
+        with open(os.path.join("logs","fio_test_results.log"), "a", encoding="utf-8") as lf:
+            lf.write(
+                f"Total QOS IOPS: {total_qos_iops}, Read BW: {total_qos_read_bw} MiB/s, "
+                f"Write BW: {total_qos_write_bw} MiB/s\n"
+            )
+            if errors:
+                lf.write("WARNINGS: " + "; ".join(errors) + "\n")
+
+        # Assertions come last so logging is not skipped
         if bw:
-            assert 20 < total_qos_read_bw < 50, f"Read BW {total_qos_read_bw} out of range (20-50 MiB/s)"
+            assert 20 < total_qos_read_bw < 50,  f"Read BW {total_qos_read_bw} out of range (20-50 MiB/s)"
             assert 20 < total_qos_write_bw < 50, f"Write BW {total_qos_write_bw} out of range (20-50 MiB/s)"
         else:
-            assert  4000 < total_qos_iops < 6500 , \
-                f"Total IOPS {total_qos_iops} can not be more than 6500, should not be less than 4000"
+            assert 4000 < total_qos_iops < 6500, f"Total IOPS {total_qos_iops} out of range (4000-6500)"
 
     def cleanup_lvols(self, lvol_configs):
         """Unmount, remove directory, and delete LVOLs for cleanup."""
