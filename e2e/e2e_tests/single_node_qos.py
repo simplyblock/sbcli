@@ -139,11 +139,12 @@ class TestLvolQOSBase(TestClusterBase):
                 "name": f"fio_{lvol_name}",
                 "rw": readwrite,
                 "ioengine": "libaio",
-                "iodepth": 1,
+                "iodepth": 256,
                 "bs": 4096,
-                "size": "2G",
-                "time_based": True,
-                "runtime": 100,
+                "size": "1G",
+                "numjobs": 16,
+                # "time_based": True,
+                # "runtime": 100,
                 "output_format": "json",
                 "output_file": f"{self.log_path}/{lvol_name}_log.json",
                 "nrfiles": 5,
@@ -252,15 +253,15 @@ class TestLvolFioQOSBW(TestLvolQOSBase):
         """Custom test scenario without requiring ndcs or npcs."""
         # Define custom test configurations that don't require ndcs or npcs
         pool_qos_lvol_configs = [
-            {"lvol_name": "lvol_qos1", "size": "4G", "mount": True},
-            {"lvol_name": "lvol_qos2", "size": "4G", "mount": True},
-            {"lvol_name": "lvol_qos3", "size": "4G", "mount": True},
+            {"lvol_name": "lvol_qos1", "size": "30G", "mount": True},
+            {"lvol_name": "lvol_qos2", "size": "30G", "mount": True},
+            {"lvol_name": "lvol_qos3", "size": "30G", "mount": True},
         ]
 
         lvol_configs = [
-            {"lvol_name": "lvol_non_qos1", "size": "4G", "mount": True},
-            {"lvol_name": "lvol_non_qos2", "size": "4G", "mount": True},
-            {"lvol_name": "lvol_non_qos3", "size": "4G", "mount": True},
+            {"lvol_name": "lvol_non_qos1", "size": "30G", "mount": True},
+            {"lvol_name": "lvol_non_qos2", "size": "30G", "mount": True},
+            {"lvol_name": "lvol_non_qos3", "size": "30G", "mount": True},
         ]
 
         self.create_pools(bw=True)
@@ -311,15 +312,15 @@ class TestLvolFioQOSIOPS(TestLvolQOSBase):
         """Custom test scenario without requiring ndcs or npcs."""
         # Define custom test configurations that don't require ndcs or npcs
         pool_qos_lvol_configs = [
-            {"lvol_name": "lvol_qos1", "size": "4G", "mount": True},
-            {"lvol_name": "lvol_qos2", "size": "4G", "mount": True},
-            {"lvol_name": "lvol_qos3", "size": "4G", "mount": True},
+            {"lvol_name": "lvol_qos1", "size": "30G", "mount": True},
+            {"lvol_name": "lvol_qos2", "size": "30G", "mount": True},
+            {"lvol_name": "lvol_qos3", "size": "30G", "mount": True},
         ]
 
         lvol_configs = [
-            {"lvol_name": "lvol_non_qos1", "size": "4G", "mount": True},
-            {"lvol_name": "lvol_non_qos2", "size": "4G", "mount": True},
-            {"lvol_name": "lvol_non_qos3", "size": "4G", "mount": True},
+            {"lvol_name": "lvol_non_qos1", "size": "30G", "mount": True},
+            {"lvol_name": "lvol_non_qos2", "size": "30G", "mount": True},
+            {"lvol_name": "lvol_non_qos3", "size": "30G", "mount": True},
         ]
         
         self.create_pools(bw=False)
