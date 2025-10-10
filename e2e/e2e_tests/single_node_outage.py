@@ -465,7 +465,7 @@ class TestHASingleNodeOutage(TestClusterBase):
             lvol_name = f"LVOL_{i}"
 
             self.common_utils.validate_fio_test(node=self.client_machines[0],
-                                                log_file=self.log_path+f"_{lvol_name}")
+                                                log_file=self.log_path+f"/{lvol_name}.log")
 
             total_fio_runtime = end_time - self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]
             self.logger.info(f"FIO Run Time: {total_fio_runtime}")
@@ -480,7 +480,7 @@ class TestHASingleNodeOutage(TestClusterBase):
         self.lvol_name = lvol_name
 
         mount_path = self.mount_path + f"_{lvol_name}"
-        log_path = self.log_path + f"_{lvol_name}.log"
+        log_path = self.log_path + f"/{lvol_name}.log"
 
         host_id = self.sbcli_utils.get_node_without_lvols()
 

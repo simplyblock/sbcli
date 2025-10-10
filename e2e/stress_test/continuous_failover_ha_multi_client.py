@@ -301,7 +301,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
-                storage_node_id=node
+                storage_node_id=node,
+                logs_path=self.docker_logs_path
             )
         self.outage_start_time = int(datetime.now().timestamp())
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
@@ -890,7 +891,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
-                storage_node_id=node
+                storage_node_id=node,
+                logs_path=self.docker_logs_path
             )
         outage_type = self.perform_random_outage()
         
@@ -912,7 +914,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
-                    storage_node_id=node
+                    storage_node_id=node,
+                    logs_path=self.docker_logs_path
                 )
             self.create_lvols_with_fio(3)
             if not self.k8s_test:
@@ -948,7 +951,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
-                storage_node_id=node
+                storage_node_id=node,
+                logs_path=self.docker_logs_path
             )
         self.restart_nodes_after_failover(outage_type)
         
@@ -957,7 +961,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
-                storage_node_id=node
+                storage_node_id=node,
+                logs_path=self.docker_logs_path
             )
 
         return outage_type
@@ -1137,7 +1142,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     cur_node_ip = cur_node_details[0]["mgmt_ip"]
                     self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
-                        storage_node_id=node
+                        storage_node_id=node,
+                        logs_path=self.docker_logs_path
                     )
                 self.create_lvols_with_fio(5)
                 if not self.k8s_test:
@@ -1170,7 +1176,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
-                    storage_node_id=node
+                    storage_node_id=node,
+                    logs_path=self.docker_logs_path
                 )
             self.restart_nodes_after_failover(outage_type)
             for node in self.sn_nodes_with_sec:
@@ -1178,7 +1185,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
-                    storage_node_id=node
+                    storage_node_id=node,
+                    logs_path=self.docker_logs_path
                 )
             self.logger.info("Waiting for fallback.")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
@@ -1258,6 +1266,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
-                    storage_node_id=node
+                    storage_node_id=node,
+                    logs_path=self.docker_logs_path
                 )
             iteration += 1
