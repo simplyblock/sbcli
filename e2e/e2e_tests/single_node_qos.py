@@ -227,7 +227,7 @@ class TestLvolQOSBase(TestClusterBase):
     #         assert  4000 < total_qos_iops < 6500 , \
     #             f"Total IOPS {total_qos_iops} can not be more than 6500, should not be less than 4000"
 
-    def _first_complete_json(self, s: str) -> str | None:
+    def _first_complete_json(self, s):
         start = s.find('{')
         if start == -1:
             return None
