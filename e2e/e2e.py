@@ -167,7 +167,10 @@ def main():
             test_obj.fetch_all_nodes_distrib_log()
             if i == (len(test_class_run) - 1) or check_for_dumps():
                 test_obj.collect_management_details(post_teardown=True)
-            test_obj.teardown(delete_lvols=True, close_ssh=True)
+            test_obj.teardown(delete_lvols=True, close_ssh=False)
+            all_nodes = test_obj._get_all_nodes()
+            test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
+            test_obj.teardown(delete_lvols=False, close_ssh=True)
             # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
