@@ -1056,6 +1056,54 @@ class SshUtils:
         except Exception as e:
             raise RuntimeError(f"Failed to start Docker logging: {e}")
 
+    def collect_final_docker_logs_simple(self, nodes, log_dir):
+        """
+        End-of-run: collect final docker logs from all containers on each node.
+        - Auto-discovers containers via `docker ps -a`.
+        - Writes logs to: <log_dir>/node_ip/containers-final-<ts>/
+        - Captures: docker ps -a, docker logs, docker inspect.
+
+        Args:
+            nodes (list[str]): List of node IPs/hosts (mgmt + storage).
+            log_dir (str): Destination directory (e.g., NFS run folder).
+        """
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        for node in nodes:
+            node_dir = os.path.join(log_dir, f"{node}", f"containers-final-{ts}")
+            self.exec_command(node, f"sudo mkdir -p '{node_dir}' && sudo chmod -R 777 '{node_dir}'")
+
+            # Save a full container listing
+            self.exec_command(
+                node,
+                f"bash -lc \"docker ps -a > '{node_dir}/docker_ps_a_{node}_{ts}.txt' 2>&1 || true\""
+            )
+
+            # Discover container names (all, including exited)
+            out, _ = self.exec_command(node, "bash -lc \"docker ps -a --format '{{{{.Names}}}}' || true\"")
+            containers = [c.strip() for c in (out or "").splitlines() if c.strip()]
+
+            if not containers:
+                # Nothing to do for this node
+                self.exec_command(
+                    node,
+                    f"bash -lc \"echo 'No containers found' > '{node_dir}/_NO_CONTAINERS_{node}_{ts}.txt'\""
+                )
+                continue
+
+            # For each container: logs + inspect
+            for c in containers:
+                # Logs (non-follow)
+                self.exec_command(
+                    node,
+                    f"bash -lc \"docker logs {c} > '{node_dir}_final.log' 2>&1 || true\""
+                )
+
+                # Inspect (JSON)
+                self.exec_command(
+                    node,
+                    f"bash -lc \"docker inspect {c} > '{node_dir}_inspect.json' 2>&1 || true\""
+                )
 
     def restart_docker_logging(self, node_ip, containers, log_dir, test_name):
         """
