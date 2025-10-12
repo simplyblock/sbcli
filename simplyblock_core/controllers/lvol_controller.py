@@ -450,8 +450,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.subsys_port = host_node.lvol_subsys_port
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
-    lvol.npcs = npcs or 0
-    lvol.ndcs = ndcs or 0
+    if npcs or ndcs:
+        lvol.npcs = npcs or 0
+        lvol.ndcs = ndcs or 0
+    else:
+        lvol.npcs = cl.distr_npcs
+        lvol.ndcs = cl.distr_ndcs
 
     lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
     if lvol_count > host_node.max_lvol:
@@ -1164,9 +1168,8 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
+            "Mode": f"{lvol.ndcs}x{lvol.npcs}"
         }
-        if lvol.ndcs or lvol.npcs:
-            lvol_data.update({"Mode": f"{lvol.ndcs}x{lvol.npcs}"})
         data.append(lvol_data)
 
     for snap, count in snap_dict.items():
