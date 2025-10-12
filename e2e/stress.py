@@ -279,12 +279,8 @@ def check_for_dumps():
         if "core.react" in files:
             core_exist = True
             break
-
-    for node, ssh in ssh_obj.ssh_connections.items():
-        logger.info(f"Closing node ssh connection for {node}")
-        ssh.close()
+        
     return core_exist
-
 
 logger = setup_logger(__name__)
 main()
