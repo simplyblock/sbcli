@@ -1061,50 +1061,77 @@ class SshUtils:
         """
         End-of-run: collect final docker logs from all containers on each node.
         - Auto-discovers containers via `docker ps -a`.
-        - Writes logs to: <log_dir>/node_ip/containers-final-<ts>/
-        - Captures: docker ps -a, docker logs, docker inspect.
-
-        Args:
-            nodes (list[str]): List of node IPs/hosts (mgmt + storage).
-            log_dir (str): Destination directory (e.g., NFS run folder).
+        - Writes logs to: <log_dir>/<node_ip>/containers-final-<ts>/
+        - Captures: docker ps -a, docker logs, docker inspect (per container).
         """
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        for node in nodes:
-            node_dir = os.path.join(log_dir, f"{node}", f"containers-final-{ts}")
-            self.exec_command(node, f"sudo mkdir -p '{node_dir}' && sudo chmod -R 777 '{node_dir}'")
+        def _safe(name: str) -> str:
+            # Keep it filesystem friendly
+            return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "unnamed"
 
-            # Save a full container listing
+        for node in nodes:
+            base_dir = os.path.join(log_dir, f"{node}", f"containers-final-{ts}")
+            # Ensure base dir exists on the remote
+            self.exec_command(node, f"bash -lc \"mkdir -p '{base_dir}' && chmod -R 777 '{base_dir}'\"")
+
+            # Always save a full container listing for later forensics
             self.exec_command(
                 node,
-                f"bash -lc \"docker ps -a > '{node_dir}/docker_ps_a_{node}_{ts}.txt' 2>&1 || true\""
+                f"bash -lc \"docker ps -a > '{base_dir}/docker_ps_a_{_safe(node)}_{ts}.txt' 2>&1 || true\""
             )
 
-            # Discover container names (all, including exited)
-            out, _ = self.exec_command(node, "bash -lc \"docker ps -a --format '{{{{.Names}}}}' || true\"")
+            # Discover container names (include exited)
+            out, _ = self.exec_command(node, "bash -lc \"docker ps -a --format '{{{{.Names}}}}' 2>/dev/null || true\"")
             containers = [c.strip() for c in (out or "").splitlines() if c.strip()]
 
             if not containers:
-                # Nothing to do for this node
                 self.exec_command(
                     node,
-                    f"bash -lc \"echo 'No containers found' > '{node_dir}/_NO_CONTAINERS_{node}_{ts}.txt'\""
+                    f"bash -lc \"echo 'No containers found' > '{base_dir}/_NO_CONTAINERS_{_safe(node)}_{ts}.txt'\""
                 )
                 continue
 
-            # For each container: logs + inspect
             for c in containers:
-                # Logs (non-follow)
+                sc = _safe(c)
+                cont_dir = f"{base_dir}/{sc}"
+                self.exec_command(node, f"bash -lc \"mkdir -p '{cont_dir}'\"")
+
+                # docker logs (timestamps; non-follow). Use a tmp file then mv for atomicity.
                 self.exec_command(
                     node,
-                    f"bash -lc \"docker logs {c} > '{node_dir}_final.log' 2>&1 || true\""
+                    "bash -lc "
+                    f"\"docker logs --timestamps {c} > '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' 2>&1 || true; "
+                    f"mv -f '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' '{cont_dir}/docker_logs_{sc}_{ts}.log' || true\""
                 )
 
-                # Inspect (JSON)
+                # docker inspect (JSON)
                 self.exec_command(
                     node,
-                    f"bash -lc \"docker inspect {c} > '{node_dir}_inspect.json' 2>&1 || true\""
+                    "bash -lc "
+                    f"\"docker inspect {c} > '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' 2>&1 || true; "
+                    f"mv -f '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' '{cont_dir}/docker_inspect_{sc}_{ts}.json' || true\""
                 )
+
+                # Optional extras that often help:
+                # docker top (may fail on exited containers, so '|| true')
+                self.exec_command(
+                    node,
+                    f"bash -lc \"docker top {c} > '{cont_dir}/docker_top_{sc}_{ts}.txt' 2>&1 || true\""
+                )
+
+                # container fs usage (size); harmless if unsupported
+                self.exec_command(
+                    node,
+                    f"bash -lc \"docker inspect --size {c} > '{cont_dir}/docker_inspect_size_{sc}_{ts}.json' 2>&1 || true\""
+                )
+
+            # For convenience, also dump names list used
+            self.exec_command(
+                node,
+                f"bash -lc \"printf '%s\\n' {' '.join([repr(x) for x in containers])} > '{base_dir}/_containers_list_{_safe(node)}_{ts}.txt'\""
+            )
+
 
     def restart_docker_logging(self, node_ip, containers, log_dir, test_name):
         """
@@ -1429,7 +1456,12 @@ class SshUtils:
         # self.logger.info(f"Saved raw bdev_get_bdevs output to {raw_output_path}")
 
         timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
-        remote_output_path = f"{logs_path}/bdev_output_{storage_node_ip}_{timestamp}.json"
+        base_path = f"{logs_path}/{storage_node_ip}/distrib_bdev_logs/"
+
+        cmd = f"sudo mkdir -p '{base_path}'"
+        self.exec_command(storage_node_ip, cmd)
+
+        remote_output_path = f"bdev_output_{storage_node_ip}_{timestamp}.json"
 
         # 1. Run to capture output into a variable (for parsing)
         bdev_cmd = f"sudo docker exec {container_name} bash -c 'python spdk/scripts/rpc.py bdev_get_bdevs'"
@@ -1503,7 +1535,7 @@ class SshUtils:
                 continue
 
             log_file_path = f"/tmp/{log_file_name}"
-            local_log_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}_{timestamp}"
+            local_log_path = f"{base_path}/{log_file_name}_{storage_node_ip}_{timestamp}"
             copy_log_cmd = f"sudo docker cp {container_name}:{log_file_path} {local_log_path}"
             self.exec_command(storage_node_ip, copy_log_cmd)
 
