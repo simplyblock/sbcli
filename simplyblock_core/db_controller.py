@@ -299,7 +299,7 @@ class DBController(metaclass=Singleton):
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
 
-    def get_snapshot_replication_tasks(self, cluster_id) -> List[StorageNode]:
+    def get_snapshot_replication_tasks(self, cluster_id) -> List[SnapshotReplication]:
         ret = SnapshotReplication().read_from_db(self.kv_store)
         out = []
         for n in ret:

@@ -163,3 +163,7 @@ class SNodeClient:
 
     def set_hugepages(self):
         return self._request("POST", "set_hugepages")
+
+    def nvme_connect(self, ip, port, nqn):
+        params = {"ip": ip, "port": port, "nqn": nqn}
+        return self._request("POST", "nvme_connect", params)

@@ -329,6 +329,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
         self.init_cluster__change_name(subparser)
+        self.init_cluster__add_replication(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -510,6 +511,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('name', help='Name', type=str)
 
+    def init_cluster__add_replication(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add-replication', 'Assigns the snapshot replication target cluster')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('target_cluster_id', help='Target Cluster id', type=str).completer = self._completer_get_cluster_list
+        argument = subcommand.add_argument('--timeout', help='Snapshot replication network timeout', type=int, default=3600, dest='timeout')
+
 
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical volume commands', aliases=['lvol',])
@@ -557,6 +564,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--uid', help='Set logical volume id', type=str, dest='uid')
         argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
+        argument = subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
 
     def init_volume__qos_set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'qos-set', 'Changes QoS settings for an active logical volume')
@@ -979,6 +987,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.cluster__set(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
+                elif sub_command in ['add-replication']:
+                    ret = self.cluster__add_replication(sub_command, args)
                 else:
                     self.parser.print_help()
 

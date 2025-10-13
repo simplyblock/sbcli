@@ -443,6 +443,9 @@ class CLIWrapperBase:
         cluster_ops.cluster_expand(args.cluster_id)
         return True
 
+    def cluster__add_replication(self, sub_command, args):
+        return cluster_ops.add_replication(args.cluster_id, args.target_cluster_id, args.timeout)
+
     def volume__add(self, sub_command, args):
         name = args.name
         size = args.size

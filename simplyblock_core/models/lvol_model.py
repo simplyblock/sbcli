@@ -64,6 +64,8 @@ class LVol(BaseModel):
     vuid: int = 0
     w_mbytes_per_sec: int = 0
     fabric: str = "TCP"
+    do_replicate: bool = False
+    replication_node_id: str = ""
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)

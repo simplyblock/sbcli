@@ -5,10 +5,11 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.controllers import health_controller, snapshot_events
+from simplyblock_core.controllers import health_controller, snapshot_events, lvol_controller
 from simplyblock_core.models.snapshot import SnapShot, SnapshotReplication
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
 
@@ -78,10 +79,32 @@ while True:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
 
-        # for task in db.get_snapshot_replication_tasks(cluster.get_id()):
-        #     if task.status == SnapshotReplication.STATUS_NEW:
-        #
-        #
+        for task in db.get_snapshot_replication_tasks(cluster.get_id()):
+            if task.status == SnapshotReplication.STATUS_NEW:
+                # start_replication
+                #1 create lvol on remote node
+                logger.info("Starting snapshot replication task")
+                lv_id, err = lvol_controller.add_lvol_ha(f"REP_{task.snapshot.name}", task.snapshot.size, task.snapshot.lvol.replication_node_id, task.snapshot.lvol.ha_type)
+                remote_lv = db.get_lvol_by_id(lv_id)
+                #2 connect to it
+                snode_api = SNodeClient(f"{ip}:5000", timeout=5, retry=2)
+                snode = db.get_storage_node_by_id(remote_lv.node_id)
+                for nic in snode.data_nics:
+                    ip = nic.ip4_address
+                    snode_api.nvme_connect(ip, remote_lv.subsys_port, remote_lv.nqn)
+                #3 start replication
+                snode.rpc_client().bdev_lvol_transfer(
+                    lvol_name=task.snapshot.snap_bdev,
+                    offset=0,
+                    cluster_batch=16,
+                    gateway=f"{remote_lv.top_bdev}n1",
+                    operation="replicate"
+                )
+                task.status = SnapshotReplication.STATUS_IN_PROGRESS
+                task.write_to_db()
+
+            # if task.status == SnapshotReplication.STATUS_IN_PROGRESS:
+
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
             node_bdev_names = []
             node_lvols_nqns = {}
