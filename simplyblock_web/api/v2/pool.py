@@ -36,7 +36,6 @@ class StoragePoolParams(BaseModel):
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
-    qos_host:str = ""
 
 
 @api.post('/', name='clusters:storage-pools:create', status_code=201, responses={201: {"content": None}})
@@ -50,7 +49,7 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
 
     id_or_false =  pool_controller.add_pool(
         parameters.name, parameters.pool_max, parameters.volume_max_size, parameters.max_rw_iops, parameters.max_rw_mbytes,
-        parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id(), parameters.qos_host
+        parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id()
     )
 
     if not id_or_false:

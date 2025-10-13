@@ -79,11 +79,10 @@ def add_pool():
     max_rw_mbytes = utils.get_int_value_or_default(pool_data, "max_rw_mbytes", 0)
     max_r_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_r_mbytes", 0)
     max_w_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_w_mbytes", 0)
-    qos_host = utils.get_int_value_or_default(pool_data, "qos_host", None)
 
     ret = pool_controller.add_pool(
         name, pool_max_size, lvol_max_size, max_rw_iops, max_rw_mbytes,
-        max_r_mbytes_per_sec, max_w_mbytes_per_sec, cluster_id, qos_host)
+        max_r_mbytes_per_sec, max_w_mbytes_per_sec, cluster_id)
 
     return utils.get_response(ret)
 
