@@ -6,7 +6,7 @@ from logger_config import setup_logger
 
 
 class ContinuousLogCollector:
-    def __init__(self):
+    def __init__(self,docker_logs_path=None):
         self.logger = setup_logger("ContinuousLogCollector")
         self.bastion = os.environ.get("BASTION_IP")
         self.user = os.getenv("USER", "root")
@@ -18,13 +18,13 @@ class ContinuousLogCollector:
 
         self.ssh_obj = SshUtils(bastion_server=self.bastion)
         self.runner_k8s_log = None
-        self.docker_logs_path = self.get_log_directory()
+        self.docker_logs_path = docker_logs_path if docker_logs_path else self.get_log_directory()
 
     def get_log_directory(self):
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         return os.path.join(Path.home(), "container-logs", f"manual-logs-{timestamp}")
 
-    def collect_logs(self):
+    def collect_logs(self, test_name):
         all_nodes = set()
         all_nodes.update(self.mgmt_nodes)
         all_nodes.update(self.storage_nodes)
@@ -47,8 +47,8 @@ class ContinuousLogCollector:
                     node_ip=node,
                     containers=containers,
                     log_dir=self.docker_logs_path,
-                    test_name="manual",
-                    poll_interval=120  # checks every 2 minutes
+                    test_name=test_name,
+                    poll_interval=60  # checks every 2 minutes
                 )
 
                 self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
@@ -75,4 +75,4 @@ class ContinuousLogCollector:
 
 if __name__ == "__main__":
     collector = ContinuousLogCollector()
-    collector.collect_logs()
+    collector.collect_logs(test_name="Manual")
