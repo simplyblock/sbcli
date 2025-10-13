@@ -2059,6 +2059,30 @@ class SshUtils:
 
         print(f"\n All logs and /etc/simplyblock configs copied to: {logs_path}\n")
 
+    def add_storage_pool(self, node, pool_name, cluster_id, 
+                         max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
+        """Adds a new storage pool using sbcli-dev CLI command (skips zero-value params)"""
+        cmd_parts = [f"{self.base_cmd} -d pool add"]
+
+        # Append only non-zero QoS parameters
+        if max_rw_iops:
+            cmd_parts.append(f"--max-rw-iops {max_rw_iops}")
+        if max_rw_mbytes:
+            cmd_parts.append(f"--max-rw-mbytes {max_rw_mbytes}")
+        if max_r_mbytes:
+            cmd_parts.append(f"--max-r-mbytes {max_r_mbytes}")
+        if max_w_mbytes:
+            cmd_parts.append(f"--max-w-mbytes {max_w_mbytes}")
+
+        # Append required positional arguments
+        cmd_parts.extend([pool_name, cluster_id])
+
+        # Join all parts into a single command
+        cmd = " ".join(cmd_parts)
+
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
+
 
 class RunnerK8sLog:
     """
