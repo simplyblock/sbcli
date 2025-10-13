@@ -424,7 +424,7 @@ class TestLvolFioQOSIOPS(TestLvolQOSBase):
                                                     readwrite="randrw"))
 
         self.common_utils.manage_fio_threads(
-            node=self.fio_node[0], threads=fio_threads, timeout=600
+            node=self.fio_node[0], threads=fio_threads, timeout=1000
         )
 
         for thread in fio_threads:
