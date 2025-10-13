@@ -30,20 +30,23 @@ class TestLvolQOSBase(TestClusterBase):
             f"Pool {self.pool_name}_qos present in list of pools post delete: {pools}"
 
         if bw:
-            self.sbcli_utils.add_storage_pool(
+            self.ssh_obj.add_storage_pool(
+                node=self.mgmt_nodes[0],
                 pool_name=f"{self.pool_name}_qos",
                 cluster_id=self.cluster_id,
                 max_r_mbytes=10,
                 max_w_mbytes=10
             )
         else:
-            self.sbcli_utils.add_storage_pool(
+            self.ssh_obj.add_storage_pool(
+                node=self.mgmt_nodes[0],
                 pool_name=f"{self.pool_name}_qos",
                 cluster_id=self.cluster_id,
                 max_rw_iops=3000
             )
 
-        self.sbcli_utils.add_storage_pool(
+        self.ssh_obj.add_storage_pool(
+            node=self.mgmt_nodes[0],
             pool_name=self.pool_name,
             cluster_id=self.cluster_id,
         )
