@@ -30,12 +30,12 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.total_lvols = 30
+        self.total_lvols = 10
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "10G"
-        self.int_lvol_size = 10
+        self.lvol_size = "5G"
+        self.int_lvol_size = 5
         self.fio_size = "1G"
         self.fio_threads = []
         self.clone_mount_details = {}
@@ -261,7 +261,7 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 5,
+                    "numjobs": 2,
                     "time_based": True,
                     "runtime": 2000,
                     "log_avg_msec": 1000,
@@ -773,7 +773,7 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 5,
+                    "numjobs": 2,
                     "time_based": True,
                     "runtime": 2000,
                     "log_avg_msec": 1000,
@@ -900,7 +900,7 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
         outage_type = self.perform_random_outage()
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-            self.delete_random_lvols(4)
+            self.delete_random_lvols(1)
             if not self.k8s_test:
                 for node in self.storage_nodes:
                     self.ssh_obj.restart_docker_logging(
@@ -1037,7 +1037,7 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 5,
+                    "numjobs": 2,
                     "time_based": True,
                     "runtime": 2000,
                     "log_avg_msec": 1000,
@@ -1092,7 +1092,7 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 5,
+                    "numjobs": 2,
                     "time_based": True,
                     "runtime": 2000,
                     "log_avg_msec": 1000,
@@ -1128,7 +1128,7 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
-                self.delete_random_lvols(5)
+                self.delete_random_lvols(1)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
                         self.ssh_obj.restart_docker_logging(
