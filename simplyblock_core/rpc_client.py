@@ -1180,4 +1180,4 @@ class RPCClient:
         params = {
             "qos_weights": qos_weights,
         }
-        return self._request("alceml_set_qos_weights", params)
+        return self._request("bdev_distrib_set_qos_weights", params)

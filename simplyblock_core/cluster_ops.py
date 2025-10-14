@@ -628,6 +628,24 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 set_cluster_status(cl_id, ols_status)
                 raise ValueError("Failed to activate cluster")
 
+    # reorder qos classes ids
+    qos_classes = db_controller.get_qos(cl_id)
+    index = 1
+    for qos_class in qos_classes:
+        if qos_class.class_name == "Default":
+            qos_class.class_id = 0
+        else:
+            qos_class.class_id = index
+            index += 1
+        qos_class.write_to_db()
+
+    if cluster.is_qos_set():
+        for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+            if node.status == StorageNode.STATUS_ONLINE:
+                logger.info(f"Setting Alcemls QOS weights on node {node.get_id()}")
+                ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
+                if not ret:
+                    logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
