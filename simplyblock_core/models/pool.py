@@ -28,6 +28,7 @@ class Pool(BaseModel):
     numeric_id: int = 0
     secret: str = ""  # unused
     users: List[str] = []
+    qos_host: str = ""
 
 
     def has_qos(self):

@@ -573,7 +573,8 @@ class CLIWrapperBase:
             args.max_rw_mbytes,
             args.max_r_mbytes,
             args.max_w_mbytes,
-            args.cluster_id
+            args.cluster_id,
+            args.qos_host
         )
 
     def storage_pool__set(self, sub_command, args):
