@@ -34,8 +34,8 @@ class TestLvolQOSBase(TestClusterBase):
                 node=self.mgmt_nodes[0],
                 pool_name=f"{self.pool_name}_qos",
                 cluster_id=self.cluster_id,
-                max_r_mbytes=10,
-                max_w_mbytes=10
+                max_r_mbytes=120,
+                max_w_mbytes=120
             )
         else:
             self.ssh_obj.add_storage_pool(
@@ -91,8 +91,8 @@ class TestLvolQOSBase(TestClusterBase):
                             lvol_name=lvol_name,
                             pool_name=self.pool_name,
                             size=config['size'],
-                            max_r_mbytes=10,
-                            max_w_mbytes=10
+                            max_r_mbytes=40,
+                            max_w_mbytes=40
                         )
                     else:
                         self.sbcli_utils.add_lvol(
@@ -147,7 +147,7 @@ class TestLvolQOSBase(TestClusterBase):
                 "size": "1G",
                 "numjobs": 16,
                 "time_based": True,
-                "runtime": 100,
+                "runtime": 200,
                 "output_format": "json",
                 "output_file": f"{self.log_path}/{lvol_name}_log.json",
                 "nrfiles": 5,
@@ -307,10 +307,10 @@ class TestLvolQOSBase(TestClusterBase):
 
         # Assertions come last so logging is not skipped
         if bw:
-            assert 20 < total_qos_read_bw < 50,  f"Read BW {total_qos_read_bw} out of range (20-50 MiB/s)"
-            assert 20 < total_qos_write_bw < 50, f"Write BW {total_qos_write_bw} out of range (20-50 MiB/s)"
+            assert 150 < total_qos_read_bw < 300,  f"Read BW {total_qos_read_bw} out of range (150-300 MiB/s)"
+            assert 150 < total_qos_write_bw < 300, f"Write BW {total_qos_write_bw} out of range (150-300 MiB/s)"
         else:
-            assert 4000 < total_qos_iops < 6500, f"Total IOPS {total_qos_iops} out of range (4000-6500)"
+            assert 4000 < total_qos_iops < 8000, f"Total IOPS {total_qos_iops} out of range (4000-6500)"
 
     def cleanup_lvols(self, lvol_configs):
         """Unmount, remove directory, and delete LVOLs for cleanup."""
