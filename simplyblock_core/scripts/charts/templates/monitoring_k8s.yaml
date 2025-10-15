@@ -127,7 +127,7 @@ spec:
             - name: objstore-config
               mountPath: /etc/thanos
             - name: thanos-data
-              mountPath: /mnt/thanos
+              mountPath: /data
           resources:
             requests:
               cpu: "100m"
