@@ -11,7 +11,6 @@ import sys
 import uuid
 import time
 from typing import Union
-from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound
@@ -1737,14 +1736,17 @@ def validate_config(config, upgrade=False):
 
 
 def get_k8s_apps_client():
+    from kubernetes import client, config
     config.load_incluster_config()
     return client.AppsV1Api()
 
 def get_k8s_core_client():
+    from kubernetes import client, config
     config.load_incluster_config()
     return client.CoreV1Api()
 
 def get_k8s_batch_client():
+    from kubernetes import client, config
     config.load_incluster_config()
     return client.BatchV1Api()
 
