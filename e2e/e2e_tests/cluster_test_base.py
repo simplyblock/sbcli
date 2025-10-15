@@ -121,10 +121,10 @@ class TestClusterBase:
         nfs_path = "/srv/nfs_share"
         nfs_mount_point = "/mnt/nfs_share"
 
-        for node in self.storage_nodes + self.mgmt_nodes + self.client_machines:
-            self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
+        # for node in self.storage_nodes + self.mgmt_nodes + self.client_machines:
+        #     self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
         
-        self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
+        # self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
