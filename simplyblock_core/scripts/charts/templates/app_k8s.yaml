@@ -922,6 +922,8 @@ spec:
       containers:
         - name: fluent-bit
           image: fluent/fluent-bit:1.8.11
+          securityContext:
+            privileged: true
           volumeMounts:
             - name: varlog
               mountPath: /var/log
