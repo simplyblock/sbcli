@@ -449,7 +449,7 @@ class SbcliUtils:
         }
         if distr_ndcs != 0 and distr_npcs != 0:
             body["ndcs"] = int(distr_ndcs)
-            body["npcs"] = int(distr_ndcs)
+            body["npcs"] = int(distr_npcs)
             body["bs"] = str(distr_bs)
             body["chunk_bs"] = str(distr_chunk_bs)
         if host_id:
