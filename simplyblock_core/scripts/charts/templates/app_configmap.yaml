@@ -32,7 +32,7 @@ data:
         Refresh_Interval  5
         Mem_Buf_Limit     5MB
         Skip_Long_Lines   On
-        DB                /var/log/flb_kube.db
+        DB                /tmp/log/flb_kube.db
 
     [FILTER]
         Name                kubernetes
