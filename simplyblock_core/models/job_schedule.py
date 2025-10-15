@@ -21,6 +21,7 @@ class JobSchedule(BaseModel):
     FN_BALANCING_AFTER_NODE_RESTART = "balancing_on_restart"
     FN_BALANCING_AFTER_DEV_REMOVE = "balancing_on_dev_rem"
     FN_BALANCING_AFTER_DEV_EXPANSION = "balancing_on_dev_add"
+    FN_SNAPSHOT_REPLICATION = "snapshot_replication"
 
     canceled: bool = False
     cluster_id: str = ""

@@ -3,7 +3,7 @@ import logging as lg
 import time
 import uuid
 
-from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller
 
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
@@ -218,6 +218,7 @@ def add(lvol_id, snapshot_name):
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
+    tasks_controller.add_snapshot_replication_task(snap)
     return snap.uuid, False
 
 

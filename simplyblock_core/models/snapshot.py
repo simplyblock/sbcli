@@ -9,6 +9,7 @@ class SnapShot(BaseModel):
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
+    STATUS_IN_REPLICATION = 'in_replication'
 
     base_bdev: str = ""
     blobid: int = 0
@@ -29,16 +30,3 @@ class SnapShot(BaseModel):
     deletion_status: str = ""
     status: str = ""
 
-
-class SnapshotReplication(BaseModel):
-
-    STATUS_NEW = 'new'
-    STATUS_IN_PROGRESS = 'in-progress'
-    STATUS_IN_DONE = 'done'
-    STATUS_IN_FAILED = 'failed'
-
-    snapshot: SnapShot = None
-    source_cluster_id: str = ""
-    target_cluster_id: str = ""
-    status: str = ""
-    date: str = ""

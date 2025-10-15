@@ -167,3 +167,7 @@ class SNodeClient:
     def nvme_connect(self, ip, port, nqn):
         params = {"ip": ip, "port": port, "nqn": nqn}
         return self._request("POST", "nvme_connect", params)
+
+    def disconnect_nqn(self, nqn):
+        params = {"nqn": nqn}
+        return self._request("POST", "disconnect_nqn", params)

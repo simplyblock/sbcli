@@ -1,265 +1,133 @@
 # coding=utf-8
 import time
-from datetime import datetime
-
+import uuid
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.controllers import health_controller, snapshot_events, lvol_controller
-from simplyblock_core.models.snapshot import SnapShot, SnapshotReplication
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.snode_client import SNodeClient
 
+
 logger = utils.get_logger(__name__)
-
 utils.init_sentry_sdk(__name__)
-
-
-def set_snapshot_health_check(snap, health_check_status):
-    snap = db.get_snapshot_by_id(snap.get_id())
-    if snap.health_check == health_check_status:
-        return
-    snap.health_check = health_check_status
-    snap.updated_at = str(datetime.now())
-    snap.write_to_db()
-
-
-def process_snap_delete_finish(snap, leader_node):
-    logger.info(f"Snapshot deleted successfully, id: {snap.get_id()}")
-
-    snode = db.get_storage_node_by_id(snap.lvol.node_id)
-    # 3-1 async delete snap bdev from primary
-    if snode.get_id() == leader_node.get_id():
-        primary_node = snode
-        secondary_node = db.get_storage_node_by_id(snode.secondary_node_id)
-    else:
-        primary_node = db.get_storage_node_by_id(snode.secondary_node_id)
-        secondary_node = snode
-
-    if primary_node.status == StorageNode.STATUS_ONLINE:
-        ret = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
-        if not ret:
-            logger.error(f"Failed to delete snap from primary_node node: {primary_node.get_id()}")
-
-    # 3-2 async delete lvol bdev from secondary
-    if secondary_node:
-        if secondary_node.status == StorageNode.STATUS_ONLINE:
-            ret = secondary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
-            if not ret:
-                logger.error(f"Failed to delete lvol from sec node: {secondary_node.get_id()}")
-                # what to do here ?
-
-    snapshot_events.snapshot_delete(snap)
-    snap.remove(db.kv_store)
-
-
-def process_snap_delete_try_again(snap):
-    snap = db.get_snapshot_by_id(snap.get_id())
-    snap.deletion_status = ""
-    snap.write_to_db()
-
-
-def set_snap_offline(snap):
-    sn = db.get_snapshot_by_id(snap.get_id())
-    sn.deletion_status = ""
-    sn.status = SnapShot.STATUS_OFFLINE
-    sn.write_to_db()
-
-
 # get DB controller
 db = db_controller.DBController()
 
-logger.info("Starting snapshot replication service...")
+
+def process_snap_replicate_start(task, snapshot):
+    # 1 create lvol on remote node
+    logger.info("Starting snapshot replication task")
+    lv_id, err = lvol_controller.add_lvol_ha(f"REP_{snapshot.name}", snapshot.size,
+                                             snapshot.lvol.replication_node_id, snapshot.lvol.ha_type)
+    remote_lv = db.get_lvol_by_id(lv_id)
+    # 2 connect to it
+    snode = db.get_storage_node_by_id(remote_lv.node_id)
+    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=5, retry=2)
+    for nic in snode.data_nics:
+        ip = nic.ip4_address
+        snode_api.nvme_connect(ip, remote_lv.subsys_port, remote_lv.nqn)
+    # 3 start replication
+    snode.rpc_client().bdev_lvol_transfer(
+        lvol_name=snapshot.snap_bdev,
+        offset=0,
+        cluster_batch=16,
+        gateway=f"{remote_lv.top_bdev}n1",
+        operation="replicate"
+    )
+    task.function_params["remote_lvol_id"] = lv_id
+    task.status = JobSchedule.STATUS_RUNNING
+    task.write_to_db()
+
+    if snapshot.status != SnapShot.STATUS_IN_REPLICATION:
+        snapshot.status = SnapShot.STATUS_IN_REPLICATION
+        snapshot.write_to_db()
+
+
+def process_snap_replicate_finish(task, snapshot):
+
+    task.function_result = "Done"
+    task.status = JobSchedule.STATUS_DONE
+    task.write_to_db()
+    if snapshot.status != SnapShot.STATUS_ONLINE:
+        snapshot.status = SnapShot.STATUS_ONLINE
+        snapshot.write_to_db()
+
+    remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
+    snode = db.get_storage_node_by_id(remote_lv.node_id)
+    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=5, retry=2)
+    snode_api.disconnect_nqn(remote_lv.nqn)
+
+    snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+
+    new_snapshot = snapshot
+    new_snapshot.uuid = str(uuid.uuid4())
+    new_snapshot.cluster_id = snode.cluster_id
+    new_snapshot.lvol = remote_lv
+    new_snapshot.snap_bdev = remote_lv.top_bdev
+    new_snapshot.write_to_db()
+    lvol_controller.delete_lvol(remote_lv.get_id(), True)
+
+    return True
+
+
+def task_runner(task: JobSchedule):
+
+    snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+
+    if task.status == JobSchedule.STATUS_NEW:
+        process_snap_replicate_start(task, snapshot)
+
+    elif task.status == JobSchedule.STATUS_IN_PROGRESS:
+        remote_lv = db.get_lvol_by_id(snapshot.lvol.node_id)
+        snode = db.get_storage_node_by_id(remote_lv.node_id)
+        ret = snode.rpc_client().bdev_lvol_transfer_stat(snapshot.snap_bdev)
+        if not ret:
+            logger.error("Failed to get transfer stat")
+        status = ret["transfer_state"]
+        offset = ret["offset"]
+        if status == "No process":
+            task.function_result = f"Status: {status}, offset:{offset}, retrying"
+            task.status = JobSchedule.STATUS_NEW
+            task.write_to_db()
+            return False
+        if status == "In progress":
+            task.function_result = f"Status: {status}, offset:{offset}"
+            task.write_to_db()
+            return True
+        if status == "Failed":
+            task.function_result = f"Status: {status}, offset:{offset}, retrying"
+            task.status = JobSchedule.STATUS_NEW
+            task.write_to_db()
+            return False
+        if status == "Done":
+            process_snap_replicate_finish(task, snapshot)
+            return True
+
+
+logger.info("Starting Tasks runner...")
 while True:
+    clusters = db.get_clusters()
+    if not clusters:
+        logger.error("No clusters found!")
+    else:
+        for cl in clusters:
+            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+            for task in tasks:
+                delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
+                if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+                    while task.status != JobSchedule.STATUS_DONE:
+                        # get new task object because it could be changed from cancel task
+                        task = db.get_task_by_id(task.uuid)
+                        res = task_runner(task)
+                        if res:
+                            if task.status == JobSchedule.STATUS_DONE:
+                                break
+                        else:
+                            if task.retry <= 3:
+                                delay_seconds *= 1
+                            else:
+                                delay_seconds *= 2
+                        time.sleep(delay_seconds)
 
-    for cluster in db.get_clusters():
-
-        if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
-            logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
-            continue
-
-        for task in db.get_snapshot_replication_tasks(cluster.get_id()):
-            if task.status == SnapshotReplication.STATUS_NEW:
-                # start_replication
-                #1 create lvol on remote node
-                logger.info("Starting snapshot replication task")
-                lv_id, err = lvol_controller.add_lvol_ha(f"REP_{task.snapshot.name}", task.snapshot.size, task.snapshot.lvol.replication_node_id, task.snapshot.lvol.ha_type)
-                remote_lv = db.get_lvol_by_id(lv_id)
-                #2 connect to it
-                snode_api = SNodeClient(f"{ip}:5000", timeout=5, retry=2)
-                snode = db.get_storage_node_by_id(remote_lv.node_id)
-                for nic in snode.data_nics:
-                    ip = nic.ip4_address
-                    snode_api.nvme_connect(ip, remote_lv.subsys_port, remote_lv.nqn)
-                #3 start replication
-                snode.rpc_client().bdev_lvol_transfer(
-                    lvol_name=task.snapshot.snap_bdev,
-                    offset=0,
-                    cluster_batch=16,
-                    gateway=f"{remote_lv.top_bdev}n1",
-                    operation="replicate"
-                )
-                task.status = SnapshotReplication.STATUS_IN_PROGRESS
-                task.write_to_db()
-
-            # if task.status == SnapshotReplication.STATUS_IN_PROGRESS:
-
-        for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-            node_bdev_names = []
-            node_lvols_nqns = {}
-            sec_node_bdev_names = {}
-            sec_node_lvols_nqns = {}
-            sec_node = None
-
-            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-
-                rpc_client = RPCClient(
-                    snode.mgmt_ip, snode.rpc_port,
-                    snode.rpc_username, snode.rpc_password, timeout=3, retry=2)
-                node_bdevs = rpc_client.get_bdevs()
-                if node_bdevs:
-                    node_bdev_names = [b['name'] for b in node_bdevs]
-                    for bdev in node_bdevs:
-                        if "aliases" in bdev and bdev["aliases"]:
-                            node_bdev_names.extend(bdev['aliases'])
-
-                ret = rpc_client.subsystem_list()
-                if ret:
-                    for sub in ret:
-                        node_lvols_nqns[sub['nqn']] = sub
-
-            if snode.secondary_node_id:
-                sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-                if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
-                    sec_rpc_client = RPCClient(
-                        sec_node.mgmt_ip, sec_node.rpc_port,
-                        sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-                    ret = sec_rpc_client.get_bdevs()
-                    if ret:
-                        for bdev in ret:
-                            sec_node_bdev_names[bdev['name']] = bdev
-
-                    ret = sec_rpc_client.subsystem_list()
-                    if ret:
-                        for sub in ret:
-                            sec_node_lvols_nqns[sub['nqn']] = sub
-
-            if snode.lvstore_status == "ready":
-
-                for snap in db.get_snapshots_by_node_id(snode.get_id()):
-                    if snap.status == SnapShot.STATUS_ONLINE:
-
-                        present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
-                        set_snapshot_health_check(snap, present)
-
-                    elif snap.status == SnapShot.STATUS_IN_DELETION:
-
-                        # check leadership
-                        leader_node = None
-                        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                                            StorageNode.STATUS_DOWN]:
-                            ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                            if not ret:
-                                raise Exception("Failed to get LVol store info")
-                            lvs_info = ret[0]
-                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                leader_node = snode
-
-                        if not leader_node and sec_node:
-                            ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
-                            if not ret:
-                                raise Exception("Failed to get LVol store info")
-                            lvs_info = ret[0]
-                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                leader_node = sec_node
-
-                        if not leader_node:
-                            raise Exception("Failed to get leader node")
-
-                        if snap.deletion_status == "" or snap.deletion_status != leader_node.get_id():
-
-                            ret = leader_node.rpc_client().delete_lvol(snap.snap_bdev)
-                            if not ret:
-                                logger.error(f"Failed to delete snap from node: {snode.get_id()}")
-                                continue
-                            snap = db.get_snapshot_by_id(snap.get_id())
-                            snap.deletion_status = leader_node.get_id()
-                            snap.write_to_db()
-
-                            time.sleep(3)
-
-                        try:
-                            ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(snap.snap_bdev)
-                        except Exception as e:
-                            logger.error(e)
-                            # timeout detected, check other node
-                            break
-
-                        if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-                            process_snap_delete_finish(snap, leader_node)
-
-                        elif ret == 1:  # Async lvol deletion is in progress or queued
-                            logger.info(f"Snap deletion in progress, id: {snap.get_id()}")
-
-                        elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error(
-                                "Async deletion is done, but leadership has changed (sync deletion is now blocked)")
-
-                        elif ret == 4:  # No async delete request exists for this Snap
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("No async delete request exists for this snap")
-                            set_snap_offline(snap)
-
-                        elif ret == -1:  # Operation not permitted
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Operation not permitted")
-                            set_snap_offline(snap)
-
-                        elif ret == -2:  # No such file or directory
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("No such file or directory")
-                            process_snap_delete_finish(snap, leader_node)
-
-                        elif ret == -5:  # I/O error
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("I/O error")
-                            process_snap_delete_try_again(snap)
-
-                        elif ret == -11:  # Try again
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Try again")
-                            process_snap_delete_try_again(snap)
-
-                        elif ret == -12:  # Out of memory
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Out of memory")
-                            process_snap_delete_try_again(snap)
-
-                        elif ret == -16:  # Device or resource busy
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Device or resource busy")
-                            process_snap_delete_try_again(snap)
-
-                        elif ret == -19:  # No such device
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("No such device")
-                            set_snap_offline(snap)
-
-                        elif ret == -35:  # Leadership changed
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Leadership changed")
-                            process_snap_delete_try_again(snap)
-
-                        elif ret == -36:  # Failed to update lvol for deletion
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Failed to update snapshot for deletion")
-                            process_snap_delete_try_again(snap)
-
-                        else:  # Failed to update lvol for deletion
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Failed to update snapshot for deletion")
-
-
-    time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

@@ -13,7 +13,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.port_stat import PortStat
-from simplyblock_core.models.snapshot import SnapShot, SnapshotReplication
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode
@@ -298,11 +298,3 @@ class DBController(metaclass=Singleton):
             if node.secondary_node_id == node_id and node.lvstore:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
-
-    def get_snapshot_replication_tasks(self, cluster_id) -> List[SnapshotReplication]:
-        ret = SnapshotReplication().read_from_db(self.kv_store)
-        out = []
-        for n in ret:
-            if n.source_cluster_id == cluster_id:
-                out.append(n)
-        return sorted(out, key=lambda x: x.create_dt)
