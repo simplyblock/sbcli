@@ -126,6 +126,8 @@ spec:
           volumeMounts:
             - name: objstore-config
               mountPath: /etc/thanos
+            - name: thanos-data
+              mountPath: /mnt/thanos
           resources:
             requests:
               cpu: "100m"
@@ -137,7 +139,9 @@ spec:
         - name: objstore-config
           configMap:
             name: simplyblock-objstore-config
-
+        - name: thanos-data
+          emptyDir: {}
+          
 ---
 apiVersion: apps/v1
 kind: Deployment
