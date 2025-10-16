@@ -234,6 +234,13 @@ spec:
       - knob_disable_posix_kernel_aio=1
       podTemplate:
         spec:
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      foundationdb.org/fdb-process-class: storage
+                  topologyKey: "kubernetes.io/hostname"
           containers:
           - name: foundationdb
             resources:
