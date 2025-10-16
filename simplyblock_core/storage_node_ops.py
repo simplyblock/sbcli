@@ -2973,6 +2973,10 @@ def recreate_lvstore_on_sec(secondary_node):
             primary_node.write_to_db()
             return False
 
+        ret = secondary_rpc_client.jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
+        if not ret:
+            logger.error("Failed to resume JC compression")
+
         ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
