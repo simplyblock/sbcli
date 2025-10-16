@@ -233,7 +233,6 @@ spec:
       customParameters:
       - knob_disable_posix_kernel_aio=1
       - listen_address=0.0.0.0:4501
-      - public_address=0.0.0.0:4501
       podTemplate:
         spec:
           affinity:
@@ -285,5 +284,5 @@ spec:
   sidecarContainer:
     enableLivenessProbe: true
     enableReadinessProbe: false
-  useExplicitListenAddress: false
+  useExplicitListenAddress: true
   version: 7.3.63
