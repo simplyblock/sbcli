@@ -190,7 +190,15 @@ ingress:
     hostNetwork: ${USE_HOST}  
     dnsPolicy: ClusterFirstWithHostNet
     service:
-      type: ${SERVICE_TYPE}  
+      type: ${SERVICE_TYPE}
+      ports:
+        http: 80
+        https: 443
+        fdb: 4501
+      targetPorts:
+        http: http
+        https: https
+        fdb: 4501
     extraArgs:
       tcp-services-configmap: "${K8S_NAMESPACE}/simplyblock-tcp-services"
     nodeSelector:
