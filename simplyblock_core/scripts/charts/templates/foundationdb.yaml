@@ -233,6 +233,7 @@ spec:
       customParameters:
       - knob_disable_posix_kernel_aio=1
       - listen_address=0.0.0.0:4501
+      - public_address=0.0.0.0:4501
       podTemplate:
         spec:
           affinity:
@@ -248,9 +249,6 @@ spec:
               requests:
                 cpu: 100m
                 memory: 512Mi
-            # env:
-            #   - name: FDB_PORT
-            #     value: "4501"
             securityContext:
               runAsUser: 0
           - name: foundationdb-kubernetes-sidecar
@@ -287,5 +285,5 @@ spec:
   sidecarContainer:
     enableLivenessProbe: true
     enableReadinessProbe: false
-  useExplicitListenAddress: true
+  useExplicitListenAddress: false
   version: 7.3.63
