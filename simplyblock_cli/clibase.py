@@ -390,6 +390,10 @@ class CLIWrapperBase:
         cluster_ops.set_secret(args.cluster_id, args.secret)
         return True
 
+    def cluster__update_fabric(self, sub_command, args):
+        cluster_ops.set_fabric(args.cluster_id, args.fabric)
+        return True
+
     def cluster__check(self, sub_command, args):
         cluster_id = args.cluster_id
         return health_controller.check_cluster(cluster_id)
@@ -468,7 +472,8 @@ class CLIWrapperBase:
             crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace, 
-            max_namespace_per_subsys=args.max_namespace_per_subsys)
+            max_namespace_per_subsys=args.max_namespace_per_subsys,
+            fabric=args.fabric)
         if results:
             return results
         else:
@@ -656,6 +661,7 @@ class CLIWrapperBase:
         distr_chunk_bs = args.distr_chunk_bs
         ha_type = args.ha_type
         name = args.name
+        fabric = args.fabric
 
         enable_node_affinity = args.enable_node_affinity
         qpair_count = args.qpair_count
@@ -667,7 +673,7 @@ class CLIWrapperBase:
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name)
+            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
