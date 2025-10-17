@@ -315,6 +315,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.is_single_node = is_single_node
     if grafana_endpoint:
         cluster.grafana_endpoint = grafana_endpoint
+    elif ingress_host_source == "hostip":
+        cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
     else:
         cluster.grafana_endpoint = f"http://{dns_name}/grafana"
     cluster.enable_node_affinity = enable_node_affinity
@@ -366,6 +368,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         #scripts.set_db_config(db_connection)
 
     if not disable_monitoring:
+        if ingress_host_source == "hostip":
+            dns_name = dev_ip
+            
         _set_max_result_window(dns_name)
 
         _add_graylog_input(dns_name, cluster.secret)
