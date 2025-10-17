@@ -18,6 +18,7 @@ spec:
       labels:
         app: simplyblock-control
     spec:
+      serviceAccountName: simplyblock-control-sa
       containers:
       - name: simplyblock-control
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
