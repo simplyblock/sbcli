@@ -353,17 +353,17 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             dns_name= ''
 
         logger.info("Deploying helm stack ...")
-        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE,
-                                str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
-        logger.info("Deploying helm stack > Done")
+        # log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
+        # scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
+        #                         log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE,
+        #                         str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
+        # logger.info("Deploying helm stack > Done")
 
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
 
         db_connection = f"{fdb_cluster_string}@{dev_ip}:4501"
-        scripts.set_db_config(db_connection)
+        #scripts.set_db_config(db_connection)
 
     if not disable_monitoring:
         _set_max_result_window(dev_ip)
