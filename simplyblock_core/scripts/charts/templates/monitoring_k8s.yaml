@@ -281,7 +281,6 @@ spec:
           hostPath:
             path: /
 
-
 ---
 apiVersion: apps/v1
 kind: Deployment

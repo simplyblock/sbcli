@@ -17,7 +17,7 @@ log:
   maxNumberIndex: "3"
 
 grafana:
-  endpoint: "http://10.0.16.95/grafana"
+  endpoint: ""
   contactPoint: ""
 
 image:
