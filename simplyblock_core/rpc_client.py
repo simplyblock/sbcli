@@ -231,7 +231,7 @@ class RPCClient:
             "num_shared_buffers": shared_bufs,
             "buf_cache_size": 512,
             "dif_insert_or_strip": False,
-            "ack_timeout": 8000,
+            "ack_timeout": 2000,
         }
         if trtype=="TCP":
             params.update({"c2h_success": True,"sock_priority": 0})
@@ -655,7 +655,6 @@ class RPCClient:
             "traddr": traddr,
             "trsvcid": str(trsvcid),
             "subnqn": nqn,
-            "fabrics_connect_timeout_us": 100000
         }
         if trtype=="TCP":
             params.update({"adrfam": "ipv4"})
@@ -715,7 +714,8 @@ class RPCClient:
             "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
             "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
-            "transport_ack_timeout": constants.ACK_TO
+            "transport_ack_timeout": constants.ACK_TO,
+            "action_on_timeout" : "abort"
         }
         return self._request("bdev_nvme_set_options", params)
 
