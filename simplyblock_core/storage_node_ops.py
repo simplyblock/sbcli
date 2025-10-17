@@ -2207,9 +2207,9 @@ def suspend_storage_node(node_id, force=False):
            for node in nodes:
                 try:
                     fw_api.firewall_set_port(
-                        node.hublvol.nvmf_port, "tcp", "block", snode.rpc_port)
+                        node.hublvol.nvmf_port, "tcp", "block", snode.rpc_port, is_reject=True)
                     fw_api.firewall_set_port(
-                        node.lvol_subsys_port, "tcp", "block", snode.rpc_port)
+                        node.lvol_subsys_port, "tcp", "block", snode.rpc_port, is_reject=True)
                 except Exception as e:
                     logger.error(e)
                     return False
@@ -2219,9 +2219,9 @@ def suspend_storage_node(node_id, force=False):
 
     try:
         fw_api.firewall_set_port(
-            snode.hublvol.nvmf_port, "tcp", "block", snode.rpc_port)
+            snode.hublvol.nvmf_port, "tcp", "block", snode.rpc_port, is_reject=True)
         fw_api.firewall_set_port(
-            snode.lvol_subsys_port, "tcp", "block", snode.rpc_port)
+            snode.lvol_subsys_port, "tcp", "block", snode.rpc_port, is_reject=True)
     except Exception as e:
         logger.error(e)
         return False
