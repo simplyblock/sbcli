@@ -1858,9 +1858,16 @@ def load_kernel_module(module):
     except subprocess.CalledProcessError as e:
         logger.warning(f"Failed to load {module} module: {e}")
 
+def load_kube_config_with_fallback():
+    """Try local kubeconfig first, then fall back to in-cluster config."""
+    try:
+        config.load_incluster_config()
+    except Exception:
+        config.load_kube_config()
+        
 
 def get_node_name_by_ip(target_ip: str) -> str:
-    config.load_kube_config()
+    load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
     nodes = v1.list_node().items
 
@@ -1873,7 +1880,7 @@ def get_node_name_by_ip(target_ip: str) -> str:
 
 def label_node_as_mgmt_plane(node_name: str):
 
-    config.load_kube_config()
+    load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
     try:
@@ -1914,7 +1921,7 @@ def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[
     return None  
 
 def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
-    config.load_kube_config()
+    load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
     try:
