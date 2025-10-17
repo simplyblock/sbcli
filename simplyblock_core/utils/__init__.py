@@ -1928,9 +1928,8 @@ def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
         cm = v1.read_namespaced_config_map(configmap_name, namespace)
         cluster_file = cm.data.get("cluster-file") if cm.data else None
         if cluster_file:
-            prefix = cluster_file.split("@", 1)[0]
-            logger.info(f"fdb cluster connection string: {prefix}")
-            return prefix
+            logger.info(f"fdb cluster connection string: {cluster_file}")
+            return cluster_file
         else:
             raise ValueError("cluster-file not found in ConfigMap")
     except client.exceptions.ApiException as e:
