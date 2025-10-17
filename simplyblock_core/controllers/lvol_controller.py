@@ -476,9 +476,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         }
     }
 
-    if ndcs or npcs:
-        lvol_dict["params"]["ndcs"] = ndcs
-        lvol_dict["params"]["npcs"] = npcs
+    if lvol.ndcs or lvol.npcs:
+        lvol_dict["params"]["ndcs"] = lvol.ndcs
+        lvol_dict["params"]["npcs"] = lvol.npcs
 
     if cl.enable_qos and lvol.lvol_priority_class > 0:
         lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
@@ -1156,6 +1156,11 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
             size_used = records[0].size_used
+        if lvol.ndcs == 0 and lvol.npcs == 0:
+            cl = db_controller.get_cluster_by_id(cluster_id)
+            mode = f"{cl.distr_ndcs}x{cl.distr_npcs}"
+        else:
+            mode = f"{lvol.ndcs}x{lvol.npcs}"
 
         lvol_data = {
             "Id": lvol.uuid,
@@ -1170,7 +1175,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
-            "Mode": f"{lvol.ndcs}x{lvol.npcs}"
+            "Mode": mode
         }
         data.append(lvol_data)
 
