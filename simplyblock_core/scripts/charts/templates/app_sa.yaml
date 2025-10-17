@@ -9,6 +9,9 @@ kind: ClusterRole
 metadata:
   name: simplyblock-control-role
 rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["", "apps"]
     resources: ["pods", "deployments", "statefulsets"]
     verbs: ["get", "list", "watch", "patch", "update"]

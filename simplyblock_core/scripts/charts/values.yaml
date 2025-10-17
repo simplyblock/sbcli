@@ -18,7 +18,7 @@ log:
 
 grafana:
   endpoint: ""
-  contactPoint: ""
+  contactPoint: "https://hooks.slack.com/services/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"
 
 image:
   simplyblock: 
