@@ -344,10 +344,13 @@ while True:
                     not_deleted = []
                     for bdev_name in snode.lvol_sync_del_queue:
                         logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
-                        ret = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
+                        ret, err = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
                         if not ret:
-                            logger.error(f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
-                            not_deleted.append(bdev_name)
+                            if "code" in err and err["code"] == -19:
+                                logger.error(f"Sync delete completed with error: {err}")
+                            else:
+                                logger.error(f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
+                                not_deleted.append(bdev_name)
                     snode.lvol_sync_del_queue = not_deleted
                     snode.write_to_db()
 
