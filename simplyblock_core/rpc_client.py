@@ -298,7 +298,7 @@ class RPCClient:
     def delete_lvol(self, name, del_async=False):
         params = {"name": name,
                   "sync": del_async}
-        return self._request("bdev_lvol_delete", params)
+        return self._request2("bdev_lvol_delete", params)
 
     def get_bdevs(self, name=None):
         params = None

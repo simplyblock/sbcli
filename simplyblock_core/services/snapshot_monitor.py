@@ -37,14 +37,14 @@ def process_snap_delete_finish(snap, leader_node):
         secondary_node = snode
 
     if primary_node.status == StorageNode.STATUS_ONLINE:
-        ret = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
+        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
         if not ret:
             logger.error(f"Failed to delete snap from primary_node node: {primary_node.get_id()}")
 
     # 3-2 async delete lvol bdev from secondary
     if secondary_node:
         if secondary_node.status == StorageNode.STATUS_ONLINE:
-            ret = secondary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
+            ret, _ = secondary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
             if not ret:
                 logger.error(f"Failed to delete lvol from sec node: {secondary_node.get_id()}")
                 # what to do here ?
@@ -152,7 +152,7 @@ while True:
 
                         if snap.deletion_status == "" or snap.deletion_status != leader_node.get_id():
 
-                            ret = leader_node.rpc_client().delete_lvol(snap.snap_bdev)
+                            ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev)
                             if not ret:
                                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                                 continue
