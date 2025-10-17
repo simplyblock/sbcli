@@ -362,7 +362,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
 
-        db_connection = f"{fdb_cluster_string}@{dev_ip}:4501"
+        db_connection = fdb_cluster_string
         #scripts.set_db_config(db_connection)
 
     if not disable_monitoring:
@@ -371,6 +371,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         _add_graylog_input(dns_name, cluster.secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     cluster.db_connection = db_connection
     cluster.status = Cluster.STATUS_UNREADY

@@ -1962,3 +1962,22 @@ def build_graylog_patch(cluster_secret: str) -> dict:
         }
     }
     return graylog_patch
+
+def patch_prometheus_configmap(username: str, password: str):
+    load_kube_config_with_fallback()
+    v1 = client.CoreV1Api()
+
+    cm = v1.read_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace="simplyblock")
+    prometheus_yml = cm.data.get("prometheus.yml", "")
+
+    prometheus_yml = re.sub(r"username:.*", f"username: '{username}'", prometheus_yml)
+    prometheus_yml = re.sub(r"password:.*", f"password: '{password}'", prometheus_yml)
+
+    patch_body = {
+        "data": {
+            "prometheus.yml": prometheus_yml
+        }
+    }
+
+    v1.patch_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace="simplyblock", body=patch_body)
+    logger.info("Patched sbcli-simplyblock-prometheus-config ConfigMap with new credentials.")
