@@ -70,15 +70,15 @@ envsubst < "$DIR"/charts/values-template.yaml > "$DIR"/charts/values.yaml
 #   exit 1
 # fi
 
-rm -rf "$DIR"/charts/charts "$DIR"/charts/Chart.lock "$DIR"/charts/requirements.lock
+# rm -rf "$DIR"/charts/charts "$DIR"/charts/Chart.lock "$DIR"/charts/requirements.lock
 
-/usr/local/bin/helm dependency build "$DIR"/charts/
+# /usr/local/bin/helm dependency build "$DIR"/charts/
 
-/usr/local/bin/helm upgrade --install sbcli "$DIR"/charts/ \
-  --namespace $K8S_NAMESPACE \
-  --create-namespace
+# /usr/local/bin/helm upgrade --install sbcli "$DIR"/charts/ \
+#   --namespace $K8S_NAMESPACE \
+#   --create-namespace
 
-for kind in ds deploy sts; do
-  /usr/local/bin/kubectl get $kind -n "$K8S_NAMESPACE" -o name \
-  | xargs -r -n1 /usr/local/bin/kubectl rollout status -n "$K8S_NAMESPACE" --timeout=500s
-done
+# for kind in ds deploy sts; do
+#   /usr/local/bin/kubectl get $kind -n "$K8S_NAMESPACE" -o name \
+#   | xargs -r -n1 /usr/local/bin/kubectl rollout status -n "$K8S_NAMESPACE" --timeout=500s
+# done

@@ -162,7 +162,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             scripts.set_db_config_double()
             
         elif mode == "kubernetes":
-            config.load_kube_config()
+            utils.load_kube_config_with_fallback()
             v1 = k8s_client.CoreV1Api()
             apps_v1 = k8s_client.AppsV1Api()
             api_cr = k8s_client.CustomObjectsApi()

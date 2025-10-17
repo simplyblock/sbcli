@@ -22,7 +22,7 @@ metadata:
 spec:
   clusterIP: None
   selector:
-    foundationdb.org/fdb-cluster-name: simplyblock-fdb-cluster
+    foundationdb.org/fdb-process-class: storage
   ports:
   - port: 4501
     targetPort: 4501

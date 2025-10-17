@@ -227,9 +227,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
-    if ingress_host_source == "dns":
+    if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
         if not dns_name:
-            raise ValueError("--dns-name is required when --ingress-host-source is dns")
+            raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
     logger.info("Installing dependencies...")
     scripts.install_deps(mode)
@@ -315,8 +315,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.is_single_node = is_single_node
     if grafana_endpoint:
         cluster.grafana_endpoint = grafana_endpoint
-    else:
+    elif ingress_host_source == "hostip":
         cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
+    else:
+        cluster.grafana_endpoint = f"http://{dns_name}/grafana"
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
@@ -346,31 +348,35 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not contact_point:
             contact_point = 'https://hooks.slack.com/services/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'
 
-        if not tls_secret:
-            tls_secret = ''
+        # if not tls_secret:
+        #     tls_secret = ''
 
-        if not dns_name:
-            dns_name= ''
+        # if not dns_name:
+        #     dns_name= ''
 
         logger.info("Deploying helm stack ...")
-        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE,
-                                str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
-        logger.info("Deploying helm stack > Done")
+        # log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
+        # scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
+        #                         log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE,
+        #                         str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
+        # logger.info("Deploying helm stack > Done")
 
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
 
-        db_connection = f"{fdb_cluster_string}@{dev_ip}:4501"
-        scripts.set_db_config(db_connection)
+        db_connection = fdb_cluster_string
+        #scripts.set_db_config(db_connection)
 
     if not disable_monitoring:
-        _set_max_result_window(dev_ip)
+        if ingress_host_source == "hostip":
+            dns_name = dev_ip
+            
+        _set_max_result_window(dns_name)
 
-        _add_graylog_input(dev_ip, cluster.secret)
+        _add_graylog_input(dns_name, cluster.secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     cluster.db_connection = db_connection
     cluster.status = Cluster.STATUS_UNREADY
