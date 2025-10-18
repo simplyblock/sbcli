@@ -28,7 +28,9 @@ def process_snap_replicate_start(task, snapshot):
     snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=5, retry=2)
     for nic in snode.data_nics:
         ip = nic.ip4_address
-        snode_api.nvme_connect(ip, remote_lv.subsys_port, remote_lv.nqn)
+        ret = snode.rpc_client().bdev_nvme_attach_controller(
+            remote_lv.top_bdev, remote_lv.nqn, ip, remote_lv.subsys_port, nic.trtype)
+
     # 3 start replication
     snode.rpc_client().bdev_lvol_transfer(
         lvol_name=snapshot.snap_bdev,
@@ -57,8 +59,7 @@ def process_snap_replicate_finish(task, snapshot):
 
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
     snode = db.get_storage_node_by_id(remote_lv.node_id)
-    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=5, retry=2)
-    snode_api.disconnect_nqn(remote_lv.nqn)
+    snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
 
     snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
 
