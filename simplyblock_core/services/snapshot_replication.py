@@ -205,10 +205,14 @@ while True:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                 if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
                     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_snapshot_replication_task(
-                            task.cluster_id, task.function_params['snapshot_id'])
-                        if active_task and active_task != task.get_id():
-                            logger.info("task found on same snapshot, retry")
+                        active_task = False
+                        for t in db.get_job_tasks(task.cluster_id):
+                            if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and t.function_params["snapshot_id"] ==  task.function_params['snapshot_id']:
+                                if t.status == JobSchedule.STATUS_RUNNING and t.canceled is False:
+                                    active_task = True
+                                    break
+                        if active_task:
+                            logger.info("replication task found for same snapshot, retry")
                             continue
                     if task.status != JobSchedule.STATUS_DONE:
                         # get new task object because it could be changed from cancel task
