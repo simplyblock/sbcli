@@ -544,6 +544,7 @@ class RandomFailoverTest(TestLvolHACluster):
             clone_name = f"clone_{generate_random_sequence(15)}"
             if clone_name in list(self.clone_mount_details):
                 clone_name = f"{clone_name}_{temp_name}"
+            sleep_n_sec(30)
             snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
             try:
                 self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)

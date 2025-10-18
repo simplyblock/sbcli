@@ -162,6 +162,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             clone_name = f"clone_{lvol}"
             if clone_name in list(self.clone_mount_details):
                 clone_name = f"{clone_name}_{temp_name}"
+            sleep_n_sec(30)
             snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
             self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
             client = self.lvol_mount_details[lvol]["Client"]
