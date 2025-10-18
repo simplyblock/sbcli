@@ -567,3 +567,44 @@ def set_hugepages():
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)
+
+
+@api.post('/nvme_connect',
+    summary='Connect NVMe-oF target',
+    responses={
+        200: {'content': {'application/json': {'schema': utils.response_schema({
+            'type': 'boolean',
+        })}},
+    },
+})
+def connect_to_nvme(body: utils.NVMEConnectParams):
+    """Connect to the indicated NVMe-oF target.
+    """
+    st = f"nvme connect --transport=tcp --traddr={body.ip} --trsvcid={body.port} --nqn={body.nqn}"
+    logger.debug(st)
+    out, err, ret_code = shell_utils.run_command(st)
+    logger.debug(ret_code)
+    logger.debug(out)
+    logger.debug(err)
+    if ret_code == 0:
+        return utils.get_response(True)
+    else:
+        return utils.get_response(ret_code, error=err)
+
+
+@api.post('/disconnect_nqn',
+    summary='Disconnect NVMe-oF device by NQN',
+    responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'integer',
+    })}}},
+})
+def disconnect_nqn(body: utils.DisconnectParams):
+    """Disconnect from indicated NVMe-oF target
+    """
+    st = f"nvme disconnect --nqn={body.nqn}"
+    out, err, ret_code = shell_utils.run_command(st)
+    logger.debug(ret_code)
+    logger.debug(out)
+    logger.debug(err)
+    return utils.get_response(ret_code)

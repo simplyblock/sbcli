@@ -20,7 +20,7 @@ def process_snap_replicate_start(task, snapshot):
     logger.info("Starting snapshot replication task")
     lv_id, err = lvol_controller.add_lvol_ha(
         f"REP_{snapshot.name}", snapshot.size, snapshot.lvol.replication_node_id, snapshot.lvol.ha_type,
-        snapshot.pool_id, use_comp=False, use_crypto=False, distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0,
+        snapshot.lvol.pool_uuid, use_comp=False, use_crypto=False, distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0,
         max_r_mbytes=0, max_w_mbytes=0)
     remote_lv = db.get_lvol_by_id(lv_id)
     # 2 connect to it
