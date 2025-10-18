@@ -19,7 +19,7 @@ def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
     snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
-    if not task.function_params["remote_lvol_id"] :
+    if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"] :
         remote_node_uuid = db.get_storage_node_by_id(snapshot.lvol.replication_node_id)
         cluster = db.get_cluster_by_id(remote_node_uuid.cluster_id)
         remote_pool_uuid = None
