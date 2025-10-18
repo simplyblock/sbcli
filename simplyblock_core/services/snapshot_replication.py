@@ -18,8 +18,10 @@ db = db_controller.DBController()
 def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
-    lv_id, err = lvol_controller.add_lvol_ha(f"REP_{snapshot.name}", snapshot.size,
-                                             snapshot.lvol.replication_node_id, snapshot.lvol.ha_type)
+    lv_id, err = lvol_controller.add_lvol_ha(
+        f"REP_{snapshot.name}", snapshot.size, snapshot.lvol.replication_node_id, snapshot.lvol.ha_type,
+        snapshot.pool_id, use_comp=False, use_crypto=False, distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0,
+        max_r_mbytes=0, max_w_mbytes=0)
     remote_lv = db.get_lvol_by_id(lv_id)
     # 2 connect to it
     snode = db.get_storage_node_by_id(remote_lv.node_id)

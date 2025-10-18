@@ -471,7 +471,8 @@ class CLIWrapperBase:
             crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace, 
-            max_namespace_per_subsys=args.max_namespace_per_subsys)
+            max_namespace_per_subsys=args.max_namespace_per_subsys,
+            do_replicate=args.replicate)
         if results:
             return results
         else:
