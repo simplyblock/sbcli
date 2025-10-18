@@ -80,12 +80,13 @@ def task_runner(task: JobSchedule):
     if task.status == JobSchedule.STATUS_NEW:
         process_snap_replicate_start(task, snapshot)
 
-    elif task.status == JobSchedule.STATUS_IN_PROGRESS:
-        remote_lv = db.get_lvol_by_id(snapshot.lvol.node_id)
+    elif task.status == JobSchedule.STATUS_RUNNING:
+        remote_lv = db.get_lvol_by_id(snapshot.lvol.get_id())
         snode = db.get_storage_node_by_id(remote_lv.node_id)
         ret = snode.rpc_client().bdev_lvol_transfer_stat(snapshot.snap_bdev)
         if not ret:
             logger.error("Failed to get transfer stat")
+            return False
         status = ret["transfer_state"]
         offset = ret["offset"]
         if status == "No process":
