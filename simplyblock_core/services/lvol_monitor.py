@@ -83,6 +83,36 @@ def post_lvol_delete_rebalance(lvol):
 def process_lvol_delete_finish(lvol):
     logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
 
+    # check leadership
+    snode = db.get_storage_node_by_id(lvol.node_id)
+    sec_node = None
+    if snode.secondary_node_id:
+        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+    leader_node = None
+    snode = db.get_storage_node_by_id(snode.get_id())
+    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+        ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+        if not ret:
+            raise Exception("Failed to get LVol info")
+        lvs_info = ret[0]
+        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+            leader_node = snode
+
+    if not leader_node and sec_node:
+        ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+        if not ret:
+            raise Exception("Failed to get LVol info")
+        lvs_info = ret[0]
+        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+            leader_node = sec_node
+
+    if not leader_node:
+        raise Exception("Failed to get leader node")
+
+    if lvol.deletion_status != leader_node.get_id():
+        lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
+        return
+
     # 3-1 async delete lvol bdev from primary
     primary_node = db.get_storage_node_by_id(lvol.node_id)
     if primary_node.status == StorageNode.STATUS_ONLINE:
@@ -263,11 +293,8 @@ while True:
 
                     elif ret == -19: # No such device
                         logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                        logger.error("No such device")
-                        lvol = db.get_lvol_by_id(lvol.get_id())
-                        lvol.io_error = True
-                        lvol.write_to_db()
-                        set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+                        logger.error("Finishing lvol delete")
+                        process_lvol_delete_finish(lvol)
 
                     elif ret == -35: # Leadership changed
                         logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
@@ -317,10 +344,13 @@ while True:
                     not_deleted = []
                     for bdev_name in snode.lvol_sync_del_queue:
                         logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
-                        ret = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
+                        ret, err = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
                         if not ret:
-                            logger.error(f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
-                            not_deleted.append(bdev_name)
+                            if "code" in err and err["code"] == -19:
+                                logger.error(f"Sync delete completed with error: {err}")
+                            else:
+                                logger.error(f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
+                                not_deleted.append(bdev_name)
                     snode.lvol_sync_del_queue = not_deleted
                     snode.write_to_db()
 

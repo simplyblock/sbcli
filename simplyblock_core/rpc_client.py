@@ -231,7 +231,7 @@ class RPCClient:
             "num_shared_buffers": shared_bufs,
             "buf_cache_size": 512,
             "dif_insert_or_strip": False,
-            "ack_timeout": 8000,
+            "ack_timeout": 2000,
         }
         if trtype=="TCP":
             params.update({"c2h_success": True,"sock_priority": 0})
@@ -384,7 +384,7 @@ class RPCClient:
     def delete_lvol(self, name, del_async=False):
         params = {"name": name,
                   "sync": del_async}
-        return self._request("bdev_lvol_delete", params)
+        return self._request2("bdev_lvol_delete", params)
 
     def get_bdevs(self, name=None):
         params = None
@@ -615,23 +615,21 @@ class RPCClient:
         return self._request("bdev_set_qos_limit", params)
 
     def bdev_lvol_add_to_group(self, group_id, lvol_name_list):
-        return True
-        # params = {
-        #     "bdev_group_id": group_id ,
-        #     "lvol_vbdev_list": lvol_name_list
-        # }
-        # return self._request("bdev_lvol_add_to_group", params)
+        params = {
+            "bdev_group_id": group_id ,
+            "lvol_vbdev_list": lvol_name_list
+        }
+        return self._request("bdev_lvol_add_to_group", params)
 
     def bdev_lvol_set_qos_limit(self, bdev_group_id, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec):
-        return True
-        # params = {
-        #     "bdev_group_id": bdev_group_id,
-        #     "rw_ios_per_sec": rw_ios_per_sec,
-        #     "rw_mbytes_per_sec": rw_mbytes_per_sec,
-        #     "r_mbytes_per_sec": r_mbytes_per_sec,
-        #     "w_mbytes_per_sec": w_mbytes_per_sec
-        # }
-        # return self._request("bdev_lvol_set_qos_limit", params)
+        params = {
+            "bdev_group_id": bdev_group_id,
+            "rw_ios_per_sec": rw_ios_per_sec,
+            "rw_mbytes_per_sec": rw_mbytes_per_sec,
+            "r_mbytes_per_sec": r_mbytes_per_sec,
+            "w_mbytes_per_sec": w_mbytes_per_sec
+        }
+        return self._request("bdev_lvol_set_qos_limit", params)
 
     def distr_send_cluster_map(self, params):
         return self._request("distr_send_cluster_map", params)
@@ -657,7 +655,6 @@ class RPCClient:
             "traddr": traddr,
             "trsvcid": str(trsvcid),
             "subnqn": nqn,
-            "fabrics_connect_timeout_us": 100000
         }
         if trtype=="TCP":
             params.update({"adrfam": "ipv4"})
@@ -717,7 +714,8 @@ class RPCClient:
             "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
             "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
-            "transport_ack_timeout": constants.ACK_TO
+            "transport_ack_timeout": constants.ACK_TO,
+            "action_on_timeout" : "abort"
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -1167,11 +1165,6 @@ class RPCClient:
         return self._request("jc_get_jm_status", params)
 
     def bdev_distrib_check_inflight_io(self, jm_vuid):
-        """
-        output: boolean value
-            'True': It means we have in-flight IOs in the target distrib group
-            'False': there is no in-flight IO
-        """
         params = {
             "jm_vuid": jm_vuid,
         }
@@ -1221,3 +1214,15 @@ class RPCClient:
             "lvol_name": lvol_name,
         }
         return self._request("bdev_lvol_convert", params)
+
+    def bdev_lvol_remove_from_group(self, group_id, lvol_name_list):
+        params = {
+            "bdev_group_id": group_id ,
+            "lvol_vbdev_list": lvol_name_list
+        }
+        return self._request("bdev_lvol_remove_from_group", params)
+    def alceml_set_qos_weights(self, qos_weights):
+        params = {
+            "qos_weights": qos_weights,
+        }
+        return self._request("bdev_distrib_set_qos_weights", params)

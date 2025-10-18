@@ -44,7 +44,6 @@ class Cluster(BaseModel):
     distr_ndcs: int = 0
     distr_npcs: int = 0
     enable_node_affinity: bool = False
-    enable_qos: bool = False
     grafana_endpoint: str = ""
     mode: str = ""
     grafana_secret: str = ""
@@ -83,3 +82,13 @@ class Cluster(BaseModel):
         data = super(Cluster, self).get_clean_dict()
         data['status_code'] = self.get_status_code()
         return data
+
+    def is_qos_set(self) -> bool:
+        # Import is here is to avoid circular import dependency
+        from simplyblock_core.db_controller import DBController
+        db_controller = DBController()
+        qos_classes = db_controller.get_qos(self.get_id())
+        if len(qos_classes) > 1:
+            return True
+        return False
+

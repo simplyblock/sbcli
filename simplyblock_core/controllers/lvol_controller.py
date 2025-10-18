@@ -315,6 +315,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cl.status}"
 
+    if lvol_priority_class > 0:
+        class_found = False
+        for qos_class in db_controller.get_qos(cl.uuid):
+            if qos_class.class_id == lvol_priority_class:
+                class_found = True
+        if not class_found:
+            return False, f"QOS class not found: {lvol_priority_class}"
+
     if uid:
         for lvol in db_controller.get_lvols():
             if lvol.get_id() == uid:
@@ -341,6 +349,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if error:
         logger.error(error)
         return False, error
+
+    if pool.has_qos():
+        host_node = db_controller.get_storage_node_by_id(pool.qos_host)
 
     cluster_size_prov = 0
     cluster_size_total = 0
@@ -424,7 +435,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
-    lvol.lvol_priority_class = lvol_priority_class
+    if lvol_priority_class:
+        lvol.lvol_priority_class = lvol_priority_class + 1
+    else:
+        lvol.lvol_priority_class = 0
     lvol.fabric = fabric
 
     if namespace:
@@ -472,7 +486,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         }
     }
 
-    if cl.enable_qos and lvol.lvol_priority_class > 0:
+    if cl.is_qos_set() and lvol.lvol_priority_class > 0:
         lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
 
     lvol.bdev_stack = [lvol_dict]
@@ -593,7 +607,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
-    connect_lvol_to_pool(lvol.uuid)
+    if pool.has_qos():
+        connect_lvol_to_pool(lvol.uuid)
 
     # set QOS
     if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
@@ -799,9 +814,9 @@ def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_lvol":
             name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
-            ret = rpc_client.delete_lvol(name, del_async=del_async)
+            ret, _ = rpc_client.delete_lvol(name, del_async=del_async)
         elif type == "bdev_lvol_clone":
-            ret = rpc_client.delete_lvol(name,  del_async=del_async)
+            ret, _ = rpc_client.delete_lvol(name,  del_async=del_async)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
@@ -823,6 +838,11 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    ret = rpc_client.bdev_lvol_remove_from_group(pool.numeric_id, [lvol.top_bdev])
+    if not ret:
+        logger.error("RPC failed bdev_lvol_remove_from_group")
 
     subsystem = rpc_client.subsystem_list(lvol.nqn)
     # 1- remove subsystem

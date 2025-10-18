@@ -27,6 +27,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
+        self.init_qos()
         super().__init__()
 
     def init_storage_node(self):
@@ -367,8 +368,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4, dest='inflight_io_threshold')
         if self.developer_mode:
-            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, true by default', type=bool, default=False, dest='enable_qos')
-        if self.developer_mode:
             argument = subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default', dest='disable_monitoring', action='store_true')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
@@ -399,8 +398,6 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size')
         if self.developer_mode:
             argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4, dest='inflight_io_threshold')
-        if self.developer_mode:
-            argument = subcommand.add_argument('--enable-qos', help='Enable qos bdev for storage nodes, default: true', type=bool, default=False, dest='enable_qos')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
 
@@ -691,6 +688,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
+        argument = subcommand.add_argument('--qos-host', help='Node UUID for QoS pool', type=str, dest='qos_host', required=False)
 
     def init_storage_pool__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'Sets a storage pool\'s attributes')
@@ -762,6 +760,30 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
+
+
+    def init_qos(self):
+        subparser = self.add_command('qos', 'qos commands')
+        self.init_qos__add(subparser)
+        self.init_qos__list(subparser)
+        self.init_qos__delete(subparser)
+
+
+    def init_qos__add(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add', 'Creates a new QOS class')
+        subcommand.add_argument('name', help='QOS class name', type=str)
+        subcommand.add_argument('weight', help='QOS class weight', type=int)
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str, default='')
+
+    def init_qos__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'Lists all qos classes')
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str, default='')
+        argument = subcommand.add_argument('--json', help='Print json output', dest='json', action='store_true')
+
+    def init_qos__delete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete', 'Delete a class')
+        subcommand.add_argument('name', help='QOS class name', type=str)
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str, default='')
 
 
     def run(self):
@@ -915,7 +937,6 @@ class CLIWrapper(CLIWrapperBase):
                         args.distr_chunk_bs = 4096
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
-                        args.enable_qos = False
                         args.disable_monitoring = False
                     ret = self.cluster__create(sub_command, args)
                 elif sub_command in ['add']:
@@ -925,7 +946,6 @@ class CLIWrapper(CLIWrapperBase):
                         args.distr_chunk_bs = 4096
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
-                        args.enable_qos = False
                     ret = self.cluster__add(sub_command, args)
                 elif sub_command in ['activate']:
                     ret = self.cluster__activate(sub_command, args)
@@ -1082,6 +1102,17 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['qos']:
+                sub_command = args_dict['qos']
+                if sub_command in ['add']:
+                    ret = self.qos__add(sub_command, args)
+                elif sub_command in ['list']:
+                    ret = self.qos__list(sub_command, args)
+                elif sub_command in ['delete']:
+                    ret = self.qos__delete(sub_command, args)
                 else:
                     self.parser.print_help()
 

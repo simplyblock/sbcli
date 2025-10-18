@@ -813,12 +813,6 @@ commands:
             type: int
             default: 4
             private: true
-          - name: "--enable-qos"
-            help: "Enable qos bdev for storage nodes, true by default"
-            dest: enable_qos
-            type: bool
-            default: false
-            private: true
           - name: "--disable-monitoring"
             help: "Disable monitoring stack, false by default"
             dest: disable_monitoring
@@ -974,12 +968,6 @@ commands:
             dest: inflight_io_threshold
             type: int
             default: 4
-            private: true
-          - name: "--enable-qos"
-            help: "Enable qos bdev for storage nodes, default: true"
-            dest: enable_qos
-            type: bool
-            default: false
             private: true
           - name: "--strict-node-anti-affinity"
             help: >
@@ -1706,6 +1694,11 @@ commands:
             help: "Maximum Write Megabytes Per Second"
             dest: max_w_mbytes
             type: int
+          - name: "--qos-host"
+            help: "Node UUID for QoS pool"
+            dest: qos_host
+            type: str
+            required: false
       - name: set
         help: "Sets a storage pool's attributes"
         arguments:
@@ -1857,3 +1850,51 @@ commands:
             dest: resize
             type: size
             default: "0"
+  - name: "qos"
+    help: "qos commands"
+    weight: 700
+    subcommands:
+      - name: add
+        help: "Creates a new QOS class"
+        arguments:
+          - name: "name"
+            help: "QOS class name"
+            dest: name
+            type: str
+          - name: "weight"
+            help: "QOS class weight"
+            dest: weight
+            type: int
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+            required: false
+            default: ""
+      - name: list
+        help: "Lists all qos classes"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+            required: false
+            default: ""
+          - name: "--json"
+            help: "Print json output"
+            dest: json
+            type: bool
+            action: store_true
+      - name: delete
+        help: "Delete a class"
+        arguments:
+          - name: "name"
+            help: "QOS class name"
+            dest: name
+            type: str
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+            required: false
+            default: ""

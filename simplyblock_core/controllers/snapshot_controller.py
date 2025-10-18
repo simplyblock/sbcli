@@ -183,7 +183,7 @@ def add(lvol_id, snapshot_name):
                 logger.info(f"Removing snapshot from {primary_node.get_id()}")
                 rpc_client = RPCClient(
                     primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
-                ret = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
+                ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
                 if not ret:
                     logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 return False, msg
@@ -278,7 +278,7 @@ def delete(snapshot_uuid, force_delete=False):
                 snode.rpc_username,
                 snode.rpc_password)
 
-            ret = rpc_client.delete_lvol(snap.snap_bdev)
+            ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 if not force_delete:
@@ -334,7 +334,7 @@ def delete(snapshot_uuid, force_delete=False):
         rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
                                    primary_node.rpc_password)
 
-        ret = rpc_client.delete_lvol(snap.snap_bdev)
+        ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:

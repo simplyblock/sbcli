@@ -176,6 +176,21 @@ while True:
                             sec_rpc_client = sec_node.rpc_client()
                             sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
 
+                        snode = db.get_storage_node_by_id(node.get_id())
+                        not_deleted = []
+                        for bdev_name in snode.lvol_sync_del_queue:
+                            logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
+                            ret, err = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
+                            if not ret:
+                                if "code" in err and err["code"] == -19:
+                                    logger.error(f"Sync delete completed with error: {err}")
+                                else:
+                                    logger.error(
+                                        f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
+                                    not_deleted.append(bdev_name)
+                        snode.lvol_sync_del_queue = not_deleted
+                        snode.write_to_db()
+
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
 
                         fw_api = FirewallClient(f"{node.mgmt_ip}:5001", timeout=5, retry=2)
