@@ -25,6 +25,11 @@ spec:
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["sleep", "infinity"]
         env:
+        - name: MONITORING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: simplyblock-grafana-secrets
+              key: MONITORING_SECRET
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:

@@ -1970,8 +1970,8 @@ def patch_prometheus_configmap(username: str, password: str):
     cm = v1.read_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace="simplyblock")
     prometheus_yml = cm.data.get("prometheus.yml", "")
 
-    prometheus_yml = re.sub(r"username:.*", f"username: '{username}'", prometheus_yml)
-    prometheus_yml = re.sub(r"password:.*", f"password: '{password}'", prometheus_yml)
+    prometheus_yml = re.sub(r"username:*", f"username: '{username}'", prometheus_yml)
+    prometheus_yml = re.sub(r"password:*", f"password: '{password}'", prometheus_yml)
 
     patch_body = {
         "data": {

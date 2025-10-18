@@ -31,6 +31,8 @@ logger = utils.get_logger(__name__)
 
 db_controller = DBController()
 
+monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+
 def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, update_secret=False):
     session = requests.session()
     session.auth = ("admin", grafana_secret)
@@ -345,27 +347,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring DB > Done")
 
     elif mode == "kubernetes":
-        if not contact_point:
-            contact_point = 'https://hooks.slack.com/services/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'
-
-        # if not tls_secret:
-        #     tls_secret = ''
-
-        # if not dns_name:
-        #     dns_name= ''
-
-        logger.info("Deploying helm stack ...")
-        # log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        # scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-        #                         log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE,
-        #                         str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
-        # logger.info("Deploying helm stack > Done")
-
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
 
         db_connection = fdb_cluster_string
-        #scripts.set_db_config(db_connection)
 
     if not disable_monitoring:
         if ingress_host_source == "hostip":
@@ -373,9 +358,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             
         _set_max_result_window(dns_name)
 
-        _add_graylog_input(dns_name, cluster.secret)
+        _add_graylog_input(dns_name, monitoring_secret)
 
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     cluster.db_connection = db_connection
@@ -471,7 +456,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     default_cluster = clusters[0]
     cluster.db_connection = default_cluster.db_connection
-    cluster.grafana_secret = default_cluster.grafana_secret
+    cluster.grafana_secret = monitoring_secret
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
 
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
