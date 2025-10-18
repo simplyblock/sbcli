@@ -3,11 +3,11 @@ import time
 import uuid
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import lvol_controller, snapshot_events
+from simplyblock_core.controllers import lvol_controller, snapshot_events, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
-
+from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
@@ -127,6 +127,19 @@ def process_snap_replicate_finish(task, snapshot):
 
 def task_runner(task: JobSchedule):
     snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+    snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
+
+    if not snode:
+        task.function_result = "node not found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
+
+    if snode.status != StorageNode.STATUS_ONLINE:
+        task.function_result = "node is not online, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return False
 
     if task.retry >= task.max_retry or task.canceled is True:
         task.function_result = "max retry reached"
@@ -141,14 +154,13 @@ def task_runner(task: JobSchedule):
             snapshot.write_to_db()
 
         remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-        snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
         snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
         lvol_controller.delete_lvol(remote_lv.get_id(), True)
 
         return True
 
 
-    if task.status == JobSchedule.STATUS_NEW:
+    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         process_snap_replicate_start(task, snapshot)
 
     elif task.status == JobSchedule.STATUS_RUNNING:
@@ -172,7 +184,7 @@ def task_runner(task: JobSchedule):
             return True
         if status == "Failed":
             task.function_result = f"Status: {status}, offset:{offset}, retrying"
-            task.status = JobSchedule.STATUS_NEW
+            task.status = JobSchedule.STATUS_SUSPENDED
             task.retry += 1
             task.write_to_db()
             return False
@@ -192,18 +204,17 @@ while True:
             for task in tasks:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                 if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
-                    while task.status != JobSchedule.STATUS_DONE:
+                    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+                        active_task = tasks_controller.get_snapshot_replication_task(
+                            task.cluster_id, task.function_params['snapshot_id'])
+                        if active_task and active_task != task.get_id():
+                            logger.info("task found on same snapshot, retry")
+                            continue
+                    if task.status != JobSchedule.STATUS_DONE:
                         # get new task object because it could be changed from cancel task
                         task = db.get_task_by_id(task.uuid)
                         res = task_runner(task)
-                        if res:
-                            if task.status == JobSchedule.STATUS_DONE:
-                                break
-                        else:
-                            if task.retry <= 3:
-                                delay_seconds *= 1
-                            else:
-                                delay_seconds *= 2
-                        time.sleep(delay_seconds)
+                        if not res:
+                            time.sleep(3)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
