@@ -6,7 +6,6 @@ from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.snode_client import SNodeClient
 
 
 logger = utils.get_logger(__name__)
@@ -71,6 +70,8 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot.lvol = remote_lv
     new_snapshot.snap_bdev = remote_lv.top_bdev
     new_snapshot.write_to_db()
+    remote_lv.bdev_stack = []
+    remote_lv.write_to_db()
     lvol_controller.delete_lvol(remote_lv.get_id(), True)
 
     return True
