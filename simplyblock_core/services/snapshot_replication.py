@@ -24,12 +24,13 @@ def process_snap_replicate_start(task, snapshot):
         max_r_mbytes=0, max_w_mbytes=0)
     remote_lv = db.get_lvol_by_id(lv_id)
     # 2 connect to it
-    snode = db.get_storage_node_by_id(remote_lv.node_id)
-    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=5, retry=2)
-    for nic in snode.data_nics:
+    remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
+    snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
+    for nic in remote_snode.data_nics:
         ip = nic.ip4_address
         ret = snode.rpc_client().bdev_nvme_attach_controller(
             remote_lv.top_bdev, remote_lv.nqn, ip, remote_lv.subsys_port, nic.trtype)
+
 
     # 3 start replication
     snode.rpc_client().bdev_lvol_transfer(
@@ -58,10 +59,11 @@ def process_snap_replicate_finish(task, snapshot):
         snapshot.write_to_db()
 
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-    snode = db.get_storage_node_by_id(remote_lv.node_id)
+    snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
     snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
 
-    snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+    remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
+    remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
 
     new_snapshot = snapshot
     new_snapshot.uuid = str(uuid.uuid4())
@@ -82,8 +84,7 @@ def task_runner(task: JobSchedule):
         process_snap_replicate_start(task, snapshot)
 
     elif task.status == JobSchedule.STATUS_RUNNING:
-        remote_lv = db.get_lvol_by_id(snapshot.lvol.get_id())
-        snode = db.get_storage_node_by_id(remote_lv.node_id)
+        snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
         ret = snode.rpc_client().bdev_lvol_transfer_stat(snapshot.snap_bdev)
         if not ret:
             logger.error("Failed to get transfer stat")
