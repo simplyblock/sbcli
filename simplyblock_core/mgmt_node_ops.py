@@ -295,7 +295,7 @@ def remove_mgmt_node(uuid):
         node_docker.swarm.leave(force=True)
 
     elif snode.mode == "kubernetes":
-        config.load_kube_config()
+        utils.load_kube_config_with_fallback()
         
     mgmt_events.mgmt_remove(snode)
     logging.info("done")

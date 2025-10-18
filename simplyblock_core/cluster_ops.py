@@ -1178,7 +1178,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         logger.info("Done updating mgmt cluster")
 
     elif cluster.mode == "kubernetes":
-        k8s_config.load_kube_config()
+        utils.load_kube_config_with_fallback()
         apps_v1 = k8s_client.AppsV1Api()
 
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
