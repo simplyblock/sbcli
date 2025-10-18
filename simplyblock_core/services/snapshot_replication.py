@@ -126,8 +126,27 @@ def process_snap_replicate_finish(task, snapshot):
 
 
 def task_runner(task: JobSchedule):
-
     snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+
+    if task.retry >= task.max_retry or task.canceled is True:
+        task.function_result = "max retry reached"
+        if task.canceled is True:
+            task.function_result = "task cancelled"
+
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+
+        if snapshot.status != SnapShot.STATUS_ONLINE:
+            snapshot.status = SnapShot.STATUS_ONLINE
+            snapshot.write_to_db()
+
+        remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
+        snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
+        snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
+        lvol_controller.delete_lvol(remote_lv.get_id(), True)
+
+        return True
+
 
     if task.status == JobSchedule.STATUS_NEW:
         process_snap_replicate_start(task, snapshot)
@@ -143,6 +162,7 @@ def task_runner(task: JobSchedule):
         if status == "No process":
             task.function_result = f"Status: {status}, offset:{offset}, retrying"
             task.status = JobSchedule.STATUS_NEW
+            task.retry += 1
             task.write_to_db()
             return False
         if status == "In progress":
@@ -153,6 +173,7 @@ def task_runner(task: JobSchedule):
         if status == "Failed":
             task.function_result = f"Status: {status}, offset:{offset}, retrying"
             task.status = JobSchedule.STATUS_NEW
+            task.retry += 1
             task.write_to_db()
             return False
         if status == "Done":
