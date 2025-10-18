@@ -262,8 +262,8 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
-                distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
+def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
+                distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="TCP", do_replicate=False):
 

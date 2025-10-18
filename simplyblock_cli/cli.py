@@ -513,6 +513,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('target_cluster_id', help='Target Cluster id', type=str).completer = self._completer_get_cluster_list
         argument = subcommand.add_argument('--timeout', help='Snapshot replication network timeout', type=int, default=3600, dest='timeout')
+        argument = subcommand.add_argument('--target-pool', help='Target cluster pool ID or name', type=str, dest='target_pool')
 
 
     def init_volume(self):

@@ -1322,7 +1322,7 @@ def set(cl_id, attr, value) -> None:
     cluster.write_to_db()
 
 
-def add_replication(source_cl_id, target_cl_id, timeout=0) -> bool:
+def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> bool:
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(source_cl_id)
     if not cluster:
@@ -1334,6 +1334,14 @@ def add_replication(source_cl_id, target_cl_id, timeout=0) -> bool:
 
     logger.info("Updating Cluster replication target")
     cluster.snapshot_replication_target_cluster = target_cl_id
+    if target_pool:
+        pool = db_controller.get_pool_by_id(target_pool)
+        if not pool:
+            raise ValueError(f"Pool not found: {target_pool}")
+        if pool.status != Pool.STATUS_ACTIVE:
+            raise ValueError(f"Pool not active: {target_pool}")
+        cluster.snapshot_replication_target_pool = target_pool
+
     if timeout and timeout > 0:
         cluster.snapshot_replication_timeout = timeout
     cluster.write_to_db()

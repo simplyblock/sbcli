@@ -1273,6 +1273,10 @@ commands:
             dest: timeout
             type: int
             default: "3600"
+          - name: "--target-pool"
+            help: "Target cluster pool ID or name"
+            dest: target_pool
+            type: str
   - name: "volume"
     help: "Logical volume commands"
     aliases:
