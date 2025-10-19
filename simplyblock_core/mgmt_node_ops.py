@@ -8,7 +8,7 @@ import time
 import requests
 
 import docker
-from kubernetes import client as k8s_client, config
+from kubernetes import client as k8s_client
 
 
 from simplyblock_core import utils, scripts, constants
