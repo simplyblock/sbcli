@@ -456,7 +456,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     default_cluster = clusters[0]
     cluster.db_connection = default_cluster.db_connection
-    cluster.grafana_secret = monitoring_secret
+    cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
 
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
