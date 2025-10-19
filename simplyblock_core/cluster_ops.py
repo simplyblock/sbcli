@@ -10,7 +10,7 @@ import textwrap
 import typing as t
 
 import docker
-from kubernetes import client as k8s_client, config as k8s_config
+from kubernetes import client as k8s_client
 import requests
 
 from docker.errors import DockerException
