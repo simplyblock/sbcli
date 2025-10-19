@@ -134,7 +134,7 @@ class TestClusterBase:
         self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
         self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
         for node in self.fio_node:
-            self.ssh_obj.make_directory(node=self.log_path)
+            self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
         
         self.runner_k8s_log = RunnerK8sLog(
                 log_dir=self.docker_logs_path,
