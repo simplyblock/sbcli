@@ -146,6 +146,9 @@ spec:
               modprobe nvme-tcp
               echo "[INFO] Loaded nvme-tcp module"
 
+              modprobe nvme-rdma
+              echo "[INFO] Loaded nvme-rdma module"
+
               TUNED_PROFILE="isolated-cpu"
               TUNED_PROFILE_DIR="/etc/tuned/$TUNED_PROFILE"
               TUNED_PROFILE_DIR2="/etc/tuned/profiles/$TUNED_PROFILE"
