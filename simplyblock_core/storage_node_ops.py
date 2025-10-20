@@ -950,7 +950,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         if not mgmt_info:
             logger.error(f"No management interface with IP found in provided interfaces: {iface_name}")
             return False
-        
+
         mgmt_ip, mgmt_iface = mgmt_info
 
         if not spdk_image:
@@ -2255,9 +2255,15 @@ def suspend_storage_node(node_id, force=False):
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     online_nodes = 0
+    offline_nodes = 0
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
             online_nodes += 1
+        else:
+            if node.status == StorageNode.STATUS_DOWN and node.get_id() != snode.secondary_node_id:
+                online_nodes += 1
+            else:
+                offline_nodes += 1
 
     if cluster.ha_type == "ha":
         if online_nodes < 3 and cluster.status == cluster.STATUS_ACTIVE:
@@ -2269,61 +2275,45 @@ def suspend_storage_node(node_id, force=False):
             logger.warning("Cluster status is degraded, use --force but this will suspend the cluster")
             return False
 
+    if offline_nodes > 0:
+        if force is False:
+            logger.error("Offline storage nodes found, cannot suspend node without --force")
+            return False
+
     logger.info("Suspending node")
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+    rpc_client = snode.rpc_client()
+    fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=20, retry=1)
 
     if snode.lvstore_stack_secondary_1:
         nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
         if nodes:
-            for node in nodes:
-                for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
-                    for iface in snode.data_nics:
-                        if iface.ip4_address:
-                                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                    lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype, ana="inaccessible")
+           for node in nodes:
+                try:
+                    fw_api.firewall_set_port(
+                        node.hublvol.nvmf_port, "tcp", "block", snode.rpc_port, is_reject=True)
+                    fw_api.firewall_set_port(
+                        node.lvol_subsys_port, "tcp", "block", snode.rpc_port, is_reject=True)
+                except Exception as e:
+                    logger.error(e)
+                    return False
+                time.sleep(0.5)
                 rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
                 rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
-    # else:
-    sec_node = None
     try:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_node_client = RPCClient(
-                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
-            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-                for iface in sec_node.data_nics:
-                    if iface.ip4_address:
-                        ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype, ana="inaccessible")
-            time.sleep(1)
-    except KeyError:
-        pass
+        fw_api.firewall_set_port(
+            snode.hublvol.nvmf_port, "tcp", "block", snode.rpc_port, is_reject=True)
+        fw_api.firewall_set_port(
+            snode.lvol_subsys_port, "tcp", "block", snode.rpc_port, is_reject=True)
+    except Exception as e:
+        logger.error(e)
+        return False
 
-    for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                ret = rpc_client.listeners_del(
-                    lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port)
-
+    time.sleep(0.5)
     rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(1)
-
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        sec_node_client = RPCClient(
-            sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
-        for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-            for iface in sec_node.data_nics:
-                if iface.ip4_address:
-                    ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype)
-                    if not ret:
-                        logger.warning(f"Failed to set ana state for lvol {lvol.nqn} on iface {iface.ip4_address}")
-        time.sleep(1)
 
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -2352,10 +2342,10 @@ def resume_storage_node(node_id):
         logger.error("Node is not in suspended state")
         return False
 
-    # task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    # if task_id:
-    #     logger.error(f"Restart task found: {task_id}, can not resume storage node")
-    #     return False
+    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    if sec_node and sec_node.status == StorageNode.STATUS_UNREACHABLE:
+        logger.error("Secondary node is unreachable, cannot resume primary node")
+        return False
 
     logger.info("Resuming node")
     for dev in snode.nvme_devices:
@@ -2376,75 +2366,31 @@ def resume_storage_node(node_id):
     except RuntimeError:
         logger.error('Failed to connect to remote devices')
         return False
-
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-
     snode.write_to_db(db_controller.kv_store)
 
-    logger.debug("Setting LVols to online")
-
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
-    # else:
+    fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=20, retry=1)
+    nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+    if nodes:
+       for node in nodes:
+            try:
+                fw_api.firewall_set_port(
+                    node.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
+                fw_api.firewall_set_port(
+                    node.hublvol.nvmf_port, "tcp", "allow", snode.rpc_port)
+            except Exception as e:
+                logger.error(e)
+                return False
 
     try:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node.status == StorageNode.STATUS_UNREACHABLE:
-            logger.error("Secondary node is unreachable, cannot resume primary node")
-            return False
-
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_node_client = RPCClient(
-                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
-            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-                for iface in sec_node.data_nics:
-                    if iface.ip4_address:
-                        ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype, ana="inaccessible")
-            time.sleep(1)
-            sec_node_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
-            sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(1)
-    except KeyError:
-        pass
-
-    for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                ret = rpc_client.listeners_create(
-                    lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state="optimized")
-
-        lvol.status = LVol.STATUS_ONLINE
-        lvol.io_error = False
-        lvol.health_check = True
-        lvol.write_to_db(db_controller.kv_store)
-
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(3)
-
-        sec_node_client = RPCClient(
-            sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
-        for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-            for iface in sec_node.data_nics:
-                if iface.ip4_address:
-                    ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype)
-
-    if snode.lvstore_stack_secondary_1:
-        nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
-        for node in nodes:
-            if not node.lvstore:
-                continue
-            for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
-                if lvol:
-                    for iface in snode.data_nics:
-                        if iface.ip4_address:
-                            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype)
-                            if not ret:
-                                logger.warning(f"Failed to set ana state for lvol {lvol.nqn} on iface {iface.ip4_address}")
+        fw_api.firewall_set_port(
+            snode.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
+        fw_api.firewall_set_port(
+            snode.hublvol.nvmf_port, "tcp", "allow", snode.rpc_port)
+    except Exception as e:
+        logger.error(e)
+        return False
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -3026,6 +2972,10 @@ def recreate_lvstore_on_sec(secondary_node):
             primary_node.lvstore_status = "ready"
             primary_node.write_to_db()
             return False
+
+        ret = secondary_rpc_client.jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
+        if not ret:
+            logger.error("Failed to resume JC compression")
 
         ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
