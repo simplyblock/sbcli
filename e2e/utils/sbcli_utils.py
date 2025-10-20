@@ -446,7 +446,7 @@ class SbcliUtils:
             "max_rw_mbytes": str(max_rw_mbytes),
             "max_r_mbytes": str(max_r_mbytes),
             "max_w_mbytes": str(max_w_mbytes),
-            "fabric ": fabric
+            "fabric": fabric
         }
         if distr_ndcs != 0 and distr_npcs != 0:
             body["ndcs"] = int(distr_ndcs)
