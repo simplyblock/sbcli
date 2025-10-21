@@ -22,8 +22,8 @@ data:
         honor_labels: true
         metrics_path: '/api/v1/cluster/metrics'
         basic_auth:
-          username: ''
-          password: ''
+          username:
+          password:
 
       - job_name: 'node'
         kubernetes_sd_configs:
