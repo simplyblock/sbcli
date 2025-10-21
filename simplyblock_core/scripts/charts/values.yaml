@@ -1,29 +1,25 @@
 graylog:
-  rootPasswordSha2: "${GRAYLOG_ROOT_PASSWORD_SHA2}"
-  passwordSecret: "${GRAYLOG_PASSWORD_SECRET}"
-
-cluster:
-  secret: "${CLUSTER_SECRET}"
-  id: "${CLUSTER_ID}"
-  ip: "${CLUSTER_IP}"
+  rootPasswordSha2: "b87c15a8ae4736d771ca60a7cc2014baaeab19b11c31f5fedef9421958a403c9"
+  passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
 
 monitoring:
-  enabled: ${ENABLE_MONITORING}
+  enabled: true
+  secret: "sWbpOgba1bKnCfcPkVQi"
 
 log:
-  deletionInterval: "${LOG_DELETION_INTERVAL}"
-  retentionPeriod: "${RETENTION_PERIOD}"
-  level: "${LOG_LEVEL}"
-  maxNumberIndex: "${MAX_NUMBER_OF_INDICES}"
+  deletionInterval: "3d"
+  retentionPeriod: "7d"
+  level: "DEBUG"
+  maxNumberIndex: "3"
 
 grafana:
-  endpoint: "${GRAFANA_ENDPOINT}"
-  contactPoint: "${CONTACT_POINT}"
+  endpoint: ""
+  contactPoint: "https://hooks.slack.com/services/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"
 
 image:
   simplyblock: 
-    repository: "${SIMPLYBLOCK_REPOSITORY}"
-    tag: "${SIMPLYBLOCK_TAG}"
+    repository: "public.ecr.aws/simply-block/simplyblock"
+    tag: "openshift_support"
     pullPolicy: "Always"
 
 openebs:
@@ -177,18 +173,15 @@ prometheus:
 ingress:
   enabled: true
   ingressClassName: nginx
-  useDNS: ${USE_DNS}
-  host: "${DNS_NAME}"
-  tlsSecret: ${TLS_SECRET}
+  useDNS: false
+  host: ""
+  tlsSecret: 
   controller:
-    hostNetwork: ${USE_HOST}  
+    hostNetwork: false  
     dnsPolicy: ClusterFirstWithHostNet
     service:
-      type: ${SERVICE_TYPE}
-      nodePorts:
-        tcp:
-          4501: 32451 
+      type: LoadBalancer
     extraArgs:
-      tcp-services-configmap: "${K8S_NAMESPACE}/simplyblock-tcp-services"
+      tcp-services-configmap: "simplyblock/simplyblock-tcp-services"
     nodeSelector:
       simplyblock.io/role: mgmt-plane

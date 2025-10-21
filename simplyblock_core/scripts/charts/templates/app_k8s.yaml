@@ -1,5 +1,60 @@
 ---
 apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-control
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-control
+  template:
+    metadata:
+      annotations:
+        log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
+      labels:
+        app: simplyblock-control
+    spec:
+      serviceAccountName: simplyblock-control-sa
+      containers:
+      - name: simplyblock-control
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["sleep", "infinity"]
+        env:
+        - name: MONITORING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: simplyblock-grafana-secrets
+              key: MONITORING_SECRET
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        volumeMounts:
+        - name: fdb-cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+          subPath: fdb.cluster
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "250m"
+            memory: "1Gi"
+      volumes:
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
+---
+apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: simplyblock-webappapi
@@ -922,6 +977,8 @@ spec:
       containers:
         - name: fluent-bit
           image: fluent/fluent-bit:1.8.11
+          securityContext:
+            privileged: true
           volumeMounts:
             - name: varlog
               mountPath: /var/log

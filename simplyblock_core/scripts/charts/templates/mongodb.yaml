@@ -51,4 +51,4 @@ metadata:
   name: admin-password
 type: Opaque
 stringData:
-  password: {{ .Values.cluster.secret }}
+  password: {{ .Values.monitoring.secret }}
