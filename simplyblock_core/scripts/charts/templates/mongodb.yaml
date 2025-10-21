@@ -18,6 +18,14 @@ spec:
             resources:
               requests:
                 storage: 5Gi
+        - metadata:
+            name: logs-volume
+          spec:
+            accessModes: [ "ReadWriteOnce" ]
+            storageClassName: openebs-local-hostpath
+            resources:
+              requests:
+                storage: 5Gi
   security:
     authentication:
       modes: ["SCRAM"]
