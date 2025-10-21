@@ -6,5 +6,5 @@ metadata:
 provisioner: openebs.io/local
 allowVolumeExpansion: true
 reclaimPolicy: Retain
-volumeBindingMode: Immediate
+volumeBindingMode: WaitForFirstConsumer
   
