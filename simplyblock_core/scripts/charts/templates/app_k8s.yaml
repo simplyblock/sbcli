@@ -2,13 +2,13 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simplyblock-control
+  name: simplyblock-admin-control
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: simplyblock-control
+      app: simplyblock-admin-control
   template:
     metadata:
       annotations:
@@ -16,7 +16,7 @@ spec:
         reloader.stakater.com/auto: "true"
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
-        app: simplyblock-control
+        app: simplyblock-admin-control
     spec:
       serviceAccountName: simplyblock-control-sa
       containers:

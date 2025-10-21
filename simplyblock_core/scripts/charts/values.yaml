@@ -180,10 +180,10 @@ ingress:
   host: ""
   tlsSecret: 
   controller:
-    hostNetwork: false  
+    hostNetwork: true  
     dnsPolicy: ClusterFirstWithHostNet
     service:
-      type: LoadBalancer
+      type: ClusterIP
     extraArgs:
       tcp-services-configmap: "simplyblock/simplyblock-tcp-services"
     nodeSelector:
