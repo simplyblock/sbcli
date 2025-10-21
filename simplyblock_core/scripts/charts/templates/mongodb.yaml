@@ -14,7 +14,7 @@ spec:
             name: data-volume
           spec:
             accessModes: [ "ReadWriteOnce" ]
-            storageClassName: openebs-jiva
+            storageClassName: openebs-local-hostpath
             resources:
               requests:
                 storage: 5Gi
