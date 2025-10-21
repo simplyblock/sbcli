@@ -90,7 +90,10 @@ prometheus:
     replicaCount: 1
     podLabels:
       app: simplyblock-prometheus
-    podAnnotations: {}
+    podAnnotations:
+      log-collector/enabled: "true"
+      reloader.stakater.com/auto: "true"
+      reloader.stakater.com/configmap: "sbcli-simplyblock-prometheus-config"
     affinity:
       podAntiAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:
