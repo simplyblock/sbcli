@@ -345,6 +345,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring DB...")
         scripts.set_db_config_single()
         logger.info("Configuring DB > Done")
+        monitoring_secret = cluster.secret
 
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
@@ -355,7 +356,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         if ingress_host_source == "hostip":
             dns_name = dev_ip
-            
+
         _set_max_result_window(dns_name)
 
         _add_graylog_input(dns_name, monitoring_secret)
