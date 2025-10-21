@@ -19,7 +19,7 @@ grafana:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "openshift_support"
+    tag: "main"
     pullPolicy: "Always"
 
 openebs:
