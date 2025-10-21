@@ -2280,6 +2280,11 @@ def suspend_storage_node(node_id, force=False):
             logger.error("Offline storage nodes found, cannot suspend node without --force")
             return False
 
+    if offline_nodes > 0:
+        if force is False:
+            logger.error("Offline storage nodes found, cannot suspend node without --force")
+            return False
+
     logger.info("Suspending node")
 
     rpc_client = snode.rpc_client()

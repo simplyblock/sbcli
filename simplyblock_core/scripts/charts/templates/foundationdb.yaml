@@ -273,7 +273,7 @@ spec:
               runAsUser: 0
       volumeClaimTemplate:
         spec:
-          storageClassName: openebs-jiva
+          storageClassName: openebs-local-hostpath
           accessModes:
             - ReadWriteOnce
           resources:
