@@ -1326,6 +1326,7 @@ commands:
             help: "Maximum Namespace per subsystem"
             dest: max_namespace_per_subsys
             type: int
+            default: 32
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr_vuid
