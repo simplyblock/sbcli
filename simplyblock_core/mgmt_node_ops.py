@@ -18,7 +18,6 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 
 logger = logging.getLogger()
 
-monitoring_secret = os.environ.get("MONITORING_SECRET", "")
 
 
 def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode):
@@ -200,6 +199,8 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             else:
                 raise TimeoutError("MongoDB pods did not become ready in time.")
 
+            monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+            
             graylog_patch = utils.build_graylog_patch(monitoring_secret)
             
             response = apps_v1.patch_namespaced_deployment(
