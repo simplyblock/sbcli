@@ -2291,16 +2291,18 @@ def suspend_storage_node(node_id, force=False):
 
     rpc_client = snode.rpc_client()
     fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=20, retry=1)
-
+    port_type = "tcp"
+    if snode.active_rdma:
+        port_type = "udp"
     if snode.lvstore_stack_secondary_1:
         nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
         if nodes:
            for node in nodes:
                 try:
                     fw_api.firewall_set_port(
-                        node.hublvol.nvmf_port, "tcp", "block", snode.rpc_port, is_reject=True)
+                        node.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
                     fw_api.firewall_set_port(
-                        node.lvol_subsys_port, "tcp", "block", snode.rpc_port, is_reject=True)
+                        node.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
                 except Exception as e:
                     logger.error(e)
                     return False
@@ -2310,9 +2312,9 @@ def suspend_storage_node(node_id, force=False):
 
     try:
         fw_api.firewall_set_port(
-            snode.hublvol.nvmf_port, "tcp", "block", snode.rpc_port, is_reject=True)
+            snode.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
         fw_api.firewall_set_port(
-            snode.lvol_subsys_port, "tcp", "block", snode.rpc_port, is_reject=True)
+            snode.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
     except Exception as e:
         logger.error(e)
         return False
@@ -2377,23 +2379,26 @@ def resume_storage_node(node_id):
     snode.write_to_db(db_controller.kv_store)
 
     fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=20, retry=1)
+    port_type = "tcp"
+    if snode.active_rdma:
+        port_type = "udp"
     nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
     if nodes:
        for node in nodes:
             try:
                 fw_api.firewall_set_port(
-                    node.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
+                    node.lvol_subsys_port, port_type, "allow", snode.rpc_port)
                 fw_api.firewall_set_port(
-                    node.hublvol.nvmf_port, "tcp", "allow", snode.rpc_port)
+                    node.hublvol.nvmf_port, port_type, "allow", snode.rpc_port)
             except Exception as e:
                 logger.error(e)
                 return False
 
     try:
         fw_api.firewall_set_port(
-            snode.lvol_subsys_port, "tcp", "allow", snode.rpc_port)
+            snode.lvol_subsys_port, port_type, "allow", snode.rpc_port)
         fw_api.firewall_set_port(
-            snode.hublvol.nvmf_port, "tcp", "allow", snode.rpc_port)
+            snode.hublvol.nvmf_port, port_type, "allow", snode.rpc_port)
     except Exception as e:
         logger.error(e)
         return False
@@ -2976,11 +2981,15 @@ def recreate_lvstore_on_sec(secondary_node):
             secondary_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1000,
                                                   max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
+        port_type = "tcp"
+        if primary_node.active_rdma:
+            port_type = "udp"
+
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
 
             fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 3- block primary port
-            fw_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "block", primary_node.rpc_port)
+            fw_api.firewall_set_port(primary_node.lvol_subsys_port, port_type, "block", primary_node.rpc_port)
             tcp_ports_events.port_deny(primary_node, primary_node.lvol_subsys_port)
 
             ### 4- set leadership to false
@@ -3007,7 +3016,7 @@ def recreate_lvstore_on_sec(secondary_node):
 
             fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 8- allow port on primary
-            fw_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow", primary_node.rpc_port)
+            fw_api.firewall_set_port(primary_node.lvol_subsys_port, port_type, "allow", primary_node.rpc_port)
             tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
 
         ### 7- add lvols to subsystems
@@ -3081,12 +3090,15 @@ def recreate_lvstore(snode, force=False):
             time.sleep(3)
 
             fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=20, retry=1)
+            port_type = "tcp"
+            if sec_node.active_rdma:
+                port_type = "udp"
             port_block_done = False
             for i in range(3):
                 try:
                     ### 3- block secondary port
                     ret, err = fw_api.firewall_set_port(
-                        snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
+                        snode.lvol_subsys_port, port_type, "block", sec_node.rpc_port)
                     if ret:
                         port_block_done = True
                         break
@@ -3192,7 +3204,10 @@ def recreate_lvstore(snode, force=False):
 
             fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 3- block secondary port
-            fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
+            port_type = "tcp"
+            if sec_node.active_rdma:
+                port_type = "udp"
+            fw_api.firewall_set_port(snode.lvol_subsys_port, port_type, "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
     if prim_node_suspend:
