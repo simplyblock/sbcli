@@ -836,9 +836,10 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    ret = rpc_client.bdev_lvol_remove_from_group(pool.numeric_id, [lvol.top_bdev])
-    if not ret:
-        logger.error("RPC failed bdev_lvol_remove_from_group")
+    if pool.has_qos():
+        ret = rpc_client.bdev_lvol_remove_from_group(pool.numeric_id, [lvol.top_bdev])
+        if not ret:
+            logger.error("RPC failed bdev_lvol_remove_from_group")
 
     subsystem = rpc_client.subsystem_list(lvol.nqn)
     # 1- remove subsystem
@@ -968,11 +969,18 @@ def delete_lvol(id_or_name, force_delete=False):
         if secondary_node:
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
-                logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
                 secondary_rpc_client = secondary_node.rpc_client()
-                ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
-                if not ret:
-                    logger.warning(f"Failed to delete subsystem from node: {secondary_node.get_id()}")
+                subsystem = secondary_rpc_client.subsystem_list(lvol.nqn)
+                # 1- remove subsystem
+                if subsystem:
+                    if len(subsystem[0]["namespaces"]) > 1:
+                        logger.info("Removing namespace")
+                        ret = secondary_rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
+                    else:
+                        logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
+                        ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
+                    if not ret:
+                        logger.warning(f"Failed to delete subsystem from node: {secondary_node.get_id()}")
 
         # 2- delete subsystem and lvol bdev from primary
         if primary_node:
@@ -1029,18 +1037,19 @@ def connect_lvol_to_pool(uuid):
         snode.rpc_username,
         snode.rpc_password)
 
-    ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
-    if not ret:
-        logger.error("RPC failed bdev_lvol_add_to_group")
-        return False
+    if pool.has_qos():
+        ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
+        if not ret:
+            logger.error("RPC failed bdev_lvol_add_to_group")
+            return False
 
-    # re-apply the QOS limits
-    ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
-                                        pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
-                                        pool.max_w_mbytes_per_sec)
-    if not ret:
-        logger.error("RPC failed bdev_set_qos_limit")
-        return False
+        # re-apply the QOS limits
+        ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
+                                            pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
+                                            pool.max_w_mbytes_per_sec)
+        if not ret:
+            logger.error("RPC failed bdev_set_qos_limit")
+            return False
 
     lvol.write_to_db(db_controller.kv_store)
     pool.write_to_db(db_controller.kv_store)
