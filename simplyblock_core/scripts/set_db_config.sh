@@ -1,3 +1,3 @@
-echo $1 | sudo tee /etc/foundationdb/fdb.cluster > /dev/null
-sudo chown -R foundationdb:foundationdb /etc/foundationdb
-sudo chmod 777 /etc/foundationdb
+echo $1 | sudo tee /var/fdb/fdb.cluster > /dev/null
+sudo chown -R foundationdb:foundationdb /var/fdb
+sudo chmod 777 /var/fdb

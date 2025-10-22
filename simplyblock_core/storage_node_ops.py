@@ -2707,7 +2707,7 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
         log_config=log_config,
         volumes=[
             '/etc/simplyblock:/etc/simplyblock',
-            '/etc/foundationdb:/etc/foundationdb',
+            '/var/fdb:/etc/foundationdb',
             '/var/tmp:/var/tmp',
             '/var/run:/var/run',
             '/dev:/dev',

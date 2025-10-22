@@ -20,7 +20,7 @@ def get_config_var(name, default=None):
 
 
 KVD_DB_VERSION = 730
-KVD_DB_FILE_PATH = os.getenv('FDB_CLUSTER_FILE', '/etc/foundationdb/fdb.cluster')
+KVD_DB_FILE_PATH = os.getenv('FDB_CLUSTER_FILE', '/var/fdb/fdb.cluster')
 KVD_DB_TIMEOUT_MS = 10000
 SPK_DIR = '/home/ec2-user/spdk'
 RPC_HTTP_PROXY_PORT = 8080

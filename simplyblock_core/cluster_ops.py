@@ -1174,7 +1174,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 image=service_image,
                 command="python simplyblock_core/services/snapshot_monitor.py",
                 name="app_SnapshotMonitor",
-                mounts=["/etc/foundationdb:/etc/foundationdb"],
+                mounts=["/var/fdb:/etc/foundationdb"],
                 env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
                 networks=["host"],
                 constraints=["node.role == manager"]

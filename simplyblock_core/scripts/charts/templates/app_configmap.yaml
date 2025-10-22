@@ -96,7 +96,7 @@ data:
     #!/bin/bash
 
     function create_cluster_file() {
-        FDB_CLUSTER_FILE=${FDB_CLUSTER_FILE:-/etc/foundationdb/fdb.cluster}
+        FDB_CLUSTER_FILE=${FDB_CLUSTER_FILE:-/var/fdb/fdb.cluster}
         mkdir -p "$(dirname $FDB_CLUSTER_FILE)"
 
         if [[ -n "$FDB_CLUSTER_FILE_CONTENTS" ]]; then
