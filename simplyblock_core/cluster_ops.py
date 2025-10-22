@@ -31,8 +31,6 @@ logger = utils.get_logger(__name__)
 
 db_controller = DBController()
 
-monitoring_secret = os.environ.get("MONITORING_SECRET", "")
-
 def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, update_secret=False):
     session = requests.session()
     session.auth = ("admin", grafana_secret)
@@ -233,6 +231,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+
     logger.info("Installing dependencies...")
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
@@ -297,7 +297,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.cli_pass = cli_pass
     cluster.secret = utils.generate_string(20)
-    cluster.grafana_secret = cluster.secret
+    cluster.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
@@ -446,6 +446,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
