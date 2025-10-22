@@ -155,6 +155,9 @@ while True:
                             lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
                             if node.secondary_node_id:
                                 lvstore_check &= health_controller._check_node_hublvol(node)
+                                sec_node = db.get_storage_node_by_id(node.secondary_node_id)
+                                if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                                    lvstore_check &= health_controller._check_sec_node_hublvol(node)
 
                         if lvstore_check is False:
                             msg = "Node LVolStore check fail, retry later"
