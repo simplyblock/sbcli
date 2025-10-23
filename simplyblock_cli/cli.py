@@ -27,7 +27,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
-        self.init_caching_node()
+        self.init_qos()
         super().__init__()
 
     def init_storage_node(self):
@@ -204,7 +204,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__device_testing_mode(self, subparser):
         subcommand = self.add_sub_command(subparser, 'device-testing-mode', 'Sets a device to testing mode')
         subcommand.add_argument('device_id', help='Device id', type=str)
-        subcommand.add_argument('mode', help='Testing mode', type=str, default='full_pass_through')
+        subcommand.add_argument('mode', help='Testing mode', type=str, default='full_pass_through', choices=['full_pass_through','io_error_on_write','io_error_on_all','hotplug_removal','discard_io_all','io_error_on_unmap','io_error_on_read',])
 
     def init_storage_node__get_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-device', 'Gets storage device by its id')
@@ -527,6 +527,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'update-secret', 'Updates a cluster\'s secret')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('secret', help='new 20 characters password', type=str)
+
+    def init_cluster__update_fabric(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'update-fabric', 'Updates a cluster\'s fabric')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('fabric', help='fabric: tcp, rdma or both (specify: tcp, rdma)', type=str, default='tcp', choices=['tcp','rdma','tcp,rdma',])
 
     def init_cluster__check(self, subparser):
         subcommand = self.add_sub_command(subparser, 'check', 'Checks a cluster\'s health')
