@@ -123,11 +123,6 @@ def get_next_cluster_status(cluster_id):
 
 def update_cluster_status(cluster_id):
     cluster = db.get_cluster_by_id(cluster_id)
-    current_cluster_status = cluster.status
-    logger.info("cluster_status: %s", current_cluster_status)
-    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
-        return
-
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
 
@@ -140,6 +135,11 @@ def update_cluster_status(cluster_id):
     cluster = db.get_cluster_by_id(cluster_id)
     cluster.is_re_balancing = task_pending  > 0
     cluster.write_to_db()
+
+    current_cluster_status = cluster.status
+    logger.info("cluster_status: %s", current_cluster_status)
+    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
+        return
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
     # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
