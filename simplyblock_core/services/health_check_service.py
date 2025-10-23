@@ -241,7 +241,7 @@ while True:
                         lvol_port_check = health_controller._check_port_on_node(snode, port)
                         logger.info(
                             f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
-                        if not lvol_port_check:
+                        if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
                             tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
 
                 health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check

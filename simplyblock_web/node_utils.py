@@ -30,6 +30,7 @@ def get_nvme_pcie():
 
 
 def get_nvme_devices():
+    logger.debug("function:get_nvme_devices start")
     out, err, rc = shell_utils.run_command("nvme list -v -o json")
     if rc != 0:
         logger.error("Error getting nvme list")
@@ -61,6 +62,7 @@ def get_nvme_devices():
                         'transport': controller['Transport'],
                         'model_id': controller['ModelNumber'],
                         'serial_number': controller['SerialNumber']})
+    logger.debug("function:get_nvme_devices end")
     return devices
 
 
@@ -69,12 +71,14 @@ def get_spdk_devices():
 
 
 def _get_mem_info():
+    logger.debug("function:_get_mem_info start")
     out, err, rc = shell_utils.run_command("cat /proc/meminfo")
 
     if rc != 0:
         raise ValueError('Failed to get memory info')
 
     entry_regex = r'^(?P<name>[\w\(\)]+):\s+(?P<size>\d+)( (?P<kb>kB))?'
+    logger.debug("function:_get_mem_info end")
 
     return {
             m.group('name'): int(m.group('size')) * (1024 if m.group('kb') else 1)

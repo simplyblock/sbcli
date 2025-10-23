@@ -11,7 +11,6 @@ import sys
 import uuid
 import time
 from typing import Union
-from kubernetes import client, config
 import docker
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound
@@ -82,6 +81,7 @@ def get_nvme_info(dev_name):
 
 
 def get_nics_data():
+    logger.debug("function:get_nics_data start")
     out, err, rc = shell_utils.run_command("ip -j address show")
     if rc != 0:
         logger.error(err)
@@ -110,6 +110,7 @@ def get_nics_data():
                 altname_info = iface
                 altname_info["name"] = altname
                 iface_list[altname] = altname_info
+    logger.debug("function:get_nics_data end")
     return iface_list
 
 
@@ -1735,14 +1736,17 @@ def validate_config(config, upgrade=False):
 
 
 def get_k8s_apps_client():
+    from kubernetes import client, config
     config.load_incluster_config()
     return client.AppsV1Api()
 
 def get_k8s_core_client():
+    from kubernetes import client, config
     config.load_incluster_config()
     return client.CoreV1Api()
 
 def get_k8s_batch_client():
+    from kubernetes import client, config
     config.load_incluster_config()
     return client.BatchV1Api()
 

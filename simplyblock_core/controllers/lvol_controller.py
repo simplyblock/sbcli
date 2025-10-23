@@ -807,9 +807,9 @@ def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_lvol":
             name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
-            ret = rpc_client.delete_lvol(name, del_async=del_async)
+            ret, _ = rpc_client.delete_lvol(name, del_async=del_async)
         elif type == "bdev_lvol_clone":
-            ret = rpc_client.delete_lvol(name,  del_async=del_async)
+            ret, _ = rpc_client.delete_lvol(name,  del_async=del_async)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
