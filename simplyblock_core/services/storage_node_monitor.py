@@ -224,7 +224,7 @@ def set_node_offline(node, set_devs_offline=False):
         #     device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
 def set_node_down(node):
-    if node.status != StorageNode.STATUS_DOWN:
+    if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
 
 logger.info("Starting node monitor")
