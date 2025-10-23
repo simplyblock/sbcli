@@ -318,7 +318,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__get_logs(subparser)
         self.init_cluster__get_secret(subparser)
         self.init_cluster__update_secret(subparser)
-        self.init_cluster__update_fabric(subparser)
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
         if self.developer_mode:
@@ -461,8 +460,9 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--distr-chunk-bs', help='(Dev) distrb bdev chunk block size, default: 4096', type=int, default=4096, dest='distr_chunk_bs')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster single type', type=str, default='ha', dest='ha_type', choices=['single','ha',])
         argument = subcommand.add_argument('--enable-node-affinity', help='Enables node affinity for storage nodes', dest='enable_node_affinity', action='store_true')
-        argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
         argument = subcommand.add_argument('--fabric', help='fabric: tcp, rdma or both (specify: tcp, rdma)', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
+        argument = subcommand.add_argument('--is-single-node', help='For single node clusters only', default=False, dest='is_single_node', action='store_true')
+        argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=0, dest='qpair_count')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow', type=int, default=128, dest='max_queue_size')
         if self.developer_mode:
@@ -527,13 +527,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'update-secret', 'Updates a cluster\'s secret')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('secret', help='new 20 characters password', type=str)
-
-    def init_cluster__update_fabric(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'update-fabric', 'Updates a cluster\'s fabric')
-        subcommand.add_argument('cluster_id', help='Cluster id',
-                                type=str).completer = self._completer_get_cluster_list
-        subcommand.add_argument('fabric', help='fabric: tcp, rdma or both (specify: tcp, rdma)', type=str,
-                                default='tcp', choices=['tcp', 'rdma', 'tcp,rdma', ])
 
     def init_cluster__check(self, subparser):
         subcommand = self.add_sub_command(subparser, 'check', 'Checks a cluster\'s health')
@@ -1108,8 +1101,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__get_secret(sub_command, args)
                 elif sub_command in ['update-secret']:
                     ret = self.cluster__update_secret(sub_command, args)
-                elif sub_command in ['update-fabric']:
-                    ret = self.cluster__update_fabric(sub_command, args)
                 elif sub_command in ['check']:
                     ret = self.cluster__check(sub_command, args)
                 elif sub_command in ['update']:
