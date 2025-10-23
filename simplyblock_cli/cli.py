@@ -318,6 +318,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__get_logs(subparser)
         self.init_cluster__get_secret(subparser)
         self.init_cluster__update_secret(subparser)
+        self.init_cluster__update_fabric(subparser)
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
         if self.developer_mode:
@@ -1106,6 +1107,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__get_secret(sub_command, args)
                 elif sub_command in ['update-secret']:
                     ret = self.cluster__update_secret(sub_command, args)
+                elif sub_command in ['update-fabric']:
+                    ret = self.cluster__update_fabric(sub_command, args)
                 elif sub_command in ['check']:
                     ret = self.cluster__check(sub_command, args)
                 elif sub_command in ['update']:

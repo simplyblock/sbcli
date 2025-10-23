@@ -798,7 +798,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
             pass
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
-        elif type == "crypto" and del_async==False:
+        elif type == "crypto" and not del_async:
             ret = rpc_client.lvol_crypto_delete(name)
             if ret:
                 ret = rpc_client.lvol_crypto_key_delete(f'key_{name}')
