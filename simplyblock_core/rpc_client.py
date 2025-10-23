@@ -917,21 +917,25 @@ class RPCClient:
         params = {"name": name}
         return self._request("distr_migration_status", params)
 
-    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False):
+    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=1024):
         params = {
             "name": name,
             "storage_ID": storage_ID,
         }
         if qos_high_priority:
             params["qos_high_priority"] = qos_high_priority
+        if job_size:
+            params["job_size"] = job_size
         return self._request("distr_migration_failure_start", params)
 
-    def distr_migration_expansion_start(self, name, qos_high_priority=False):
+    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=1024):
         params = {
             "name": name,
         }
         if qos_high_priority:
             params["qos_high_priority"] = qos_high_priority
+        if job_size:
+            params["job_size"] = job_size
         return self._request("distr_migration_expansion_start", params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
