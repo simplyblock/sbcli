@@ -867,8 +867,8 @@ def run_tuned():
             check=True
         )
         logger.info("Successfully run the tuned adm profile")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error running the tuned adm profile: {e}")
+    except subprocess.CalledProcessError:
+        logger.warning("Error running the tuned adm profile")
 
 def run_grubby(core_list):
     isolated_cores = ",".join(map(str, core_list))
@@ -880,8 +880,8 @@ def run_grubby(core_list):
             check=True
         )
         logger.info("Successfully run the grubby command")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error running the grubby command: {e}")
+    except subprocess.CalledProcessError:
+        logger.warning("Error running the grubby command")
 
 def parse_thread_siblings():
     """Parse the thread siblings from the sysfs topology."""

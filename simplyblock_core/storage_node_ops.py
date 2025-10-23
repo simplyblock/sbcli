@@ -2,6 +2,7 @@
 import datetime
 import json
 import os
+import platform
 import socket
 
 import psutil
@@ -2712,7 +2713,9 @@ def deploy(ifname, isolate_cores=False):
     if isolate_cores:
         utils.generate_realtime_variables_file(all_isolated_cores)
         utils.run_tuned()
-        utils.run_grubby(all_isolated_cores)
+        arch = platform.machine().lower()
+        if "arm" in arch or "aarch64" in arch:
+            utils.run_grubby(all_isolated_cores)
     return f"{dev_ip}:5000"
 
 
