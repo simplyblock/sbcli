@@ -3533,6 +3533,10 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             logger.error(err)
             return False
 
+        ret = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
+        if not ret:
+            logger.error("Failed to resume JC compression")
+
         sec_rpc_client = sec_node.rpc_client()
         sec_rpc_client.bdev_examine(snode.raid)
         sec_rpc_client.bdev_wait_for_examine()
