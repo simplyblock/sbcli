@@ -457,10 +457,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
-    secondary_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+    s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
     is_active_primary = getattr(host_node, attr_name)
-    is_active_secondary = getattr(secondary_node, attr_name)
+    is_active_secondary = getattr(s_node, attr_name)
     if not is_active_primary:
         return False, f"Primary node fabric {fabric} is not active"
     if not is_active_secondary:
