@@ -3016,7 +3016,7 @@ def recreate_lvstore_on_sec(secondary_node):
             primary_node.write_to_db()
             return False
 
-        ret = secondary_rpc_client.jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
+        ret = primary_node.rpc_client().jc_suspend_compression(jm_vuid=secondary_node.jm_vuid, suspend=False)
         if not ret:
             logger.error("Failed to resume JC compression")
 
