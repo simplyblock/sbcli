@@ -1000,7 +1000,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         active_rdma=False
         fabric_tcp = cluster.fabric_tcp
         fabric_rdma = cluster.fabric_rdma
-        names = node_config.get("nic_ports") or data_nics_list or [mgmt_iface]
+        names = data_nics_list or [mgmt_iface]
         logger.info(f"fabric_tcp is {fabric_tcp}")
         logger.info(f"fabric_rdma is {fabric_rdma}")
         logger.debug(f"Data nics ports are: {names}")
