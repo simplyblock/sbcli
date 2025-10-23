@@ -1358,6 +1358,23 @@ commands:
             help: "new 20 characters password"
             dest: secret
             type: str
+      - name: update-fabric
+        help: "Updates a cluster's fabric"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "fabric"
+            help: "fabric: tcp, rdma or both (specify: tcp, rdma)"
+            dest: fabric
+            type: str
+            choices:
+              - tcp
+              - rdma
+              - tcp,rdma
+            default: tcp
       - name: check
         help: "Checks a cluster's health"
         arguments:

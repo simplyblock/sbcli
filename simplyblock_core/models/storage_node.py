@@ -129,7 +129,7 @@ class StorageNode(BaseNodeObject):
                 ip = iface.ip4_address
                 if self.active_rdma:
                     if iface.trtype != "RDMA":
-                        logger.info(f"Skipping as the RDMA is enabled")
+                        logger.info("Skipping as the RDMA is enabled")
                         continue
                     rpc_client.listeners_create(
                         nqn=nqn,
@@ -139,7 +139,7 @@ class StorageNode(BaseNodeObject):
                     )
                 else:
                     if iface.trtype != "TCP":
-                        logger.info(f"Skipping as the TCP is only enabled")
+                        logger.info("Skipping as the TCP is only enabled")
                         continue
                     rpc_client.listeners_create(
                         nqn=nqn,

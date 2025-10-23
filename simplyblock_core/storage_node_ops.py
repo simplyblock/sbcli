@@ -7,8 +7,7 @@ import platform
 import socket
 
 import psutil
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List
+from typing import List
 
 import threading
 
@@ -993,7 +992,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         active_rdma=False
         fabric_tcp = cluster.fabric_tcp
         fabric_rdma = cluster.fabric_rdma
-        names = node_config.get("nic_ports") or data_nics_list  or [iface_name]
+        names = data_nics_list  or [iface_name]
         logger.info(f"fabric_tcp is {fabric_tcp}")
         logger.info(f"fabric_rdma is {fabric_rdma}")
         logger.debug(f"Data nics ports are: {names}")
