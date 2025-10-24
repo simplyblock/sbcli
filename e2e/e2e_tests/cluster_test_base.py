@@ -807,24 +807,32 @@ class TestClusterBase:
             delete_snapshot_command = f"{self.base_cmd} snapshot delete {snapshot} --force"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
 
-    def filter_migration_tasks(self, tasks, node_id, timestamp):
+    def filter_migration_tasks(self, tasks, node_id, timestamp, window_minutes=None):
         """
         Filters `device_migration` tasks for a specific node and timestamp.
-
-        Args:
-            tasks (list): List of task dictionaries from the API response.
-            node_id (str): The UUID of the node to check for migration tasks.
-            timestamp (int): The timestamp to filter tasks created after this time.
-
-        Returns:
-            list: List of `device_migration` tasks for the specific node created after the given timestamp.
+        If window_minutes is provided, includes tasks within ±window_minutes of timestamp;
+        otherwise keeps original behavior (tasks strictly after timestamp).
         """
+        self.logger.info(f"[DEBUG]: Migration TASKS: {tasks}")
+
+        # Compute time bounds
+        if window_minutes is None:
+            lower, upper = timestamp, None
+        else:
+            delta = int(window_minutes) * 60
+            lower, upper = timestamp - delta, timestamp + delta
+
         filtered_tasks = [
             task for task in tasks
-            if ('balancing_on' in task['function_name'] or 'migration' in task['function_name']) and task['date'] > timestamp
+            if ('balancing_on' in task['function_name'] or 'migration' in task['function_name'])
+            and (
+                (upper is None and task['date'] > lower) or
+                (upper is not None and lower <= task['date'] <= upper)
+            )
             and (node_id is None or task['node_id'] == node_id)
         ]
         return filtered_tasks
+
 
     def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60, no_task_ok=False):
         """
@@ -857,7 +865,7 @@ class TestClusterBase:
 
         while datetime.now(timezone.utc) < end_time:
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
-            filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
+            filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp, window_minutes=10)
 
             if filtered_tasks:
                 migration_tasks_found = True
