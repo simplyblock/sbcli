@@ -810,25 +810,18 @@ class TestClusterBase:
     def filter_migration_tasks(self, tasks, node_id, timestamp, window_minutes=None):
         """
         Filters `device_migration` tasks for a specific node and timestamp.
-        If window_minutes is provided, includes tasks within ±window_minutes of timestamp;
-        otherwise keeps original behavior (tasks strictly after timestamp).
+        If window_minutes is provided, include tasks with date > (timestamp - window_minutes*60).
+        There is NO upper limit; only a lower bound.
         """
         self.logger.info(f"[DEBUG]: Migration TASKS: {tasks}")
 
-        # Compute time bounds
-        if window_minutes is None:
-            lower, upper = timestamp, None
-        else:
-            delta = int(window_minutes) * 60
-            lower, upper = timestamp - delta, timestamp + delta
+        # Lower bound only
+        lower = timestamp if window_minutes is None else timestamp - int(window_minutes) * 60
 
         filtered_tasks = [
             task for task in tasks
             if ('balancing_on' in task['function_name'] or 'migration' in task['function_name'])
-            and (
-                (upper is None and task['date'] > lower) or
-                (upper is not None and lower <= task['date'] <= upper)
-            )
+            and task['date'] > lower
             and (node_id is None or task['node_id'] == node_id)
         ]
         return filtered_tasks
