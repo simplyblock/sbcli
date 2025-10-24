@@ -27,7 +27,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
-        self.init_qos()
+        self.init_caching_node()
         super().__init__()
 
     def init_storage_node(self):
