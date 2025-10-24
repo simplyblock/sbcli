@@ -582,6 +582,16 @@ def apply_config():
 
     return utils.get_response(True)
 
+
+@api.get('/check', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def is_alive():
+    return utils.get_response(True)
+
+
 api.post('/bind_device_to_spdk')(snode_ops.bind_device_to_spdk)
 
 api.get('/ifc_is_tcp')(snode_ops.ifc_is_tcp)

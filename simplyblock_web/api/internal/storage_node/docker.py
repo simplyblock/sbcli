@@ -623,7 +623,7 @@ def ifc_is_tcp(query: NicQuery):
     return utils.get_response(False)
 
 
-@api.get('/', responses={
+@api.get('/check', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
     })}}},
