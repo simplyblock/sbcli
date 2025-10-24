@@ -1,4 +1,5 @@
 ### simplyblock e2e tests
+import os
 import json
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -202,7 +203,7 @@ class TestSingleNodeFailure(TestClusterBase):
                 self.ssh_obj.restart_docker_logging(
                     node_ip=node,
                     containers=self.container_nodes[node],
-                    log_dir=self.docker_logs_path,
+                    log_dir=os.path.join(self.docker_logs_path, node),
                     test_name=self.test_name
                 )
         else:
@@ -440,7 +441,7 @@ class TestHASingleNodeFailure(TestClusterBase):
                     self.ssh_obj.restart_docker_logging(
                         node_ip=node,
                         containers=self.container_nodes[node],
-                        log_dir=self.docker_logs_path,
+                        log_dir=os.path.join(self.docker_logs_path, node),
                         test_name=self.test_name
                     )
             else:
@@ -483,7 +484,7 @@ class TestHASingleNodeFailure(TestClusterBase):
     def add_lvol_and_run_fio(self, lvol_name):
         self.lvol_name = lvol_name
         mount_path = self.mount_path+f"_{lvol_name}"
-        log_path = self.log_path+f"_{lvol_name}"
+        log_path = self.log_path+f"_{lvol_name}.log"
 
         host_id = self.sbcli_utils.get_node_without_lvols()
 

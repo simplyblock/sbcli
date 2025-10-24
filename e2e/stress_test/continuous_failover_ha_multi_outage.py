@@ -218,6 +218,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
 
             clone_name = f"clone_{generate_random_sequence(15)}"
+            sleep_n_sec(30)
             snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
             try:
                 self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
