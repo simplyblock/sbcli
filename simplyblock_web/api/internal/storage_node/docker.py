@@ -621,3 +621,12 @@ def ifc_is_tcp(query: NicQuery):
     except Exception as e:
         logger.error(e)
     return utils.get_response(False)
+
+
+@api.get('/', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def is_alive():
+    return utils.get_response(True)
