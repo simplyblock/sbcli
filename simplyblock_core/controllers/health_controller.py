@@ -118,9 +118,9 @@ def _check_node_api(ip):
     try:
         snode_api = SNodeClient(f"{ip}:5000", timeout=10, retry=2)
         logger.debug(f"Node API={ip}:5000")
-        info, _ = snode_api.info()
-        if info:
-            logger.debug(f"Hostname: {info['hostname']}")
+        ret, _ = snode_api.is_live()
+        logger.debug(f"snode is alive: {ret}")
+        if ret:
             return True
     except Exception as e:
         logger.debug(e)
