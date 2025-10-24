@@ -3718,7 +3718,7 @@ def make_sec_new_primary(node_id):
 
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_NEW:
-            device_controller.add_device(dev.get_id())
+            device_controller.add_device(dev.get_id(), add_migration_task=False)
 
     time.sleep(5)
     for dev in snode.nvme_devices:
