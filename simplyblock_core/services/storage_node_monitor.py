@@ -122,7 +122,6 @@ def get_next_cluster_status(cluster_id):
 
 
 def update_cluster_status(cluster_id):
-    cluster = db.get_cluster_by_id(cluster_id)
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
 
@@ -213,11 +212,11 @@ def set_node_offline(node, set_devs_offline=False):
         # set node unavailable
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
 
-        if set_devs_offline:
-            # set devices unavailable
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                    device_controller.device_set_unavailable(dev.get_id())
+        # if set_devs_offline:
+        #     # set devices unavailable
+        #     for dev in node.nvme_devices:
+        #         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+        #             device_controller.device_set_unavailable(dev.get_id())
 
         # # set jm dev offline
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
