@@ -321,7 +321,7 @@ while True:
                 if snode.status == StorageNode.STATUS_UNREACHABLE:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
                                           Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
-                        tasks_controller.add_node_to_auto_restart(snode)
+                        # tasks_controller.add_node_to_auto_restart(snode)
                         continue
 
                 if not node_port_check:
@@ -359,7 +359,14 @@ while True:
                             logger.info("ping is fine, snodeapi is fine, But no spdk process and no rpc check, "
                                         "So that we set device offline")
                         set_node_offline(snode, set_devs_offline=(not spdk_process and not node_rpc_check))
-                        tasks_controller.add_node_to_auto_restart(snode)
+                        try:
+                            ret = snode.rpc_client(timeout=10).get_version()
+                            if not ret:
+                                logger.debug(f"False RPC response, adding node to auto restart")
+                                tasks_controller.add_node_to_auto_restart(snode)
+                        except:
+                            logger.debug(f"Timeout to get RPC response, skipping restart")
+
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
                         logger.error("Port check failed")
