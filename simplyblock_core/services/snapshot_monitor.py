@@ -27,27 +27,54 @@ def set_snapshot_health_check(snap, health_check_status):
 def process_snap_delete_finish(snap, leader_node):
     logger.info(f"Snapshot deleted successfully, id: {snap.get_id()}")
 
+    # check leadership
     snode = db.get_storage_node_by_id(snap.lvol.node_id)
-    # 3-1 async delete snap bdev from primary
-    if snode.get_id() == leader_node.get_id():
-        primary_node = snode
-        secondary_node = db.get_storage_node_by_id(snode.secondary_node_id)
-    else:
-        primary_node = db.get_storage_node_by_id(snode.secondary_node_id)
-        secondary_node = snode
+    sec_node = None
+    if snode.secondary_node_id:
+        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+    leader_node = None
+    snode = db.get_storage_node_by_id(snode.get_id())
+    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+        ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+        if not ret:
+            raise Exception("Failed to get LVol info")
+        lvs_info = ret[0]
+        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+            leader_node = snode
 
+    if not leader_node and sec_node:
+        ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+        if not ret:
+            raise Exception("Failed to get LVol info")
+        lvs_info = ret[0]
+        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+            leader_node = sec_node
+
+    if not leader_node:
+        raise Exception("Failed to get leader node")
+
+    if snap.deletion_status != leader_node.get_id():
+        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev)
+        if not ret:
+            logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+        snap = db.get_snapshot_by_id(snap.get_id())
+        snap.deletion_status = leader_node.get_id()
+        snap.write_to_db()
+        return
+
+    # 3-1 async delete lvol bdev from primary
+    primary_node = db.get_storage_node_by_id(leader_node.get_id())
     if primary_node.status == StorageNode.STATUS_ONLINE:
         ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
         if not ret:
-            logger.error(f"Failed to delete snap from primary_node node: {primary_node.get_id()}")
+            logger.error(f"Failed to delete snap from node: {snode.get_id()}")
 
     # 3-2 async delete lvol bdev from secondary
-    if secondary_node:
-        if secondary_node.status == StorageNode.STATUS_ONLINE:
-            ret, _ = secondary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
-            if not ret:
-                logger.error(f"Failed to delete lvol from sec node: {secondary_node.get_id()}")
-                # what to do here ?
+    if leader_node.secondary_node_id:
+        sec_node = db.get_storage_node_by_id(leader_node.secondary_node_id)
+        if sec_node:
+            sec_node.lvol_sync_del_queue.append(snap.snap_bdev)
+            sec_node.write_to_db()
 
     snapshot_events.snapshot_delete(snap)
     snap.remove(db.kv_store)
