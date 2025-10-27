@@ -15,7 +15,6 @@ import time
 import subprocess
 import random
 import threading
-from io import BytesIO
 from typing import Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -157,8 +156,10 @@ def exec_command(ssh: paramiko.SSHClient, command: str, retries=3) -> Tuple[str,
             stdin, stdout, stderr = ssh.exec_command(command)
             output = stdout.read().decode(errors="replace").strip()
             error  = stderr.read().decode(errors="replace").strip()
-            if output: print(f"[OUTPUT] {output}")
-            if error:  print(f"[ERROR] {error}")
+            if output:
+                print(f"[OUTPUT] {output}")
+            if error:
+                print(f"[ERROR] {error}")
             return output, error
         except Exception as e:
             print(f"[ERROR] Command execution failed ({attempt+1}/{retries}): {e}")
@@ -386,7 +387,7 @@ def run_remote_uploader(ssh: paramiko.SSHClient, pairs, node: str):
         f"{UPLOAD_RETRIES} {BACKOFF_BASE_SECS} {BACKOFF_MAX_SECS}; echo __EC:$?"
     )
     out, _ = exec_command(ssh, cmd)
-    ec_lines = [l for l in out.splitlines() if l.startswith("__EC:")]
+    ec_lines = [str(l).strip() for l in out.splitlines() if l.startswith("__EC:")]
     ec = int(ec_lines[-1].split(":")[1]) if ec_lines else 0
     if ec != 0:
         raise RuntimeError(f"Remote uploader exited with code {ec} on node {node}")

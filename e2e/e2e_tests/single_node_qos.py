@@ -1,6 +1,4 @@
-from datetime import datetime
 import os
-from pathlib import Path
 from e2e_tests.cluster_test_base import TestClusterBase
 import threading
 import json
@@ -236,7 +234,8 @@ class TestLvolQOSBase(TestClusterBase):
             return None
         depth = 0
         for i, ch in enumerate(s[start:], start):
-            if ch == '{': depth += 1
+            if ch == '{':
+                depth += 1
             elif ch == '}':
                 depth -= 1
                 if depth == 0:
