@@ -387,7 +387,11 @@ def run_remote_uploader(ssh: paramiko.SSHClient, pairs, node: str):
         f"{UPLOAD_RETRIES} {BACKOFF_BASE_SECS} {BACKOFF_MAX_SECS}; echo __EC:$?"
     )
     out, _ = exec_command(ssh, cmd)
-    ec_lines = [str(l).strip() for l in out.splitlines() if l.startswith("__EC:")]
+    ec_lines = []
+    for line in out.splitlines():
+        if line.startswith("__EC:"):
+            ec_lines.append(line)
+
     ec = int(ec_lines[-1].split(":")[1]) if ec_lines else 0
     if ec != 0:
         raise RuntimeError(f"Remote uploader exited with code {ec} on node {node}")
