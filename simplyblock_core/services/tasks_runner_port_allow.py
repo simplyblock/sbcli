@@ -194,6 +194,16 @@ while True:
                         snode.lvol_sync_del_queue = not_deleted
                         snode.write_to_db()
 
+                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                            # check jc_compression status
+                            jc_compression_is_active = sec_node.rpc_client().jc_compression(snode.jm_vuid)
+                            while jc_compression_is_active:
+                                logger.info(
+                                    f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
+                                time.sleep(60)
+                                jc_compression_is_active = sec_node.rpc_client().jc_compression(sec_node.jm_vuid)
+
+
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
 
                         fw_api = FirewallClient(f"{node.mgmt_ip}:5001", timeout=5, retry=2)
