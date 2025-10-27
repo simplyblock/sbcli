@@ -379,11 +379,11 @@ class RPCClient:
             "clear_method": "unmap",
             "lvol_priority_class": lvol_priority_class,
         }
-        if ndcs or npcs:
-            params.update({
-                'ndcs' : ndcs,
-                'npcs' : npcs,
-            })
+        # if ndcs or npcs:
+        #     params.update({
+        #         'ndcs' : ndcs,
+        #         'npcs' : npcs,
+        #     })
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name, del_async=False):
@@ -1184,8 +1184,23 @@ class RPCClient:
             "lvol_vbdev_list": lvol_name_list
         }
         return self._request("bdev_lvol_remove_from_group", params)
+
     def alceml_set_qos_weights(self, qos_weights):
         params = {
             "qos_weights": qos_weights,
         }
         return self._request("bdev_distrib_set_qos_weights", params)
+
+    def jc_compression(self, jm_vuid):
+        """
+        Return value:
+            'False': indicates compression has finished or there is no pending compression.
+            'True': indicates there is an in-progress compression, and management needs to wait before the fallback.
+                    In this situation, management must retry this RPC call every 1 minute until compression is
+                    complete. (False response)
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+            "get_status": True,
+        }
+        return self._request("jc_compression", params)
