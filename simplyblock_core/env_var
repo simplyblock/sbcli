@@ -1,6 +1,6 @@
-SIMPLY_BLOCK_COMMAND_NAME=sbcli-pre
-SIMPLY_BLOCK_VERSION=25.6.10
+SIMPLY_BLOCK_COMMAND_NAME=sbcli-rdma
+SIMPLY_BLOCK_VERSION=25.7.10
 
 
-SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.6-PRE
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:rdma_integration_r
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.6-Hotfix-latest

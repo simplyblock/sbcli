@@ -456,6 +456,7 @@ def leave_swarm():
     logger.error(msg)
     return utils.get_response(False, msg)
 
+
 class _GPTPartitionsParams(BaseModel):
     nbd_device: str = Field('/dev/nbd0')
     jm_percent: int = Field(3, ge=0, le=100)
@@ -599,26 +600,89 @@ class NicQuery(BaseModel):
     nic: str
 
 
+def resolve_underlying_ifaces(nic):
+    base_path = f"/sys/class/net/{nic}"
+    if not os.path.exists(base_path):
+        return []
+
+    # 1️⃣ Handle bridge devices (collect all lower interfaces)
+    bridge_path = os.path.join(base_path, "brif")
+    if os.path.exists(bridge_path):
+        lower_ifaces = os.listdir(bridge_path)
+        resolved = []
+        for lower in lower_ifaces:
+            resolved.extend(resolve_underlying_ifaces(lower))
+        return resolved
+
+    # 2️⃣ Handle bonded interfaces (collect all slaves)
+    bond_slaves = os.path.join(base_path, "bonding/slaves")
+    if os.path.exists(bond_slaves):
+        try:
+            with open(bond_slaves, "r") as f:
+                slaves = f.read().strip().split()
+            resolved = []
+            for s in slaves:
+                resolved.extend(resolve_underlying_ifaces(s))
+            return resolved
+        except Exception as e:
+            logger.warning(f"Failed to read bond slaves for {nic}: {e}")
+
+    # 3️⃣ Handle VLANs (detect lower_* symlinks like lower_bond0)
+    lowers = [f for f in os.listdir(base_path) if f.startswith("lower_")]
+    if lowers:
+        resolved = []
+        for lower in lowers:
+            try:
+                target = os.path.basename(os.path.realpath(os.path.join(base_path, lower)))
+                resolved.extend(resolve_underlying_ifaces(target))
+            except Exception as e:
+                logger.warning(f"Failed to resolve {lower} for {nic}: {e}")
+        return resolved
+
+    # 4️⃣ Fallback: device symlink (for VLANs on physical ifaces)
+    vlan_dev_path = os.path.join(base_path, "device")
+    if os.path.islink(vlan_dev_path):
+        try:
+            real_path = os.path.realpath(vlan_dev_path)
+            parent = real_path.split("/")[-1]
+            if parent != nic and os.path.exists(f"/sys/class/net/{parent}"):
+                return resolve_underlying_ifaces(parent)
+        except Exception as e:
+            logger.warning(f"Failed to resolve VLAN parent for {nic}: {e}")
+
+    # 5️⃣ Default: treat as physical
+    return [nic]
+
+
 @api.get('/ifc_is_roce', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean',
     })}}},
 })
-def ifc_is_roce(query: NicQuery):
+def ifc_is_roce(query):
+    """
+    Check if the given interface (including VLANs, bonds, bridges)
+    ultimately uses a RoCE-capable NIC.
+    """
     try:
-        nic = query.nic
+        nic = query.nic if hasattr(query, "nic") else str(query)
         rdma_path = "/sys/class/infiniband/"
         if not os.path.exists(rdma_path):
             return utils.get_response(False)
 
+        underlying = resolve_underlying_ifaces(nic)
+        logger.debug(f"Resolved {nic} → underlying ifaces: {underlying}")
+
         for rdma_dev in os.listdir(rdma_path):
             net_path = os.path.join(rdma_path, rdma_dev, "device/net")
             if os.path.exists(net_path):
-                for iface in os.listdir(net_path):
-                    if iface == nic:
+                roce_ifaces = os.listdir(net_path)
+                for iface in underlying:
+                    if iface in roce_ifaces:
                         return utils.get_response(True)
     except Exception as e:
-        logger.error(e)
+        logger.error(f"ifc_is_roce failed: {e}")
+
     return utils.get_response(False)
 
 
