@@ -1,10 +1,11 @@
 # coding=utf-8
+import threading
 import time
 from datetime import datetime, timezone
 
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
-from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
+from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -18,6 +19,8 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 utils.init_sentry_sdk()
+
+node_rpc_timeout_threads: dict[str, threading.Thread] = {}
 
 
 def is_new_migrated_node(cluster_id, node):
@@ -226,6 +229,21 @@ def set_node_down(node):
     if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
 
+
+def node_rpc_timeout_check_and_report(node):
+    start_time = time.time()
+    try:
+        rpc_client = node.rpc_client(timeout=60, retry=5)
+        ret = rpc_client.get_version()
+        if ret:
+            logger.debug(f"SPDK version: {ret['version']}")
+            return True
+    except Exception as e:
+        logger.debug(e)
+    # RPC timeout detected, send to cluster log
+    storage_events.snode_rpc_timeout(node, time.time()-start_time)
+
+
 logger.info("Starting node monitor")
 while True:
     clusters = db.get_clusters()
@@ -277,6 +295,11 @@ while True:
             node_rpc_check = health_controller._check_node_rpc(
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+
+            if not node_rpc_check and snode.get_id() not in node_rpc_timeout_threads:
+                t = threading.Thread(target=node_rpc_timeout_check_and_report, args=(snode,))
+                t.start()
+                node_rpc_timeout_threads[snode.get_id()] = t
 
             if ping_check and node_api_check and spdk_process and not node_rpc_check:
                 start_time = time.time()
