@@ -438,7 +438,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
     if lvol_priority_class:
-        lvol.lvol_priority_class = lvol_priority_class + 1
+        lvol.lvol_priority_class = lvol_priority_class
     else:
         lvol.lvol_priority_class = 0
     lvol.fabric = fabric
@@ -503,7 +503,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol_dict["params"]["npcs"] = lvol.npcs
 
     if cl.is_qos_set() and lvol.lvol_priority_class > 0:
-        lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
+        lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class +1
 
     lvol.bdev_stack = [lvol_dict]
 
