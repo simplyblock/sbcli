@@ -370,7 +370,7 @@ class RPCClient:
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0):
+    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0, ndcs=0, npcs=0):
         params = {
             "lvol_name": name,
             "size_in_mib": size_in_mib,
@@ -379,6 +379,11 @@ class RPCClient:
             "clear_method": "unmap",
             "lvol_priority_class": lvol_priority_class,
         }
+        if ndcs or npcs:
+            params.update({
+                'ndcs' : ndcs,
+                'npcs' : npcs,
+            })
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name, del_async=False):

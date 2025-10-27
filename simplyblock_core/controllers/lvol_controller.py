@@ -265,7 +265,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp"):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -380,14 +380,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         logger.warning("Number of active cluster devices are less than 8")
         # return False, "Number of active cluster devices are less than 8"
 
-    # if len(online_nodes) < 3 and ha_type == "ha":
-    #     logger.error("Storage nodes are less than 3 in ha cluster")
-    #     return False, "Storage nodes are less than 3 in ha cluster"
-
     if host_node and host_node.status != StorageNode.STATUS_ONLINE:
         mgs = f"Storage node is not online. ID: {host_node.get_id()} status: {host_node.status}"
         logger.error(mgs)
         return False, mgs
+
+    if ndcs or npcs:
+        if ndcs+npcs > len(online_nodes):
+            mgs = f"Online storage nodes: {len(online_nodes)} are less than the required LVol geometry: {(ndcs+npcs)}"
+            logger.error(mgs)
+            return False, mgs
 
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 
@@ -436,7 +438,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
     if lvol_priority_class:
-        lvol.lvol_priority_class = lvol_priority_class + 1
+        lvol.lvol_priority_class = lvol_priority_class
     else:
         lvol.lvol_priority_class = 0
     lvol.fabric = fabric
@@ -472,6 +474,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.subsys_port = host_node.lvol_subsys_port
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
+    if npcs or ndcs:
+        lvol.npcs = npcs or 0
+        lvol.ndcs = ndcs or 0
+    else:
+        lvol.npcs = cl.distr_npcs
+        lvol.ndcs = cl.distr_ndcs
 
     lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
     if lvol_count > host_node.max_lvol:
@@ -490,8 +498,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         }
     }
 
+    if lvol.ndcs or lvol.npcs:
+        lvol_dict["params"]["ndcs"] = lvol.ndcs
+        lvol_dict["params"]["npcs"] = lvol.npcs
+
     if cl.is_qos_set() and lvol.lvol_priority_class > 0:
-        lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
+        lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class +1
 
     lvol.bdev_stack = [lvol_dict]
 
@@ -1190,8 +1202,13 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
             size_used = records[0].size_used
+        if lvol.ndcs == 0 and lvol.npcs == 0:
+            cl = db_controller.get_cluster_by_id(cluster_id)
+            mode = f"{cl.distr_ndcs}x{cl.distr_npcs}"
+        else:
+            mode = f"{lvol.ndcs}x{lvol.npcs}"
 
-        data.append({
+        lvol_data = {
             "Id": lvol.uuid,
             "Name": lvol.lvol_name,
             "Size": utils.humanbytes(lvol.size),
@@ -1200,12 +1217,14 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "HA": lvol.ha_type,
             "BlobID": lvol.blobid or "",
             "LVolUUID": lvol.lvol_uuid or "",
-            # "Priority": lvol.lvol_priority_class,
             "Status": lvol.status,
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
-        })
+            "Mode": mode
+        }
+        data.append(lvol_data)
+
     for snap, count in snap_dict.items():
         ref_snap = db_controller.get_snapshot_by_id(snap)
         ref_snap.ref_count = count

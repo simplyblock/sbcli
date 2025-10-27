@@ -1392,6 +1392,16 @@ commands:
                   removed. Please exchange the use of `--pvc_name` with `--pvc-name`.
             dest: pvc_name
             type: str
+          - name: "--data-chunks-per-stripe"
+            help: "Erasure coding schema parameter k (distributed raid), default: 1"
+            dest: ndcs
+            type: int
+            default: 0
+          - name: "--parity-chunks-per-stripe"
+            help: "Erasure coding schema parameter n (distributed raid), default: 1"
+            dest: npcs
+            type: int
+            default: 0
       - name: qos-set
         help: "Changes QoS settings for an active logical volume"
         arguments:
