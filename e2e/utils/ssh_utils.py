@@ -2002,10 +2002,10 @@ class SshUtils:
             if is_local:
                 # --- local host check ---
                 if subprocess.run(install_check_cmd, shell=True).returncode != 0:
-                    self.logger.info(f"[HOST] nfs-utils not found — installing...")
+                    self.logger.info("[HOST] nfs-utils not found — installing...")
                     subprocess.run(install_cmd, shell=True, check=True)
                 else:
-                    self.logger.info(f"[HOST] nfs-utils already installed.")
+                    self.logger.info("[HOST] nfs-utils already installed.")
 
                 result = subprocess.run(check_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 if result.returncode != 0:

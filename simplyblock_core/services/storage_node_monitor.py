@@ -362,10 +362,11 @@ while True:
                         try:
                             ret = snode.rpc_client(timeout=10).get_version()
                             if not ret:
-                                logger.debug(f"False RPC response, adding node to auto restart")
+                                logger.debug("False RPC response, adding node to auto restart")
                                 tasks_controller.add_node_to_auto_restart(snode)
-                        except:
-                            logger.debug(f"Timeout to get RPC response, skipping restart")
+                        except Exception as e:
+                            logger.debug("Timeout to get RPC response, skipping restart")
+                            logger.error(e)
 
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
