@@ -1,13 +1,14 @@
 # coding=utf-8
 import datetime
 import json
+import os
 import logging
 import uuid
 import time
 import requests
 
 import docker
-from kubernetes import client as k8s_client, config
+from kubernetes import client as k8s_client
 
 
 from simplyblock_core import utils, scripts, constants
@@ -16,6 +17,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
 
 logger = logging.getLogger()
+
 
 
 def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode):
@@ -162,7 +164,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             scripts.set_db_config_double()
             
         elif mode == "kubernetes":
-            config.load_kube_config()
+            utils.load_kube_config_with_fallback()
             v1 = k8s_client.CoreV1Api()
             apps_v1 = k8s_client.AppsV1Api()
             api_cr = k8s_client.CustomObjectsApi()
@@ -197,7 +199,9 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             else:
                 raise TimeoutError("MongoDB pods did not become ready in time.")
 
-            graylog_patch = utils.build_graylog_patch(cluster_secret)
+            monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+            
+            graylog_patch = utils.build_graylog_patch(monitoring_secret)
             
             response = apps_v1.patch_namespaced_deployment(
                 name=constants.GRAYLOG_STATEFULSET_NAME,
@@ -292,7 +296,7 @@ def remove_mgmt_node(uuid):
         node_docker.swarm.leave(force=True)
 
     elif snode.mode == "kubernetes":
-        config.load_kube_config()
+        utils.load_kube_config_with_fallback()
         
     mgmt_events.mgmt_remove(snode)
     logging.info("done")

@@ -106,6 +106,7 @@ def add_lvol():
         | namespace       | the LVol namespace for k8s
         | uid             | use this UUID for this LVol
         | pvc_name        | set PVC name for this LVol
+        | fabric          | Lvol fabric
     """""
 
     cl_data = request.get_json()
@@ -144,6 +145,8 @@ def add_lvol():
 
     ha_type = utils.get_value_or_default(cl_data, "ha_type", "default")
 
+    fabric = utils.get_value_or_default(cl_data, "fabric", "TCP")
+
     crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
     crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
     host_id = utils.get_value_or_default(cl_data, "host_id", None)
@@ -154,6 +157,7 @@ def add_lvol():
     max_namespace_per_subsys = utils.get_value_or_default(cl_data, "max_namespace_per_subsys", 1)
     ndcs = utils.get_value_or_default(cl_data, "ndcs", 0)
     npcs = utils.get_value_or_default(cl_data, "npcs", 0)
+    fabric = utils.get_value_or_default(cl_data, "fabric", "tcp")
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -182,6 +186,7 @@ def add_lvol():
         max_namespace_per_subsys=max_namespace_per_subsys,
         ndcs=ndcs,
         npcs=npcs,
+        fabric=fabric
     )
 
     return utils.get_response(ret, error, http_code=400)

@@ -10,7 +10,9 @@ from typing import List, Optional, Union
 
 import cpuinfo
 import docker
+import psutil
 import requests
+import socket
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
 from pydantic import BaseModel, Field
@@ -240,6 +242,7 @@ def spdk_process_kill(query: utils.RPCPortParams):
     })}}},
 })
 def spdk_process_is_up(query: utils.RPCPortParams):
+    logger.debug("function:spdk_process_is_up start")
     try:
         node_docker = get_docker_client()
         for cont in node_docker.containers.list(all=True):
@@ -247,12 +250,14 @@ def spdk_process_is_up(query: utils.RPCPortParams):
             if cont.attrs['Name'] == f"/spdk_{query.rpc_port}":
                 status = cont.attrs['State']["Status"]
                 is_running = cont.attrs['State']["Running"]
+                logger.debug("function:spdk_process_is_up end")
                 if is_running:
                     return utils.get_response(True)
                 else:
                     return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
     except Exception as e:
         logger.error(e)
+    logger.debug("function:spdk_process_is_up end")
     return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
 
 
@@ -310,15 +315,18 @@ def delete_cluster_id():
 
 
 def get_node_lsblk():
+    logger.debug("function:get_node_lsblk start")
     out, err, rc = shell_utils.run_command("lsblk -J")
     if rc != 0:
         logger.error(err)
         return []
     data = json.loads(out)
+    logger.debug("function:get_node_lsblk end")
     return data
 
 
 def get_nodes_config():
+    logger.debug("function:get_nodes_config start")
     file_path = constants.NODES_CONFIG_FILE
     try:
         # Open and read the JSON file
@@ -335,6 +343,7 @@ def get_nodes_config():
         for i in range(len(nodes_config.get("nodes"))):
             if not core_utils.validate_node_config(nodes_config.get("nodes")[i]):
                 return {}
+        logger.debug("function:get_nodes_config end")
         return nodes_config
 
     except FileNotFoundError:
@@ -352,7 +361,8 @@ def get_nodes_config():
     })}}},
 })
 def get_info():
-    return utils.get_response({
+    logger.debug("function:get_info start")
+    resp = utils.get_response({
         "cluster_id": get_cluster_id(),
 
         "hostname": HOSTNAME,
@@ -378,6 +388,8 @@ def get_info():
         "lsblk": get_node_lsblk(),
         "nodes_config": get_nodes_config(),
     })
+    logger.debug("function:get_info end")
+    return resp
 
 
 class _JoinSwarmParams(BaseModel):
@@ -566,4 +578,55 @@ def set_hugepages():
         num_pages = math.ceil(huge_page_memory / (2048 * 1024))
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
+    return utils.get_response(True)
+
+class NicQuery(BaseModel):
+    nic: str
+
+@api.get('/ifc_is_roce', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def ifc_is_roce(query: NicQuery):
+    try:
+        nic = query.nic
+        rdma_path = "/sys/class/infiniband/"
+        if not os.path.exists(rdma_path):
+            return utils.get_response(False)
+
+        for rdma_dev in os.listdir(rdma_path):
+            net_path = os.path.join(rdma_path, rdma_dev, "device/net")
+            if os.path.exists(net_path):
+                for iface in os.listdir(net_path):
+                    if iface == nic:
+                        return utils.get_response(True)
+    except Exception as e:
+        logger.error(e)
+    return utils.get_response(False)
+
+
+@api.get('/ifc_is_tcp', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def ifc_is_tcp(query: NicQuery):
+    try:
+        nic = query.nic
+        addrs = psutil.net_if_addrs().get(nic, [])
+        for addr in addrs:
+            if addr.family == socket.AF_INET:
+                return utils.get_response(True)
+    except Exception as e:
+        logger.error(e)
+    return utils.get_response(False)
+
+
+@api.get('/check', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def is_alive():
     return utils.get_response(True)

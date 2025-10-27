@@ -10,12 +10,12 @@ import textwrap
 import typing as t
 
 import docker
-from kubernetes import client as k8s_client, config as k8s_config
+from kubernetes import client as k8s_client
 import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import cluster_events, device_controller
+from simplyblock_core.controllers import cluster_events, device_controller, qos_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -221,15 +221,17 @@ def parse_protocols(input_str: str):
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
-                   enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, enable_qos, disable_monitoring, strict_node_anti_affinity, name,
+                   enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
-    if ingress_host_source == "dns":
+    if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
         if not dns_name:
-            raise ValueError("--dns-name is required when --ingress-host-source is dns")
+            raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
+
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
 
     logger.info("Installing dependencies...")
     scripts.install_deps(mode)
@@ -295,7 +297,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.cli_pass = cli_pass
     cluster.secret = utils.generate_string(20)
-    cluster.grafana_secret = cluster.secret
+    cluster.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
@@ -315,15 +317,16 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.is_single_node = is_single_node
     if grafana_endpoint:
         cluster.grafana_endpoint = grafana_endpoint
-    else:
+    elif ingress_host_source == "hostip":
         cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
+    else:
+        cluster.grafana_endpoint = f"http://{dns_name}/grafana"
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
 
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
-    cluster.enable_qos = enable_qos
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
@@ -342,42 +345,33 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring DB...")
         scripts.set_db_config_single()
         logger.info("Configuring DB > Done")
+        monitoring_secret = cluster.secret
 
     elif mode == "kubernetes":
-        if not contact_point:
-            contact_point = 'https://hooks.slack.com/services/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'
-
-        if not tls_secret:
-            tls_secret = ''
-
-        if not dns_name:
-            dns_name= ''
-
-        logger.info("Deploying helm stack ...")
-        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        scripts.deploy_k8s_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, contact_point, constants.K8S_NAMESPACE,
-                                str(disable_monitoring), tls_secret, ingress_host_source, dns_name)
-        logger.info("Deploying helm stack > Done")
-
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
 
-        db_connection = f"{fdb_cluster_string}@{dev_ip}:4501"
-        scripts.set_db_config(db_connection)
+        db_connection = fdb_cluster_string
 
     if not disable_monitoring:
-        _set_max_result_window(dev_ip)
+        if ingress_host_source == "hostip":
+            dns_name = dev_ip
 
-        _add_graylog_input(dev_ip, cluster.secret)
+        _set_max_result_window(dns_name)
 
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        _add_graylog_input(dns_name, monitoring_secret)
+
+        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
+        if mode == "kubernetes":
+            utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     cluster.db_connection = db_connection
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
-    db_controller = DBController()
+
     cluster.write_to_db(db_controller.kv_store)
+
+    qos_controller.add_class("Default", 100, cluster.get_id())
 
     cluster_events.cluster_create(cluster)
 
@@ -443,8 +437,8 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, enable_qos, strict_node_anti_affinity, is_single_node, name) -> str:
-    db_controller = DBController()
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp") -> str:
+
     clusters = db_controller.get_clusters()
     if not clusters:
         raise ValueError("No previous clusters found!")
@@ -452,6 +446,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
@@ -464,7 +460,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     default_cluster = clusters[0]
     cluster.db_connection = default_cluster.db_connection
-    cluster.grafana_secret = default_cluster.grafana_secret
+    cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
 
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
@@ -479,7 +475,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
-    cluster.enable_qos = enable_qos
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
@@ -488,17 +483,20 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cluster.prov_cap_warn = prov_cap_warn
     if prov_cap_crit and prov_cap_crit > 0:
         cluster.prov_cap_crit = prov_cap_crit
+    protocols = parse_protocols(fabric)
+    cluster.fabric_tcp = protocols["tcp"]
+    cluster.fabric_rdma = protocols["rdma"]
 
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
+    qos_controller.add_class("Default", 100, cluster.get_id())
 
     return cluster.get_id()
 
 
 def set_name(cl_id, name) -> Cluster:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
     old_name = cluster.cluster_name
     cluster.cluster_name = name
@@ -508,7 +506,6 @@ def set_name(cl_id, name) -> Cluster:
 
 
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
@@ -629,6 +626,24 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 set_cluster_status(cl_id, ols_status)
                 raise ValueError("Failed to activate cluster")
 
+    # reorder qos classes ids
+    qos_classes = db_controller.get_qos(cl_id)
+    index = 1
+    for qos_class in qos_classes:
+        if qos_class.class_name == "Default":
+            qos_class.class_id = 0
+        else:
+            qos_class.class_id = index
+            index += 1
+        qos_class.write_to_db()
+
+    if cluster.is_qos_set():
+        for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+            if node.status == StorageNode.STATUS_ONLINE:
+                logger.info(f"Setting Alcemls QOS weights on node {node.get_id()}")
+                ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
+                if not ret:
+                    logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
@@ -641,7 +656,6 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
 
 
 def cluster_expand(cl_id) -> None:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_IN_EXPANSION,
@@ -692,7 +706,6 @@ def cluster_expand(cl_id) -> None:
 
 
 def get_cluster_status(cl_id) -> t.List[dict]:
-    db_controller = DBController()
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     return sorted([
@@ -712,7 +725,6 @@ def get_cluster_status(cl_id) -> t.List[dict]:
 
 
 def set_cluster_status(cl_id, status) -> None:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status == status:
@@ -725,7 +737,6 @@ def set_cluster_status(cl_id, status) -> None:
 
 
 def cluster_set_read_only(cl_id) -> None:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status == Cluster.STATUS_READONLY:
@@ -744,7 +755,6 @@ def cluster_set_read_only(cl_id) -> None:
 
 
 def cluster_set_active(cl_id) -> None:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
@@ -764,7 +774,6 @@ def cluster_set_active(cl_id) -> None:
 
 
 def list() -> t.List[dict]:
-    db_controller = DBController()
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()
 
@@ -789,7 +798,6 @@ def list() -> t.List[dict]:
 
 
 def list_all_info(cluster_id) -> str:
-    db_controller = DBController()
     cl = db_controller.get_cluster_by_id(cluster_id)
 
     mt = db_controller.get_mgmt_nodes()
@@ -994,7 +1002,6 @@ def list_all_info(cluster_id) -> str:
 
 
 def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
 
     if history:
@@ -1019,7 +1026,6 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
 
 
 def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> t.List[dict]:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)
 
     if history_string:
@@ -1072,20 +1078,15 @@ def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes
 
 
 def get_ssh_pass(cluster_id) -> str:
-    db_controller = DBController()
     return db_controller.get_cluster_by_id(cluster_id).cli_pass
 
 
 def get_secret(cluster_id) -> str:
-    db_controller = DBController()
     return db_controller.get_cluster_by_id(cluster_id).secret
 
 
 def set_secret(cluster_id, secret) -> None:
-    db_controller = DBController()
-
     cluster = db_controller.get_cluster_by_id(cluster_id)
-
     secret = secret.strip()
     if len(secret) < 20:
         raise ValueError("Secret must be at least 20 char")
@@ -1096,8 +1097,16 @@ def set_secret(cluster_id, secret) -> None:
     cluster.write_to_db(db_controller.kv_store)
 
 
-def change_cluster_name(cluster_id, new_name) -> None:
+def set_fabric(cluster_id, fabric) -> None:
     db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    protocols = parse_protocols(fabric)
+    cluster.fabric_tcp = protocols["tcp"]
+    cluster.fabric_rdma = protocols["rdma"]
+    cluster.write_to_db(db_controller.kv_store)
+
+
+def change_cluster_name(cluster_id, new_name) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)
     old_name = cluster.cluster_name
     cluster.cluster_name = new_name
@@ -1107,7 +1116,6 @@ def change_cluster_name(cluster_id, new_name) -> None:
 
 
 def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
-    db_controller = DBController()
     db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
@@ -1143,11 +1151,10 @@ def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
 
 
 def get_cluster(cl_id) -> dict:
-    return DBController().get_cluster_by_id(cl_id).get_clean_dict()
+    return db_controller.get_cluster_by_id(cl_id).get_clean_dict()
 
 
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
     sbcli=constants.SIMPLY_BLOCK_CLI_NAME
@@ -1187,7 +1194,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         logger.info("Done updating mgmt cluster")
 
     elif cluster.mode == "kubernetes":
-        k8s_config.load_kube_config()
+        utils.load_kube_config_with_fallback()
         apps_v1 = k8s_client.AppsV1Api()
 
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
@@ -1266,7 +1273,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
 
 
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
-    db_controller = DBController()
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
@@ -1280,7 +1286,6 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
 
 
 def cluster_grace_shutdown(cl_id) -> None:
-    db_controller = DBController()
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
@@ -1293,7 +1298,6 @@ def cluster_grace_shutdown(cl_id) -> None:
 
 
 def delete_cluster(cl_id) -> None:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
@@ -1313,7 +1317,6 @@ def delete_cluster(cl_id) -> None:
     logger.info("Done")
 
 def set(cl_id, attr, value) -> None:
-    db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if attr not in cluster.get_attrs_map():

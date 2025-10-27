@@ -192,7 +192,7 @@ class TestSingleNodeOutage(TestClusterBase):
                 self.ssh_obj.restart_docker_logging(
                     node_ip=node,
                     containers=self.container_nodes[node],
-                    log_dir=self.docker_logs_path,
+                    log_dir=os.path.join(self.docker_logs_path, node),
                     test_name=self.test_name
                 )
         else:
@@ -436,7 +436,7 @@ class TestHASingleNodeOutage(TestClusterBase):
                     self.ssh_obj.restart_docker_logging(
                         node_ip=node,
                         containers=self.container_nodes[node],
-                        log_dir=self.docker_logs_path,
+                        log_dir=os.path.join(self.docker_logs_path, node),
                         test_name=self.test_name
                     )
             else:
@@ -465,7 +465,7 @@ class TestHASingleNodeOutage(TestClusterBase):
             lvol_name = f"LVOL_{i}"
 
             self.common_utils.validate_fio_test(node=self.client_machines[0],
-                                                log_file=self.log_path+f"_{lvol_name}")
+                                                log_file=self.log_path+f"/{lvol_name}.log")
 
             total_fio_runtime = end_time - self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]
             self.logger.info(f"FIO Run Time: {total_fio_runtime}")
@@ -478,8 +478,9 @@ class TestHASingleNodeOutage(TestClusterBase):
 
     def add_lvol_and_run_fio(self, lvol_name):
         self.lvol_name = lvol_name
-        mount_path = self.mount_path+f"_{lvol_name}"
-        log_path = self.log_path+f"_{lvol_name}"
+
+        mount_path = self.mount_path + f"_{lvol_name}"
+        log_path = self.log_path + f"/{lvol_name}.log"
 
         host_id = self.sbcli_utils.get_node_without_lvols()
 
@@ -518,15 +519,13 @@ class TestHASingleNodeOutage(TestClusterBase):
         self.ssh_obj.mount_path(node=self.client_machines[0],
                                 device=disk_use,
                                 mount_path=mount_path)
-        
-        log_path = f"{os.path.dirname(self.mount_path)}"
 
         fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test,
                                        args=(self.client_machines[0], None, mount_path, log_path,),
                                        kwargs={"name": f"fio_run_{lvol_name}",
                                                "runtime": self.fio_runtime,
                                                "log_avg_msec": 1000,
-                                               "iolog_file": f"{log_path}/{self.lvol_name}_fio_iolog",
+                                               "iolog_file": f"{self.log_path}/{self.lvol_name}_fio_iolog",
                                                "debug": self.fio_debug})
         fio_thread1.start()
         self.fio_threads.append(fio_thread1)

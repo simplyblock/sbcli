@@ -39,7 +39,6 @@ class ClusterParams(BaseModel):
     qpair_count: int = 256
     max_queue_size: int = 128
     inflight_io_threshold: int = 4
-    enable_qos: bool = False
     enable_node_affinity: bool = False
     strict_node_anti_affinity: bool = False
 

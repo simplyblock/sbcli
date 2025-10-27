@@ -183,7 +183,7 @@ def add(lvol_id, snapshot_name):
                 logger.info(f"Removing snapshot from {primary_node.get_id()}")
                 rpc_client = RPCClient(
                     primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
-                ret = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
+                ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
                 if not ret:
                     logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 return False, msg
@@ -200,6 +200,7 @@ def add(lvol_id, snapshot_name):
     snap.snap_bdev = f"{lvol.lvs_name}/{snap_bdev_name}"
     snap.created_at = int(time.time())
     snap.lvol = lvol
+    snap.fabric = lvol.fabric
     snap.vuid = snap_vuid
     snap.status = SnapShot.STATUS_ONLINE
 
@@ -277,7 +278,7 @@ def delete(snapshot_uuid, force_delete=False):
                 snode.rpc_username,
                 snode.rpc_password)
 
-            ret = rpc_client.delete_lvol(snap.snap_bdev)
+            ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 if not force_delete:
@@ -333,7 +334,7 @@ def delete(snapshot_uuid, force_delete=False):
         rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
                                    primary_node.rpc_password)
 
-        ret = rpc_client.delete_lvol(snap.snap_bdev)
+        ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:
@@ -449,6 +450,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.vuid = snap.lvol.vuid
     lvol.snapshot_name = snap.snap_bdev
     lvol.subsys_port = snap.lvol.subsys_port
+    lvol.fabric = snap.fabric
 
     if pvc_name:
         lvol.pvc_name = pvc_name

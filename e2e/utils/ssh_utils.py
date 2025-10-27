@@ -347,8 +347,9 @@ class SshUtils:
             node (str): Node to perform ssh operation on
             device (str): Device path
         """
-        command = f"sudo umount {device}"
-        self.exec_command(node, command)
+        if "/mnt/nfs_share" not in device:
+            command = f"sudo umount {device}"
+            self.exec_command(node, command)
     
     def get_devices(self, node):
         """Get devices on a machine
@@ -396,11 +397,12 @@ class SshUtils:
 
         iolog_base = kwargs.get("iolog_file", None)
         iolog_opt = f"--write_iolog={iolog_base}" if iolog_base else ""
+        verify_md5 = "--verify=md5" if iodepth == 1 else ""
 
         command = (
             f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
-            f"{time_based} --runtime={runtime} --rw={rw} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
+            f"{time_based} --runtime={runtime} --rw={rw} --max_latency=30s --bs={bs} --size={size} --rwmixread={rwmixread} "
+            f"{verify_md5} --verify_dump=1 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_avg_msec_opt} {iolog_opt} "
             f"{output_format}{output_file}"
         )
@@ -601,9 +603,11 @@ class SshUtils:
 
     def remove_dir(self, node, dir_path):
         """Remove directory on the node."""
-        cmd = f"sudo rm -rf {dir_path}"
-        output, error = self.exec_command(node=node, command=cmd)
-        return output, error
+        if "/mnt/nfs_share" not in dir_path:
+            cmd = f"sudo rm -rf {dir_path}"
+            output, error = self.exec_command(node=node, command=cmd)
+            return output, error
+        return None, None
 
     def disconnect_nvme(self, node, nqn_grep):
         """Disconnect NVMe device on the node."""
@@ -863,7 +867,7 @@ class SshUtils:
     #             filesystem.append(columns[0])
     #     return filesystem
 
-    def deploy_storage_node(self, node, max_lvol, max_prov_gb, ifname="eth0"):
+    def deploy_storage_node(self, node, max_lvol, max_prov_gb, ifname="eth0", branch='main'):
         """
         Runs 'sn configure' and 'sn deploy' on the node with provided configuration.
 
@@ -873,7 +877,7 @@ class SshUtils:
             max_prov_gb (int): Maximum provision size in GB.
             ifname (str): Mgmt Interface (Default: eth0)
         """
-        cmd = f"pip install {self.base_cmd}"
+        cmd = f"pip install git+https://github.com/simplyblock-io/sbcli.git@{branch}"
         self.exec_command(node=node, command=cmd)
 
         time.sleep(10)
@@ -1052,6 +1056,81 @@ class SshUtils:
 
         except Exception as e:
             raise RuntimeError(f"Failed to start Docker logging: {e}")
+
+    def collect_final_docker_logs_simple(self, nodes, log_dir):
+        """
+        End-of-run: collect final docker logs from all containers on each node.
+        - Auto-discovers containers via `docker ps -a`.
+        - Writes logs to: <log_dir>/<node_ip>/containers-final-<ts>/
+        - Captures: docker ps -a, docker logs, docker inspect (per container).
+        """
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        def _safe(name: str) -> str:
+            # Keep it filesystem friendly
+            return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "unnamed"
+
+        for node in nodes:
+            base_dir = os.path.join(log_dir, f"{node}", f"containers-final-{ts}")
+            # Ensure base dir exists on the remote
+            self.exec_command(node, f"bash -lc \"mkdir -p '{base_dir}' && chmod -R 777 '{base_dir}'\"")
+
+            # Always save a full container listing for later forensics
+            self.exec_command(
+                node,
+                f"bash -lc \"docker ps -a > '{base_dir}/docker_ps_a_{_safe(node)}_{ts}.txt' 2>&1 || true\""
+            )
+
+            # Discover container names (include exited)
+            out, _ = self.exec_command(node, "bash -lc \"docker ps -a --format '{{{{.Names}}}}' 2>/dev/null || true\"")
+            containers = [c.strip() for c in (out or "").splitlines() if c.strip()]
+
+            if not containers:
+                self.exec_command(
+                    node,
+                    f"bash -lc \"echo 'No containers found' > '{base_dir}/_NO_CONTAINERS_{_safe(node)}_{ts}.txt'\""
+                )
+                continue
+
+            for c in containers:
+                sc = _safe(c)
+                cont_dir = f"{base_dir}/{sc}"
+                self.exec_command(node, f"bash -lc \"mkdir -p '{cont_dir}'\"")
+
+                # docker logs (timestamps; non-follow). Use a tmp file then mv for atomicity.
+                self.exec_command(
+                    node,
+                    "bash -lc "
+                    f"\"docker logs --timestamps {c} > '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' 2>&1 || true; "
+                    f"mv -f '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' '{cont_dir}/docker_logs_{sc}_{ts}.log' || true\""
+                )
+
+                # docker inspect (JSON)
+                self.exec_command(
+                    node,
+                    "bash -lc "
+                    f"\"docker inspect {c} > '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' 2>&1 || true; "
+                    f"mv -f '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' '{cont_dir}/docker_inspect_{sc}_{ts}.json' || true\""
+                )
+
+                # Optional extras that often help:
+                # docker top (may fail on exited containers, so '|| true')
+                self.exec_command(
+                    node,
+                    f"bash -lc \"docker top {c} > '{cont_dir}/docker_top_{sc}_{ts}.txt' 2>&1 || true\""
+                )
+
+                # container fs usage (size); harmless if unsupported
+                self.exec_command(
+                    node,
+                    f"bash -lc \"docker inspect --size {c} > '{cont_dir}/docker_inspect_size_{sc}_{ts}.json' 2>&1 || true\""
+                )
+
+            # For convenience, also dump names list used
+            self.exec_command(
+                node,
+                f"bash -lc \"printf '%s\\n' {' '.join([repr(x) for x in containers])} > '{base_dir}/_containers_list_{_safe(node)}_{ts}.txt'\""
+            )
 
 
     def restart_docker_logging(self, node_ip, containers, log_dir, test_name):
@@ -1341,7 +1420,7 @@ class SshUtils:
             self.logger.error(f"Failed to dump lvstore on {node_ip}: {e}")
             return None
         
-    def fetch_distrib_logs(self, storage_node_ip, storage_node_id):
+    def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path):
         """
         Fetch distrib names using bdev_get_bdevs RPC, generate and execute RPC JSON,
         and copy logs from SPDK container.
@@ -1377,7 +1456,12 @@ class SshUtils:
         # self.logger.info(f"Saved raw bdev_get_bdevs output to {raw_output_path}")
 
         timestamp = datetime.now().strftime("%d-%m-%y-%H-%M-%S")
-        remote_output_path = f"{Path.home()}/bdev_output_{storage_node_ip}_{timestamp}.json"
+        base_path = f"{logs_path}/{storage_node_ip}/distrib_bdev_logs/"
+
+        cmd = f"sudo mkdir -p '{base_path}'"
+        self.exec_command(storage_node_ip, cmd)
+
+        remote_output_path = f"bdev_output_{storage_node_ip}_{timestamp}.json"
 
         # 1. Run to capture output into a variable (for parsing)
         bdev_cmd = f"sudo docker exec {container_name} bash -c 'python spdk/scripts/rpc.py bdev_get_bdevs'"
@@ -1451,7 +1535,7 @@ class SshUtils:
                 continue
 
             log_file_path = f"/tmp/{log_file_name}"
-            local_log_path = f"{Path.home()}/{log_file_name}_{storage_node_ip}_{timestamp}"
+            local_log_path = f"{base_path}/{log_file_name}_{storage_node_ip}_{timestamp}"
             copy_log_cmd = f"sudo docker cp {container_name}:{log_file_path} {local_log_path}"
             self.exec_command(storage_node_ip, copy_log_cmd)
 
@@ -1896,6 +1980,108 @@ class SshUtils:
     def make_node_primary(self, node_ip, node_id):
         make_primary_cmd = f"{self.base_cmd} --dev -d storage-node make-primary {node_id}"
         self.exec_command(node_ip, make_primary_cmd)
+
+    def ensure_nfs_mounted(self, node, nfs_server, nfs_path, mount_point, is_local = False):
+        """
+        Ensures that the NFS share is mounted on the given node (or locally if is_local=True).
+        If not mounted, it creates the mount point and mounts automatically.
+
+        Args:
+            node (str): Node IP or name (ignored if is_local=True)
+            nfs_server (str): NFS server IP (e.g., 10.10.10.140)
+            nfs_path (str): Exported NFS path (e.g., /srv/nfs_share)
+            mount_point (str): Local mount directory (e.g., /mnt/nfs_share)
+            is_local (bool): If True, runs commands on the host itself
+        """
+        check_cmd = f"mount | grep -w '{mount_point}'"
+        mount_cmd = f"sudo mkdir -p {mount_point} && sudo mount -t nfs {nfs_server}:{nfs_path} {mount_point}"
+        install_check_cmd = "dnf list installed nfs-util"
+        install_cmd = "sudo dnf install -y nfs-utils"
+
+        try:
+            if is_local:
+                # --- local host check ---
+                if subprocess.run(install_check_cmd, shell=True).returncode != 0:
+                    self.logger.info("[HOST] nfs-utils not found — installing...")
+                    subprocess.run(install_cmd, shell=True, check=True)
+                else:
+                    self.logger.info("[HOST] nfs-utils already installed.")
+
+                result = subprocess.run(check_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode != 0:
+                    self.logger.info(f"[HOST] NFS not mounted — mounting {nfs_server}:{nfs_path}...")
+                    subprocess.run(mount_cmd, shell=True, check=True)
+                else:
+                    self.logger.info(f"[HOST] NFS already mounted at {mount_point}")
+            else:
+                # --- remote node check ---
+                pkg_check, error = self.exec_command(node, install_check_cmd)
+                if pkg_check is None or pkg_check.strip() == "":
+                    self.logger.info(f"[{node}] Installing nfs-utils...")
+                    self.exec_command(node, install_cmd)
+                else:
+                    self.logger.info(f"[{node}] nfs-utils already installed.")
+
+                result, _ = self.exec_command(node, check_cmd)
+                if not result.strip():
+                    self.logger.info(f"[{node}] NFS not mounted — mounting now...")
+                    self.exec_command(node, mount_cmd)
+                else:
+                    self.logger.info(f"[{node}] NFS already mounted at {mount_point}")
+        except Exception as e:
+            msg = f"[{node if not is_local else 'HOST'}] Error while ensuring NFS mount: {e}"
+            if is_local:
+                self.logger.info(msg)
+            else:
+                self.logger.error(msg)
+    
+    
+    def copy_logs_and_configs_to_nfs(self, logs_path, storage_nodes):
+        """
+        Copies host ./logs folder and /etc/simplyblock folders from storage nodes
+        into a new run-specific folder under /mnt/nfs_share.
+        """
+
+        # --- 1) Copy host logs ---
+        print(f"[HOST] Copying ./logs → {logs_path}/host-logs")
+        subprocess.run(["sudo", "mkdir", "-p", f"{logs_path}/host-logs"], check=True)
+        subprocess.run(["sudo", "cp", "-r", "./logs/.", f"{logs_path}/host-logs/"], check=False)
+
+        # --- 2) Copy /etc/simplyblock from each storage node ---
+        for node in storage_nodes:
+            node_folder = os.path.join(logs_path, node)
+            print(f"[{node}] Copying /etc/simplyblock → {node_folder}/etc-simplyblock")
+            cmd = (
+                f"sudo mkdir -p '{node_folder}/etc-simplyblock' && "
+                f"sudo cp -r /etc/simplyblock/* '{node_folder}/etc-simplyblock/' || true"
+            )
+            self.exec_command(node, cmd)
+
+        print(f"\n All logs and /etc/simplyblock configs copied to: {logs_path}\n")
+
+    def add_storage_pool(self, node, pool_name, cluster_id, 
+                         max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
+        """Adds a new storage pool using sbcli-dev CLI command (skips zero-value params)"""
+        cmd_parts = [f"{self.base_cmd} -d pool add"]
+
+        # Append only non-zero QoS parameters
+        if max_rw_iops:
+            cmd_parts.append(f"--max-rw-iops {max_rw_iops}")
+        if max_rw_mbytes:
+            cmd_parts.append(f"--max-rw-mbytes {max_rw_mbytes}")
+        if max_r_mbytes:
+            cmd_parts.append(f"--max-r-mbytes {max_r_mbytes}")
+        if max_w_mbytes:
+            cmd_parts.append(f"--max-w-mbytes {max_w_mbytes}")
+
+        # Append required positional arguments
+        cmd_parts.extend([pool_name, cluster_id])
+
+        # Join all parts into a single command
+        cmd = " ".join(cmd_parts)
+
+        output, error = self.exec_command(node=node, command=cmd)
+        return output, error
 
 
 class RunnerK8sLog:

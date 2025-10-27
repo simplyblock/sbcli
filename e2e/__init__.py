@@ -13,6 +13,12 @@ from e2e_tests.single_node_reboot import (
 from e2e_tests.single_node_multi_fio_perf import (
     TestLvolFioNpcs0, TestLvolFioNpcs1, TestLvolFioNpcs2, TestLvolFioNpcsCustom
 )
+
+from e2e_tests.single_node_qos import (
+    TestLvolFioQOSBW,
+    TestLvolFioQOSIOPS
+)
+
 from e2e_tests.single_node_resize import TestSingleNodeResizeLvolCone
 
 from e2e_tests.multi_lvol_run_fio import TestManyLvolSameNode
@@ -46,6 +52,9 @@ from stress_test.lvol_snap_clone_fio_failover import(
 from stress_test.continuous_failover_ha import RandomFailoverTest
 from stress_test.continuous_failover_ha_multi_client import RandomMultiClientFailoverTest
 from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
+from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailoverTest
+from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
+from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade
@@ -66,6 +75,8 @@ ALL_TESTS = [
     TestRebootNodeHost,
     TestMgmtNodeReboot,
     FioWorkloadTest,
+    TestLvolFioQOSBW,
+    TestLvolFioQOSIOPS,
     TestMultiFioSnapshotDowntime,
     TestManyLvolSameNode,
     TestBatchLVOLsLimit,
@@ -85,6 +96,8 @@ def get_all_tests(custom=True, ha_test=False):
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
+        TestLvolFioQOSBW,
+        TestLvolFioQOSIOPS,
         TestSingleNodeOutage,
         # TestSingleNodeReboot,
         # TestHASingleNodeReboot,
@@ -131,6 +144,9 @@ def get_stress_tests():
         RandomFailoverTest,
         RandomMultiClientFailoverTest,
         RandomMultiClientMultiFailoverTest,
+        RandomMultiGeometryFailoverTest,
+        RandomMultiClient2NodeFailoverTest,
+        RandomRDMAFailoverTest,
     ]
     return tests
 

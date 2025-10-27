@@ -127,7 +127,9 @@ def main():
             test_obj.fetch_all_nodes_distrib_log()
             if i == (len(test_class_run) - 1):
                 test_obj.collect_management_details()
-            # test_obj.teardown()
+            all_nodes = test_obj._get_all_nodes()
+            test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
+            test_obj.teardown(delete_lvols=False, close_ssh=True)
             # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
@@ -277,12 +279,8 @@ def check_for_dumps():
         if "core.react" in files:
             core_exist = True
             break
-
-    for node, ssh in ssh_obj.ssh_connections.items():
-        logger.info(f"Closing node ssh connection for {node}")
-        ssh.close()
+        
     return core_exist
-
 
 logger = setup_logger(__name__)
 main()

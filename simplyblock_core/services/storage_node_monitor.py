@@ -63,7 +63,7 @@ def get_next_cluster_status(cluster_id):
         node_online_devices = 0
         node_offline_devices = 0
 
-        if node.status == StorageNode.STATUS_IN_CREATION:
+        if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED]:
             continue
 
         if node.status == StorageNode.STATUS_ONLINE:
@@ -109,7 +109,7 @@ def get_next_cluster_status(cluster_id):
     # npcs k = 1
     n = cluster.distr_ndcs
     k = cluster.distr_npcs
-   
+
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
     if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n+k)):
         return Cluster.STATUS_DEGRADED
@@ -122,12 +122,6 @@ def get_next_cluster_status(cluster_id):
 
 
 def update_cluster_status(cluster_id):
-    cluster = db.get_cluster_by_id(cluster_id)
-    current_cluster_status = cluster.status
-    logger.info("cluster_status: %s", current_cluster_status)
-    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
-        return
-
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
 
@@ -140,6 +134,11 @@ def update_cluster_status(cluster_id):
     cluster = db.get_cluster_by_id(cluster_id)
     cluster.is_re_balancing = task_pending  > 0
     cluster.write_to_db()
+
+    current_cluster_status = cluster.status
+    logger.info("cluster_status: %s", current_cluster_status)
+    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
+        return
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
     # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
@@ -213,18 +212,18 @@ def set_node_offline(node, set_devs_offline=False):
         # set node unavailable
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
 
-        if set_devs_offline:
-            # set devices unavailable
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                    device_controller.device_set_unavailable(dev.get_id())
+        # if set_devs_offline:
+        #     # set devices unavailable
+        #     for dev in node.nvme_devices:
+        #         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+        #             device_controller.device_set_unavailable(dev.get_id())
 
         # # set jm dev offline
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
         #     device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
 def set_node_down(node):
-    if node.status != StorageNode.STATUS_DOWN:
+    if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
 
 logger.info("Starting node monitor")
@@ -279,6 +278,15 @@ while True:
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
+            if ping_check and node_api_check and spdk_process and not node_rpc_check:
+                start_time = time.time()
+                while time.time() < start_time + 60:
+                    node_rpc_check = health_controller._check_node_rpc(
+                        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+                    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
+                    if node_rpc_check:
+                        break
+
             node_port_check = True
 
             if spdk_process and node_rpc_check and snode.lvstore_status == "ready":
@@ -313,7 +321,7 @@ while True:
                 if snode.status == StorageNode.STATUS_UNREACHABLE:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
                                           Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
-                        tasks_controller.add_node_to_auto_restart(snode)
+                        # tasks_controller.add_node_to_auto_restart(snode)
                         continue
 
                 if not node_port_check:
@@ -342,17 +350,24 @@ while True:
                 if not ping_check and not node_api_check and not spdk_process:
                     # restart on new node
                     storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_SCHEDULABLE)
-                    # set devices unavailable
-                    for dev in snode.nvme_devices:
-                        if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                            device_controller.device_set_unavailable(dev.get_id())
 
                 elif ping_check and node_api_check and (not spdk_process or not node_rpc_check):
                     # add node to auto restart
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
                                           Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
-                        set_node_offline(snode, set_devs_offline=not spdk_process)
-                        tasks_controller.add_node_to_auto_restart(snode)
+                        if not spdk_process and not node_rpc_check:
+                            logger.info("ping is fine, snodeapi is fine, But no spdk process and no rpc check, "
+                                        "So that we set device offline")
+                        set_node_offline(snode, set_devs_offline=(not spdk_process and not node_rpc_check))
+                        try:
+                            ret = snode.rpc_client(timeout=10).get_version()
+                            if not ret:
+                                logger.debug("False RPC response, adding node to auto restart")
+                                tasks_controller.add_node_to_auto_restart(snode)
+                        except Exception as e:
+                            logger.debug("Timeout to get RPC response, skipping restart")
+                            logger.error(e)
+
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
                         logger.error("Port check failed")

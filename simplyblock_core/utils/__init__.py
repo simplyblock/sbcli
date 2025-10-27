@@ -85,6 +85,7 @@ def get_nvme_info(dev_name):
 
 
 def get_nics_data():
+    logger.debug("function:get_nics_data start")
     out, err, rc = shell_utils.run_command("ip -j address show")
     if rc != 0:
         logger.error(err)
@@ -113,6 +114,7 @@ def get_nics_data():
                 altname_info = iface
                 altname_info["name"] = altname
                 iface_list[altname] = altname_info
+    logger.debug("function:get_nics_data end")
     return iface_list
 
 
@@ -865,8 +867,8 @@ def run_tuned():
             check=True
         )
         logger.info("Successfully run the tuned adm profile")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error running the tuned adm profile: {e}")
+    except subprocess.CalledProcessError:
+        logger.warning("Error running the tuned adm profile")
 
 def run_grubby(core_list):
     isolated_cores = ",".join(map(str, core_list))
@@ -878,8 +880,8 @@ def run_grubby(core_list):
             check=True
         )
         logger.info("Successfully run the grubby command")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error running the grubby command: {e}")
+    except subprocess.CalledProcessError:
+        logger.warning("Error running the grubby command")
 
 def parse_thread_siblings():
     """Parse the thread siblings from the sysfs topology."""
@@ -1856,9 +1858,16 @@ def load_kernel_module(module):
     except subprocess.CalledProcessError as e:
         logger.warning(f"Failed to load {module} module: {e}")
 
+def load_kube_config_with_fallback():
+    """Try local kubeconfig first, then fall back to in-cluster config."""
+    try:
+        config.load_incluster_config()
+    except Exception:
+        config.load_kube_config()
+        
 
 def get_node_name_by_ip(target_ip: str) -> str:
-    config.load_kube_config()
+    load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
     nodes = v1.list_node().items
 
@@ -1871,7 +1880,7 @@ def get_node_name_by_ip(target_ip: str) -> str:
 
 def label_node_as_mgmt_plane(node_name: str):
 
-    config.load_kube_config()
+    load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
     try:
@@ -1912,16 +1921,15 @@ def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[
     return None  
 
 def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
-    config.load_kube_config()
+    load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
     try:
         cm = v1.read_namespaced_config_map(configmap_name, namespace)
         cluster_file = cm.data.get("cluster-file") if cm.data else None
         if cluster_file:
-            prefix = cluster_file.split("@", 1)[0]
-            logger.info(f"fdb cluster connection string: {prefix}")
-            return prefix
+            logger.info(f"fdb cluster connection string: {cluster_file}")
+            return cluster_file
         else:
             raise ValueError("cluster-file not found in ConfigMap")
     except client.exceptions.ApiException as e:
@@ -1954,3 +1962,22 @@ def build_graylog_patch(cluster_secret: str) -> dict:
         }
     }
     return graylog_patch
+
+def patch_prometheus_configmap(username: str, password: str):
+    load_kube_config_with_fallback()
+    v1 = client.CoreV1Api()
+
+    cm = v1.read_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace="simplyblock")
+    prometheus_yml = cm.data.get("prometheus.yml", "")
+
+    prometheus_yml = re.sub(r"username:*", f"username: '{username}'", prometheus_yml)
+    prometheus_yml = re.sub(r"password:*", f"password: '{password}'", prometheus_yml)
+
+    patch_body = {
+        "data": {
+            "prometheus.yml": prometheus_yml
+        }
+    }
+
+    v1.patch_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace="simplyblock", body=patch_body)
+    logger.info("Patched sbcli-simplyblock-prometheus-config ConfigMap with new credentials.")

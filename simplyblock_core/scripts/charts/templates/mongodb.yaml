@@ -14,7 +14,15 @@ spec:
             name: data-volume
           spec:
             accessModes: [ "ReadWriteOnce" ]
-            storageClassName: openebs-jiva
+            storageClassName: openebs-local-hostpath
+            resources:
+              requests:
+                storage: 5Gi
+        - metadata:
+            name: logs-volume
+          spec:
+            accessModes: [ "ReadWriteOnce" ]
+            storageClassName: openebs-local-hostpath
             resources:
               requests:
                 storage: 5Gi
@@ -43,4 +51,4 @@ metadata:
   name: admin-password
 type: Opaque
 stringData:
-  password: {{ .Values.cluster.secret }}
+  password: {{ .Values.monitoring.secret }}

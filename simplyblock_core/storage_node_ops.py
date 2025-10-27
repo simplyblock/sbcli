@@ -2,6 +2,7 @@
 import datetime
 import json
 import os
+import platform
 import socket
 
 import psutil
@@ -20,7 +21,7 @@ from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller, health_controller, tcp_ports_events
+    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.iface import IFace
@@ -236,6 +237,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'nvmf_ip': IP,
         'nvmf_port': snode.nvmf_port,
         'nvmf_multipath': multipath,
+        'node_id': snode.get_id(),
     })
 
 
@@ -321,6 +323,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'nvmf_ip': IP,
         'nvmf_port': snode.nvmf_port,
         'nvmf_multipath': multipath,
+        'node_id': snode.get_id(),
     })
 
 
@@ -351,16 +354,6 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create alceml bdev: {alceml_name}")
         return None
     alceml_bdev = alceml_name
-    qos_bdev = ""
-    # Add qos bdev device
-    if cluster.enable_qos:
-        inflight_io_threshold = cluster.inflight_io_threshold
-        qos_bdev = f"{alceml_name}_qos"
-        ret = rpc_client.qos_vbdev_create(qos_bdev, alceml_name, inflight_io_threshold)
-        if not ret:
-            logger.error(f"Failed to create qos bdev: {qos_bdev}")
-            return None
-        alceml_bdev = qos_bdev
 
     # add pass through
     pt_name = f"{alceml_name}_PT"
@@ -394,7 +387,6 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
 
     nvme.alceml_bdev = alceml_bdev
     nvme.pt_bdev = pt_name
-    nvme.qos_bdev = qos_bdev
     nvme.alceml_name = alceml_name
     nvme.nvmf_nqn = subsystem_nqn
     nvme.nvmf_ip = IP
@@ -961,8 +953,9 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         if not mgmt_info:
             logger.error(f"No management interface with IP found in provided interfaces: {iface_name}")
             return False
-        
+
         mgmt_ip, mgmt_iface = mgmt_info
+        logger.info(f"mgmt interface is {mgmt_iface}")
 
         if not spdk_image:
             spdk_image = constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE
@@ -1007,26 +1000,30 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         active_rdma=False
         fabric_tcp = cluster.fabric_tcp
         fabric_rdma = cluster.fabric_rdma
-        names = node_config.get("nic_ports") or data_nics_list or [mgmt_iface]
-
+        names = data_nics_list or [mgmt_iface]
+        logger.info(f"fabric_tcp is {fabric_tcp}")
+        logger.info(f"fabric_rdma is {fabric_rdma}")
+        logger.debug(f"Data nics ports are: {names}")
         for nic in names:
             device = node_info['network_interface'][nic]
             base_ifc_cfg={
                       'uuid': str(uuid.uuid4()),
-                      'if_name': device['name'],
+                      'if_name': nic,
                       'ip4_address': device['ip'],
                       'status': device['status'],
                        'net_type': device['net_type'],}
-            if fabric_tcp and ifc_is_tcp(nic):
-                cfg = base_ifc_cfg.copy()
-                cfg['trtype'] = "TCP"
-                data_nics.append(IFace(cfg))
-                active_tcp=True
-            if fabric_rdma and ifc_is_roce(nic):
+            if fabric_rdma and snode_api.ifc_is_roce(nic):
                 cfg = base_ifc_cfg.copy()
                 cfg['trtype'] = "RDMA"
                 data_nics.append(IFace(cfg))
                 active_rdma=True
+                if fabric_tcp and snode_api.ifc_is_tcp(nic):
+                    active_tcp = True
+            elif fabric_tcp and snode_api.ifc_is_tcp(nic):
+                cfg = base_ifc_cfg.copy()
+                cfg['trtype'] = "TCP"
+                data_nics.append(IFace(cfg))
+                active_tcp = True
 
         if not active_tcp and not active_rdma:
             logger.error("No usable storage network interface found.")
@@ -1245,6 +1242,14 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
                 logger.error("Failed to prepare cluster devices")
                 return False
 
+        # set qos values if enabled
+        if cluster.is_qos_set():
+            logger.info("Setting Alcemls QOS weights")
+            ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
+            if not ret:
+              logger.error("Failed to set Alcemls QOS")
+              return False
+
         logger.info("Connecting to remote devices")
         remote_devices = _connect_to_remote_devs(snode)
         snode.remote_devices = remote_devices
@@ -1254,23 +1259,6 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
         snode.write_to_db(kv_store)
-
-        # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-        #     logger.warning(
-        #         f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
-        #
-        #     logger.info("Setting node status to Active")
-        #     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
-        #
-        #     logger.info("Make other nodes connect to the node devices")
-        #     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-        #     for node in snodes:
-        #         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-        #             continue
-        #         node.remote_devices = _connect_to_remote_devs(node)
-        #         node.write_to_db(kv_store)
-        #
-        #     continue
 
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         old_status = snode.status
@@ -1532,7 +1520,7 @@ def restart_storage_node(
                 data_nics.append(
                     IFace({
                         'uuid': str(uuid.uuid4()),
-                        'if_name': device['name'],
+                        'if_name': nic,
                         'ip4_address': device['ip'],
                         'status': device['status'],
                         'net_type': device['net_type']}))
@@ -1562,9 +1550,25 @@ def restart_storage_node(
                         snode_api.bind_device_to_spdk(dev['address'])
         else:
             node_ip = None
+    active_tcp=False
+    active_rdma=False
+    fabric_tcp = cluster.fabric_tcp
+    fabric_rdma = cluster.fabric_rdma
+    snode_api = SNodeClient(snode.api_endpoint, timeout=5 * 60, retry=3)
+    for nic in snode.data_nics:
+        if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
+            nic.trtype = "RDMA"
+            active_rdma=True
+            if fabric_tcp and snode_api.ifc_is_tcp(nic["if_name"]):
+                active_tcp = True
+        elif fabric_tcp and snode_api.ifc_is_tcp(nic["if_name"]):
+            nic.trtype = "TCP"
+            active_tcp = True
+    snode.active_tcp=active_tcp
+    snode.active_rdma=active_rdma
+
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
-    snode_api = SNodeClient(snode.api_endpoint, timeout=5 * 60, retry=3)
     node_info, _ = snode_api.info()
     logger.debug(f"Node info: {node_info}")
 
@@ -1740,10 +1744,17 @@ def restart_storage_node(
         return False
 
     qpair = cluster.qpair_count
-    ret = rpc_client.transport_create("TCP", qpair)
-    if not ret:
-        logger.error(f"Failed to create transport TCP with qpair: {qpair}")
-        return False
+    req_cpu_count = len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask))
+    if cluster.fabric_tcp:
+        ret = rpc_client.transport_create("TCP", qpair, 512*(req_cpu_count+1))
+        if not ret:
+            logger.error(f"Failed to create transport TCP with qpair: {qpair}")
+            return False
+    if cluster.fabric_rdma:
+        ret = rpc_client.transport_create("RDMA", qpair, 512*(req_cpu_count+1))
+        if not ret:
+            logger.error(f"Failed to create transport RDMA with qpair: {qpair}")
+            return False
 
     # 7- set jc singleton mask
     if snode.jc_singleton_mask:
@@ -1840,6 +1851,14 @@ def restart_storage_node(
             return False
 
     snode.write_to_db()
+
+    # set qos values if enabled
+    if cluster.is_qos_set():
+        logger.info("Setting Alcemls QOS weights")
+        ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
+        if not ret:
+            logger.error("Failed to set Alcemls QOS")
+            return False
 
     logger.info("Connecting to remote devices")
     try:
@@ -2267,9 +2286,15 @@ def suspend_storage_node(node_id, force=False):
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     online_nodes = 0
+    offline_nodes = 0
     for node in snodes:
         if node.status == node.STATUS_ONLINE:
             online_nodes += 1
+        else:
+            if node.status == StorageNode.STATUS_DOWN and node.get_id() != snode.secondary_node_id:
+                online_nodes += 1
+            else:
+                offline_nodes += 1
 
     if cluster.ha_type == "ha":
         if online_nodes < 3 and cluster.status == cluster.STATUS_ACTIVE:
@@ -2281,61 +2306,52 @@ def suspend_storage_node(node_id, force=False):
             logger.warning("Cluster status is degraded, use --force but this will suspend the cluster")
             return False
 
+    if offline_nodes > 0:
+        if force is False:
+            logger.error("Offline storage nodes found, cannot suspend node without --force")
+            return False
+
+    if offline_nodes > 0:
+        if force is False:
+            logger.error("Offline storage nodes found, cannot suspend node without --force")
+            return False
+
     logger.info("Suspending node")
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
-
+    rpc_client = snode.rpc_client()
+    fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=20, retry=1)
+    port_type = "tcp"
+    if snode.active_rdma:
+        port_type = "udp"
     if snode.lvstore_stack_secondary_1:
         nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
         if nodes:
-            for node in nodes:
-                for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
-                    for iface in snode.data_nics:
-                        if iface.ip4_address:
-                                ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                    lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype, ana="inaccessible")
+           for node in nodes:
+                try:
+                    fw_api.firewall_set_port(
+                        node.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
+                    fw_api.firewall_set_port(
+                        node.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
+                except Exception as e:
+                    logger.error(e)
+                    return False
+                time.sleep(0.5)
                 rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
                 rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
-    # else:
-    sec_node = None
     try:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_node_client = RPCClient(
-                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
-            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-                for iface in sec_node.data_nics:
-                    if iface.ip4_address:
-                        ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype, ana="inaccessible")
-            time.sleep(1)
-    except KeyError:
-        pass
+        fw_api.firewall_set_port(
+            snode.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
+        fw_api.firewall_set_port(
+            snode.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
+    except Exception as e:
+        logger.error(e)
+        return False
 
-    for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                ret = rpc_client.listeners_del(
-                    lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port)
-
+    time.sleep(0.5)
     rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(1)
-
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        sec_node_client = RPCClient(
-            sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
-        for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-            for iface in sec_node.data_nics:
-                if iface.ip4_address:
-                    ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype)
-                    if not ret:
-                        logger.warning(f"Failed to set ana state for lvol {lvol.nqn} on iface {iface.ip4_address}")
-        time.sleep(1)
 
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -2364,10 +2380,10 @@ def resume_storage_node(node_id):
         logger.error("Node is not in suspended state")
         return False
 
-    # task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    # if task_id:
-    #     logger.error(f"Restart task found: {task_id}, can not resume storage node")
-    #     return False
+    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    if sec_node and sec_node.status == StorageNode.STATUS_UNREACHABLE:
+        logger.error("Secondary node is unreachable, cannot resume primary node")
+        return False
 
     logger.info("Resuming node")
     for dev in snode.nvme_devices:
@@ -2388,75 +2404,34 @@ def resume_storage_node(node_id):
     except RuntimeError:
         logger.error('Failed to connect to remote devices')
         return False
-
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-
     snode.write_to_db(db_controller.kv_store)
 
-    logger.debug("Setting LVols to online")
-
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
-    # else:
+    fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=20, retry=1)
+    port_type = "tcp"
+    if snode.active_rdma:
+        port_type = "udp"
+    nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+    if nodes:
+       for node in nodes:
+            try:
+                fw_api.firewall_set_port(
+                    node.lvol_subsys_port, port_type, "allow", snode.rpc_port)
+                fw_api.firewall_set_port(
+                    node.hublvol.nvmf_port, port_type, "allow", snode.rpc_port)
+            except Exception as e:
+                logger.error(e)
+                return False
 
     try:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node.status == StorageNode.STATUS_UNREACHABLE:
-            logger.error("Secondary node is unreachable, cannot resume primary node")
-            return False
-
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_node_client = RPCClient(
-                sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
-            for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-                for iface in sec_node.data_nics:
-                    if iface.ip4_address:
-                        ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                            lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype, ana="inaccessible")
-            time.sleep(1)
-            sec_node_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
-            sec_node_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-            time.sleep(1)
-    except KeyError:
-        pass
-
-    for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                ret = rpc_client.listeners_create(
-                    lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state="optimized")
-
-        lvol.status = LVol.STATUS_ONLINE
-        lvol.io_error = False
-        lvol.health_check = True
-        lvol.write_to_db(db_controller.kv_store)
-
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        time.sleep(3)
-
-        sec_node_client = RPCClient(
-            sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=1)
-        for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
-            for iface in sec_node.data_nics:
-                if iface.ip4_address:
-                    ret = sec_node_client.nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype)
-
-    if snode.lvstore_stack_secondary_1:
-        nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
-        for node in nodes:
-            if not node.lvstore:
-                continue
-            for lvol in db_controller.get_lvols_by_node_id(node.get_id()):
-                if lvol:
-                    for iface in snode.data_nics:
-                        if iface.ip4_address:
-                            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                                lvol.nqn, iface.ip4_address, lvol.subsys_port, iface.trtype)
-                            if not ret:
-                                logger.warning(f"Failed to set ana state for lvol {lvol.nqn} on iface {iface.ip4_address}")
+        fw_api.firewall_set_port(
+            snode.lvol_subsys_port, port_type, "allow", snode.rpc_port)
+        fw_api.firewall_set_port(
+            snode.hublvol.nvmf_port, port_type, "allow", snode.rpc_port)
+    except Exception as e:
+        logger.error(e)
+        return False
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2738,7 +2713,9 @@ def deploy(ifname, isolate_cores=False):
     if isolate_cores:
         utils.generate_realtime_variables_file(all_isolated_cores)
         utils.run_tuned()
-        utils.run_grubby(all_isolated_cores)
+        arch = platform.machine().lower()
+        if "arm" in arch or "aarch64" in arch:
+            utils.run_grubby(all_isolated_cores)
     return f"{dev_ip}:5000"
 
 
@@ -2778,6 +2755,7 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
         environment=[
             f"DOCKER_IP={node_ip}",
             "WITHOUT_CLOUD_INFO=True",
+            "SIMPLYBLOCK_LOG_LEVEL=DEBUG",
         ]
     )
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
@@ -3038,17 +3016,25 @@ def recreate_lvstore_on_sec(secondary_node):
             primary_node.write_to_db()
             return False
 
+        ret = primary_node.rpc_client().jc_suspend_compression(jm_vuid=secondary_node.jm_vuid, suspend=False)
+        if not ret:
+            logger.error("Failed to resume JC compression")
+
         ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
             secondary_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1000,
                                                   max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
+        port_type = "tcp"
+        if primary_node.active_rdma:
+            port_type = "udp"
+
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
 
             fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 3- block primary port
-            fw_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "block", primary_node.rpc_port)
+            fw_api.firewall_set_port(primary_node.lvol_subsys_port, port_type, "block", primary_node.rpc_port)
             tcp_ports_events.port_deny(primary_node, primary_node.lvol_subsys_port)
 
             ### 4- set leadership to false
@@ -3075,7 +3061,7 @@ def recreate_lvstore_on_sec(secondary_node):
 
             fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 8- allow port on primary
-            fw_api.firewall_set_port(primary_node.lvol_subsys_port, "tcp", "allow", primary_node.rpc_port)
+            fw_api.firewall_set_port(primary_node.lvol_subsys_port, port_type, "allow", primary_node.rpc_port)
             tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
 
         ### 7- add lvols to subsystems
@@ -3152,7 +3138,10 @@ def recreate_lvstore(snode, force=False):
             fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
 
             ### 3- block secondary port
-            fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "block", sec_node.rpc_port)
+            port_type = "tcp"
+            if sec_node.active_rdma:
+                port_type = "udp"
+            fw_api.firewall_set_port(snode.lvol_subsys_port, port_type, "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
             time.sleep(0.5)
@@ -3255,7 +3244,10 @@ def recreate_lvstore(snode, force=False):
 
             fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
             ### 3- block secondary port
-            fw_api.firewall_set_port(snode.lvol_subsys_port, "tcp", "allow", sec_node.rpc_port)
+            port_type = "tcp"
+            if sec_node.active_rdma:
+                port_type = "udp"
+            fw_api.firewall_set_port(snode.lvol_subsys_port, port_type, "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
 
     if prim_node_suspend:
@@ -3541,6 +3533,10 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             logger.error(err)
             return False
 
+        ret = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
+        if not ret:
+            logger.error("Failed to resume JC compression")
+
         sec_rpc_client = sec_node.rpc_client()
         sec_rpc_client.bdev_examine(snode.raid)
         sec_rpc_client.bdev_wait_for_examine()
@@ -3722,7 +3718,7 @@ def make_sec_new_primary(node_id):
 
     for dev in snode.nvme_devices:
         if dev.status == NVMeDevice.STATUS_NEW:
-            device_controller.add_device(dev.get_id())
+            device_controller.add_device(dev.get_id(), add_migration_task=False)
 
     time.sleep(5)
     for dev in snode.nvme_devices:

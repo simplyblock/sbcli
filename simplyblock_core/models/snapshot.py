@@ -28,3 +28,4 @@ class SnapShot(BaseModel):
     vuid: int = 0
     deletion_status: str = ""
     status: str = ""
+    fabric: str = "tcp"

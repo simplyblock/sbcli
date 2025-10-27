@@ -610,7 +610,7 @@ def device_set_failed(device_id):
     tasks_controller.add_device_failed_mig_task(device_id)
 
 
-def add_device(device_id):
+def add_device(device_id, add_migration_task=True):
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
@@ -653,8 +653,8 @@ def add_device(device_id):
     for node in snodes:
         if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             distr_controller.send_cluster_map_add_device(device_obj, node)
-
-    tasks_controller.add_new_device_mig_task(device_id)
+    if add_migration_task:
+        tasks_controller.add_new_device_mig_task(device_id)
     return device_id
 
     #

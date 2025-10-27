@@ -155,6 +155,9 @@ while True:
                             lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
                             if node.secondary_node_id:
                                 lvstore_check &= health_controller._check_node_hublvol(node)
+                                sec_node = db.get_storage_node_by_id(node.secondary_node_id)
+                                if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                                    lvstore_check &= health_controller._check_sec_node_hublvol(node)
 
                         if lvstore_check is False:
                             msg = "Node LVolStore check fail, retry later"
@@ -176,10 +179,28 @@ while True:
                             sec_rpc_client = sec_node.rpc_client()
                             sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
 
+                        snode = db.get_storage_node_by_id(node.get_id())
+                        not_deleted = []
+                        for bdev_name in snode.lvol_sync_del_queue:
+                            logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
+                            ret, err = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
+                            if not ret:
+                                if "code" in err and err["code"] == -19:
+                                    logger.error(f"Sync delete completed with error: {err}")
+                                else:
+                                    logger.error(
+                                        f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
+                                    not_deleted.append(bdev_name)
+                        snode.lvol_sync_del_queue = not_deleted
+                        snode.write_to_db()
+
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
 
                         fw_api = FirewallClient(f"{node.mgmt_ip}:5001", timeout=5, retry=2)
-                        fw_api.firewall_set_port(port_number, "tcp", "allow", node.rpc_port)
+                        port_type = "tcp"
+                        if node.active_rdma:
+                            port_type = "udp"
+                        fw_api.firewall_set_port(port_number, port_type, "allow", node.rpc_port)
                         tcp_ports_events.port_allowed(node, port_number)
 
                         task.function_result = f"Port {port_number} allowed on node"

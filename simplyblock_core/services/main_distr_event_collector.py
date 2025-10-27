@@ -46,14 +46,15 @@ def process_device_event(event):
             distr_controller.send_dev_status_event(device_obj, device_obj.status, event_node_obj)
             return
 
-        distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
 
         if event_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+            distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
             logger.info(f"Node is not online, skipping. status: {event_node_obj.status}")
             event.status = 'skipped:node_offline'
             return
 
         if device_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+            distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
             logger.info(f"Node is not online, skipping. status: {device_node_obj.status}")
             event.status = f'skipped:device_node_{device_node_obj.status}'
             return
@@ -77,6 +78,7 @@ def process_device_event(event):
                 device_controller.device_set_unavailable(device_obj.get_id())
                 device_controller.device_set_io_error(device_obj.get_id(), True)
         else:
+            distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
             event_node_obj = db.get_storage_node_by_id(event_node_obj.get_id())
             for dev in event_node_obj.remote_devices:
                 if dev.get_id() == device_obj.get_id():

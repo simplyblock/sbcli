@@ -73,7 +73,7 @@ class SNodeClient:
         return None, None
 
     def is_live(self):
-        return self._request("GET", "")
+        return self._request("GET", "/check")
 
     def info(self):
         return self._request("GET", "info")
@@ -163,3 +163,11 @@ class SNodeClient:
 
     def set_hugepages(self):
         return self._request("POST", "set_hugepages")
+
+    def ifc_is_roce(self, nic):
+        params = {"nic": nic}
+        return self._request("GET", "ifc_is_roce", params)
+
+    def ifc_is_tcp(self, nic):
+        params = {"nic": nic}
+        return self._request("GET", "ifc_is_tcp", params)

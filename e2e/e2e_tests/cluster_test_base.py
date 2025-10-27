@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 import boto3
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils, RunnerK8sLog
@@ -10,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import string
 import random
+
 
 
 def generate_random_sequence(length):
@@ -54,6 +57,7 @@ class TestClusterBase:
         self.pool_name = "test_pool"
         self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = "/mnt/test_location"
+        self.nfs_log_base = os.environ.get("NFS_LOG_BASE", "/mnt/nfs_share")
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
@@ -113,13 +117,25 @@ class TestClusterBase:
             )
             sleep_n_sec(2)
 
+        nfs_server = "10.10.10.140"
+        nfs_path = "/srv/nfs_share"
+        nfs_mount_point = "/mnt/nfs_share"
+
+        for node in self.storage_nodes + self.mgmt_nodes + self.client_machines:
+            self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
         
+        self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         # Construct the logs path with test name and timestamp
-        self.docker_logs_path = os.path.join(Path.home(), "container-logs", f"{self.test_name}-{timestamp}")
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # fresh folder per run on NFS:
+        self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
+        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
+        for node in self.fio_node:
+            self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
+        
         self.runner_k8s_log = RunnerK8sLog(
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
@@ -154,31 +170,34 @@ class TestClusterBase:
             )
             self.ec2_resource = session.resource('ec2')
 
+        self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+        self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
         for node in self.storage_nodes:
+            node_log_dir = os.path.join(self.docker_logs_path, node)
             self.ssh_obj.delete_old_folders(
                 node=node,
-                folder_path=os.path.join(Path.home(), "container-logs"),
-                days=3
+                folder_path=self.nfs_log_base,
+                days=10
             )
-            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+            self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
             self.ssh_obj.check_tmux_installed(node_ip=node)
             self.ssh_obj.exec_command(node=node,
                                     command="sudo tmux kill-server")
             
-            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=node_log_dir)
 
             if not self.k8s_test:
                 self.ssh_obj.start_docker_logging(node_ip=node,
                                                 containers=containers,
-                                                log_dir=self.docker_logs_path,
+                                                log_dir=node_log_dir,
                                                 test_name=self.test_name
                                                 )
 
-            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                    log_dir=self.docker_logs_path)
+                                                    log_dir=node_log_dir)
             if not self.k8s_test:
                 self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
         
@@ -196,27 +215,28 @@ class TestClusterBase:
         for node in self.mgmt_nodes:
             self.ssh_obj.delete_old_folders(
                 node=node,
-                folder_path=os.path.join(Path.home(), "container-logs"),
-                days=3
+                folder_path=self.nfs_log_base,
+                days=10
             )
-            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+            node_log_dir = os.path.join(self.docker_logs_path, node)
+            self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
             self.ssh_obj.check_tmux_installed(node_ip=node)
             self.ssh_obj.exec_command(node=node,
                                     command="sudo tmux kill-server")
             
-            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=node_log_dir)
 
             self.ssh_obj.start_docker_logging(node_ip=node,
                                               containers=containers,
-                                              log_dir=self.docker_logs_path,
+                                              log_dir=node_log_dir,
                                               test_name=self.test_name
                                               )
 
-            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=self.docker_logs_path)
+            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                     log_dir=self.docker_logs_path)
+                                                     log_dir=node_log_dir)
         # for node in self.mgmt_nodes:
         #     self.ssh_obj.monitor_container_logs(
         #         node_ip=node,
@@ -228,24 +248,27 @@ class TestClusterBase:
         for node in self.fio_node:
             self.ssh_obj.delete_old_folders(
                 node=node,
-                folder_path=os.path.join(Path.home(), "container-logs"),
-                days=3
+                folder_path=self.nfs_log_base,
+                days=10
             )
+            node_log_dir = os.path.join(self.docker_logs_path, node)
 
-            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+            self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
 
             self.ssh_obj.check_tmux_installed(node_ip=node)
 
             self.ssh_obj.exec_command(node=node,
                                       command="sudo tmux kill-server")
             self.ssh_obj.start_tcpdump_logging(node_ip=node,
-                                               log_dir=self.docker_logs_path)
+                                               log_dir=node_log_dir)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                     log_dir=self.docker_logs_path)
+                                                     log_dir=node_log_dir)
         
         self.fetch_all_nodes_distrib_log()
 
         self.logger.info("Started log monitoring for all storage nodes.")
+
+        self.start_root_monitor()
 
         sleep_n_sec(120)
 
@@ -319,82 +342,78 @@ class TestClusterBase:
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         for result in storage_nodes['results']:
             if result['is_secondary_node'] is False:
-                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"])
+                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"],
+                                                logs_path=self.docker_logs_path)
 
-    def collect_management_details(self):
-        base_path = Path.home()
-        cmd = f"{self.base_cmd} cluster list >& {base_path}/cluster_list.txt"
+    def collect_management_details(self, post_teardown=False):
+        suffix = "_pre_teardown" if not post_teardown else "_post_teardown"
+
+        base_path = os.path.join(self.docker_logs_path, self.mgmt_nodes[0])
+        cmd = f"{self.base_cmd} cluster list >& {base_path}/cluster_list{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster status {self.cluster_id} >& {base_path}/cluster_status.txt"
+        cmd = f"{self.base_cmd} cluster status {self.cluster_id} >& {base_path}/cluster_status{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster get-logs {self.cluster_id} --limit 0 >& {base_path}/cluster_get_logs.txt"
+        cmd = f"{self.base_cmd} cluster get-logs {self.cluster_id} --limit 0 >& {base_path}/cluster_get_logs{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0 >& {base_path}/cluster_list_tasks.txt"
+        cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0 >& {base_path}/cluster_list_tasks{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} sn list >& {base_path}/sn_list.txt"
+        cmd = f"{self.base_cmd} sn list >& {base_path}/sn_list{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
-        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity.txt"
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=cmd)
-        
-        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity.txt"
+        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} cluster show {self.cluster_id} >& {base_path}/cluster_show.txt"
+        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} lvol list >& {base_path}/lvol_list.txt"
+        cmd = f"{self.base_cmd} cluster show {self.cluster_id} >& {base_path}/cluster_show{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
-        cmd = f"{self.base_cmd} snapshot list >& {base_path}/snapshot_list.txt"
+        cmd = f"{self.base_cmd} lvol list >& {base_path}/lvol_list{suffix}.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} snapshot list >& {base_path}/snapshot_list{suffix}.txt"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+        
+        cmd = f"{self.base_cmd} pool list >& {base_path}/pool_list{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
         
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         node=1
         for result in storage_nodes['results']:
-            cmd = f"{self.base_cmd} sn list-devices {result['uuid']} >& {base_path}/node{node}_list_devices.txt"
+            cmd = f"{self.base_cmd} sn list-devices {result['uuid']} >& {base_path}/node{node}_list_devices{suffix}.txt"
             self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
-            cmd = f"{self.base_cmd} sn check {result['uuid']} >& {base_path}/node{node}_check.txt"
+            cmd = f"{self.base_cmd} sn check {result['uuid']} >& {base_path}/node{node}_check{suffix}.txt"
             self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
             node+=1
         for node in self.fio_node:
+            base_path = os.path.join(self.docker_logs_path, node)
             cmd = f"journalctl -k >& {base_path}/jounalctl_{node}.txt"
+
             self.ssh_obj.exec_command(node, cmd)
             cmd = f"dmesg -T >& {base_path}/dmesg_{node}.txt"
             self.ssh_obj.exec_command(node, cmd)
             
-    def teardown(self):
+    def teardown(self, delete_lvols=True, close_ssh=True):
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")
-
-        for node in self.storage_nodes:
-            self.ssh_obj.exec_command(node=node,
-                                      command="sudo tmux kill-server")
-            result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node, 
-                                                                     log_dir=self.docker_logs_path, 
-                                                                     test_name=self.test_name)
-
-            for file, lines in result.items():
-                if lines:
-                    self.logger.info(f"\n{file}:")
-                    for line in lines:
-                        self.logger.info(f"  -> {line}")
 
         for node in self.fio_node:
             self.ssh_obj.exec_command(node=node,
@@ -403,7 +422,8 @@ class TestClusterBase:
             self.ssh_obj.kill_processes(node=node,
                                         process_name="fio")
         
-
+        self.stop_root_monitor()
+        
         retry_check = 100
         while retry_check:
             exit_while = True
@@ -424,47 +444,66 @@ class TestClusterBase:
             self.logger.info("FIO did not exit completely after kill and wait. "
                              "Some hanging mount points could be present. "
                              "Needs manual cleanup.")
+        if delete_lvols:
+            try:
+                lvols = self.sbcli_utils.list_lvols()
+                self.unmount_all(base_path=self.mount_path)
+                self.unmount_all(base_path="/mnt/")
+                sleep_n_sec(2)
+                for node in self.fio_node:
+                    self.ssh_obj.unmount_path(node=node,
+                                            device=self.mount_path)
+                sleep_n_sec(2)
+                if lvols is not None:
+                    for _, lvol_id in lvols.items():
+                        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+                        nqn = lvol_details[0]["nqn"]
+                        for node in self.fio_node:
+                            self.ssh_obj.unmount_path(node=node,
+                                                    device=self.mount_path)
+                            sleep_n_sec(2)
+                            self.ssh_obj.exec_command(node=node,
+                                                    command=f"sudo nvme disconnect -n {nqn}")
+                            sleep_n_sec(2)
+                    self.disconnect_lvols()
+                    sleep_n_sec(2)
+                    self.sbcli_utils.delete_all_lvols()
+                    sleep_n_sec(2)
+                self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_storage_pools()
+                sleep_n_sec(2)
+                latest_util = self.get_latest_cluster_util()
+                size_used = latest_util["size_used"]
+                is_less_than_500mb = size_used < 500 * 1024 * 1024
+                if not is_less_than_500mb:
+                    raise Exception("Cluster capacity more than 500MB after cleanup!!")
+                for node in self.fio_node:
+                    self.ssh_obj.remove_dir(node, "/mnt/*")
+            except Exception as _:
+                self.logger.info(traceback.format_exc())
+
+        for node in self.storage_nodes:
+            self.ssh_obj.exec_command(node=node,
+                                      command="sudo tmux kill-server")
+            result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node, 
+                                                                     log_dir=self.docker_logs_path, 
+                                                                     test_name=self.test_name)
+
+            for file, lines in result.items():
+                if lines:
+                    self.logger.info(f"\n{file}:")
+                    for line in lines:
+                        self.logger.info(f"  -> {line}")
         
-        try:
-            lvols = self.sbcli_utils.list_lvols()
-            self.unmount_all(base_path=self.mount_path)
-            self.unmount_all(base_path="/mnt/")
-            sleep_n_sec(2)
-            for node in self.fio_node:
-                self.ssh_obj.unmount_path(node=node,
-                                          device=self.mount_path)
-            sleep_n_sec(2)
-            if lvols is not None:
-                for _, lvol_id in lvols.items():
-                    lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-                    nqn = lvol_details[0]["nqn"]
-                    for node in self.fio_node:
-                        self.ssh_obj.unmount_path(node=node,
-                                                  device=self.mount_path)
-                        sleep_n_sec(2)
-                        self.ssh_obj.exec_command(node=node,
-                                                  command=f"sudo nvme disconnect -n {nqn}")
-                        sleep_n_sec(2)
-                self.disconnect_lvols()
-                sleep_n_sec(2)
-                self.sbcli_utils.delete_all_lvols()
-                sleep_n_sec(2)
-            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-            sleep_n_sec(2)
-            self.sbcli_utils.delete_all_storage_pools()
-            sleep_n_sec(2)
-            latest_util = self.get_latest_cluster_util()
-            size_used = latest_util["size_used"]
-            is_less_than_500mb = size_used < 500 * 1024 * 1024
-            if not is_less_than_500mb:
-                raise Exception("Cluster capacity more than 500MB after cleanup!!")
-            for node in self.fio_node:
-                self.ssh_obj.remove_dir(node, "/mnt/*")
+        self.ssh_obj.copy_logs_and_configs_to_nfs(
+                logs_path=self.docker_logs_path, storage_nodes=self.storage_nodes
+            )
+        if close_ssh:
             for node, ssh in self.ssh_obj.ssh_connections.items():
                 self.logger.info(f"Closing node ssh connection for {node}")
                 ssh.close()
-        except Exception as _:
-            self.logger.info(traceback.format_exc())
+
         try:
             if self.ec2_resource:
                 instance_id = self.common_utils.get_instance_id_by_name(ec2_resource=self.ec2_resource,
@@ -475,6 +514,115 @@ class TestClusterBase:
         except Exception as e:
             self.logger.info(f"Error while deleting instance: {e}")
             self.logger.info(traceback.format_exc())
+
+    def get_logs_path(self):
+        """Print logs path on nfs
+        """
+        self.logger.info(f"Logs Path: {self.docker_logs_path}")
+
+    def _get_all_nodes(self):
+        """Return ordered, de-duplicated list of mgmt + storage nodes."""
+        nodes = []
+        if getattr(self, "mgmt_nodes", None):
+            nodes.extend(self.mgmt_nodes)
+        if getattr(self, "storage_nodes", None):
+            nodes.extend(self.storage_nodes)
+        seen = set()
+        ordered = []
+        for n in nodes:
+            if n not in seen:
+                seen.add(n)
+                ordered.append(n)
+        return ordered
+
+    def cleanup_root_when_high_usage(self, threshold: int = None):
+        """
+        For each mgmt/storage node, if /root usage >= threshold,
+        delete /root/distrib_* , /root/bdev_* , and /etc/simplyblock/LVS_* ONLY on that node.
+
+        threshold: percentage int. Default from env ROOT_DISK_THRESHOLD or 80.
+        """
+        thr = threshold if threshold is not None else int(os.getenv("ROOT_DISK_THRESHOLD", "80"))
+
+        def _get_root_usage_pct(node: str) -> int:
+            # POSIX-safe: df -P /root -> 2nd line, 5th col (Use%)
+            cmd = r"df -P /root | awk 'NR==2{print $5}' | tr -dc '0-9'"
+            out, _ = self.ssh_obj.exec_command(node=node, command=cmd, supress_logs=True)
+            s = (out or "").strip()
+            try:
+                return int(s)
+            except Exception:
+                self.logger.warning(f"Could not parse /root usage for {node!r} from output: {out!r}")
+                return -1
+
+        for node in self._get_all_nodes():
+            used = _get_root_usage_pct(node)
+            if used < 0:
+                self.logger.warning(f"[{node}] Skipping cleanup (unknown /root usage).")
+                continue
+
+            if used >= thr:
+                self.logger.warning(f"[{node}] /root usage {used}% >= {thr}%. Cleaning heavy files...")
+                # Safe deletes (handles both files/dirs, globs allowed)
+                self.ssh_obj.delete_file_dir(node=node, entity="/root/distrib_*", recursive=True)
+                self.ssh_obj.delete_file_dir(node=node, entity="/root/bdev_*", recursive=True)
+                self.ssh_obj.delete_file_dir(node=node, entity="/etc/simplyblock/LVS_*", recursive=True)
+
+                # Recheck
+                used_after = _get_root_usage_pct(node)
+                if used_after >= 0:
+                    self.logger.info(f"[{node}] /root usage after cleanup: {used_after}% (was {used}%)")
+                else:
+                    self.logger.info(f"[{node}] Cleanup done; could not re-check usage.")
+            else:
+                self.logger.info(f"[{node}] /root usage {used}% < {thr}%. No cleanup needed.")
+
+    def start_root_monitor(self, interval_minutes: int = None, threshold: int = None):
+        """
+        Start a background thread that checks /root usage periodically
+        and cleans if usage >= threshold on a per-node basis.
+
+        interval_minutes: int, default from env ROOT_MONITOR_INTERVAL_MIN or 60
+        threshold: int %, default from env ROOT_DISK_THRESHOLD or 80
+        """
+        if hasattr(self, "_root_monitor_thread") and getattr(self, "_root_monitor_thread").is_alive():
+            self.logger.info("Root monitor already running; skipping start.")
+            return
+
+        poll_mins = interval_minutes if interval_minutes is not None else int(os.getenv("ROOT_MONITOR_INTERVAL_MIN", "60"))
+        thr = threshold if threshold is not None else int(os.getenv("ROOT_DISK_THRESHOLD", "80"))
+
+        self._root_monitor_stop = threading.Event()
+
+        def _monitor_loop():
+            self.logger.info(
+                f"[RootMonitor] Started. interval={poll_mins}m threshold={thr}% nodes={len(self._get_all_nodes())}"
+            )
+            while not self._root_monitor_stop.is_set():
+                try:
+                    self.cleanup_root_when_high_usage(thr)
+                except Exception as e:
+                    self.logger.error(f"[RootMonitor] Error during cleanup: {e}")
+                # Sleep in 10s slices so we can stop promptly
+                total = poll_mins * 60
+                step = 10
+                waited = 0
+                while waited < total and not self._root_monitor_stop.is_set():
+                    time.sleep(step)
+                    waited += step
+            self.logger.info("[RootMonitor] Exiting.")
+
+        t = threading.Thread(target=_monitor_loop, name="RootMonitor", daemon=True)
+        t.start()
+        self._root_monitor_thread = t
+
+    def stop_root_monitor(self):
+        """Gracefully stop the background /root monitor."""
+        if hasattr(self, "_root_monitor_stop") and self._root_monitor_stop:
+            self._root_monitor_stop.set()
+        if hasattr(self, "_root_monitor_thread") and self._root_monitor_thread:
+            self._root_monitor_thread.join(timeout=5)
+        self.logger.info("Stopped background root monitor.")
 
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
@@ -605,8 +753,9 @@ class TestClusterBase:
         for node in self.fio_node:
             mount_points = self.ssh_obj.get_mount_points(node=node, base_path=base_path)
             for mount_point in mount_points:
-                self.logger.info(f"Unmounting {mount_point}")
-                self.ssh_obj.unmount_path(node=node, device=mount_point)
+                if "/mnt/nfs_share" not in mount_point:
+                    self.logger.info(f"Unmounting {mount_point}")
+                    self.ssh_obj.unmount_path(node=node, device=mount_point)
 
     def remove_mount_dirs(self):
         """ Remove all mount point directories """
@@ -614,8 +763,9 @@ class TestClusterBase:
         for node in self.fio_node:
             mount_dirs = self.ssh_obj.get_mount_points(node=node, base_path=self.mount_path)
             for mount_dir in mount_dirs:
-                self.logger.info(f"Removing directory {mount_dir}")
-                self.ssh_obj.remove_dir(node=node, dir_path=mount_dir)
+                if "/mnt/nfs_share" not in mount_dir:
+                    self.logger.info(f"Removing directory {mount_dir}")
+                    self.ssh_obj.remove_dir(node=node, dir_path=mount_dir)
     
     def disconnect_lvol(self, lvol_device):
         """Disconnects the logical volume."""
@@ -657,24 +807,25 @@ class TestClusterBase:
             delete_snapshot_command = f"{self.base_cmd} snapshot delete {snapshot} --force"
             self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=delete_snapshot_command)
 
-    def filter_migration_tasks(self, tasks, node_id, timestamp):
+    def filter_migration_tasks(self, tasks, node_id, timestamp, window_minutes=None):
         """
         Filters `device_migration` tasks for a specific node and timestamp.
-
-        Args:
-            tasks (list): List of task dictionaries from the API response.
-            node_id (str): The UUID of the node to check for migration tasks.
-            timestamp (int): The timestamp to filter tasks created after this time.
-
-        Returns:
-            list: List of `device_migration` tasks for the specific node created after the given timestamp.
+        If window_minutes is provided, include tasks with date > (timestamp - window_minutes*60).
+        There is NO upper limit; only a lower bound.
         """
+        self.logger.info(f"[DEBUG]: Migration TASKS: {tasks}")
+
+        # Lower bound only
+        lower = timestamp if window_minutes is None else timestamp - int(window_minutes) * 60
+
         filtered_tasks = [
             task for task in tasks
-            if 'balancing_on' in task['function_name'] and task['date'] > timestamp
+            if ('balancing_on' in task['function_name'] or 'migration' in task['function_name'])
+            and task['date'] > lower
             and (node_id is None or task['node_id'] == node_id)
         ]
         return filtered_tasks
+
 
     def validate_migration_for_node(self, timestamp, timeout, node_id=None, check_interval=60, no_task_ok=False):
         """
@@ -707,7 +858,7 @@ class TestClusterBase:
 
         while datetime.now(timezone.utc) < end_time:
             tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
-            filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp)
+            filtered_tasks = self.filter_migration_tasks(tasks, node_id, timestamp, window_minutes=10)
 
             if filtered_tasks:
                 migration_tasks_found = True
