@@ -62,6 +62,7 @@ class TestClusterBase:
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
         self.ec2_resource = None
+        self.k8s_mgmt = False
         self.lvol_crypt_keys = ["7b3695268e2a6611a25ac4b1ee15f27f9bf6ea9783dada66a4a730ebf0492bfd",
                                 "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c"]
         self.log_threads = []
@@ -119,12 +120,13 @@ class TestClusterBase:
 
         nfs_server = "10.10.10.140"
         nfs_path = "/srv/nfs_share"
-        nfs_mount_point = "/mnt/nfs_share"
+        nfs_mount_point = self.nfs_log_base
 
-        for node in self.storage_nodes + self.mgmt_nodes + self.client_machines:
-            self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
+        if not self.k8s_mgmt:
+            for node in self.storage_nodes + self.mgmt_nodes + self.client_machines:
+                self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
         
-        self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
+            self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 

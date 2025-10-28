@@ -13,6 +13,8 @@ import random
 import string
 import re
 import subprocess
+import shlex
+from typing import List, Tuple, Optional
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
@@ -37,7 +39,7 @@ class SshUtils:
     """Class to perform all ssh level operationa
     """
 
-    def __init__(self, bastion_server):
+    def __init__(self, bastion_server, k8s_mgmt=False, k8s_namespace=None):
         self.ssh_connections = dict()
         self.bastion_server = bastion_server
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
@@ -47,6 +49,185 @@ class SshUtils:
         self.log_monitor_threads = {}
         self.log_monitor_stop_flags = {}
         self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
+        self.k8s_mgmt = k8s_mgmt
+        self.k8s_namespace = k8s_namespace
+        self.k8s_pod = None
+
+        # Autodetect when k8s mode is on and pod not provided:
+        if self.k8s_mgmt:
+            pod = self._detect_k8s_pod(self.k8s_namespace)
+            if pod:
+                self.k8s_pod = pod
+                self.logger.info(f"[k8s] Using autodetected pod: {self.k8s_pod} (ns={self.k8s_namespace})")
+            else:
+                self.logger.warning(
+                    f"[k8s] Could not autodetect admin-control pod in ns={self.k8s_namespace}. "
+            f"Set SBCLI_POD or pass k8s_pod in __init__."
+        )
+                
+    def _detect_k8s_pod(self, namespace: str) -> Optional[str]:
+        """
+        Return a pod name in <namespace> that contains 'admin-control'.
+        Example line: 'pod/simplyblock-admin-control-7967cc6757-nh8hb'
+        """
+        try:
+            out = subprocess.check_output(
+                ["kubectl", "-n", namespace, "get", "pods", "-o", "name"],
+                text=True
+            )
+            self.logger.info(f"K8s namespace output = {out.splitlines()}")
+            for line in out.splitlines():
+                if "admin-control" in line:
+                    return line.split("/", 1)[-1].strip()
+        except Exception as e:
+            self.logger.debug(f"[k8s] autodetect failed: {e}")
+        return None
+
+    def run_k8s(self, command, timeout=360, max_retries=3, stream_callback=None, supress_logs=False):
+        """
+        Executes a command inside the admin-control pod via kubectl with streaming and retry mechanism.
+
+        Args:
+            command (str): Shell command to run inside the pod (string; will be executed via bash -lc).
+            timeout (int): Timeout in seconds for the command.
+            max_retries (int): Number of retries in case of failures.
+            stream_callback (callable, optional): Called with (chunk:str, is_error:bool) as output streams.
+            supress_logs (bool): If True, reduce info logs.
+
+        Returns:
+            tuple[str, str]: (stdout, stderr)
+        """
+        namespace = getattr(self, "k8s_namespace", None) or os.environ.get("SBCLI_NAMESPACE", "simplyblock")
+        pod = getattr(self, "k8s_pod", None) or os.environ.get("SBCLI_POD")
+
+        # Lazy autodetect pod if missing
+        if not pod:
+            try:
+                if hasattr(self, "_detect_k8s_pod"):
+                    pod = self._detect_k8s_pod(namespace)
+                else:
+                    out = subprocess.check_output(
+                        ["kubectl", "-n", namespace, "get", "pods", "-o", "name"], text=True
+                    )
+                    for line in out.splitlines():
+                        if "admin-control" in line:
+                            pod = line.split("/", 1)[-1].strip()
+                            break
+            except Exception as e:
+                pod = None
+                if not supress_logs:
+                    self.logger.debug(f"[k8s autodetect] {e}")
+
+        if not pod:
+            msg = "[k8s] No admin-control pod found. Set SBCLI_POD or ensure autodetect works."
+            if not supress_logs:
+                self.logger.error(msg)
+            return "", msg
+
+        retry_count = 0
+        while retry_count < max_retries:
+            kube_cmd = [
+                "kubectl", "-n", namespace, "exec", "-i", pod, "--",
+                "bash", "-lc", command
+            ]
+
+            try:
+                if not supress_logs:
+                    self.logger.info(f"[k8s] Executing command in {namespace}/{pod}: {command}")
+
+                if stream_callback:
+                    # Streamed execution
+                    proc = subprocess.Popen(
+                        kube_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, bufsize=1
+                    )
+                    out_buf, err_buf = [], []
+
+                    def _stream_reader(pipe, is_err):
+                        for line in iter(pipe.readline, ''):
+                            if is_err:
+                                err_buf.append(line)
+                            else:
+                                out_buf.append(line)
+                            try:
+                                stream_callback(line, is_error=is_err)
+                            except Exception as cb_e:
+                                # Don't kill the run if callback fails
+                                if not supress_logs:
+                                    self.logger.debug(f"[k8s stream_callback error] {cb_e}")
+
+                    t_out = threading.Thread(target=_stream_reader, args=(proc.stdout, False), daemon=True)
+                    t_err = threading.Thread(target=_stream_reader, args=(proc.stderr, True), daemon=True)
+                    t_out.start(); t_err.start()
+
+                    try:
+                        proc.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        # Drain any remaining buffers
+                        try:
+                            t_out.join(timeout=1)
+                            t_err.join(timeout=1)
+                        except Exception:
+                            pass
+                        if not supress_logs:
+                            self.logger.error(f"[k8s] Timeout after {timeout}s. Retrying ({retry_count + 1}/{max_retries})...")
+                        retry_count += 1
+                        time.sleep(2)
+                        continue
+
+                    # Ensure threads finish
+                    t_out.join()
+                    t_err.join()
+
+                    rc = proc.returncode
+                    output = "".join(out_buf)
+                    error = "".join(err_buf)
+
+                else:
+                    # Simple capture execution
+                    completed = subprocess.run(
+                        kube_cmd, capture_output=True, text=True, timeout=timeout
+                    )
+                    rc = completed.returncode
+                    output = completed.stdout
+                    error = completed.stderr
+
+                # Log results
+                if output and not supress_logs:
+                    self.logger.info(f"[k8s] Command output: {output}")
+                if error and not supress_logs:
+                    self.logger.error(f"[k8s] Command error: {error}")
+
+                if rc == 0:
+                    if not output and not error and not supress_logs:
+                        self.logger.warning(f"[k8s] Command '{command}' returned no output or error.")
+                    return output, error
+
+                # Non-zero exit ⇒ retry
+                if not supress_logs:
+                    self.logger.error(f"[k8s] Command failed with rc={rc}. Retrying ({retry_count + 1}/{max_retries})...")
+                retry_count += 1
+                time.sleep(2)
+
+            except subprocess.TimeoutExpired:
+                if not supress_logs:
+                    self.logger.error(f"[k8s] Timeout after {timeout}s. Retrying ({retry_count + 1}/{max_retries})...")
+                retry_count += 1
+                time.sleep(2)
+
+            except Exception as e:
+                if not supress_logs:
+                    self.logger.error(f"[k8s] General error: {e}. Retrying ({retry_count + 1}/{max_retries})...")
+                retry_count += 1
+                time.sleep(2)
+
+        # Exhausted retries
+        msg = f"[k8s] Failed to execute command '{command}' in {namespace}/{pod} after {max_retries} retries."
+        if not supress_logs:
+            self.logger.error(msg)
+        return "", msg
+
 
     def connect(self, address: str, port: int = 22,
             bastion_server_address: str = None,
@@ -670,49 +851,73 @@ class SshUtils:
     def get_snapshots(self, node):
         """Get all snapshots on the node."""
         cmd = "%s snapshot list | grep -i ss | awk '{{print $2}}'" % self.base_cmd
-        output, error = self.exec_command(node=node, command=cmd)
+        if self.k8s_mgmt:
+            output, _ = self.run_k8s(cmd, timeout=600)
+        else:
+            output, _ = self.exec_command(node=node, command=cmd)
         return output.strip().split()
-    
+
     def suspend_node(self, node, node_id):
         """Suspend node."""
         cmd = f"{self.base_cmd} -d sn suspend {node_id}"
-        output, _ = self.exec_command(node=node, command=cmd)
+        if self.k8s_mgmt:
+            output, _ = self.run_k8s(cmd, timeout=600)
+        else:
+            output, _ = self.exec_command(node=node, command=cmd)
         return output.strip().split()
     
     def shutdown_node(self, node, node_id, force=False):
         """Shutdown Node."""
         force_cmd = " --force" if force else ""
         cmd = f"{self.base_cmd} -d sn shutdown {node_id}{force_cmd}"
-        output, _ = self.exec_command(node=node, command=cmd)
+        if self.k8s_mgmt:
+            output, _ = self.run_k8s(cmd, timeout=600)
+        else:
+            output, _ = self.exec_command(node=node, command=cmd)
         return output.strip().split()
     
     def restart_node(self, node, node_id, force=False):
         """Shutdown Node."""
         force_cmd = " --force" if force else ""
         cmd = f"{self.base_cmd} -d sn restart {node_id}{force_cmd}"
-        output, _ = self.exec_command(node=node, command=cmd)
+        if self.k8s_mgmt:
+            output, _ = self.run_k8s(cmd, timeout=600)
+        else:
+            output, _ = self.exec_command(node=node, command=cmd)
         return output.strip().split()
 
     def get_lvol_id(self, node, lvol_name):
         """Get logical volume IDs on the node."""
         cmd = "%s lvol list | grep -i '%s ' | awk '{{print $2}}'" % (self.base_cmd, lvol_name)
-        output, error = self.exec_command(node=node, command=cmd)
+        if self.k8s_mgmt:
+            output, _ = self.run_k8s(cmd, timeout=600)
+        else:
+            output, _ = self.exec_command(node=node, command=cmd)
         return output.strip().split()
     
     def get_snapshot_id(self, node, snapshot_name):
         cmd = "%s snapshot list | grep -i '%s ' | awk '{print $2}'" % (self.base_cmd, snapshot_name)
-        output, error = self.exec_command(node=node, command=cmd)
+        if self.k8s_mgmt:
+            output, _ = self.run_k8s(cmd, timeout=600)
+        else:
+            output, _ = self.exec_command(node=node, command=cmd)
 
         return output.strip()
 
     def add_snapshot(self, node, lvol_id, snapshot_name):
         cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
-        output, error = self.exec_command(node=node, command=cmd)
+        if self.k8s_mgmt:
+            output, error = self.run_k8s(cmd, timeout=600)
+        else:
+            output, error = self.exec_command(node=node, command=cmd)
         return output, error
     
     def add_clone(self, node, snapshot_id, clone_name):
         cmd = f"{self.base_cmd} -d snapshot clone {snapshot_id} {clone_name}"
-        output, error = self.exec_command(node=node, command=cmd)
+        if self.k8s_mgmt:
+            output, error = self.run_k8s(cmd, timeout=600)
+        else:
+            output, error = self.exec_command(node=node, command=cmd)
         return output, error
 
     def delete_snapshot(self, node, snapshot_id, timeout=600, interval=30):
@@ -727,21 +932,30 @@ class SshUtils:
         """
         # Pre-check if snapshot exists
         check_cmd = f"{self.base_cmd} snapshot list | grep -i '{snapshot_id}'"
-        output, error = self.exec_command(node=node, command=check_cmd)
+        if self.k8s_mgmt:
+            output, error = self.run_k8s(check_cmd, timeout=600)
+        else:
+            output, error = self.exec_command(node=node, command=check_cmd)
         if not output.strip():
             self.logger.warning(f"[Pre-check] Snapshot {snapshot_id} not found.")
             return "Snapshot not found before deletion", None
 
         self.logger.info(f"[Delete] Deleting snapshot {snapshot_id}")
         del_cmd = f"{self.base_cmd} -d snapshot delete {snapshot_id} --force"
-        output, error = self.exec_command(node=node, command=del_cmd)
+        if self.k8s_mgmt:
+            output, error = self.run_k8s(del_cmd, timeout=600)
+        else:
+            output, error = self.exec_command(node=node, command=del_cmd)
         self.logger.info(f"[Delete] Command output: {output}")
 
         # Polling for deletion confirmation
         start_time = time.time()
         while time.time() - start_time < timeout:
             poll_cmd = f"{self.base_cmd} snapshot list | grep -i '{snapshot_id}'"
-            poll_output, poll_error = self.exec_command(node=node, command=poll_cmd)
+            if self.k8s_mgmt:
+                poll_output, poll_error = self.run_k8s(poll_cmd, timeout=600)
+            else:
+                poll_output, poll_error = self.exec_command(node=node, command=poll_cmd)
 
             if not poll_output.strip():
                 self.logger.info(f"[Check] Snapshot {snapshot_id} successfully deleted.")
@@ -757,7 +971,10 @@ class SshUtils:
         patterns = ["snap", "ss", "snapshot"]
         for pattern in patterns:
             cmd = "%s snapshot list | grep -i %s | awk '{print $2}'" % (self.base_cmd, pattern)
-            output, error = self.exec_command(node=node, command=cmd)
+            if self.k8s_mgmt:
+                output, error = self.run_k8s(cmd, timeout=600)
+            else:
+                output, error = self.exec_command(node=node, command=cmd)
 
             list_snapshot = output.strip().split()
             for snapshot_id in list_snapshot:
@@ -1396,7 +1613,10 @@ class SshUtils:
             command = f"{self.base_cmd} --dev -d sn dump-lvstore {storage_node_id} | grep 'LVS dump file will be here'"
             self.logger.info(f"Executing '{self.base_cmd} --dev -d sn dump-lvstore' on {node_ip} for Storage Node ID: {storage_node_id}")
             
-            output, error = self.exec_command(node_ip, command)
+            if self.k8s_mgmt:
+                output, error = self.run_k8s(command, timeout=600)
+            else:
+                output, error = self.exec_command(node_ip, command)
 
             if error:
                 self.logger.error(f"Error executing '{self.base_cmd} --dev -d sn dump-lvstore' on {node_ip}: {error}")

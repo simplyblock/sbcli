@@ -3,3 +3,4 @@ requests
 boto3
 matplotlib
 ping3
+shlex

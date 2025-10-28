@@ -42,8 +42,7 @@ def main():
     parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
     parser.add_argument('--run_ha', type=bool, help="Run HA tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
-    parser.add_argument('--upload_logs', type=bool, help="Upload Logs", default=False)
-    
+    parser.add_argument('--upload_logs', type=bool, help="Upload Logs", default=False)    
 
     args = parser.parse_args()
     
