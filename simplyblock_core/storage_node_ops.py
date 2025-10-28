@@ -3191,7 +3191,7 @@ def recreate_lvstore(snode, force=False):
     ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
     if not ret:
         logger.error(f"Failed to recover lvstore: {snode.lvstore} on node: {snode.get_id()}")
-        if not force:
+        if not force:recreate_lvstore()
             _kill_app()
             raise Exception("Failed to recover lvstore")
 
@@ -3424,7 +3424,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     distr_page_size = page_size_in_blocks
     # distr_page_size = (ndcs + npcs) * page_size_in_blocks
     # cluster_sz = ndcs * page_size_in_blocks
-    cluster_sz = page_size_in_blocks
+    cluster_sz = page_size_in_blocks * constants.LVOL_CLUSTER_RATIO
     strip_size_kb = int((ndcs + npcs) * 2048)
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 1
