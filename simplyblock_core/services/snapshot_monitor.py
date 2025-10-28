@@ -215,7 +215,7 @@ while True:
                         elif ret == -1:  # Operation not permitted
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
                             logger.error("Operation not permitted")
-                            set_snap_offline(snap)
+                            process_snap_delete_try_again(snap)
 
                         elif ret == -2:  # No such file or directory
                             logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
