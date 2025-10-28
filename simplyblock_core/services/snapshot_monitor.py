@@ -70,11 +70,14 @@ def process_snap_delete_finish(snap, leader_node):
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
 
     # 3-2 async delete lvol bdev from secondary
-    if leader_node.secondary_node_id:
-        sec_node = db.get_storage_node_by_id(leader_node.secondary_node_id)
-        if sec_node:
-            sec_node.lvol_sync_del_queue.append(snap.snap_bdev)
-            sec_node.write_to_db()
+    non_leader_id = snode.secondary_node_id
+    if snode.get_id() != leader_node.get_id():
+        non_leader_id = snode.get_id()
+
+    non_leader = db.get_storage_node_by_id(non_leader_id)
+    if non_leader:
+        non_leader.lvol_sync_del_queue.append(snap.snap_bdev)
+        non_leader.write_to_db()
 
     snapshot_events.snapshot_delete(snap)
     snap.remove(db.kv_store)
