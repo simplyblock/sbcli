@@ -160,7 +160,7 @@ SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
-K8S_NAMESPACE = "simplyblock"
+K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"

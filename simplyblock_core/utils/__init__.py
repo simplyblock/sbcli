@@ -1967,7 +1967,7 @@ def patch_prometheus_configmap(username: str, password: str):
     load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
-    cm = v1.read_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace="simplyblock")
+    cm = v1.read_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace=constants.K8S_NAMESPACE)
     prometheus_yml = cm.data.get("prometheus.yml", "")
 
     prometheus_yml = re.sub(r"username:*", f"username: '{username}'", prometheus_yml)
@@ -1979,5 +1979,5 @@ def patch_prometheus_configmap(username: str, password: str):
         }
     }
 
-    v1.patch_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace="simplyblock", body=patch_body)
+    v1.patch_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace=constants.K8S_NAMESPACE, body=patch_body)
     logger.info("Patched sbcli-simplyblock-prometheus-config ConfigMap with new credentials.")
