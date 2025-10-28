@@ -115,17 +115,20 @@ def process_lvol_delete_finish(lvol):
 
     # 3-1 async delete lvol bdev from primary
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
-    if primary_node.status == StorageNode.STATUS_ONLINE:
+    if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
         if not ret:
             logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
     # 3-2 async delete lvol bdev from secondary
-    if leader_node.secondary_node_id:
-        sec_node = db.get_storage_node_by_id(leader_node.secondary_node_id)
-        if sec_node:
-            sec_node.lvol_sync_del_queue.append(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-            sec_node.write_to_db()
+    if snode.get_id() == leader_node.get_id():
+        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+    else:
+        sec_node = db.get_storage_node_by_id(snode.get_id())
+
+    if sec_node:
+        sec_node.lvol_sync_del_queue.append(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+        sec_node.write_to_db()
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
