@@ -45,10 +45,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -99,7 +99,7 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "512Mi"
           limits:
             cpu: "500m"
@@ -148,10 +148,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -200,10 +200,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -250,10 +250,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -300,10 +300,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -350,10 +350,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -401,10 +401,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -451,10 +451,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -501,10 +501,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -551,10 +551,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -600,10 +600,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -651,10 +651,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -701,10 +701,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -751,10 +751,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -800,10 +800,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -849,10 +849,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -898,10 +898,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -947,10 +947,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -993,10 +993,10 @@ spec:
               mountPath: /fluent-bit/etc/
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "400Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
         - name: varlog
