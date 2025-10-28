@@ -288,6 +288,9 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
 
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
+        if not passed:
+            return False
+
         try:
             cl = db_controller.get_cluster_by_id(node.cluster_id)
         except KeyError:
