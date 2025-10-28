@@ -64,7 +64,7 @@ def process_snap_delete_finish(snap, leader_node):
 
     # 3-1 async delete lvol bdev from primary
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
-    if primary_node.status == StorageNode.STATUS_ONLINE:
+    if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
