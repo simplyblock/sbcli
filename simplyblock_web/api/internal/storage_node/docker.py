@@ -645,7 +645,7 @@ def resolve_underlying_ifaces(nic):
         'type': 'boolean',
     })}}},
 })
-def ifc_is_roce(query):
+def ifc_is_roce(query: NicQuery):
     """
     Check if the given interface (including VLANs, bonds, bridges)
     ultimately uses a RoCE-capable NIC.
@@ -679,7 +679,7 @@ def ifc_is_roce(query):
 })
 def ifc_is_tcp(query: NicQuery):
     try:
-        nic = query.nic
+        nic = query.nic if hasattr(query, "nic") else str(query)
         addrs = psutil.net_if_addrs().get(nic, [])
         for addr in addrs:
             if addr.family == socket.AF_INET:
