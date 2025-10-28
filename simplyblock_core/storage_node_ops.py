@@ -3191,7 +3191,7 @@ def recreate_lvstore(snode, force=False):
     ret = rpc_client.bdev_lvol_get_lvstores(snode.lvstore)
     if not ret:
         logger.error(f"Failed to recover lvstore: {snode.lvstore} on node: {snode.get_id()}")
-        if not force:recreate_lvstore()
+        if not force:
             _kill_app()
             raise Exception("Failed to recover lvstore")
 
