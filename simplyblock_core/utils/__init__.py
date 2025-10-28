@@ -40,7 +40,6 @@ CONFIG_KEYS = [
     "jc_singleton_core",
 ]
 
-
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 
 
@@ -185,6 +184,7 @@ def get_docker_client(cluster_id=None):
 
     raise RuntimeError("No docker client found for this IP")
 
+
 def get_k8s_node_ip():
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
@@ -204,6 +204,7 @@ def get_k8s_node_ip():
             print(e)
             raise e
     return False
+
 
 def dict_agg(data, mean=False, keys=None):
     out: dict = {}
@@ -488,6 +489,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned.get("jc_singleton_core", [])
     )
 
+
 def isolate_cores(spdk_cpu_mask):
     spdk_cores = hexa_to_cpu_list(spdk_cpu_mask)
     hyperthreading_enabled = is_hyperthreading_enabled_via_siblings()
@@ -533,10 +535,13 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     '''
     poller_number = poller_count if poller_count else cpu_count
 
-    small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
-    large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (
+            6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+    large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
+            6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
     return int(4.0 * small_pool_count), int(2.5 * large_pool_count)
+
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
     '''
@@ -549,13 +554,15 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
     memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (
             250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
-    return int(1.2*memory_consumption)
+    return int(1.2 * memory_consumption)
+
 
 def calculate_minimum_sys_memory(max_prov):
     minimum_sys_memory = (2000 * 1024) * convert_size(max_prov, 'GB') + 500 * 1024 * 1024
 
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
+
 
 def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory, huge_total_memory):
     total_free_memory = free_sys_memory + huge_total_memory
@@ -870,6 +877,7 @@ def run_tuned():
     except subprocess.CalledProcessError:
         logger.warning("Error running the tuned adm profile")
 
+
 def run_grubby(core_list):
     isolated_cores = ",".join(map(str, core_list))
     core_args = f"isolcpus={isolated_cores} nohz_full={isolated_cores} rcu_nocbs={isolated_cores}"
@@ -882,6 +890,7 @@ def run_grubby(core_list):
         logger.info("Successfully run the grubby command")
     except subprocess.CalledProcessError:
         logger.warning("Error running the grubby command")
+
 
 def parse_thread_siblings():
     """Parse the thread siblings from the sysfs topology."""
@@ -976,11 +985,13 @@ def store_config_file(data_config, file_path, create_read_only_file=False):
     except subprocess.CalledProcessError as e:
         logger.error(f"Error writing to file: {e}")
 
+
 def load_config(file_path):
     # Load and parse a JSON config file
     with open(file_path, 'r') as f:
         config = json.load(f)
     return config
+
 
 def init_sentry_sdk(name=None):
     # import sentry_sdk
@@ -1186,7 +1197,6 @@ def get_nvme_pci_devices():
             if len(name) > 1 or len(partitions) > 1:
                 blocked_devices.append(name[0])
 
-
         # Step 3: Map NVMe devices to PCI addresses
         pci_addresses = []
         lspci_output = subprocess.check_output(
@@ -1330,7 +1340,6 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, co
                 node_0_cores.append(available_cores[4 * q1])
                 node_1_cores.append(available_cores[4 * q1 + 1])
 
-
             # Ensure the number of isolated cores is the same for both nodes
             min_isolated_cores = min(len(node_0_cores), len(node_1_cores))
 
@@ -1385,7 +1394,7 @@ def regenerate_config(new_config, old_config, force=False):
             old_config["nodes"][i]["isolated"] = isolated_cores
             distribution = calculate_core_allocations(isolated_cores, number_of_alcemls + 1)
             core_to_index = {core: idx for idx, core in enumerate(isolated_cores)}
-            old_config["nodes"][i]["distribution"] ={
+            old_config["nodes"][i]["distribution"] = {
                 "app_thread_core": get_core_indexes(core_to_index, distribution[0]),
                 "jm_cpu_core": get_core_indexes(core_to_index, distribution[1]),
                 "poller_cpu_cores": get_core_indexes(core_to_index, distribution[2]),
@@ -1411,14 +1420,15 @@ def regenerate_config(new_config, old_config, force=False):
         small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls + 1, 2 * number_of_distribs,
                                                                   len(isolated_cores),
                                                                   number_of_poller_cores or len(
-                                                                      isolated_cores),)
-        minimum_hp_memory = calculate_minimum_hp_memory(small_pool_count, large_pool_count, old_config["nodes"][i]["max_lvol"],
+                                                                      isolated_cores), )
+        minimum_hp_memory = calculate_minimum_hp_memory(small_pool_count, large_pool_count,
+                                                        old_config["nodes"][i]["max_lvol"],
                                                         old_config["nodes"][i]["max_size"], len(isolated_cores))
         old_config["nodes"][i]["small_pool_count"] = small_pool_count
         old_config["nodes"][i]["large_pool_count"] = large_pool_count
         old_config["nodes"][i]["huge_page_memory"] = minimum_hp_memory
         minimum_sys_memory = calculate_minimum_sys_memory(old_config["nodes"][i]["max_size"])
-        old_config["nodes"][i]["sys_memory"] =  minimum_sys_memory
+        old_config["nodes"][i]["sys_memory"] = minimum_sys_memory
 
     memory_details = node_utils.get_memory_details()
     free_memory = memory_details.get("free")
@@ -1434,14 +1444,15 @@ def regenerate_config(new_config, old_config, force=False):
         node_cores_set = set(node["isolated"])
         all_isolated_cores.update(node_cores_set)
     if total_free_memory < total_required_memory:
-            logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
-            return False
+        logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
+        return False
     old_config["isolated_cores"] = list(all_isolated_cores)
     old_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
     return old_config
 
 
-def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked, cores_percentage=0):
+def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
+                     cores_percentage=0):
     system_info = {}
     nodes_config: dict = {"nodes": []}
 
@@ -1520,7 +1531,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     "jm_cpu_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][1]),
                     "poller_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][2]),
                     "alceml_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][3]),
-                    "alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][4]),
+                    "alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
+                                                                core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
                     "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6])
                 },
@@ -1554,7 +1566,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["max_size"] = max_prov
             node_info["huge_page_memory"] = minimum_hp_memory
             minimum_sys_memory = calculate_minimum_sys_memory(max_prov)
-            node_info["sys_memory"] =  minimum_sys_memory
+            node_info["sys_memory"] = minimum_sys_memory
             all_nodes.append(node_info)
             node_index += 1
     memory_details = node_utils.get_memory_details()
@@ -1571,8 +1583,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         node_cores_set = set(node["isolated"])
         all_isolated_cores.update(node_cores_set)
     if total_free_memory < total_required_memory:
-            logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
-            return False, False
+        logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
+        return False, False
     nodes_config["nodes"] = all_nodes
     nodes_config["isolated_cores"] = list(all_isolated_cores)
     nodes_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
@@ -1604,15 +1616,17 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     except Exception as e:
         logger.error(f"Node {node}: Error occurred: {e}")
 
+
 def adjust_hugepages(hugepages: int) -> int:
     """Adjust hugepages to the next multiple of 500 and add a small extra based on leading digits."""
     remainder = hugepages % 500
-    hugepages =  hugepages + (500 - remainder)
+    hugepages = hugepages + (500 - remainder)
 
     str_val = str(hugepages)
     decimal_val = float(str_val[0] + '.' + str_val[1])
     add_val = int(decimal_val * 24)
     return hugepages + add_val
+
 
 def validate_node_config(node):
     required_top_fields = [
@@ -1742,7 +1756,8 @@ def validate_config(config, upgrade=False):
         # Check no core is used in more than one node
         node_cores_set = set(node["isolated"])
         if all_isolated_cores.intersection(node_cores_set):
-            logger.error(f"Duplicate isolated cores found between nodes: {all_isolated_cores.intersection(node_cores_set)}")
+            logger.error(
+                f"Duplicate isolated cores found between nodes: {all_isolated_cores.intersection(node_cores_set)}")
             return False
         all_isolated_cores.update(node_cores_set)
     if upgrade:
@@ -1754,9 +1769,11 @@ def get_k8s_apps_client():
     config.load_incluster_config()
     return client.AppsV1Api()
 
+
 def get_k8s_core_client():
     config.load_incluster_config()
     return client.CoreV1Api()
+
 
 def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
     ready_pods = 0
@@ -1773,9 +1790,11 @@ def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
 
     return ready_pods == expected_replicas
 
+
 def get_k8s_batch_client():
     config.load_incluster_config()
     return client.BatchV1Api()
+
 
 def get_storage_node_api_log_type(mgmt_ip, name):
     try:
@@ -1786,6 +1805,7 @@ def get_storage_node_api_log_type(mgmt_ip, name):
             return log_config["Type"]
     except (docker.errors.NotFound, docker.errors.DockerException, Exception):
         pass
+
 
 def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
     try:
@@ -1798,6 +1818,7 @@ def remove_container(client: docker.DockerClient, name, graceful_timeout=3):
     except APIError as e:
         if e.status_code != 409:
             raise
+
 
 def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_uuid, cluster_secret):
     TOP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -1851,12 +1872,34 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
         print(f"File moved to {prometheus_file_path} successfully.")
 
+
 def load_kernel_module(module):
+    """
+    Loads a kernel module using modprobe and ensures it is persistent across reboots
+    by creating a module file in /etc/modules-load.d/<module>.conf.
+    """
     try:
+        # Attempt to load the module immediately
         subprocess.run(["modprobe", module], check=True)
-        logger.info(f" {module} module loaded successfully.")
+        logger.info(f"{module} module loaded successfully.")
     except subprocess.CalledProcessError as e:
         logger.warning(f"Failed to load {module} module: {e}")
+        return False
+
+    # Ensure persistence across reboots
+    try:
+        path = f"/etc/modules-load.d/{module}.conf"
+        os.makedirs("/etc/modules-load.d", exist_ok=True)
+
+        with open(path, "w") as f:
+            f.write(f"{module}\n")
+
+        logger.info(f"Created persistent module config: {path}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to create module load file for {module}: {e}")
+        return False
+
 
 def load_kube_config_with_fallback():
     """Try local kubeconfig first, then fall back to in-cluster config."""
@@ -1864,7 +1907,7 @@ def load_kube_config_with_fallback():
         config.load_incluster_config()
     except Exception:
         config.load_kube_config()
-        
+
 
 def get_node_name_by_ip(target_ip: str) -> str:
     load_kube_config_with_fallback()
@@ -1878,14 +1921,14 @@ def get_node_name_by_ip(target_ip: str) -> str:
 
     raise ValueError(f"No node found with IP address: {target_ip}")
 
-def label_node_as_mgmt_plane(node_name: str):
 
+def label_node_as_mgmt_plane(node_name: str):
     load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
     try:
         node = v1.read_node(name=node_name)
-        
+
         labels = node.metadata.labels or {}
         labels["simplyblock.io/role"] = "mgmt-plane"
 
@@ -1902,7 +1945,6 @@ def label_node_as_mgmt_plane(node_name: str):
 
 
 def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[Tuple[str, str]]:
-
     if isinstance(node_info, (bytes, bytearray)):
         try:
             node_info = json.loads(node_info.decode("utf-8"))
@@ -1918,7 +1960,8 @@ def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[
         if ip:
             return ip, iface
 
-    return None  
+    return None
+
 
 def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
     load_kube_config_with_fallback()
@@ -1934,6 +1977,7 @@ def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
             raise ValueError("cluster-file not found in ConfigMap")
     except client.exceptions.ApiException as e:
         raise ValueError(f"Failed to read ConfigMap: {e}")
+
 
 def build_graylog_patch(cluster_secret: str) -> dict:
     graylog_env_patch = [
@@ -1963,11 +2007,12 @@ def build_graylog_patch(cluster_secret: str) -> dict:
     }
     return graylog_patch
 
+
 def patch_prometheus_configmap(username: str, password: str):
     load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
-    cm = v1.read_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace="simplyblock")
+    cm = v1.read_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace=constants.K8S_NAMESPACE)
     prometheus_yml = cm.data.get("prometheus.yml", "")
 
     prometheus_yml = re.sub(r"username:*", f"username: '{username}'", prometheus_yml)
@@ -1979,5 +2024,5 @@ def patch_prometheus_configmap(username: str, password: str):
         }
     }
 
-    v1.patch_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace="simplyblock", body=patch_body)
+    v1.patch_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace=constants.K8S_NAMESPACE, body=patch_body)
     logger.info("Patched sbcli-simplyblock-prometheus-config ConfigMap with new credentials.")
