@@ -29,7 +29,7 @@ class SbcliUtils:
         """
         print(self.cluster_api_url)
         print(api_url)
-        request_url = self.cluster_api_url + api_url
+        request_url = self.cluster_api_url + '/api/v1/' + api_url
         print(request_url)
         headers = headers if headers else self.headers
         print(headers)
@@ -79,7 +79,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + api_url
+        request_url = self.cluster_api_url + '/api/v1/' + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
         while retry > 0:
@@ -123,7 +123,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + api_url
+        request_url = self.cluster_api_url + '/api/v1/' + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling DELETE for {api_url} with headers: {headers}")
         retry = 10
@@ -169,7 +169,7 @@ class SbcliUtils:
         Returns:
             dict: response returned
         """
-        request_url = self.cluster_api_url + api_url
+        request_url = self.cluster_api_url + '/api/v1/' + api_url
         headers = headers if headers else self.headers
         self.logger.info(f"Calling POST for {api_url} with headers: {headers}, body: {body}")
         retry = 5
