@@ -60,6 +60,11 @@ def _add_task(function_name, cluster_id, node_id, device_id,
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
+    elif function_name == JobSchedule.FN_JC_COMP_RESUME:
+        task_id = get_jc_comp_task(cluster_id, node_id)
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
 
     task_obj = JobSchedule()
     task_obj.uuid = str(uuid.uuid4())
@@ -349,3 +354,16 @@ def get_failed_device_mig_task(cluster_id, device_id):
 
 def add_port_allow_task(cluster_id, node_id, port_number):
     return _add_task(JobSchedule.FN_PORT_ALLOW, cluster_id, node_id, "", function_params={"port_number": port_number})
+
+
+def add_jc_comp_resume_task(cluster_id, node_id):
+    return _add_task(JobSchedule.FN_JC_COMP_RESUME, cluster_id, node_id, "", max_retry=10)
+
+
+def get_jc_comp_task(cluster_id, node_id):
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_JC_COMP_RESUME and task.node_id == node_id :
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                return task.uuid
+    return False
