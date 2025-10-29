@@ -983,7 +983,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
                 namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
-                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory)
+                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode)
             time.sleep(5)
 
         except Exception as e:
