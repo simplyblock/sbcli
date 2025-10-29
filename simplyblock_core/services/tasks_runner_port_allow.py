@@ -175,11 +175,20 @@ while True:
                         snode_api = SNodeClient(f"{node.mgmt_ip}:5000", timeout=3, retry=2)
 
                         sec_node = db.get_storage_node_by_id(node.secondary_node_id)
+                        snode = db.get_storage_node_by_id(node.get_id())
+                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                            # check jc_compression status
+                            jc_compression_is_active = sec_node.rpc_client().jc_compression(snode.jm_vuid)
+                            while jc_compression_is_active:
+                                logger.info(
+                                    f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
+                                time.sleep(60)
+                                jc_compression_is_active = sec_node.rpc_client().jc_compression(sec_node.jm_vuid)
+
                         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                             sec_rpc_client = sec_node.rpc_client()
                             sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
 
-                        snode = db.get_storage_node_by_id(node.get_id())
                         not_deleted = []
                         for bdev_name in snode.lvol_sync_del_queue:
                             logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
@@ -193,16 +202,6 @@ while True:
                                     not_deleted.append(bdev_name)
                         snode.lvol_sync_del_queue = not_deleted
                         snode.write_to_db()
-
-                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                            # check jc_compression status
-                            jc_compression_is_active = sec_node.rpc_client().jc_compression(snode.jm_vuid)
-                            while jc_compression_is_active:
-                                logger.info(
-                                    f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
-                                time.sleep(60)
-                                jc_compression_is_active = sec_node.rpc_client().jc_compression(sec_node.jm_vuid)
-
 
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
 
