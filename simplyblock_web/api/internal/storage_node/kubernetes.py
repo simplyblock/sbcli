@@ -267,6 +267,7 @@ class SPDKParams(BaseModel):
     fdb_connection: str = Field('')
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
+    cluster_mode: str
 
 
 @api.post('/spdk_process_start', responses={
