@@ -97,8 +97,7 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              set -e
-
+        
               if [[ -f /etc/os-release ]]; then
                   source /etc/os-release
                   OS_ID=$ID
