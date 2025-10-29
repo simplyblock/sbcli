@@ -186,5 +186,4 @@ ingress:
       type: ClusterIP
     extraArgs:
       tcp-services-configmap: "simplyblock/simplyblock-tcp-services"
-    nodeSelector:
-      simplyblock.io/role: mgmt-plane
+    nodeSelector: {}

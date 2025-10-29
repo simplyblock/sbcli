@@ -267,6 +267,7 @@ class SPDKParams(BaseModel):
     fdb_connection: str = Field('')
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
+    cluster_mode: str
 
 
 @api.post('/spdk_process_start', responses={
@@ -344,6 +345,7 @@ def spdk_process_start(body: SPDKParams):
             'FDB_CONNECTION': body.fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
             'GRAYLOG_SERVER_IP': body.cluster_ip,
+            'MODE': body.cluster_mode,
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib

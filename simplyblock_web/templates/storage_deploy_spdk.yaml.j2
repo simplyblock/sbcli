@@ -6,6 +6,10 @@ metadata:
   labels:
     app: spdk-app-{{ RPC_PORT }}
     role: simplyblock-storage-node
+  {% if MODE == "kubernetes" %}
+  annotations:
+    log-collector/enabled: "true"
+  {% endif %}
 spec:
   restartPolicy: Never
   serviceAccountName: simplyblock-storage-node-sa
@@ -139,7 +143,7 @@ spec:
           value: "True"
         - name: TIMEOUT
           value: "300"
-
+    {% if MODE == "docker" %}
     - name: fluentd
       image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
       imagePullPolicy: "Always"
@@ -166,3 +170,4 @@ spec:
         - name: dockercontainerlogdirectory
           mountPath: /var/log/pods
           readOnly: true
+  {% endif %}
