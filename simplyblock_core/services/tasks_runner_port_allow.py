@@ -179,7 +179,12 @@ while True:
                         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                             # check jc_compression status
                             jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
+                            retries = 10
                             while jc_compression_is_active:
+                                if retries <= 0:
+                                    logger.warning("Timeout waiting for JC compression task to finish")
+                                    break
+                                retries -= 1
                                 logger.info(
                                     f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
                                 time.sleep(60)
