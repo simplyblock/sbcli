@@ -1,6 +1,7 @@
 # coding=utf-8
 import logging as lg
 import json
+import math
 import random
 import sys
 import time
@@ -405,6 +406,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         vuid = utils.get_random_vuid()
     else:
         vuid = distr_vuid
+
+    # round size to the nearest 1G ceiling
+    size = math.ceil(size/(1024*1024*1024))*1024*1024*1024
 
     if max_size > 0:
         if max_size < size:
