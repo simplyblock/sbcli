@@ -247,8 +247,9 @@ spec:
             - '--collector.filesystem.ignored-mount-points=^(/rootfs|/host|)/(sys|proc|dev|host|etc|var/lib/docker/.+|var/lib/kubelet/pods/.+)($|/)'
             - '--collector.filesystem.ignored-fs-types=^(sys|proc|auto|cgroup|devpts|ns|au|fuse.lxc|mqueue)(fs|)$'
             - '--no-collector.ipvs'
+            - '--web.listen-address=:9200'
           ports:
-            - containerPort: 9100
+            - containerPort: 9200
               protocol: TCP
           volumeMounts:
             - name: proc
