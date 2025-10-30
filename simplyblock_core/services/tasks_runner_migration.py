@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import tasks_events
+from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -198,5 +198,20 @@ while True:
 
                     res = task_runner(task)
                     update_master_task(task)
+                    if res:
+                        node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
+                        if not node_task:
+                            logger.info("no task found on same node, resuming compression")
+                            node = db.get_storage_node_by_id(task.node_id)
+                            for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+                                if n.status != StorageNode.STATUS_ONLINE:
+                                    logger.warning("Not all nodes are online, can not resume JC compression")
+                                    continue
+                            rpc_client = RPCClient(
+                                node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+                            ret = rpc_client.jc_compression_start(jm_vuid=node.jm_vuid)
+                            if not ret:
+                                logger.info("Failed to resume JC compression adding task...")
+                                tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
 
     time.sleep(3)

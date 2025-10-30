@@ -3139,11 +3139,11 @@ def recreate_lvstore(snode, force=False):
             time.sleep(3)
 
             # check jc_compression status
-            jc_compression_is_active = sec_node.rpc_client().jc_compression(snode.jm_vuid)
+            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
             while jc_compression_is_active:
                 logger.info(f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
                 time.sleep(60)
-                jc_compression_is_active = sec_node.rpc_client().jc_compression(sec_node.jm_vuid)
+                jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(sec_node.jm_vuid)
 
             fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
 
