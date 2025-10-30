@@ -600,7 +600,7 @@ def is_alive():
     })}}},
 })
 def spdk_proxy_restart(query: utils.RPCPortParams):
-    return spdk_process_kill(query)
+    return utils.get_response(True)
 
 
 api.post('/bind_device_to_spdk')(snode_ops.bind_device_to_spdk)
