@@ -145,7 +145,7 @@ _humanbytes_parameter = {
 }
 
 
-def humanbytes(size: int, mode: str = 'si') -> str:
+def humanbytes(size: int, mode: str = 'iec') -> str: # show size using 1024 base
     """Return the given bytes as a human friendly including the appropriate unit."""
     if not size or size < 0:
         return '0 B'
