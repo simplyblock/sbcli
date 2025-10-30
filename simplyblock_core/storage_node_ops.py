@@ -2319,7 +2319,7 @@ def suspend_storage_node(node_id, force=False):
     logger.info("Suspending node")
 
     rpc_client = snode.rpc_client()
-    fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=20, retry=1)
+    fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
     if snode.active_rdma:
         port_type = "udp"
@@ -2408,7 +2408,7 @@ def resume_storage_node(node_id):
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db(db_controller.kv_store)
 
-    fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=20, retry=1)
+    fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
     if snode.active_rdma:
         port_type = "udp"
@@ -3035,7 +3035,7 @@ def recreate_lvstore_on_sec(secondary_node):
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
 
-            fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
+            fw_api = FirewallClient(primary_node, timeout=5, retry=2)
             ### 3- block primary port
             fw_api.firewall_set_port(primary_node.lvol_subsys_port, port_type, "block", primary_node.rpc_port)
             tcp_ports_events.port_deny(primary_node, primary_node.lvol_subsys_port)
@@ -3062,7 +3062,7 @@ def recreate_lvstore_on_sec(secondary_node):
                 # return False
 
 
-            fw_api = FirewallClient(f"{primary_node.mgmt_ip}:5001", timeout=5, retry=2)
+            fw_api = FirewallClient(primary_node, timeout=5, retry=2)
             ### 8- allow port on primary
             fw_api.firewall_set_port(primary_node.lvol_subsys_port, port_type, "allow", primary_node.rpc_port)
             tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
@@ -3150,7 +3150,7 @@ def recreate_lvstore(snode, force=False):
                 time.sleep(60)
                 jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(sec_node.jm_vuid)
 
-            fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
+            fw_api = FirewallClient(sec_node, timeout=5, retry=2)
 
             ### 3- block secondary port
             port_type = "tcp"
@@ -3257,7 +3257,7 @@ def recreate_lvstore(snode, force=False):
                 # return False
             ### 8- allow secondary port
 
-            fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
+            fw_api = FirewallClient(sec_node, timeout=5, retry=2)
             ### 3- block secondary port
             port_type = "tcp"
             if sec_node.active_rdma:
