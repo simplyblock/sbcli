@@ -150,6 +150,9 @@ while True:
                         for db_dev in node.nvme_devices:
                             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
+                        logger.info("Finished sending device status and now waiting 5s for JMs to connect")
+                        time.sleep(5)
+
                         lvstore_check = True
                         if node.lvstore_status == "ready":
                             lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
