@@ -76,7 +76,10 @@ while True:
                                     continue
 
                             rpc_client = node.rpc_client(timeout=5, retry=2)
-                            ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+                            jm_vuid = node.jm_vuid
+                            if "jm_vuid" in task.function_params:
+                                jm_vuid = task.function_params["jm_vuid"]
+                            ret = rpc_client.jc_suspend_compression(jm_vuid=jm_vuid, suspend=False)
                             if ret:
                                 task.function_result = f"JC {node.jm_vuid} compression resumed on node"
                                 task.status = JobSchedule.STATUS_DONE
