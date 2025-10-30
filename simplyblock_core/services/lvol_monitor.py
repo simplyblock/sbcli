@@ -60,10 +60,10 @@ def resume_comp(lvol):
             return
     rpc_client = RPCClient(
         node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
-    ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+    ret = rpc_client.jc_compression_start(jm_vuid=node.jm_vuid)
     if not ret:
         logger.info("Failed to resume JC compression adding task...")
-        tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id())
+        tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), node.jm_vuid)
 
 
 def post_lvol_delete_rebalance(lvol):

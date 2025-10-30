@@ -3016,9 +3016,12 @@ def recreate_lvstore_on_sec(secondary_node):
             primary_node.write_to_db()
             return False
 
-        ret = primary_node.rpc_client().jc_suspend_compression(jm_vuid=secondary_node.jm_vuid, suspend=False)
+        # sending to the node that is being restarted (secondary_node) with the secondary group jm_vuid (primary_node.jm_vuid)
+        ret = secondary_node.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
         if not ret:
-            logger.error("Failed to resume JC compression")
+            logger.info("Failed to resume JC compression adding task...")
+            tasks_controller.add_jc_comp_resume_task(
+                secondary_node.cluster_id, secondary_node.get_id(), jm_vuid=primary_node.jm_vuid)
 
         ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
@@ -3136,11 +3139,16 @@ def recreate_lvstore(snode, force=False):
             time.sleep(3)
 
             # check jc_compression status
-            jc_compression_is_active = sec_node.rpc_client().jc_compression(snode.jm_vuid)
+            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
+            retries = 10
             while jc_compression_is_active:
+                if retries <= 0:
+                    logger.warning("Timeout waiting for JC compression task to finish")
+                    break
+                retries -= 1
                 logger.info(f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
                 time.sleep(60)
-                jc_compression_is_active = sec_node.rpc_client().jc_compression(sec_node.jm_vuid)
+                jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(sec_node.jm_vuid)
 
             fw_api = FirewallClient(f"{sec_node.mgmt_ip}:5001", timeout=5, retry=2)
 
@@ -3540,9 +3548,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             logger.error(err)
             return False
 
+        # sending to the other node (sec_node) with the primary group jm_vuid (snode.jm_vuid)
         ret = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
         if not ret:
-            logger.error("Failed to resume JC compression")
+            logger.info("Failed to resume JC compression adding task...")
+            tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
 
         sec_rpc_client = sec_node.rpc_client()
         sec_rpc_client.bdev_examine(snode.raid)
