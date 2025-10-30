@@ -938,6 +938,8 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_node_add.py"]
           env:
+            - name: LVOL_NVMF_PORT_START
+              value: "{{ .Values.ports.lvolNvmfPortStart }}"
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
