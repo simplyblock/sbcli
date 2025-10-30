@@ -1191,7 +1191,7 @@ class RPCClient:
         }
         return self._request("bdev_distrib_set_qos_weights", params)
 
-    def jc_compression(self, jm_vuid):
+    def jc_compression_get_status(self, jm_vuid):
         """
         Return value:
             'False': indicates compression has finished or there is no pending compression.
@@ -1202,6 +1202,12 @@ class RPCClient:
         params = {
             "jm_vuid": jm_vuid,
             "get_status": True,
+        }
+        return self._request("jc_compression", params)
+
+    def jc_compression_start(self, jm_vuid):
+        params = {
+            "jm_vuid": jm_vuid
         }
         return self._request("jc_compression", params)
 
