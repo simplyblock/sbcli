@@ -1348,6 +1348,9 @@ def resize_lvol(id, new_size):
         logger.error(msg)
         return False, msg
 
+    # round size to the nearest 1G ceiling
+    new_size = math.ceil(new_size/(1024*1024*1024))*1024*1024*1024
+
     if lvol.size >= new_size:
         msg = f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}"
         logger.error(msg)
