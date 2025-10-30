@@ -82,7 +82,7 @@ while True:
                                 task.status = JobSchedule.STATUS_DONE
                                 task.write_to_db(db.kv_store)
                             else:
-                                msg = f"JC comp resume failed, retry task"
+                                msg = "JC comp resume failed, retry task"
                                 logger.info(msg)
                                 task.retry += 1
                                 task.function_result = msg
