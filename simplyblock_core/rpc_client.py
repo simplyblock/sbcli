@@ -1204,3 +1204,18 @@ class RPCClient:
             "get_status": True,
         }
         return self._request("jc_compression", params)
+
+    def nvmf_port_block_rdma(self, port):
+        params = {
+            "port": port,
+        }
+        return self._request("nvmf_port_block", params)
+
+    def nvmf_port_unblock_rdma(self, port):
+        params = {
+            "port": port,
+        }
+        return self._request("nvmf_port_unblock", params)
+
+    def nvmf_get_blocked_ports_rdma(self):
+        return self._request("nvmf_get_blocked_ports")

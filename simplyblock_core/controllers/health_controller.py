@@ -142,7 +142,7 @@ def _check_spdk_process_up(ip, rpc_port):
 
 def _check_port_on_node(snode, port_id):
     try:
-        fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
+        fw_api = FirewallClient(snode, timeout=5, retry=2)
         iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
         if type(iptables_command_output) is str:
             iptables_command_output = [iptables_command_output]
@@ -155,6 +155,13 @@ def _check_port_on_node(snode, port_id):
                             action = rule['target']  # type: ignore
                             if action in ["DROP", "REJECT"]:
                                 return False
+
+        # check RDMA port block
+        if snode.active_rdma:
+            rdma_fw_port_list = snode.rpc_client().nvmf_get_blocked_ports_rdma()
+            if port_id in rdma_fw_port_list:
+                return False
+
         return True
     except Exception as e:
         logger.error(e)

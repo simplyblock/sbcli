@@ -205,7 +205,7 @@ while True:
 
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
 
-                        fw_api = FirewallClient(f"{node.mgmt_ip}:5001", timeout=5, retry=2)
+                        fw_api = FirewallClient(snode, timeout=5, retry=2)
                         port_type = "tcp"
                         if node.active_rdma:
                             port_type = "udp"
