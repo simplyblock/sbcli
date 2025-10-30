@@ -44,47 +44,6 @@ def set_snapshot_health_check(snap, health_check_status):
     snap.write_to_db()
 
 
-lvol_del_start_time = 0.0
-def pre_lvol_delete_rebalance():
-    global lvol_del_start_time
-    if lvol_del_start_time == 0:
-        lvol_del_start_time = time.time()
-
-
-def resume_comp(lvol):
-    logger.info("resuming compression")
-    node = db.get_storage_node_by_id(lvol.node_id)
-    for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-        if n.status != StorageNode.STATUS_ONLINE:
-            logger.warning("Not all nodes are online, can not resume JC compression")
-            return
-    rpc_client = RPCClient(
-        node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
-    ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-    if not ret:
-        logger.info("Failed to resume JC compression adding task...")
-        tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id())
-
-
-def post_lvol_delete_rebalance(lvol):
-    global lvol_del_start_time
-    diff = time.time() - lvol_del_start_time
-    if diff > 0:
-        records = db.get_cluster_capacity(cluster, int(diff/5))
-        total_size = records[0].size_total
-        current_cap = records[0].size_used
-        start_cap = records[-1].size_used
-        if start_cap - current_cap > int(total_size * 10 / 100):
-            resume_comp(lvol)
-        lvol_del_start_time = 0
-        return True
-    lvol_records = db.get_lvol_stats(lvol, 1)
-    if lvol_records:
-        total_size = db.get_cluster_capacity(cluster, 1)[0].size_total
-        if lvol_records[0].size_used > int(total_size * 10 / 100):
-            resume_comp(lvol)
-
-
 def process_lvol_delete_finish(lvol):
     logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
 
@@ -151,7 +110,6 @@ def process_lvol_delete_finish(lvol):
         logger.info("All devices are full, starting expansion migrations")
         for dev_id in full_devs_ids:
             tasks_controller.add_new_device_mig_task(dev_id)
-    post_lvol_delete_rebalance(lvol)
 
 
 def process_lvol_delete_try_again(lvol):
@@ -252,7 +210,6 @@ while True:
 
                     elif ret == 1: # Async lvol deletion is in progress or queued
                         logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
-                        pre_lvol_delete_rebalance()
 
                     elif ret == 3: # Async deletion is done, but leadership has changed (sync deletion is now blocked)
                         logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
