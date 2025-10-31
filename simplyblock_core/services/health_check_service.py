@@ -227,7 +227,27 @@ while True:
                         if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
                             lvstore_check &= health_controller._check_node_lvstore(
                                 lvstore_stack, second_node_1, auto_fix=True, stack_src_node=snode)
-                            lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1, auto_fix=True)
+                            sec_node_check = health_controller._check_sec_node_hublvol(second_node_1)
+                            if not sec_node_check:
+                                ret = second_node_1.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                                if ret:
+                                    lvs_info = ret[0]
+                                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                        # is_sec_node_leader = True
+                                        # check jc_compression status
+                                        jc_compression_is_active = second_node_1.rpc_client().jc_compression_get_status(snode.jm_vuid)
+                                        retries = 10
+                                        while jc_compression_is_active:
+                                            if retries <= 0:
+                                                logger.warning("Timeout waiting for JC compression task to finish")
+                                                break
+                                            retries -= 1
+                                            logger.info(
+                                                f"JC compression task found on node: {second_node_1.get_id()}, retrying in 60 seconds")
+                                            time.sleep(60)
+                                            jc_compression_is_active = second_node_1.rpc_client().jc_compression_get_status(snode.jm_vuid)
+                                        lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1, auto_fix=True)
+
 
                     lvol_port_check = False
                     # if node_api_check:

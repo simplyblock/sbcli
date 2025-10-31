@@ -173,7 +173,7 @@ while True:
                                             f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
                                         time.sleep(60)
                                         jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
-                                            sec_node.jm_vuid)
+                                            snode.jm_vuid)
 
                         lvstore_check = True
                         if node.lvstore_status == "ready":
