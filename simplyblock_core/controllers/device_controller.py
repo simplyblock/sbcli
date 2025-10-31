@@ -57,10 +57,10 @@ def device_set_state(device_id, state):
         return False
 
     if device.status != state:
-        old_status = dev.status
+        device.previous_status = device.status
         device.status = state
         snode.write_to_db(db_controller.kv_store)
-        device_events.device_status_change(device, device.status, old_status)
+        device_events.device_status_change(device, device.status, device.previous_status)
 
     if state == NVMeDevice.STATUS_ONLINE:
         logger.info("Make other nodes connect to the node devices")
