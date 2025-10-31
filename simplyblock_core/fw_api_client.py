@@ -74,7 +74,7 @@ class FirewallClient:
     def firewall_set_port(self, port_id, port_type="tcp", action="block", rpc_port=None, is_reject=False):
         params = {
             "port_id": port_id,
-            "port_type": port_type,
+            "port_type": "tcp",
             "action": action,
             "rpc_port": rpc_port,
             "is_reject": is_reject,
