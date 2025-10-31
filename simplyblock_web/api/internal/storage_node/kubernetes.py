@@ -334,6 +334,7 @@ def spdk_process_start(body: SPDKParams):
         values = {
             'SPDK_IMAGE': body.spdk_image,
             "L_CORES": body.l_cores,
+            "CPU_CORES": core_utils.get_total_cpu_cores(body.l_cores),
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
             'MEM_GEGA': core_utils.convert_size(body.spdk_mem, 'GiB', round_up=True),
             'MEM2_GEGA': core_utils.convert_size(body.system_mem, 'GiB', round_up=True),
@@ -417,7 +418,7 @@ def spdk_process_start(body: SPDKParams):
                 )
             )
             logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
-            
+
         elif core_isolate and openshift:
             core_template = env.get_template('oc_storage_core_isolation.yaml.j2')
             core_yaml = yaml.safe_load(core_template.render(values))
