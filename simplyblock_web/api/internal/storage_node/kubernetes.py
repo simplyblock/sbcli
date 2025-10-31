@@ -334,7 +334,7 @@ def spdk_process_start(body: SPDKParams):
         values = {
             'SPDK_IMAGE': body.spdk_image,
             "L_CORES": body.l_cores,
-            "CPU_CORES": core_utils.get_total_cpu_cores(body.l_cores),
+            "CORES": core_utils.get_total_cpu_cores(body.l_cores),
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
             'MEM_GEGA': core_utils.convert_size(body.spdk_mem, 'GiB', round_up=True),
             'MEM2_GEGA': core_utils.convert_size(body.system_mem, 'GiB', round_up=True),
