@@ -88,6 +88,21 @@ spec:
                   - "iommu=pt"
               EOF
 
+              # Create the KubeletConfig to enable static CPU manager
+              cat <<EOF | kubectl apply -f -
+              apiVersion: machineconfiguration.openshift.io/v1
+              kind: KubeletConfig
+              metadata:
+                name: set-static-cpu-manager
+              spec:
+                machineConfigPoolSelector:
+                  matchLabels:
+                    machineconfiguration.openshift.io/role: worker-isolated
+                kubeletConfig:
+                  cpuManagerPolicy: static
+                  cpuManagerReconcilePeriod: 5s
+              EOF
+
               echo "[INFO] Init setup and CPU isolation complete."
               
               echo "--- Init setup complete ---"
