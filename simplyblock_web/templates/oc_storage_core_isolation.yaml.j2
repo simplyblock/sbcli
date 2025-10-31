@@ -34,6 +34,9 @@ spec:
             - |
               set -e
 
+              echo "--- Installing jq ---"
+              apk add --no-cache jq
+
               echo "--- Reading isolated cores from config ---"
               CONFIG_FILE="/var/simplyblock/sn_config_file"
 
