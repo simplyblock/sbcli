@@ -345,6 +345,7 @@ while True:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
                                           Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
                         # tasks_controller.add_node_to_auto_restart(snode)
+                        set_node_online(snode)
                         continue
 
                 if not node_port_check:
