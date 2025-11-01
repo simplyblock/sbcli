@@ -153,7 +153,7 @@ def _check_port_on_node(snode, port_id):
                     for rule in chain['rules']:  # type: ignore
                         if str(port_id) in rule['options']:  # type: ignore
                             action = rule['target']  # type: ignore
-                            if action in ["DROP", "REJECT"]:
+                            if action in ["DROP"]:
                                 return False
 
         # check RDMA port block

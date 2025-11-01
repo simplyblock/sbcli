@@ -196,14 +196,6 @@ while True:
                             task.status = JobSchedule.STATUS_RUNNING
                             task.write_to_db(db.kv_store)
 
-                        port_number = task.function_params["port_number"]
-                        snode_api = SNodeClient(f"{node.mgmt_ip}:5000", timeout=3, retry=2)
-
-
-                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                            sec_rpc_client = sec_node.rpc_client()
-                            sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
-
                         not_deleted = []
                         for bdev_name in snode.lvol_sync_del_queue:
                             logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
@@ -217,6 +209,13 @@ while True:
                                     not_deleted.append(bdev_name)
                         snode.lvol_sync_del_queue = not_deleted
                         snode.write_to_db()
+
+                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                            sec_rpc_client = sec_node.rpc_client()
+                            sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+
+                        port_number = task.function_params["port_number"]
+                        snode_api = SNodeClient(f"{node.mgmt_ip}:5000", timeout=3, retry=2)
 
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
 
