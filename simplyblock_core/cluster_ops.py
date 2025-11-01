@@ -587,7 +587,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 raise ValueError("Failed to activate cluster")
         else:
             ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks*constants.LVOL_CLUSTER_RATIO, max_size)
+                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if ret:
             snode.lvstore_status = "ready"
