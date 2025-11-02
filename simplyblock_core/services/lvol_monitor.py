@@ -325,6 +325,8 @@ while True:
                             lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
                         if not ret:
                             passed = False
+                        else:
+                            passed = True
 
                 if snode.lvstore_status == "ready":
 

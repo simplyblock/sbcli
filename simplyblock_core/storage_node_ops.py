@@ -3259,10 +3259,14 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
     for iface in snode.data_nics:
-        if iface.ip4_address:
+        if iface.ip4_address and lvol.fabric==iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(
                 lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
+        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+            logger.info("adding listener for %s on IP %s, fabric TCP" % (lvol.nqn, iface.ip4_address))
+            ret = rpc_client.listeners_create(
+                lvol.nqn, "TCP", iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     lvol_obj.status = LVol.STATUS_ONLINE
