@@ -720,7 +720,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
                         logger.warning("listener already exists")
                     else:
                         return False, f"Failed to create listener for {lvol.get_id()}"
-            elif lvol.fabric == "tcp" and snode.active_tcp:
+            elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
                 logger.info("adding listener for %s on IP %s, fabric TCP" % (lvol.nqn, iface.ip4_address))
                 ret, err = rpc_client.nvmf_subsystem_add_listener(
                         lvol.nqn, "TCP", iface.ip4_address, lvol.subsys_port, ana_state)
