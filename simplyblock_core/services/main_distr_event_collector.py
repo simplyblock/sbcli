@@ -78,13 +78,17 @@ def process_device_event(event):
                 device_controller.device_set_unavailable(device_obj.get_id())
                 device_controller.device_set_io_error(device_obj.get_id(), True)
         else:
-            distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
-            event_node_obj = db.get_storage_node_by_id(event_node_obj.get_id())
-            for dev in event_node_obj.remote_devices:
-                if dev.get_id() == device_obj.get_id():
-                    event_node_obj.remote_devices.remove(dev)
-                    event_node_obj.write_to_db()
-                    break
+            if event.message == 'error_write_cannot_allocate':
+                logger.info("Setting device to cannot_allocate")
+                device_controller.device_set_state(device_obj.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
+            else:
+                distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
+                event_node_obj = db.get_storage_node_by_id(event_node_obj.get_id())
+                for dev in event_node_obj.remote_devices:
+                    if dev.get_id() == device_obj.get_id():
+                        event_node_obj.remote_devices.remove(dev)
+                        event_node_obj.write_to_db()
+                        break
 
         event.status = 'processed'
 
