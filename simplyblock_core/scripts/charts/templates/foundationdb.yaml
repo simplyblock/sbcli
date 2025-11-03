@@ -226,7 +226,7 @@ spec:
   minimumUptimeSecondsForBounce: 60
   processCounts:
     cluster_controller: 1
-    log: -1 
+    log: 3
     stateless: -1
   processes:
     general:
@@ -235,15 +235,6 @@ spec:
       - listen_address=0.0.0.0:4501
       podTemplate:
         spec:
-          affinity:
-            podAntiAffinity:
-              preferredDuringSchedulingIgnoredDuringExecution:
-                - weight: 100
-                  podAffinityTerm:
-                    labelSelector:
-                      matchLabels:
-                        foundationdb.org/fdb-process-class: storage
-                    topologyKey: kubernetes.io/hostname
           containers:
           - name: foundationdb
             resources:
@@ -284,6 +275,32 @@ spec:
           resources:
             requests:
               storage: 10G
+
+    storage:
+      podTemplate:
+        spec:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        foundationdb.org/fdb-process-class: storage
+                    topologyKey: kubernetes.io/hostname
+    log:
+      podTemplate:
+        spec:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        foundationdb.org/fdb-process-class: log
+                    topologyKey: kubernetes.io/hostname
+
   routing:
     defineDNSLocalityFields: true
   sidecarContainer:
