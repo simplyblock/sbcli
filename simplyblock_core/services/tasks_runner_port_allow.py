@@ -156,19 +156,24 @@ while True:
                         sec_node = db.get_storage_node_by_id(node.secondary_node_id)
                         snode = db.get_storage_node_by_id(node.get_id())
                         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                            # check jc_compression status
-                            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
-                            retries = 10
-                            while jc_compression_is_active:
-                                if retries <= 0:
-                                    logger.warning("Timeout waiting for JC compression task to finish")
-                                    break
-                                retries -= 1
-                                logger.info(
-                                    f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
-                                time.sleep(60)
-                                jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
-                                    sec_node.jm_vuid)
+                            ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                            if ret:
+                                lvs_info = ret[0]
+                                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                    # is_sec_node_leader = True
+                                    # check jc_compression status
+                                    jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
+                                    retries = 10
+                                    while jc_compression_is_active:
+                                        if retries <= 0:
+                                            logger.warning("Timeout waiting for JC compression task to finish")
+                                            break
+                                        retries -= 1
+                                        logger.info(
+                                            f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
+                                        time.sleep(60)
+                                        jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
+                                            snode.jm_vuid)
 
                         lvstore_check = True
                         if node.lvstore_status == "ready":
@@ -191,14 +196,6 @@ while True:
                             task.status = JobSchedule.STATUS_RUNNING
                             task.write_to_db(db.kv_store)
 
-                        port_number = task.function_params["port_number"]
-                        snode_api = SNodeClient(f"{node.mgmt_ip}:5000", timeout=3, retry=2)
-
-
-                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                            sec_rpc_client = sec_node.rpc_client()
-                            sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
-
                         not_deleted = []
                         for bdev_name in snode.lvol_sync_del_queue:
                             logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
@@ -212,6 +209,13 @@ while True:
                                     not_deleted.append(bdev_name)
                         snode.lvol_sync_del_queue = not_deleted
                         snode.write_to_db()
+
+                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                            sec_rpc_client = sec_node.rpc_client()
+                            sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+
+                        port_number = task.function_params["port_number"]
+                        snode_api = SNodeClient(f"{node.mgmt_ip}:5000", timeout=3, retry=2)
 
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
 

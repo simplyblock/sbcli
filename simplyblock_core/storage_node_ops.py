@@ -2320,6 +2320,17 @@ def suspend_storage_node(node_id, force=False):
 
     logger.info("Suspending node")
 
+    for dev in snode.nvme_devices:
+        if dev.status == NVMeDevice.STATUS_ONLINE:
+            device_controller.device_set_unavailable(dev.get_id())
+
+    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+        logger.info("Setting JM unavailable")
+        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+
+    logger.info("Setting node status to suspended")
+    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+
     rpc_client = snode.rpc_client()
     fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
@@ -2355,16 +2366,7 @@ def suspend_storage_node(node_id, force=False):
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(1)
 
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            device_controller.device_set_unavailable(dev.get_id())
 
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        logger.info("Setting JM unavailable")
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
-
-    logger.info("Setting node status to suspended")
-    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
     logger.info("Done")
     return True
 
@@ -3314,10 +3316,14 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
     for iface in snode.data_nics:
-        if iface.ip4_address:
+        if iface.ip4_address and lvol.fabric==iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(
                 lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
+        elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+            logger.info("adding listener for %s on IP %s, fabric TCP" % (lvol.nqn, iface.ip4_address))
+            ret = rpc_client.listeners_create(
+                lvol.nqn, "TCP", iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     lvol_obj.status = LVol.STATUS_ONLINE

@@ -28,7 +28,7 @@ while True:
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
 
-                if task.function_name == JobSchedule.FN_PORT_ALLOW:
+                if task.function_name == JobSchedule.FN_JC_COMP_RESUME:
                     if task.status != JobSchedule.STATUS_DONE:
 
                         # get new task object because it could be changed from cancel task
@@ -63,7 +63,14 @@ while True:
                             continue
 
                         node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
-                        if not node_task:
+                        if node_task:
+                            msg="Task found on same node"
+                            logger.info(msg)
+                            task.retry += 1
+                            task.function_result = msg
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.write_to_db(db.kv_store)
+                        else:
                             logger.info("no task found on same node, resuming compression")
                             node = db.get_storage_node_by_id(task.node_id)
                             for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
