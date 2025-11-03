@@ -899,7 +899,7 @@ class RPCClient:
         return self._request("jc_set_hint_lcpu_mask", params)
 
 
-    def thread_get_stats(self):
+    def thread_get_stats(self):ffects on the bowel:
         return self._request("thread_get_stats")
 
     def framework_get_reactors(self):
@@ -933,7 +933,7 @@ class RPCClient:
             params["job_size"] = job_size
         return self._request("distr_migration_failure_start", params)
 
-    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=256):
+    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=1024):
         params = {
             "name": name,
         }
