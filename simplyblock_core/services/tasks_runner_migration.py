@@ -45,8 +45,6 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         return False
 
-    allowed_error_codes = [0]
-
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             if node.is_secondary_node:  # pass
@@ -71,8 +69,6 @@ def task_runner(task):
                     task.retry += 1
                     task.write_to_db(db.kv_store)
                     return False
-                elif dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                    allowed_error_codes = list(range(0, 4096))
 
         task.status = JobSchedule.STATUS_RUNNING
         task.function_result = ""
@@ -110,6 +106,13 @@ def task_runner(task):
 
     try:
         if "migration" in task.function_params:
+            allowed_error_codes = []
+            for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
+                for dev in node.nvme_devices:
+                    if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                        allowed_error_codes = [8, 32, 520]
+                        break
+
             mig_info = task.function_params["migration"]
             res = rpc_client.distr_migration_status(**mig_info)
             return utils.handle_task_result(task, res, allowed_error_codes=allowed_error_codes)
