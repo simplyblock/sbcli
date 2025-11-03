@@ -1879,7 +1879,9 @@ def restart_storage_node(
                              NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
             db_dev.status = NVMeDevice.STATUS_ONLINE
             if db_dev.previous_status and db_dev.previous_status == NVMeDevice.STATUS_CANNOT_ALLOCATE:
-                db_dev.status = NVMeDevice.STATUS_CANNOT_ALLOCATE
+                records = db_controller.get_device_capacity(db_dev, 1)
+                if records and records[0].size_util == 100:
+                    db_dev.status = NVMeDevice.STATUS_CANNOT_ALLOCATE
             db_dev.health_check = True
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
