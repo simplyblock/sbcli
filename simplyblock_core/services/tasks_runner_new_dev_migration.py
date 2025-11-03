@@ -120,10 +120,16 @@ def task_runner(task):
 
     try:
         if "migration" in task.function_params:
-            allowed_error_codes = list(range(1, 8)) if not all_devs_online else [0]
+            allow_all_errors = False
+            for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
+                for dev in node.nvme_devices:
+                    if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                        allow_all_errors = True
+                        break
+
             mig_info = task.function_params["migration"]
             res = rpc_client.distr_migration_status(**mig_info)
-            return utils.handle_task_result(task, res, allowed_error_codes=allowed_error_codes)
+            return utils.handle_task_result(task, res, allow_all_errors=allow_all_errors)
     except Exception as e:
         logger.error("Failed to get migration task status")
         logger.exception(e)
