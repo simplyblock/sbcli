@@ -1204,6 +1204,9 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         # Update Deployments
         deployments = apps_v1.list_namespaced_deployment(namespace=constants.K8S_NAMESPACE)
         for deploy in deployments.items:
+            if deploy.metadata.name == constants.ADMIN_DEPLOY_NAME:
+                logger.info(f"Skipping deployment {deploy.metadata.name}")
+                continue
             for c in deploy.spec.template.spec.containers:
                 if image_parts in c.image:
                     logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
