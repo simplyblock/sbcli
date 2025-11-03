@@ -28,7 +28,7 @@ while True:
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
 
-                if task.function_name == JobSchedule.FN_PORT_ALLOW:
+                if task.function_name == JobSchedule.FN_JC_COMP_RESUME:
                     if task.status != JobSchedule.STATUS_DONE:
 
                         # get new task object because it could be changed from cancel task
