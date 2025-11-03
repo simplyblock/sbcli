@@ -255,8 +255,8 @@ spec:
           - name: foundationdb-kubernetes-sidecar
             resources:
               limits:
-                cpu: 100m
-                memory: 128Mi
+                cpu: 200m
+                memory: 256Mi
               requests:
                 cpu: 100m
                 memory: 128Mi
@@ -280,7 +280,7 @@ spec:
             - ReadWriteOnce
           resources:
             requests:
-              storage: 5G
+              storage: 10G
   routing:
     defineDNSLocalityFields: true
   sidecarContainer:
