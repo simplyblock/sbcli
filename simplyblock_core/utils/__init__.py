@@ -749,7 +749,7 @@ def strfdelta(tdelta):
     return out.strip()
 
 
-def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes=None):
+def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes=None, allow_all_errors=False):
     if res:
         if not allowed_error_codes:
             allowed_error_codes = [0]
@@ -762,7 +762,7 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes=None):
             if error_code == 0:
                 task.function_result = "Done"
                 task.status = JobSchedule.STATUS_DONE
-            elif error_code in allowed_error_codes:
+            elif error_code in allowed_error_codes or allow_all_errors:
                 task.function_result = f"mig completed with status: {error_code}"
                 task.status = JobSchedule.STATUS_DONE
             else:
