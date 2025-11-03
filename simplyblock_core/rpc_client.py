@@ -899,7 +899,7 @@ class RPCClient:
         return self._request("jc_set_hint_lcpu_mask", params)
 
 
-    def thread_get_stats(self):ffects on the bowel:
+    def thread_get_stats(self):
         return self._request("thread_get_stats")
 
     def framework_get_reactors(self):
