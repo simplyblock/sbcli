@@ -40,7 +40,7 @@ from simplyblock_core.utils import pull_docker_image_with_retry
 logger = utils.get_logger(__name__)
 
 
-def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_names: List[str], reattach: bool):
+def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool):
     """Connect snode to device
 
     This only performs the actual operation between both involved SPDK instances,
@@ -54,6 +54,15 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
         if bdev.startswith(name):
             logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
             return bdev
+
+    rpc_client = node.rpc_client()
+    # check connection status
+    if device.connecting_from_node and device.connecting_from_node != node.get_id():
+        logger.warning("This device is being connected to from other node, sleep for 5 seconds")
+        time.sleep(5)
+
+    device.connecting_from_node = node.get_id()
+    device.write_to_db()
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
@@ -91,6 +100,9 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
         if device.nvmf_multipath:
             rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
+    # wait 5 seconds after controller attach
+    time.sleep(5)
+
     if not bdev_name:
         msg = "Bdev name not returned from controller attach"
         logger.error(msg)
@@ -103,6 +115,9 @@ def connect_device(name: str, device: NVMeDevice, rpc_client: RPCClient, bdev_na
             break
         else:
             time.sleep(1)
+
+    device.connecting_from_node = ""
+    device.write_to_db()
 
     if not bdev_found:
         logger.error("Bdev not found after 5 attempts")
@@ -702,7 +717,7 @@ def _connect_to_remote_devs(
                 raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
 
             dev.remote_bdev = connect_device(
-                    f"remote_{dev.alceml_bdev}", dev, rpc_client,
+                    f"remote_{dev.alceml_bdev}", dev, this_node,
                     bdev_names=node_bdev_names, reattach=reattach,
             )
             remote_devices.append(dev)
@@ -762,7 +777,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
 
         try:
             org_dev.remote_bdev = connect_device(
-                    f"remote_{org_dev.jm_bdev}", org_dev, rpc_client,
+                    f"remote_{org_dev.jm_bdev}", org_dev, this_node,
                     bdev_names=node_bdev_names, reattach=True,
             )
         except RuntimeError:

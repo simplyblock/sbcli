@@ -63,6 +63,7 @@ class NVMeDevice(BaseModel):
     serial_number: str = ""
     size: int = -1
     testing_bdev: str = ""
+    connecting_from_node: str = ""
 
 
 class JMDevice(NVMeDevice):
