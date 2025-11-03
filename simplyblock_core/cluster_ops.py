@@ -1157,12 +1157,12 @@ def get_cluster(cl_id) -> dict:
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
-    sbcli=constants.SIMPLY_BLOCK_CLI_NAME
-    subprocess.check_call(f"pip install {sbcli} --upgrade".split(' '))
-    logger.info(f"{sbcli} upgraded")
-
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
+        sbcli=constants.SIMPLY_BLOCK_CLI_NAME
+        subprocess.check_call(f"pip install {sbcli} --upgrade".split(' '))
+        logger.info(f"{sbcli} upgraded")
+
         cluster_docker = utils.get_docker_client(cluster_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
