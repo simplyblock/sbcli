@@ -227,6 +227,7 @@ spec:
   processCounts:
     cluster_controller: 1
     log: 3
+    storage: 3
     stateless: -1
   processes:
     general:
