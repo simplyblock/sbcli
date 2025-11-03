@@ -63,7 +63,9 @@ def task_runner(task):
                     logger.error(f"Failed to get online since: {e}")
 
             for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_NEW, NVMeDevice.STATUS_UNAVAILABLE]:
+                if dev.status in [NVMeDevice.STATUS_ONLINE,
+                                  NVMeDevice.STATUS_FAILED_AND_MIGRATED,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     task.function_result = f"Some dev status is {dev.status }, retrying"
                     task.status = JobSchedule.STATUS_SUSPENDED
                     task.retry += 1
