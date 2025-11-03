@@ -63,7 +63,14 @@ while True:
                             continue
 
                         node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
-                        if not node_task:
+                        if node_task:
+                            msg="Task found on same node"
+                            logger.info(msg)
+                            task.retry += 1
+                            task.function_result = msg
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.write_to_db(db.kv_store)
+                        else:
                             logger.info("no task found on same node, resuming compression")
                             node = db.get_storage_node_by_id(task.node_id)
                             for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
