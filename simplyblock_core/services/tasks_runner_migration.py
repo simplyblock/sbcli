@@ -71,10 +71,8 @@ def task_runner(task):
                     task.retry += 1
                     task.write_to_db(db.kv_store)
                     return False
-                elif dev.status == NVMeDevice.STATUS_READONLY:
-                    allowed_error_codes.append(8)
-                elif dev.status == NVMeDevice.STATUS_CANNOT_ALLOCATE:
-                    allowed_error_codes.append(32)
+                elif dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    allowed_error_codes = list(range(0, 4096))
 
         task.status = JobSchedule.STATUS_RUNNING
         task.function_result = ""
