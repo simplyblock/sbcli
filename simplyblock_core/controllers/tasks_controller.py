@@ -310,7 +310,7 @@ def get_active_node_tasks(cluster_id, node_id):
     tasks = db.get_job_tasks(cluster_id)
     out = []
     for task in tasks:
-        if task.function_name == JobSchedule.FN_PORT_ALLOW:
+        if task.function_name in [JobSchedule.FN_PORT_ALLOW, JobSchedule.FN_JC_COMP_RESUME]:
             continue
         if task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
