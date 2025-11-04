@@ -1314,6 +1314,10 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
             if nic.ip4_address and lvol.fabric == nic.trtype.lower():
                 transport = nic.trtype.lower()
 
+            if transport == "tcp":
+                keep_alive_to = constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
+            else:
+                keep_alive_to = constants.LVOL_NVME_KEEP_ALIVE_TO
 
             out.append({
                 "ns_id": lvol.ns_id,
@@ -1324,11 +1328,11 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 "ctrl-loss-tmo": ctrl_loss_tmo,
                 "nr-io-queues": cluster.client_qpair_count,
-                "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
+                "keep-alive-tmo": keep_alive_to,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                            f"--ctrl-loss-tmo={ctrl_loss_tmo} "
                            f"--nr-io-queues={cluster.client_qpair_count} "
-                           f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
+                           f"--keep-alive-tmo={keep_alive_to} "
                            f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
             })
     return out
