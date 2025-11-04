@@ -2015,7 +2015,9 @@ def restart_storage_node(
 
             online_devices_list = []
             for dev in snode.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_ONLINE:
+                if dev.status in [NVMeDevice.STATUS_ONLINE,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                                  NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                     logger.info(f"Starting migration task for device {dev.get_id()}")
                     online_devices_list.append(dev.get_id())
             if online_devices_list:
@@ -3109,6 +3111,19 @@ def recreate_lvstore(snode, force=False):
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db()
+    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+        # check jc_compression status
+        jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
+        retries = 10
+        while jc_compression_is_active:
+            if retries <= 0:
+                logger.warning("Timeout waiting for JC compression task to finish")
+                break
+            retries -= 1
+            logger.info(f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
+            time.sleep(60)
+            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(sec_node.jm_vuid)
 
     ### 1- create distribs and raid
     ret, err = _create_bdev_stack(snode, [])
@@ -3120,8 +3135,6 @@ def recreate_lvstore(snode, force=False):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
-
-    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(snode.get_id()):
@@ -3158,18 +3171,6 @@ def recreate_lvstore(snode, force=False):
             sec_node.lvstore_status = "in_creation"
             sec_node.write_to_db()
             time.sleep(3)
-
-            # check jc_compression status
-            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
-            retries = 10
-            while jc_compression_is_active:
-                if retries <= 0:
-                    logger.warning("Timeout waiting for JC compression task to finish")
-                    break
-                retries -= 1
-                logger.info(f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
-                time.sleep(60)
-                jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(sec_node.jm_vuid)
 
             fw_api = FirewallClient(sec_node, timeout=5, retry=2)
 
