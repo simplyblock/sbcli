@@ -160,7 +160,7 @@ while True:
 
                         try:
                             storage_node_ops.connect_device(
-                                    f"remote_{org_dev.alceml_bdev}", org_dev, rpc_client,
+                                    f"remote_{org_dev.alceml_bdev}", org_dev, snode,
                                     bdev_names=list(node_bdev_names), reattach=False,
                             )
                             connected_devices.append(org_dev.get_id())

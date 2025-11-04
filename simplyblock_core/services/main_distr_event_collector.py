@@ -39,6 +39,10 @@ def process_device_event(event):
             event.status = 'device_not_found'
             return
 
+        if device_obj.connecting_from_node == event_node_obj.get_id():
+            logger.warning("Connection attempt was found from node to device, sleeping 5 seconds")
+            time.sleep(5)
+
         if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                      NVMeDevice.STATUS_CANNOT_ALLOCATE]:
             logger.info(f"The device is not online, skipping. status: {device_obj.status}")

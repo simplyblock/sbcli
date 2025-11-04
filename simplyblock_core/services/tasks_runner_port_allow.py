@@ -106,7 +106,7 @@ while True:
                                         raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
 
                                     dev.remote_bdev = storage_node_ops.connect_device(
-                                        f"remote_{dev.alceml_bdev}", dev, node.rpc_client(),
+                                        f"remote_{dev.alceml_bdev}", dev, node,
                                         bdev_names=list(node_bdev_names), reattach=False)
 
                                     remote_devices.append(dev)
