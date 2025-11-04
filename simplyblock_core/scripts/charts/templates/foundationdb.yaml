@@ -226,7 +226,8 @@ spec:
   minimumUptimeSecondsForBounce: 60
   processCounts:
     cluster_controller: 1
-    log: -1 
+    log: 3
+    storage: 3
     stateless: -1
   processes:
     general:
@@ -235,28 +236,22 @@ spec:
       - listen_address=0.0.0.0:4501
       podTemplate:
         spec:
-          affinity:
-            podAntiAffinity:
-              preferredDuringSchedulingIgnoredDuringExecution:
-                - weight: 100
-                  podAffinityTerm:
-                    labelSelector:
-                      matchLabels:
-                        foundationdb.org/fdb-process-class: storage
-                    topologyKey: kubernetes.io/hostname
           containers:
           - name: foundationdb
             resources:
+              limits:
+                cpu: 300m
+                memory: 512Mi
               requests:
                 cpu: 100m
-                memory: 512Mi
+                memory: 256Mi
             securityContext:
               runAsUser: 0
           - name: foundationdb-kubernetes-sidecar
             resources:
               limits:
-                cpu: 100m
-                memory: 128Mi
+                cpu: 200m
+                memory: 256Mi
               requests:
                 cpu: 100m
                 memory: 128Mi
@@ -280,7 +275,55 @@ spec:
             - ReadWriteOnce
           resources:
             requests:
-              storage: 5G
+              storage: 10G
+
+    storage:
+      podTemplate:
+        spec:
+          containers:
+          - name: foundationdb
+            resources:
+              limits:
+                cpu: 500m
+                memory: 2Gi
+              requests:
+                cpu: 100m
+                memory: 512Mi
+            securityContext:
+              runAsUser: 0
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        foundationdb.org/fdb-process-class: storage
+                    topologyKey: kubernetes.io/hostname
+    log:
+      podTemplate:
+        spec:
+          containers:
+          - name: foundationdb
+            resources:
+              limits:
+                cpu: 500m
+                memory: 2Gi
+              requests:
+                cpu: 100m
+                memory: 512Mi
+            securityContext:
+              runAsUser: 0
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        foundationdb.org/fdb-process-class: log
+                    topologyKey: kubernetes.io/hostname
+
   routing:
     defineDNSLocalityFields: true
   sidecarContainer:

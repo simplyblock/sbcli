@@ -173,6 +173,7 @@ GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
 PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
 FDB_SERVICE_NAME = "simplyblock-fdb-cluster"
 FDB_CONFIG_NAME = "simplyblock-fdb-cluster-config"
+ADMIN_DEPLOY_NAME = "simplyblock-admin-control"
 
 os_env_patch = [
     {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},

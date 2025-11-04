@@ -19,7 +19,7 @@ spec:
           operator: Exists
       containers:
         - name: init-setup
-          image: ubuntu:22.04
+          image: simplyblock/ubuntu-tools:22.04
           securityContext:
             privileged: true
           command: ["/bin/sh", "-c"]
@@ -27,9 +27,8 @@ spec:
             - |
               set -e
 
-              echo "--- Installing curl & networking tools ---"
-              apt-get update && apt-get install -y iproute2 curl grep
-
+              echo "--- Starting init setup ---"
+              
               NODE_IP=$(ip route get 1.1.1.1 | grep -oE 'src [0-9.]+' | awk '{print $2}')
               echo "Detected node IP: $NODE_IP"
 

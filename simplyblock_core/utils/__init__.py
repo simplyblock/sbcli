@@ -693,6 +693,25 @@ def parse_size(size: Union[str, int], mode: str = 'si/iec', assume_unit: str = '
         return -1
 
 
+def get_total_cpu_cores(mapping: str) -> int:
+    """Return the total number of CPU cores defined in a mapping string.
+
+    The mapping string should consist of comma-separated items in the form
+    "index@core", e.g. "0@6,1@7,2@8,3@9".
+
+    Args:
+        mapping: A string representing core index-to-ID mappings.
+
+    Returns:
+        The total count of cores parsed from the mapping string.
+    """
+    if not mapping:
+        return 0
+
+    # Split by commas and count the number of valid items
+    items = [pair for pair in mapping.split(",") if "@" in pair]
+    return len(items)
+
 def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> int:
     """Convert the given number of bytes to target unit
 

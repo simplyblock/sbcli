@@ -13,7 +13,7 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list", "watch","patch", "update"]
   - apiGroups: ["", "apps"]
-    resources: ["pods", "deployments", "statefulsets"]
+    resources: ["pods", "deployments", "statefulsets", "daemonsets"]
     verbs: ["get", "list", "watch", "patch", "update"]
   - apiGroups: [""]
     resources: ["nodes"]
