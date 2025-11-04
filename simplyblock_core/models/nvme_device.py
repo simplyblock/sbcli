@@ -64,6 +64,7 @@ class NVMeDevice(BaseModel):
     size: int = -1
     testing_bdev: str = ""
     connecting_from_node: str = ""
+    previous_status: str = ""
 
 
 class JMDevice(NVMeDevice):

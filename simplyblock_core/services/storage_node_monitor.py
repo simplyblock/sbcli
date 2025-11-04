@@ -128,14 +128,15 @@ def update_cluster_status(cluster_id):
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
 
-    task_pending = 0
+    first_iter_task_pending = 0
     for task in db.get_job_tasks(cluster_id):
         if task.status != JobSchedule.STATUS_DONE and task.function_name in [
             JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
-            task_pending += 1
+            if task.retry == 0:
+                first_iter_task_pending += 1
 
     cluster = db.get_cluster_by_id(cluster_id)
-    cluster.is_re_balancing = task_pending  > 0
+    cluster.is_re_balancing = first_iter_task_pending  > 0
     cluster.write_to_db()
 
     current_cluster_status = cluster.status
