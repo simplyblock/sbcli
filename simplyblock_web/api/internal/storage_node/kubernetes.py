@@ -423,22 +423,22 @@ def spdk_process_start(body: SPDKParams):
             core_template = env.get_template('oc_storage_core_isolation.yaml.j2')
             core_yaml = yaml.safe_load(core_template.render(values))
             batch_v1 = core_utils.get_k8s_batch_client()
-            # core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
-            # msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
-            # logger.info(msg)
+            core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
+            msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
+            logger.info(msg)
 
-            # node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
-            # logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
+            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
+            logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
 
-            # batch_v1.delete_namespaced_job(
-            #     name=core_resp.metadata.name,
-            #     namespace=namespace,
-            #     body=V1DeleteOptions(
-            #         propagation_policy='Foreground',
-            #         grace_period_seconds=0
-            #     )
-            # )
-            # logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
+            batch_v1.delete_namespaced_job(
+                name=core_resp.metadata.name,
+                namespace=namespace,
+                body=V1DeleteOptions(
+                    propagation_policy='Foreground',
+                    grace_period_seconds=0
+                )
+            )
+            logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
 
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
