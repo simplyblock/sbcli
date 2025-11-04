@@ -238,10 +238,7 @@ while True:
                             if task.status == JobSchedule.STATUS_DONE:
                                 break
                         else:
-                            if task.retry <= 3:
-                                delay_seconds *= 1
-                            else:
-                                delay_seconds *= 2
+                            delay_seconds *= 2
                         time.sleep(delay_seconds)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
