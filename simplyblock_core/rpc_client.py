@@ -1213,7 +1213,7 @@ class RPCClient:
         params = {
             "jm_vuid": jm_vuid
         }
-        return self._request("jc_compression", params)
+        return self._request2("jc_compression", params)
 
     def nvmf_port_block_rdma(self, port):
         params = {
