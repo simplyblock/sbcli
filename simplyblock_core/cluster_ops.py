@@ -370,6 +370,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.create_dt = str(datetime.datetime.now())
 
     cluster.write_to_db(db_controller.kv_store)
+    logger.info("Sleeping for 10 seconds!!")
+    time.sleep(10)
 
     qos_controller.add_class("Default", 100, cluster.get_id())
 
