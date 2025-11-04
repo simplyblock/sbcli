@@ -23,7 +23,7 @@ spec:
       - name: simplyblock-control
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["sleep", "infinity"]
+        command: ["/bin/bash", "-c", "trap : TERM INT; sleep infinity & wait"]
         env:
         - name: LVOL_NVMF_PORT_START
           value: "{{ .Values.ports.lvolNvmfPortStart }}"
