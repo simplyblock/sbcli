@@ -404,7 +404,7 @@ def _check_node_lvstore(
                                         if dev.status == NVMeDevice.STATUS_ONLINE:
                                             try:
                                                 remote_bdev = storage_node_ops.connect_device(
-                                                    f"remote_{dev.alceml_bdev}", dev, rpc_client,
+                                                    f"remote_{dev.alceml_bdev}", dev, node,
                                                     bdev_names=node_bdev_names, reattach=False)
                                                 if remote_bdev:
                                                     new_remote_devices = []
