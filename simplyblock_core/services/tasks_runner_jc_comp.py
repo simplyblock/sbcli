@@ -86,9 +86,13 @@ while True:
                             jm_vuid = node.jm_vuid
                             if "jm_vuid" in task.function_params:
                                 jm_vuid = task.function_params["jm_vuid"]
-                            ret = rpc_client.jc_compression_start(jm_vuid=jm_vuid)
+                            ret, err = rpc_client.jc_compression_start(jm_vuid=jm_vuid)
                             if ret:
                                 task.function_result = f"JC {node.jm_vuid} compression resumed on node"
+                                task.status = JobSchedule.STATUS_DONE
+                                task.write_to_db(db.kv_store)
+                            elif err and "code" in err and err["code"] == -2:
+                                task.function_result = f"JC {node.jm_vuid} compression not needed"
                                 task.status = JobSchedule.STATUS_DONE
                                 task.write_to_db(db.kv_store)
                             else:
