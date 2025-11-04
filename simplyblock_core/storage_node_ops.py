@@ -2015,7 +2015,9 @@ def restart_storage_node(
 
             online_devices_list = []
             for dev in snode.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_ONLINE:
+                if dev.status in [NVMeDevice.STATUS_ONLINE,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                                  NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                     logger.info(f"Starting migration task for device {dev.get_id()}")
                     online_devices_list.append(dev.get_id())
             if online_devices_list:
