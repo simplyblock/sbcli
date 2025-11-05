@@ -33,8 +33,8 @@ def snapshot_clone(snapshot, lvol_clone, caused_by=ec.CAUSED_BY_CLI):
 
 
 def replication_task_created(snapshot, caused_by=ec.CAUSED_BY_CLI):
-    _snapshot_event(snapshot, f"Snapshot replication task created", caused_by, ec.EVENT_OBJ_CREATED)
+    _snapshot_event(snapshot, "Snapshot replication task created", caused_by, ec.EVENT_OBJ_CREATED)
 
 
 def replication_task_finished(snapshot, caused_by=ec.CAUSED_BY_CLI):
-    _snapshot_event(snapshot, f"Snapshot replication task finished", caused_by, ec.EVENT_OBJ_CREATED)
+    _snapshot_event(snapshot, "Snapshot replication task finished", caused_by, ec.EVENT_OBJ_CREATED)

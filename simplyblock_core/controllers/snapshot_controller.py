@@ -601,20 +601,25 @@ def list_replication_tasks(cluster_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
-            remote_lv = db_controller.get_lvol_by_id(task.function_params["remote_lvol_id"])
             duration = ""
-            if  task.status == JobSchedule.STATUS_RUNNING:
-                try:
-                    duration = utils.strfdelta_seconds(time.time() - task.function_params["start_time"])
-                except Exception:
-                    pass
+            try:
+                if task.status == JobSchedule.STATUS_RUNNING:
+                    duration = utils.strfdelta_seconds(int(time.time()) - task.function_params["start_time"])
+                elif "end_time" in task.function_params:
+                    duration = utils.strfdelta_seconds(
+                        task.function_params["end_time"] - task.function_params["start_time"])
+            except Exception as e:
+                logger.error(e)
+            offset = ""
+            if "offset" in task.function_params:
+                offset = task.function_params["offset"]
             data.append({
                 "Task ID": task.uuid,
                 "Snapshot ID": snap.uuid,
                 "Size": utils.humanbytes(snap.used_size),
                 "Duration": duration,
-                "Offset": task.function_params["offset"],
+                "Offset": offset,
                 "Status": task.status,
-                "Replicate on node": remote_lv.node_id,
+                "Replicated on node": snap.lvol.node_id,
             })
     return utils.print_table(data)

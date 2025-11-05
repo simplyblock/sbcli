@@ -3,7 +3,7 @@ import time
 import uuid
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import lvol_controller, snapshot_events, tasks_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -89,7 +89,7 @@ def process_snap_replicate_start(task, snapshot):
         operation="replicate"
     )
     task.status = JobSchedule.STATUS_RUNNING
-    task.function_params["start_time"] = time.time()
+    task.function_params["start_time"] = int(time.time())
     task.write_to_db()
 
     if snapshot.status != SnapShot.STATUS_IN_REPLICATION:
@@ -101,6 +101,7 @@ def process_snap_replicate_finish(task, snapshot):
 
     task.function_result = "Done"
     task.status = JobSchedule.STATUS_DONE
+    task.function_params["end_time"] = int(time.time())
     task.write_to_db()
     if snapshot.status != SnapShot.STATUS_ONLINE:
         snapshot.status = SnapShot.STATUS_ONLINE
