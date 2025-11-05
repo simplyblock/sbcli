@@ -255,7 +255,7 @@ def delete(snapshot_uuid, force_delete=False):
         return False
 
     if snap.status == SnapShot.STATUS_IN_REPLICATION:
-        logger.error(f"Snapshot is in replication")
+        logger.error("Snapshot is in replication")
         return False
 
     try:
