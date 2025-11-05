@@ -37,8 +37,14 @@ def process_snap_replicate_start(task, snapshot):
         lv_id, err = lvol_controller.add_lvol_ha(
             f"REP_{snapshot.snap_name}", snapshot.size, snapshot.lvol.replication_node_id, snapshot.lvol.ha_type,
             remote_pool_uuid)
-        task.function_params["remote_lvol_id"] = lv_id
-        task.write_to_db()
+        if lv_id:
+            task.function_params["remote_lvol_id"] = lv_id
+            task.write_to_db()
+        else:
+            logger.error(err)
+            task.function_result = "Error creating remote lvol"
+            task.write_to_db()
+            return
 
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
     # 2 connect to it
@@ -83,6 +89,7 @@ def process_snap_replicate_start(task, snapshot):
         operation="replicate"
     )
     task.status = JobSchedule.STATUS_RUNNING
+    task.function_params["start_time"] = time.time()
     task.write_to_db()
 
     if snapshot.status != SnapShot.STATUS_IN_REPLICATION:

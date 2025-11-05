@@ -568,9 +568,9 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             argument = subcommand.add_argument('--uid', help='Set logical volume id', type=str, dest='uid')
         argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
-        argument = subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=0, dest='ndcs')
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=0, dest='npcs')
+        argument = subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
 
     def init_volume__qos_set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'qos-set', 'Changes QoS settings for an active logical volume')
@@ -748,6 +748,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__list(subparser)
         self.init_snapshot__delete(subparser)
         self.init_snapshot__clone(subparser)
+        self.init_snapshot__replication_status(subparser)
 
 
     def init_snapshot__add(self, subparser):
@@ -769,6 +770,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
+
+    def init_snapshot__replication_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists snapshots replication status')
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
 
 
     def init_qos(self):
@@ -1113,6 +1118,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
+                elif sub_command in ['replication-status']:
+                    ret = self.snapshot__replication_status(sub_command, args)
                 else:
                     self.parser.print_help()
 

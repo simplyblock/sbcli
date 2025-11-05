@@ -7,6 +7,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
 
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
@@ -590,3 +591,30 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if new_size:
         lvol_controller.resize_lvol(lvol.get_id(), new_size)
     return lvol.uuid, False
+
+
+def list_replication_tasks(cluster_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+
+    data = []
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            remote_lv = db_controller.get_lvol_by_id(task.function_params["remote_lvol_id"])
+            duration = ""
+            if  task.status == JobSchedule.STATUS_RUNNING:
+                try:
+                    duration = utils.strfdelta_seconds(time.time() - task.function_params["start_time"])
+                except Exception:
+                    pass
+            data.append({
+                "Task ID": task.uuid,
+                "Snapshot ID": snap.uuid,
+                "Size": utils.humanbytes(snap.used_size),
+                "Duration": duration,
+                "Offset": task.function_params["offset"],
+                "Status": task.status,
+                "Replicate on node": remote_lv.node_id,
+            })
+    return utils.print_table(data)

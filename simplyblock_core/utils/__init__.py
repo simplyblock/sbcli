@@ -735,7 +735,10 @@ def nearest_upper_power_of_2(n):
 
 
 def strfdelta(tdelta):
-    remainder = int(tdelta.total_seconds())
+    return strfdelta_seconds(int(tdelta.total_seconds()))
+
+
+def strfdelta_seconds(remainder: int) -> str:
     possible_fields = ('W', 'D', 'H', 'M', 'S')
     constants = {'W': 604800, 'D': 86400, 'H': 3600, 'M': 60, 'S': 1}
     values = {}

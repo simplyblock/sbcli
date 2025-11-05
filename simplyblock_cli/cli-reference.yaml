@@ -1882,6 +1882,13 @@ commands:
             dest: resize
             type: size
             default: "0"
+      - name: replication-status
+        help: "Lists snapshots replication status"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
   - name: "qos"
     help: "qos commands"
     weight: 700

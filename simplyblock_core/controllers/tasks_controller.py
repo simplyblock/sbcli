@@ -168,6 +168,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
     for task in tasks:
         if task.function_name == JobSchedule.FN_DEV_MIG:
             continue
+        logger.debug(task)
         if task.max_retry > 0:
             retry = f"{task.retry}/{task.max_retry}"
         else:
