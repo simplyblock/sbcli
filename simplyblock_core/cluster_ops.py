@@ -371,8 +371,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     cluster.write_to_db(db_controller.kv_store)
 
-    qos_controller.add_class("Default", 100, cluster.get_id())
-
     cluster_events.cluster_create(cluster)
 
     mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
