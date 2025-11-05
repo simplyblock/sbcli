@@ -267,6 +267,7 @@ class SPDKParams(BaseModel):
     fdb_connection: str = Field('')
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
+    cluster_mode: str
 
 
 @api.post('/spdk_process_start', responses={
@@ -303,6 +304,10 @@ def spdk_process_start(body: SPDKParams):
     if isinstance(ubuntu_host, str):
        ubuntu_host = ubuntu_host.strip().lower() in ("true")
 
+    openshift = os.environ.get("OPENSHIFT_CLUSTER", False)
+    if isinstance(openshift, str):
+       openshift = openshift.strip().lower() in ("true")
+
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
     core_name_length = len(node_prepration_core_name+node_name)
@@ -329,6 +334,7 @@ def spdk_process_start(body: SPDKParams):
         values = {
             'SPDK_IMAGE': body.spdk_image,
             "L_CORES": body.l_cores,
+            "CORES": core_utils.get_total_cpu_cores(body.l_cores),
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
             'MEM_GEGA': core_utils.convert_size(body.spdk_mem, 'GiB', round_up=True),
             'MEM2_GEGA': core_utils.convert_size(body.system_mem, 'GiB', round_up=True),
@@ -344,6 +350,7 @@ def spdk_process_start(body: SPDKParams):
             'FDB_CONNECTION': body.fdb_connection,
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
             'GRAYLOG_SERVER_IP': body.cluster_ip,
+            'MODE': body.cluster_mode,
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib
@@ -391,8 +398,29 @@ def spdk_process_start(body: SPDKParams):
         )
         logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
 
-        if core_isolate:
+        if core_isolate and not openshift:
             core_template = env.get_template('storage_core_isolation.yaml.j2')
+            core_yaml = yaml.safe_load(core_template.render(values))
+            batch_v1 = core_utils.get_k8s_batch_client()
+            core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
+            msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
+            logger.info(msg)
+
+            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
+            logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
+
+            batch_v1.delete_namespaced_job(
+                name=core_resp.metadata.name,
+                namespace=namespace,
+                body=V1DeleteOptions(
+                    propagation_policy='Foreground',
+                    grace_period_seconds=0
+                )
+            )
+            logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
+
+        elif core_isolate and openshift:
+            core_template = env.get_template('oc_storage_core_isolation.yaml.j2')
             core_yaml = yaml.safe_load(core_template.render(values))
             batch_v1 = core_utils.get_k8s_batch_client()
             core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
@@ -582,4 +610,28 @@ def apply_config():
 
     return utils.get_response(True)
 
+
+@api.get('/check', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def is_alive():
+    return utils.get_response(True)
+
+
+@api.get('/spdk_proxy_restart', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_proxy_restart(query: utils.RPCPortParams):
+    return utils.get_response(True)
+
+
 api.post('/bind_device_to_spdk')(snode_ops.bind_device_to_spdk)
+
+api.get('/ifc_is_tcp')(snode_ops.ifc_is_tcp)
+
+api.get('/ifc_is_roce')(snode_ops.ifc_is_roce)
+

@@ -1,5 +1,66 @@
 ---
 apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-admin-control
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-admin-control
+  template:
+    metadata:
+      annotations:
+        log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
+      labels:
+        app: simplyblock-admin-control
+    spec:
+      serviceAccountName: simplyblock-control-sa
+      containers:
+      - name: simplyblock-control
+        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["/bin/bash", "-c", "trap : TERM INT; sleep infinity & wait"]
+        env:
+        - name: LVOL_NVMF_PORT_START
+          value: "{{ .Values.ports.lvolNvmfPortStart }}"
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: MONITORING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: simplyblock-grafana-secrets
+              key: MONITORING_SECRET
+        - name: SIMPLYBLOCK_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-config
+              key: LOG_LEVEL
+        volumeMounts:
+        - name: fdb-cluster-file
+          mountPath: /etc/foundationdb/fdb.cluster
+          subPath: fdb.cluster
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "600m"
+            memory: "1Gi"
+      volumes:
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
+---
+apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: simplyblock-webappapi
@@ -40,7 +101,7 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "512Mi"
           limits:
             cpu: "500m"
@@ -89,10 +150,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -141,10 +202,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -191,10 +252,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -241,10 +302,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -291,10 +352,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -342,10 +403,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -392,10 +453,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -442,10 +503,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -492,10 +553,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -541,10 +602,10 @@ spec:
           subPath: fdb.cluster
         resources:
           requests:
-            cpu: "100m"
+            cpu: "200m"
             memory: "256Mi"
           limits:
-            cpu: "250m"
+            cpu: "400m"
             memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -592,10 +653,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -642,10 +703,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -692,10 +753,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -741,10 +802,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -790,10 +851,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -839,10 +900,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -877,6 +938,8 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_node_add.py"]
           env:
+            - name: LVOL_NVMF_PORT_START
+              value: "{{ .Values.ports.lvolNvmfPortStart }}"
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:
                 configMapKeyRef:
@@ -888,10 +951,10 @@ spec:
             subPath: fdb.cluster
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "256Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
       - name: fdb-cluster-file
@@ -901,6 +964,104 @@ spec:
             - key: cluster-file
               path: fdb.cluster
 
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks-runner-port-allow
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks-runner-port-allow
+  template:
+    metadata:
+      annotations:
+        log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
+      labels:
+        app: simplyblock-tasks-runner-port-allow
+    spec:      
+      containers:
+        - name: tasks-runner-port-allow
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_port_allow.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "400m"
+              memory: "1Gi"
+      volumes:
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks-runner-jc-comp-resume
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks-runner-jc-comp-resume
+  template:
+    metadata:
+      annotations:
+        log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
+      labels:
+        app: simplyblock-tasks-runner-jc-comp-resume
+    spec:      
+      containers:
+        - name: tasks-runner-jc-comp-resume
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_jc_comp.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "400m"
+              memory: "1Gi"
+      volumes:
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
 ---
 
 apiVersion: apps/v1
@@ -922,6 +1083,8 @@ spec:
       containers:
         - name: fluent-bit
           image: fluent/fluent-bit:1.8.11
+          securityContext:
+            privileged: true
           volumeMounts:
             - name: varlog
               mountPath: /var/log
@@ -932,10 +1095,10 @@ spec:
               mountPath: /fluent-bit/etc/
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "400Mi"
             limits:
-              cpu: "250m"
+              cpu: "400m"
               memory: "1Gi"
       volumes:
         - name: varlog

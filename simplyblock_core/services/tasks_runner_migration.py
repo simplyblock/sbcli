@@ -2,7 +2,7 @@
 import time
 from datetime import datetime, timezone
 
-from simplyblock_core import db_controller, utils
+from simplyblock_core import db_controller, utils, constants
 from simplyblock_core.controllers import tasks_events, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -63,7 +63,9 @@ def task_runner(task):
                     logger.error(f"Failed to get online since: {e}")
 
             for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_NEW, NVMeDevice.STATUS_UNAVAILABLE]:
+                if dev.status not in [NVMeDevice.STATUS_ONLINE,
+                                      NVMeDevice.STATUS_FAILED_AND_MIGRATED,
+                                      NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     task.function_result = f"Some dev status is {dev.status }, retrying"
                     task.status = JobSchedule.STATUS_SUSPENDED
                     task.retry += 1
@@ -91,7 +93,8 @@ def task_runner(task):
         qos_high_priority = False
         if db.get_cluster_by_id(snode.cluster_id).is_qos_set():
             qos_high_priority = True
-        rsp = rpc_client.distr_migration_expansion_start(distr_name, qos_high_priority)
+        rsp = rpc_client.distr_migration_expansion_start(distr_name, qos_high_priority, job_size=1024,
+                                                         jobs=constants.MIG_PARALLEL_JOBS)
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task, retry later"
@@ -106,9 +109,16 @@ def task_runner(task):
 
     try:
         if "migration" in task.function_params:
+            allow_all_errors = False
+            for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
+                for dev in node.nvme_devices:
+                    if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                        allow_all_errors = True
+                        break
+
             mig_info = task.function_params["migration"]
             res = rpc_client.distr_migration_status(**mig_info)
-            return utils.handle_task_result(task, res)
+            return utils.handle_task_result(task, res, allow_all_errors=allow_all_errors)
     except Exception as e:
         logger.error("Failed to get migration task status")
         logger.exception(e)
@@ -203,10 +213,15 @@ while True:
                         if not node_task:
                             logger.info("no task found on same node, resuming compression")
                             node = db.get_storage_node_by_id(task.node_id)
+                            for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+                                if n.status != StorageNode.STATUS_ONLINE:
+                                    logger.warning("Not all nodes are online, can not resume JC compression")
+                                    continue
                             rpc_client = RPCClient(
                                 node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
-                            ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-                            if not ret:
-                                logger.error("Failed to resume JC compression")
+                            ret, err = rpc_client.jc_compression_start(jm_vuid=node.jm_vuid)
+                            if err and "code" in err and err["code"] != -2:
+                                logger.info("Failed to resume JC compression adding task...")
+                                tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
 
     time.sleep(3)

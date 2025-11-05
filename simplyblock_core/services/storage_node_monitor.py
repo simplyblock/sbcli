@@ -1,10 +1,11 @@
 # coding=utf-8
+import threading
 import time
 from datetime import datetime, timezone
 
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
-from simplyblock_core.controllers import health_controller, device_controller, tasks_controller
+from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -18,6 +19,8 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 utils.init_sentry_sdk()
+
+node_rpc_timeout_threads: dict[str, threading.Thread] = {}
 
 
 def is_new_migrated_node(cluster_id, node):
@@ -122,24 +125,24 @@ def get_next_cluster_status(cluster_id):
 
 
 def update_cluster_status(cluster_id):
+    next_current_status = get_next_cluster_status(cluster_id)
+    logger.info("cluster_new_status: %s", next_current_status)
+
+    first_iter_task_pending = 0
+    for task in db.get_job_tasks(cluster_id):
+        if task.status != JobSchedule.STATUS_DONE and task.function_name in [
+            JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
+            if task.retry == 0:
+                first_iter_task_pending += 1
+
     cluster = db.get_cluster_by_id(cluster_id)
+    cluster.is_re_balancing = first_iter_task_pending  > 0
+    cluster.write_to_db()
+
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
     if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
         return
-
-    next_current_status = get_next_cluster_status(cluster_id)
-    logger.info("cluster_new_status: %s", next_current_status)
-
-    task_pending = 0
-    for task in db.get_job_tasks(cluster_id):
-        if task.status != JobSchedule.STATUS_DONE and task.function_name in [
-            JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
-            task_pending += 1
-
-    cluster = db.get_cluster_by_id(cluster_id)
-    cluster.is_re_balancing = task_pending  > 0
-    cluster.write_to_db()
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
     # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
@@ -213,19 +216,34 @@ def set_node_offline(node, set_devs_offline=False):
         # set node unavailable
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
 
-        if set_devs_offline:
-            # set devices unavailable
-            for dev in node.nvme_devices:
-                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
-                    device_controller.device_set_unavailable(dev.get_id())
+        # if set_devs_offline:
+        #     # set devices unavailable
+        #     for dev in node.nvme_devices:
+        #         if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY]:
+        #             device_controller.device_set_unavailable(dev.get_id())
 
         # # set jm dev offline
         # if node.jm_device.status != JMDevice.STATUS_UNAVAILABLE:
         #     device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
 def set_node_down(node):
-    if node.status != StorageNode.STATUS_DOWN:
+    if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
+
+
+def node_rpc_timeout_check_and_report(node):
+    start_time = time.time()
+    try:
+        rpc_client = node.rpc_client(timeout=60, retry=5)
+        ret = rpc_client.get_version()
+        if ret:
+            logger.debug(f"SPDK version: {ret['version']}")
+            return True
+    except Exception as e:
+        logger.debug(e)
+    # RPC timeout detected, send to cluster log
+    storage_events.snode_rpc_timeout(node, time.time()-start_time)
+
 
 logger.info("Starting node monitor")
 while True:
@@ -279,6 +297,11 @@ while True:
                 snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
             logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
+            if not node_rpc_check and snode.get_id() not in node_rpc_timeout_threads:
+                t = threading.Thread(target=node_rpc_timeout_check_and_report, args=(snode,))
+                t.start()
+                node_rpc_timeout_threads[snode.get_id()] = t
+
             if ping_check and node_api_check and spdk_process and not node_rpc_check:
                 start_time = time.time()
                 while time.time() < start_time + 60:
@@ -322,7 +345,8 @@ while True:
                 if snode.status == StorageNode.STATUS_UNREACHABLE:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_UNREADY,
                                           Cluster.STATUS_SUSPENDED, Cluster.STATUS_READONLY]:
-                        tasks_controller.add_node_to_auto_restart(snode)
+                        # tasks_controller.add_node_to_auto_restart(snode)
+                        set_node_online(snode)
                         continue
 
                 if not node_port_check:
@@ -360,7 +384,15 @@ while True:
                             logger.info("ping is fine, snodeapi is fine, But no spdk process and no rpc check, "
                                         "So that we set device offline")
                         set_node_offline(snode, set_devs_offline=(not spdk_process and not node_rpc_check))
-                        tasks_controller.add_node_to_auto_restart(snode)
+                        try:
+                            ret = snode.rpc_client(timeout=10).get_version()
+                            if not ret:
+                                logger.debug("False RPC response, adding node to auto restart")
+                                tasks_controller.add_node_to_auto_restart(snode)
+                        except Exception as e:
+                            logger.debug("Timeout to get RPC response, skipping restart")
+                            logger.error(e)
+
                 elif not node_port_check:
                     if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
                         logger.error("Port check failed")

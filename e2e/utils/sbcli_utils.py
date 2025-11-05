@@ -425,7 +425,7 @@ class SbcliUtils:
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
-                 crypto=False, key1=None, key2=None, fabric="TCP", cluster_id=None):
+                 crypto=False, key1=None, key2=None, fabric="tcp", cluster_id=None):
         """Adds lvol with given params
         """
 
@@ -446,12 +446,13 @@ class SbcliUtils:
             "max_rw_mbytes": str(max_rw_mbytes),
             "max_r_mbytes": str(max_r_mbytes),
             "max_w_mbytes": str(max_w_mbytes),
+            "fabric": fabric
         }
         if distr_ndcs != 0 and distr_npcs != 0:
-            body["distr_ndcs"] = str(distr_ndcs)
-            body["distr_npcs"] = str(distr_ndcs)
-            body["bs"] = str(distr_ndcs)
-            body["chunk_bs"] = str(distr_ndcs)
+            body["ndcs"] = int(distr_ndcs)
+            body["npcs"] = int(distr_npcs)
+            body["bs"] = str(distr_bs)
+            body["chunk_bs"] = str(distr_chunk_bs)
         if host_id:
             body["host_id"] = host_id
         if crypto:

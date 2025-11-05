@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from pathlib import Path
 import threading
@@ -144,7 +145,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
             timestamp = int(datetime.now().timestamp())
 
             # Step 5: Restart node with new IP
-            restart_cmd = f"{self.base_cmd} storage-node restart {restart_target['node_uuid']} --node-ip {self.new_node_ip}:5000"
+            restart_cmd = f"{self.base_cmd} storage-node restart {restart_target['node_uuid']} --node-ip {self.new_node_ip}:5000 --force"
             self.ssh_obj.exec_command(self.mgmt_nodes[0], restart_cmd)
 
             self.sbcli_utils.wait_for_storage_node_status(restart_target["node_uuid"],
@@ -159,7 +160,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
                 self.ssh_obj.restart_docker_logging(
                     node_ip=node,
                     containers=self.container_nodes[node],
-                    log_dir=self.docker_logs_path,
+                    log_dir=os.path.join(self.docker_logs_path, node),
                     test_name=self.test_name
                 )
 

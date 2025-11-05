@@ -63,7 +63,9 @@ class LVol(BaseModel):
     top_bdev: str = ""
     vuid: int = 0
     w_mbytes_per_sec: int = 0
-    fabric: str = "TCP"
+    fabric: str = "tcp"
+    ndcs: int = 0
+    npcs: int = 0
     do_replicate: bool = False
     replication_node_id: str = ""
 

@@ -119,9 +119,9 @@ def _check_node_api(ip):
     try:
         snode_api = SNodeClient(f"{ip}:5000", timeout=10, retry=2)
         logger.debug(f"Node API={ip}:5000")
-        info, _ = snode_api.info()
-        if info:
-            logger.debug(f"Hostname: {info['hostname']}")
+        ret, _ = snode_api.is_live()
+        logger.debug(f"snode is alive: {ret}")
+        if ret:
             return True
     except Exception as e:
         logger.debug(e)
@@ -142,7 +142,7 @@ def _check_spdk_process_up(ip, rpc_port):
 
 def _check_port_on_node(snode, port_id):
     try:
-        fw_api = FirewallClient(f"{snode.mgmt_ip}:5001", timeout=5, retry=2)
+        fw_api = FirewallClient(snode, timeout=5, retry=2)
         iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
         if type(iptables_command_output) is str:
             iptables_command_output = [iptables_command_output]
@@ -153,8 +153,15 @@ def _check_port_on_node(snode, port_id):
                     for rule in chain['rules']:  # type: ignore
                         if str(port_id) in rule['options']:  # type: ignore
                             action = rule['target']  # type: ignore
-                            if action in ["DROP", "REJECT"]:
+                            if action in ["DROP"]:
                                 return False
+
+        # check RDMA port block
+        if snode.active_rdma:
+            rdma_fw_port_list = snode.rpc_client().nvmf_get_blocked_ports_rdma()
+            if port_id in rdma_fw_port_list:
+                return False
+
         return True
     except Exception as e:
         logger.error(e)
@@ -288,6 +295,9 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
 
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
+        if not passed:
+            return False
+
         try:
             cl = db_controller.get_cluster_by_id(node.cluster_id)
         except KeyError:
@@ -394,7 +404,7 @@ def _check_node_lvstore(
                                         if dev.status == NVMeDevice.STATUS_ONLINE:
                                             try:
                                                 remote_bdev = storage_node_ops.connect_device(
-                                                    f"remote_{dev.alceml_bdev}", dev, rpc_client,
+                                                    f"remote_{dev.alceml_bdev}", dev, node,
                                                     bdev_names=node_bdev_names, reattach=False)
                                                 if remote_bdev:
                                                     new_remote_devices = []

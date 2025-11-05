@@ -364,13 +364,13 @@ class RPCClient:
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
-            "cluster_sz": cluster_sz*4,
+            "cluster_sz": cluster_sz,
             "clear_method": clear_method,
             "num_md_pages_per_cluster_ratio": num_md_pages_per_cluster_ratio,
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0):
+    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0, ndcs=0, npcs=0):
         params = {
             "lvol_name": name,
             "size_in_mib": size_in_mib,
@@ -379,6 +379,11 @@ class RPCClient:
             "clear_method": "unmap",
             "lvol_priority_class": lvol_priority_class,
         }
+        # if ndcs or npcs:
+        #     params.update({
+        #         'ndcs' : ndcs,
+        #         'npcs' : npcs,
+        #     })
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name, del_async=False):
@@ -656,8 +661,7 @@ class RPCClient:
             "trsvcid": str(trsvcid),
             "subnqn": nqn,
         }
-        if trtype=="TCP":
-            params.update({"adrfam": "ipv4"})
+        params.update({"adrfam": "ipv4"})
         if multipath:
             params["multipath"] = "failover"
         else:
@@ -715,7 +719,7 @@ class RPCClient:
             "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
             "transport_ack_timeout": constants.ACK_TO,
-            "action_on_timeout" : "abort"
+            "action_on_timeout": "abort"
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -918,21 +922,29 @@ class RPCClient:
         params = {"name": name}
         return self._request("distr_migration_status", params)
 
-    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False):
+    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=1024, jobs=4):
         params = {
             "name": name,
             "storage_ID": storage_ID,
         }
         if qos_high_priority:
             params["qos_high_priority"] = qos_high_priority
+        if job_size:
+            params["job_size"] = job_size
+        if jobs:
+            params["jobs"] = jobs
         return self._request("distr_migration_failure_start", params)
 
-    def distr_migration_expansion_start(self, name, qos_high_priority=False):
+    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=1024, jobs=4):
         params = {
             "name": name,
         }
         if qos_high_priority:
             params["qos_high_priority"] = qos_high_priority
+        if job_size:
+            params["job_size"] = job_size
+        if jobs:
+            params["jobs"] = jobs
         return self._request("distr_migration_expansion_start", params)
 
     def bdev_raid_add_base_bdev(self, raid_bdev, base_bdev):
@@ -1221,8 +1233,44 @@ class RPCClient:
             "lvol_vbdev_list": lvol_name_list
         }
         return self._request("bdev_lvol_remove_from_group", params)
+
     def alceml_set_qos_weights(self, qos_weights):
         params = {
             "qos_weights": qos_weights,
         }
         return self._request("bdev_distrib_set_qos_weights", params)
+
+    def jc_compression_get_status(self, jm_vuid):
+        """
+        Return value:
+            'False': indicates compression has finished or there is no pending compression.
+            'True': indicates there is an in-progress compression, and management needs to wait before the fallback.
+                    In this situation, management must retry this RPC call every 1 minute until compression is
+                    complete. (False response)
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+            "get_status": True,
+        }
+        return self._request("jc_compression", params)
+
+    def jc_compression_start(self, jm_vuid):
+        params = {
+            "jm_vuid": jm_vuid
+        }
+        return self._request2("jc_compression", params)
+
+    def nvmf_port_block_rdma(self, port):
+        params = {
+            "port": port,
+        }
+        return self._request("nvmf_port_block", params)
+
+    def nvmf_port_unblock_rdma(self, port):
+        params = {
+            "port": port,
+        }
+        return self._request("nvmf_port_unblock", params)
+
+    def nvmf_get_blocked_ports_rdma(self):
+        return self._request("nvmf_get_blocked_ports")

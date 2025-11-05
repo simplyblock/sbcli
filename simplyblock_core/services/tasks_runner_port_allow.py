@@ -106,7 +106,7 @@ while True:
                                         raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
 
                                     dev.remote_bdev = storage_node_ops.connect_device(
-                                        f"remote_{dev.alceml_bdev}", dev, node.rpc_client(),
+                                        f"remote_{dev.alceml_bdev}", dev, node,
                                         bdev_names=list(node_bdev_names), reattach=False)
 
                                     remote_devices.append(dev)
@@ -150,11 +150,39 @@ while True:
                         for db_dev in node.nvme_devices:
                             distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
+                        logger.info("Finished sending device status and now waiting 5s for JMs to connect")
+                        time.sleep(5)
+
+                        sec_node = db.get_storage_node_by_id(node.secondary_node_id)
+                        snode = db.get_storage_node_by_id(node.get_id())
+                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                            ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                            if ret:
+                                lvs_info = ret[0]
+                                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                    # is_sec_node_leader = True
+                                    # check jc_compression status
+                                    jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
+                                    retries = 10
+                                    while jc_compression_is_active:
+                                        if retries <= 0:
+                                            logger.warning("Timeout waiting for JC compression task to finish")
+                                            break
+                                        retries -= 1
+                                        logger.info(
+                                            f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
+                                        time.sleep(60)
+                                        jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
+                                            snode.jm_vuid)
+
                         lvstore_check = True
                         if node.lvstore_status == "ready":
                             lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
                             if node.secondary_node_id:
                                 lvstore_check &= health_controller._check_node_hublvol(node)
+                                sec_node = db.get_storage_node_by_id(node.secondary_node_id)
+                                if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                                    lvstore_check &= health_controller._check_sec_node_hublvol(sec_node, auto_fix=True)
 
                         if lvstore_check is False:
                             msg = "Node LVolStore check fail, retry later"
@@ -168,15 +196,6 @@ while True:
                             task.status = JobSchedule.STATUS_RUNNING
                             task.write_to_db(db.kv_store)
 
-                        port_number = task.function_params["port_number"]
-                        snode_api = SNodeClient(f"{node.mgmt_ip}:5000", timeout=3, retry=2)
-
-                        sec_node = db.get_storage_node_by_id(node.secondary_node_id)
-                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                            sec_rpc_client = sec_node.rpc_client()
-                            sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
-
-                        snode = db.get_storage_node_by_id(node.get_id())
                         not_deleted = []
                         for bdev_name in snode.lvol_sync_del_queue:
                             logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
@@ -191,10 +210,20 @@ while True:
                         snode.lvol_sync_del_queue = not_deleted
                         snode.write_to_db()
 
+                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                            sec_rpc_client = sec_node.rpc_client()
+                            sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+
+                        port_number = task.function_params["port_number"]
+                        snode_api = SNodeClient(f"{node.mgmt_ip}:5000", timeout=3, retry=2)
+
                         logger.info(f"Allow port {port_number} on node {node.get_id()}")
 
-                        fw_api = FirewallClient(f"{node.mgmt_ip}:5001", timeout=5, retry=2)
-                        fw_api.firewall_set_port(port_number, "tcp", "allow", node.rpc_port)
+                        fw_api = FirewallClient(snode, timeout=5, retry=2)
+                        port_type = "tcp"
+                        if node.active_rdma:
+                            port_type = "udp"
+                        fw_api.firewall_set_port(port_number, port_type, "allow", node.rpc_port)
                         tcp_ports_events.port_allowed(node, port_number)
 
                         task.function_result = f"Port {port_number} allowed on node"

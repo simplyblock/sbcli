@@ -54,11 +54,16 @@ def pre_lvol_delete_rebalance():
 def resume_comp(lvol):
     logger.info("resuming compression")
     node = db.get_storage_node_by_id(lvol.node_id)
+    for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+        if n.status != StorageNode.STATUS_ONLINE:
+            logger.warning("Not all nodes are online, can not resume JC compression")
+            return
     rpc_client = RPCClient(
         node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
-    ret = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-    if not ret:
-        logger.error("Failed to resume JC compression")
+    ret, err = rpc_client.jc_compression_start(jm_vuid=node.jm_vuid)
+    if err and "code" in err and err["code"] != -2:
+        logger.info("Failed to resume JC compression adding task...")
+        tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), node.jm_vuid)
 
 
 def post_lvol_delete_rebalance(lvol):
@@ -114,18 +119,21 @@ def process_lvol_delete_finish(lvol):
         return
 
     # 3-1 async delete lvol bdev from primary
-    primary_node = db.get_storage_node_by_id(lvol.node_id)
-    if primary_node.status == StorageNode.STATUS_ONLINE:
+    primary_node = db.get_storage_node_by_id(leader_node.get_id())
+    if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
         if not ret:
             logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
     # 3-2 async delete lvol bdev from secondary
-    if snode.secondary_node_id:
+    if snode.get_id() == leader_node.get_id():
         sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node:
-            sec_node.lvol_sync_del_queue.append(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-            sec_node.write_to_db()
+    else:
+        sec_node = db.get_storage_node_by_id(snode.get_id())
+
+    if sec_node:
+        sec_node.lvol_sync_del_queue.append(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+        sec_node.write_to_db()
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
@@ -325,6 +333,8 @@ while True:
                             lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
                         if not ret:
                             passed = False
+                        else:
+                            passed = True
 
                 if snode.lvstore_status == "ready":
 

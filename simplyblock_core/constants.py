@@ -19,6 +19,10 @@ def get_config_var(name, default=None):
     return default
 
 
+KiB=1024
+MiB=1024*1024
+GiB=1024*1024*1024
+
 KVD_DB_VERSION = 730
 KVD_DB_FILE_PATH = os.getenv('FDB_CLUSTER_FILE', '/etc/foundationdb/fdb.cluster')
 KVD_DB_TIMEOUT_MS = 10000
@@ -128,7 +132,8 @@ LVOL_NVME_CONNECT_RECONNECT_DELAY=2
 LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
 LVOL_NVME_CONNECT_NR_IO_QUEUES=3
 LVOL_NVME_KEEP_ALIVE_TO=10
-LVOL_NVMF_PORT_START=9100
+LVOL_NVME_KEEP_ALIVE_TO_TCP=7
+LVOL_NVMF_PORT_START=int(os.getenv('LVOL_NVMF_PORT_START', 9100))
 QPAIR_COUNT=32
 CLIENT_QPAIR_COUNT=3
 NVME_TIMEOUT_US=8000000
@@ -141,6 +146,7 @@ TRANSPORT_RETRY=3
 CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
+LVOL_CLUSTER_RATIO=1
 
 
 SENTRY_SDK_DNS = "https://745047b017ac424b4173550e19910fb7@o4508953941311488.ingest.de.sentry.io/4508996361584720"
@@ -160,13 +166,14 @@ SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
-K8S_NAMESPACE = "simplyblock"
+K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
 PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
 FDB_SERVICE_NAME = "simplyblock-fdb-cluster"
 FDB_CONFIG_NAME = "simplyblock-fdb-cluster-config"
+ADMIN_DEPLOY_NAME = "simplyblock-admin-control"
 
 os_env_patch = [
     {"name": "OPENSEARCH_JAVA_OPTS", "value": "-Xms1g -Xmx1g"},
@@ -216,3 +223,5 @@ prometheus_patch = {
 }
 
 qos_class_meta_and_migration_weight_percent = 25
+
+MIG_PARALLEL_JOBS = 16

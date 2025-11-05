@@ -49,6 +49,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('{{ argument.name }}', help='{{ argument.help | escape_strings | escape_python_string }}', type={{ argument.type | argument_type }}
 {%- if argument.default is defined and argument.action is undefined %}, default={{ argument | default_value }}{% endif %}
 {%- if argument.nargs is defined %}, nargs={{ argument | nargs }}{% endif %}
+{%- if argument.choices %}, choices=[{% for choice in argument.choices %}'{{ choice }}',{% endfor %}]{% endif %}
 {%- if argument.action is defined %}, dest='{{ argument.action }}'{% endif %})
 {%- if argument.completer is defined %}.completer = self.{{ argument.completer }}{% endif %}
 {%- endfor -%}

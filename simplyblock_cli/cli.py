@@ -204,7 +204,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__device_testing_mode(self, subparser):
         subcommand = self.add_sub_command(subparser, 'device-testing-mode', 'Sets a device to testing mode')
         subcommand.add_argument('device_id', help='Device id', type=str)
-        subcommand.add_argument('mode', help='Testing mode', type=str, default='full_pass_through')
+        subcommand.add_argument('mode', help='Testing mode', type=str, default='full_pass_through', choices=['full_pass_through','io_error_on_write','io_error_on_all','hotplug_removal','discard_io_all','io_error_on_unmap','io_error_on_read',])
 
     def init_storage_node__get_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-device', 'Gets storage device by its id')
@@ -317,6 +317,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__get_logs(subparser)
         self.init_cluster__get_secret(subparser)
         self.init_cluster__update_secret(subparser)
+        self.init_cluster__update_fabric(subparser)
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
         if self.developer_mode:
@@ -458,6 +459,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('secret', help='new 20 characters password', type=str)
 
+    def init_cluster__update_fabric(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'update-fabric', 'Updates a cluster\'s fabric')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('fabric', help='fabric: tcp, rdma or both (specify: tcp, rdma)', type=str, default='tcp', choices=['tcp','rdma','tcp,rdma',])
+
     def init_cluster__check(self, subparser):
         subcommand = self.add_sub_command(subparser, 'check', 'Checks a cluster\'s health')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
@@ -552,7 +558,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second', type=int, dest='max_rw_mbytes')
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
-        argument = subcommand.add_argument('--max-namespace-per-subsys', help='Maximum Namespace per subsystem', type=int, dest='max_namespace_per_subsys')
+        argument = subcommand.add_argument('--max-namespace-per-subsys', help='Maximum Namespace per subsystem', type=int, default=32, dest='max_namespace_per_subsys')
         if self.developer_mode:
             argument = subcommand.add_argument('--distr-vuid', help='(Dev) set vuid manually, default: random (1-99999)', type=int, dest='distr_vuid')
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type', type=str, default='default', dest='ha_type', choices=['single','default','ha',])
@@ -563,6 +569,8 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--uid', help='Set logical volume id', type=str, dest='uid')
         argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
         argument = subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
+        argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=0, dest='ndcs')
+        argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=0, dest='npcs')
 
     def init_volume__qos_set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'qos-set', 'Changes QoS settings for an active logical volume')
@@ -976,6 +984,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__get_secret(sub_command, args)
                 elif sub_command in ['update-secret']:
                     ret = self.cluster__update_secret(sub_command, args)
+                elif sub_command in ['update-fabric']:
+                    ret = self.cluster__update_fabric(sub_command, args)
                 elif sub_command in ['check']:
                     ret = self.cluster__check(sub_command, args)
                 elif sub_command in ['update']:

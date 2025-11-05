@@ -73,7 +73,7 @@ class SNodeClient:
         return None, None
 
     def is_live(self):
-        return self._request("GET", "")
+        return self._request("GET", "/check")
 
     def info(self):
         return self._request("GET", "info")
@@ -81,7 +81,7 @@ class SNodeClient:
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
-                           total_mem=None, system_mem=None):
+                           total_mem=None, system_mem=None, cluster_mode=None):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -111,6 +111,8 @@ class SNodeClient:
             params["total_mem"] = total_mem
         if system_mem:
             params["system_mem"] = system_mem
+        if cluster_mode:
+            params["cluster_mode"] = cluster_mode
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
@@ -164,6 +166,13 @@ class SNodeClient:
     def set_hugepages(self):
         return self._request("POST", "set_hugepages")
 
+    def ifc_is_roce(self, nic):
+        params = {"nic": nic}
+        return self._request("GET", "ifc_is_roce", params)
+
+    def ifc_is_tcp(self, nic):
+        params = {"nic": nic}
+        return self._request("GET", "ifc_is_tcp", params)
     def nvme_connect(self, ip, port, nqn):
         params = {"ip": ip, "port": port, "nqn": nqn}
         return self._request("POST", "nvme_connect", params)

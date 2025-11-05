@@ -1,6 +1,7 @@
 # coding=utf-8
 import logging as lg
 import json
+import math
 import random
 import sys
 import time
@@ -265,7 +266,8 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="TCP", do_replicate=False):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
+                do_replicate=False):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -309,7 +311,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
 
-    if (fabric == "TCP" and not cl.fabric_tcp) or (fabric == "RDMA" and not cl.fabric_rdma):
+    if (fabric == "tcp" and not cl.fabric_tcp) or (fabric == "rdma" and not cl.fabric_rdma):
         return False,  f"Fabric not available in cluster: {fabric}"
 
     if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
@@ -380,14 +382,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.warning("Number of active cluster devices are less than 8")
         # return False, "Number of active cluster devices are less than 8"
 
-    # if len(online_nodes) < 3 and ha_type == "ha":
-    #     logger.error("Storage nodes are less than 3 in ha cluster")
-    #     return False, "Storage nodes are less than 3 in ha cluster"
-
     if host_node and host_node.status != StorageNode.STATUS_ONLINE:
         mgs = f"Storage node is not online. ID: {host_node.get_id()} status: {host_node.status}"
         logger.error(mgs)
         return False, mgs
+
+    if ndcs or npcs:
+        if ndcs+npcs > len(online_nodes):
+            mgs = f"Online storage nodes: {len(online_nodes)} are less than the required LVol geometry: {(ndcs+npcs)}"
+            logger.error(mgs)
+            return False, mgs
 
     cluster_size_prov_util = int(((cluster_size_prov+size) / cluster_size_total) * 100)
 
@@ -403,6 +407,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         vuid = utils.get_random_vuid()
     else:
         vuid = distr_vuid
+
+    # round size to the nearest 1G ceiling
+    size = math.ceil(size/(1024*1024*1024))*1024*1024*1024
 
     if max_size > 0:
         if max_size < size:
@@ -436,7 +443,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
     if lvol_priority_class:
-        lvol.lvol_priority_class = lvol_priority_class + 1
+        lvol.lvol_priority_class = lvol_priority_class
     else:
         lvol.lvol_priority_class = 0
     lvol.fabric = fabric
@@ -457,6 +464,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+    s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+    attr_name = f"active_{fabric}"
+    is_active_primary = getattr(host_node, attr_name)
+    is_active_secondary = getattr(s_node, attr_name)
+    if not is_active_primary:
+        return False, f"Primary node fabric {fabric} is not active"
+    if not is_active_secondary:
+        return False, f"Secondary node fabric {fabric} is not active"
 
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
@@ -464,6 +479,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.subsys_port = host_node.lvol_subsys_port
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
+    if npcs or ndcs:
+        lvol.npcs = npcs or 0
+        lvol.ndcs = ndcs or 0
+    else:
+        lvol.npcs = cl.distr_npcs
+        lvol.ndcs = cl.distr_ndcs
     lvol.do_replicate = bool(do_replicate)
     if lvol.do_replicate:
         random_nodes = _get_next_3_nodes(cl.snapshot_replication_target_cluster, lvol.size)
@@ -486,8 +507,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         }
     }
 
+    if lvol.ndcs or lvol.npcs:
+        lvol_dict["params"]["ndcs"] = lvol.ndcs
+        lvol_dict["params"]["npcs"] = lvol.npcs
+
     if cl.is_qos_set() and lvol.lvol_priority_class > 0:
-        lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class
+        lvol_dict["params"]["lvol_priority_class"] = lvol.lvol_priority_class +1
 
     lvol.bdev_stack = [lvol_dict]
 
@@ -691,10 +716,19 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         # add listeners
         logger.info("adding listeners")
         for iface in snode.data_nics:
-            if iface.ip4_address and lvol.fabric==iface.trtype:
+            if iface.ip4_address and lvol.fabric==iface.trtype.lower():
                 logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
                 ret, err = rpc_client.nvmf_subsystem_add_listener(
                     lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state)
+                if not ret:
+                    if err and "code" in err and err["code"] == -32602:
+                        logger.warning("listener already exists")
+                    else:
+                        return False, f"Failed to create listener for {lvol.get_id()}"
+            elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
+                logger.info("adding listener for %s on IP %s, fabric TCP" % (lvol.nqn, iface.ip4_address))
+                ret, err = rpc_client.nvmf_subsystem_add_listener(
+                        lvol.nqn, "TCP", iface.ip4_address, lvol.subsys_port, ana_state)
                 if not ret:
                     if err and "code" in err and err["code"] == -32602:
                         logger.warning("listener already exists")
@@ -753,7 +787,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     # add listeners
     logger.info("adding listeners")
     for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric==iface.trtype:
+        if iface.ip4_address and lvol.fabric==iface.trtype.lower():
             if not ana_state:
                 ana_state = "non_optimized"
                 if lvol.node_id == snode.get_id():
@@ -840,9 +874,10 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    ret = rpc_client.bdev_lvol_remove_from_group(pool.numeric_id, [lvol.top_bdev])
-    if not ret:
-        logger.error("RPC failed bdev_lvol_remove_from_group")
+    if pool.has_qos():
+        ret = rpc_client.bdev_lvol_remove_from_group(pool.numeric_id, [lvol.top_bdev])
+        if not ret:
+            logger.error("RPC failed bdev_lvol_remove_from_group")
 
     subsystem = rpc_client.subsystem_list(lvol.nqn)
     # 1- remove subsystem
@@ -972,11 +1007,18 @@ def delete_lvol(id_or_name, force_delete=False):
         if secondary_node:
             secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
-                logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
                 secondary_rpc_client = secondary_node.rpc_client()
-                ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
-                if not ret:
-                    logger.warning(f"Failed to delete subsystem from node: {secondary_node.get_id()}")
+                subsystem = secondary_rpc_client.subsystem_list(lvol.nqn)
+                # 1- remove subsystem
+                if subsystem:
+                    if len(subsystem[0]["namespaces"]) > 1:
+                        logger.info("Removing namespace")
+                        ret = secondary_rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
+                    else:
+                        logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
+                        ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
+                    if not ret:
+                        logger.warning(f"Failed to delete subsystem from node: {secondary_node.get_id()}")
 
         # 2- delete subsystem and lvol bdev from primary
         if primary_node:
@@ -1033,18 +1075,19 @@ def connect_lvol_to_pool(uuid):
         snode.rpc_username,
         snode.rpc_password)
 
-    ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
-    if not ret:
-        logger.error("RPC failed bdev_lvol_add_to_group")
-        return False
+    if pool.has_qos():
+        ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
+        if not ret:
+            logger.error("RPC failed bdev_lvol_add_to_group")
+            return False
 
-    # re-apply the QOS limits
-    ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
-                                        pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
-                                        pool.max_w_mbytes_per_sec)
-    if not ret:
-        logger.error("RPC failed bdev_set_qos_limit")
-        return False
+        # re-apply the QOS limits
+        ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id, pool.max_rw_ios_per_sec,
+                                            pool.max_rw_mbytes_per_sec, pool.max_r_mbytes_per_sec,
+                                            pool.max_w_mbytes_per_sec)
+        if not ret:
+            logger.error("RPC failed bdev_set_qos_limit")
+            return False
 
     lvol.write_to_db(db_controller.kv_store)
     pool.write_to_db(db_controller.kv_store)
@@ -1168,8 +1211,13 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
             size_used = records[0].size_used
+        if lvol.ndcs == 0 and lvol.npcs == 0:
+            cl = db_controller.get_cluster_by_id(cluster_id)
+            mode = f"{cl.distr_ndcs}x{cl.distr_npcs}"
+        else:
+            mode = f"{lvol.ndcs}x{lvol.npcs}"
 
-        data.append({
+        lvol_data = {
             "Id": lvol.uuid,
             "Name": lvol.lvol_name,
             "Size": utils.humanbytes(lvol.size),
@@ -1182,8 +1230,11 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
+            "Mode": mode,
             "Replicated On": lvol.replication_node_id,
-        })
+        }
+        data.append(lvol_data)
+
     for snap, count in snap_dict.items():
         ref_snap = db_controller.get_snapshot_by_id(snap)
         ref_snap.ref_count = count
@@ -1263,9 +1314,17 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
         snode = db_controller.get_storage_node_by_id(nodes_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
-            transport = nic.trtype.lower()
             ip = nic.ip4_address
             port = lvol.subsys_port
+            transport = "tcp"
+            if nic.ip4_address and lvol.fabric == nic.trtype.lower():
+                transport = nic.trtype.lower()
+
+            if transport == "tcp":
+                keep_alive_to = constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
+            else:
+                keep_alive_to = constants.LVOL_NVME_KEEP_ALIVE_TO
+
             out.append({
                 "ns_id": lvol.ns_id,
                 "transport": transport,
@@ -1275,11 +1334,11 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 "ctrl-loss-tmo": ctrl_loss_tmo,
                 "nr-io-queues": cluster.client_qpair_count,
-                "keep-alive-tmo": constants.LVOL_NVME_KEEP_ALIVE_TO,
+                "keep-alive-tmo": keep_alive_to,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                            f"--ctrl-loss-tmo={ctrl_loss_tmo} "
                            f"--nr-io-queues={cluster.client_qpair_count} "
-                           f"--keep-alive-tmo={constants.LVOL_NVME_KEEP_ALIVE_TO} "
+                           f"--keep-alive-tmo={keep_alive_to} "
                            f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
             })
     return out
@@ -1298,6 +1357,9 @@ def resize_lvol(id, new_size):
         msg = f"Pool is disabled {pool.get_id()}"
         logger.error(msg)
         return False, msg
+
+    # round size to the nearest 1G ceiling
+    new_size = math.ceil(new_size/(1024*1024*1024))*1024*1024*1024
 
     if lvol.size >= new_size:
         msg = f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}"

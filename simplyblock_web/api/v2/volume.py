@@ -41,6 +41,8 @@ class _CreateParams(BaseModel):
     priority_class: Literal[0, 1] = 0
     namespace: Optional[str] = None
     pvc_name: Optional[str] = None
+    ndcs: util.Unsigned = 0
+    npcs: util.Unsigned = 0
 
 
 class _CloneParams(BaseModel):
@@ -81,6 +83,8 @@ def add(
             lvol_priority_class=data.priority_class,
             namespace=data.namespace,
             pvc_name=data.pvc_name,
+            ndcs=data.ndcs,
+            npcs=data.npcs,
         )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(

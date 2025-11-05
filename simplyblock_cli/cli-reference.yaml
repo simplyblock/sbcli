@@ -1126,6 +1126,23 @@ commands:
             help: "new 20 characters password"
             dest: secret
             type: str
+      - name: update-fabric
+        help: "Updates a cluster's fabric"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "fabric"
+            help: "fabric: tcp, rdma or both (specify: tcp, rdma)"
+            dest: fabric
+            type: str
+            choices:
+              - tcp
+              - rdma
+              - tcp,rdma
+            default: tcp
       - name: check
         help: "Checks a cluster's health"
         arguments:
@@ -1348,6 +1365,7 @@ commands:
             help: "Maximum Namespace per subsystem"
             dest: max_namespace_per_subsys
             type: int
+            default: 32
           - name: "--distr-vuid"
             help: "(Dev) set vuid manually, default: random (1-99999)"
             dest: distr_vuid
@@ -1396,6 +1414,16 @@ commands:
                   removed. Please exchange the use of `--pvc_name` with `--pvc-name`.
             dest: pvc_name
             type: str
+          - name: "--data-chunks-per-stripe"
+            help: "Erasure coding schema parameter k (distributed raid), default: 1"
+            dest: ndcs
+            type: int
+            default: 0
+          - name: "--parity-chunks-per-stripe"
+            help: "Erasure coding schema parameter n (distributed raid), default: 1"
+            dest: npcs
+            type: int
+            default: 0
           - name: "--replicate"
             help: "Replicate LVol snapshot"
             dest: replicate

@@ -160,7 +160,7 @@ while True:
 
                         try:
                             storage_node_ops.connect_device(
-                                    f"remote_{org_dev.alceml_bdev}", org_dev, rpc_client,
+                                    f"remote_{org_dev.alceml_bdev}", org_dev, snode,
                                     bdev_names=list(node_bdev_names), reattach=False,
                             )
                             connected_devices.append(org_dev.get_id())
@@ -227,7 +227,19 @@ while True:
                         if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
                             lvstore_check &= health_controller._check_node_lvstore(
                                 lvstore_stack, second_node_1, auto_fix=True, stack_src_node=snode)
-                            lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1, auto_fix=True)
+                            sec_node_check = health_controller._check_sec_node_hublvol(second_node_1)
+                            if not sec_node_check:
+                                if snode.status == StorageNode.STATUS_ONLINE:
+                                    ret = second_node_1.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                                    if ret:
+                                        lvs_info = ret[0]
+                                        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                            # is_sec_node_leader = True
+                                            # check jc_compression status
+                                            jc_compression_is_active = second_node_1.rpc_client().jc_compression_get_status(snode.jm_vuid)
+                                            if not jc_compression_is_active:
+                                                lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1, auto_fix=True)
+
 
                     lvol_port_check = False
                     # if node_api_check:

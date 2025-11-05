@@ -98,7 +98,7 @@ spec:
           args:
             - |
               set -e
-
+              
               if [[ -f /etc/os-release ]]; then
                   source /etc/os-release
                   OS_ID=$ID
@@ -145,6 +145,9 @@ spec:
 
               modprobe nvme-tcp
               echo "[INFO] Loaded nvme-tcp module"
+
+              modprobe nvme-rdma
+              echo "[INFO] Loaded nvme-rdma module"
 
               TUNED_PROFILE="isolated-cpu"
               TUNED_PROFILE_DIR="/etc/tuned/$TUNED_PROFILE"

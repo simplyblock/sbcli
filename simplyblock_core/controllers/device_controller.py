@@ -57,10 +57,10 @@ def device_set_state(device_id, state):
         return False
 
     if device.status != state:
-        old_status = dev.status
+        device.previous_status = device.status
         device.status = state
         snode.write_to_db(db_controller.kv_store)
-        device_events.device_status_change(device, device.status, old_status)
+        device_events.device_status_change(device, device.status, device.previous_status)
 
     if state == NVMeDevice.STATUS_ONLINE:
         logger.info("Make other nodes connect to the node devices")
@@ -610,7 +610,7 @@ def device_set_failed(device_id):
     tasks_controller.add_device_failed_mig_task(device_id)
 
 
-def add_device(device_id):
+def add_device(device_id, add_migration_task=True):
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
@@ -653,8 +653,8 @@ def add_device(device_id):
     for node in snodes:
         if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             distr_controller.send_cluster_map_add_device(device_obj, node)
-
-    tasks_controller.add_new_device_mig_task(device_id)
+    if add_migration_task:
+        tasks_controller.add_new_device_mig_task(device_id)
     return device_id
 
     #

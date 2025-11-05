@@ -16,8 +16,9 @@ class FirewallClientException(Exception):
 
 class FirewallClient:
 
-    def __init__(self, ip_address, timeout=300, retry=5):
-        self.ip_address = ip_address
+    def __init__(self, node, timeout=300, retry=5):
+        self.node = node
+        self.ip_address = f"{node.mgmt_ip}:5001"
         self.url = 'http://%s/' % self.ip_address
         self.timeout = timeout
         self.session = requests.session()
@@ -73,19 +74,27 @@ class FirewallClient:
     def firewall_set_port(self, port_id, port_type="tcp", action="block", rpc_port=None, is_reject=False):
         params = {
             "port_id": port_id,
-            "port_type": port_type,
+            "port_type": "tcp",
             "action": action,
             "rpc_port": rpc_port,
             "is_reject": is_reject,
         }
+        response = None
         try:
-            return self._request("POST", "firewall", params)
+            response = self._request("POST", "firewall", params)
         except Exception as e:
             logger.warning(e)
             logger.info("Using other firewall path: firewall_set_port")
             mgmt_ip = self.ip_address.split(":")[0]
             self.url = f"http://{mgmt_ip}:5000/"
-            return self._request("POST", "snode/firewall_set_port", params)
+            response = self._request("POST", "snode/firewall_set_port", params)
+
+        if response and self.node.active_rdma:
+            if action == "block":
+                response = self.node.rpc_client().nvmf_port_block_rdma(port_id)
+            else:
+                response = self.node.rpc_client().nvmf_port_unblock_rdma(port_id)
+        return response
 
     def get_firewall(self, rpc_port=None):
         params = {"rpc_port": rpc_port}
