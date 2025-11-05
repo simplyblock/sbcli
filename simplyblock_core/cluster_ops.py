@@ -15,7 +15,7 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import cluster_events, device_controller, qos_controller
+from simplyblock_core.controllers import cluster_events, device_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -372,9 +372,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.write_to_db(db_controller.kv_store)
 
     cluster_events.cluster_create(cluster)
-
+    logger.info("Cluster created.")
+    print(cluster)
     time.sleep(3)
 
+    from simplyblock_core.controllers import qos_controller
     qos_controller.add_class("Default", 100, cluster.get_id())
 
     mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
@@ -493,6 +495,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
+    from simplyblock_core.controllers import qos_controller
     qos_controller.add_class("Default", 100, cluster.get_id())
 
     return cluster.get_id()
@@ -643,6 +646,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 logger.info(f"Setting Alcemls QOS weights on node {node.get_id()}")
+                from simplyblock_core.controllers import qos_controller
                 ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
                 if not ret:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
