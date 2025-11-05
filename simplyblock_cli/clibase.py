@@ -559,6 +559,15 @@ class CLIWrapperBase:
     def volume__inflate(self, sub_command, args):
         return lvol_controller.inflate_lvol(args.volume_id)
 
+    def volume__replication_start(self, sub_command, args):
+        return lvol_controller.volume__replication_start(args.lvol_id)
+
+    def volume__replication_stop(self, sub_command, args):
+        return lvol_controller.volume__replication_stop(args.lvol_id)
+
+    def volume__replication_status(self, sub_command, args):
+        return snapshot_controller.list_replication_tasks(args.cluster_id)
+
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_ip = args.cluster_ip
@@ -640,6 +649,9 @@ class CLIWrapperBase:
 
     def snapshot__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)
+
+    def snapshot__delete_replication_only(self, sub_command, args):
+        return snapshot_controller.delete_replicated(args.snapshot_id)
 
     def qos__add(self, sub_command, args):
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)

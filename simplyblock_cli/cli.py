@@ -541,6 +541,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
+        self.init_volume__replication_start(subparser)
+        self.init_volume__replication_stop(subparser)
+        self.init_volume__replication_status(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -648,6 +651,18 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
 
+    def init_volume__replication_start(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-start', 'Start snapshot replication taken from lvol')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__replication_stop(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-stop', 'Stop snapshot replication taken from lvol')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__replication_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists replication status')
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
+
 
     def init_control_plane(self):
         subparser = self.add_command('control-plane', 'Control plane commands', aliases=['cp','mgmt',])
@@ -749,6 +764,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__delete(subparser)
         self.init_snapshot__clone(subparser)
         self.init_snapshot__replication_status(subparser)
+        self.init_snapshot__delete_replication_only(subparser)
 
 
     def init_snapshot__add(self, subparser):
@@ -774,6 +790,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_snapshot__replication_status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists snapshots replication status')
         subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
+
+    def init_snapshot__delete_replication_only(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete-replication-only', 'Delete replicated version of a snapshot')
+        subcommand.add_argument('snapshot_id', help='Snapshot UUID', type=str)
 
 
     def init_qos(self):
@@ -1071,6 +1091,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
+                elif sub_command in ['replication-start']:
+                    ret = self.volume__replication_start(sub_command, args)
+                elif sub_command in ['replication-stop']:
+                    ret = self.volume__replication_stop(sub_command, args)
+                elif sub_command in ['replication-status']:
+                    ret = self.volume__replication_status(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1120,6 +1146,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__clone(sub_command, args)
                 elif sub_command in ['replication-status']:
                     ret = self.snapshot__replication_status(sub_command, args)
+                elif sub_command in ['delete-replication-only']:
+                    ret = self.snapshot__delete_replication_only(sub_command, args)
                 else:
                     self.parser.print_help()
 

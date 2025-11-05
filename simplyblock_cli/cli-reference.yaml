@@ -1630,6 +1630,27 @@ commands:
             help: "Logical volume id"
             dest: volume_id
             type: str
+      - name: replication-start
+        help: "Start snapshot replication taken from lvol"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
+      - name: replication-stop
+        help: "Stop snapshot replication taken from lvol"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
+      - name: replication-status
+        help: "Lists replication status"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
   - name: "control-plane"
     help: "Control plane commands"
     aliases:
@@ -1888,6 +1909,13 @@ commands:
           - name: "cluster_id"
             help: "Cluster UUID"
             dest: cluster_id
+            type: str
+      - name: delete-replication-only
+        help: "Delete replicated version of a snapshot"
+        arguments:
+          - name: "snapshot_id"
+            help: "Snapshot UUID"
+            dest: snapshot_id
             type: str
   - name: "qos"
     help: "qos commands"

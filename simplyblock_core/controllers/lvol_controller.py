@@ -1771,3 +1771,28 @@ def inflate_lvol(lvol_id):
     else:
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
+
+def volume__replication_start(lvol_id):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    logger.info("Setting LVol do_replicate: True")
+    lvol.do_replicate = True
+    lvol.write_to_db()
+
+
+def volume__replication_stop(lvol_id, delete=False):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    logger.info("Setting LVol do_replicate: False")
+    lvol.do_replicate = False
+    lvol.write_to_db()

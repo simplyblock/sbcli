@@ -254,6 +254,10 @@ def delete(snapshot_uuid, force_delete=False):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
+    if snap.status == SnapShot.STATUS_IN_REPLICATION:
+        logger.error(f"Snapshot is in replication")
+        return False
+
     try:
         snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
     except KeyError:
@@ -623,3 +627,21 @@ def list_replication_tasks(cluster_id):
                 "Replicated on node": snap.lvol.node_id,
             })
     return utils.print_table(data)
+
+
+def delete_replicated(snapshot_id):
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_id)
+    except KeyError:
+        logger.error(f"Snapshot not found {snapshot_id}")
+        return False
+
+    snaps = db_controller.get_snapshots_by_node_id(snap.lvol.replication_node_id)
+    for sn in snaps:
+        if sn.snap_name == snap.snap_name:
+            logger.info("Deleting replicated snapshot %s", sn.uuid)
+            ret = delete(sn.uuid)
+            if not ret:
+                logger.error("Failed to delete snapshot %s", sn.uuid)
+                return False
+    return True

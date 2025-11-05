@@ -47,6 +47,14 @@ def process_snap_replicate_start(task, snapshot):
             return
 
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
+    remote_lv_node = db.get_storage_node_by_id(remote_lv.node_id)
+    if remote_lv_node.status != StorageNode.STATUS_ONLINE:
+        task.function_result = "Target node is not online, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
+
     # 2 connect to it
     ret = snode.rpc_client().bdev_nvme_controller_list(remote_lv.top_bdev)
     if not ret:
@@ -135,6 +143,12 @@ def process_snap_replicate_finish(task, snapshot):
 
 def task_runner(task: JobSchedule):
     snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+    if not snapshot:
+        task.function_result = "snapshot not found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
+
     snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
 
     if not snode:
