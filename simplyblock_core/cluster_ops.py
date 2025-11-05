@@ -373,10 +373,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     cluster_events.cluster_create(cluster)
 
-    time.sleep(10)
-
-    qos_controller.add_class("Default", 100, cluster.get_id())
-
     mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
 
     logger.info("New Cluster has been created")
