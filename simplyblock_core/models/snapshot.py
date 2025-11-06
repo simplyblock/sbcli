@@ -30,3 +30,5 @@ class SnapShot(BaseModel):
     deletion_status: str = ""
     status: str = ""
     fabric: str = "tcp"
+    target_replicated_snap_uuid: str = ""
+    source_replicated_snap_uuid: str = ""

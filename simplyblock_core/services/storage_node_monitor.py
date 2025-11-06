@@ -74,7 +74,7 @@ def get_next_cluster_status(cluster_id):
                 continue
             online_nodes += 1
             # check for jm rep tasks:
-            ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
+            ret = node.rpc_client(timeout=5).jc_get_jm_status(node.jm_vuid)
             if ret:
                 for jm in ret:
                     if ret[jm] is False: # jm is not ready (has active replication task)

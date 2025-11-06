@@ -560,10 +560,10 @@ class CLIWrapperBase:
         return lvol_controller.inflate_lvol(args.volume_id)
 
     def volume__replication_start(self, sub_command, args):
-        return lvol_controller.volume__replication_start(args.lvol_id)
+        return lvol_controller.replication_start(args.lvol_id)
 
     def volume__replication_stop(self, sub_command, args):
-        return lvol_controller.volume__replication_stop(args.lvol_id)
+        return lvol_controller.replication_stop(args.lvol_id)
 
     def volume__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)

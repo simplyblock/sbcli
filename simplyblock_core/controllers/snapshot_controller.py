@@ -359,6 +359,9 @@ def delete(snapshot_uuid, force_delete=False):
     except KeyError:
         pass
 
+    if snap.target_replicated_snap_uuid:
+        delete_replicated(snap.uuid)
+
     logger.info("Done")
     return True
 
@@ -636,12 +639,16 @@ def delete_replicated(snapshot_id):
         logger.error(f"Snapshot not found {snapshot_id}")
         return False
 
-    snaps = db_controller.get_snapshots_by_node_id(snap.lvol.replication_node_id)
-    for sn in snaps:
-        if sn.snap_name == snap.snap_name:
-            logger.info("Deleting replicated snapshot %s", sn.uuid)
-            ret = delete(sn.uuid)
-            if not ret:
-                logger.error("Failed to delete snapshot %s", sn.uuid)
-                return False
+    try:
+        target_replicated_snap = db_controller.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+        logger.info("Deleting replicated snapshot %s", target_replicated_snap.uuid)
+        ret = delete(target_replicated_snap.uuid)
+        if not ret:
+            logger.error("Failed to delete snapshot %s", target_replicated_snap.uuid)
+            return False
+
+    except KeyError:
+        logger.error(f"Snapshot not found {snap.target_replicated_snap_uuid}")
+        return False
+
     return True

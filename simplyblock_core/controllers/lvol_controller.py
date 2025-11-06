@@ -10,8 +10,10 @@ from datetime import datetime
 from typing import List, Tuple
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
+    snapshot_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
@@ -1772,7 +1774,7 @@ def inflate_lvol(lvol_id):
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
 
-def volume__replication_start(lvol_id):
+def replication_start(lvol_id):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -1784,8 +1786,14 @@ def volume__replication_start(lvol_id):
     lvol.do_replicate = True
     lvol.write_to_db()
 
+    for snap in db_controller.get_snapshots():
+        if snap.lvol.uuid == lvol.uuid:
+            if not snap.target_replicated_snap_uuid:
+                task = tasks_controller.add_snapshot_replication_task(snap)
+                if task:
+                    snapshot_events.replication_task_created(snap)
 
-def volume__replication_stop(lvol_id, delete=False):
+def replication_stop(lvol_id, delete=False):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -1796,3 +1804,15 @@ def volume__replication_stop(lvol_id, delete=False):
     logger.info("Setting LVol do_replicate: False")
     lvol.do_replicate = False
     lvol.write_to_db()
+
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    tasks = db_controller.get_job_tasks(snode.cluster_id)
+
+
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.status != JobSchedule.STATUS_DONE:
+            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            if snap.lvol.uuid == lvol.uuid:
+                tasks_controller.cancel_task(task.uuid)
+
+    return True

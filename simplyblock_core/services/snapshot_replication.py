@@ -111,9 +111,6 @@ def process_snap_replicate_finish(task, snapshot):
     task.status = JobSchedule.STATUS_DONE
     task.function_params["end_time"] = int(time.time())
     task.write_to_db()
-    if snapshot.status != SnapShot.STATUS_ONLINE:
-        snapshot.status = SnapShot.STATUS_ONLINE
-        snapshot.write_to_db()
 
     # detach remote lvol
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
@@ -153,8 +150,16 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot.snap_bdev = remote_lv.top_bdev
     new_snapshot.snap_uuid = remote_lv.lvol_uuid
     new_snapshot.blobid = remote_lv.blobid
+    new_snapshot.blobid = remote_lv.blobid
     new_snapshot.created_at = int(time.time())
+    new_snapshot.source_replicated_snap_uuid = snapshot.uuid
+    new_snapshot.status = SnapShot.STATUS_ONLINE
     new_snapshot.write_to_db()
+
+    if snapshot.status == SnapShot.STATUS_IN_REPLICATION:
+        snapshot.status = SnapShot.STATUS_ONLINE
+        snapshot.target_replicated_snap_uuid = new_snapshot.uuid
+        snapshot.write_to_db()
 
     # delete lvol object
     remote_lv.bdev_stack = []

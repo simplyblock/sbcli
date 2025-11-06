@@ -1167,10 +1167,6 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             if not ret:
                 logger.error("Failed to set pollers mask")
                 return False
-            ret = rpc_client.bdev_lvol_create_poller_group(snode.pollers_mask)
-            if not ret:
-                logger.error("Failed to set pollers mask")
-                return False
 
         # 4- start spdk framework
         ret = rpc_client.framework_start_init()
@@ -1179,6 +1175,12 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             return False
 
         rpc_client.log_set_print_level("DEBUG")
+
+        if snode.pollers_mask:
+            ret = rpc_client.bdev_lvol_create_poller_group(snode.pollers_mask)
+            if not ret:
+                logger.error("Failed to set pollers mask")
+                return False
 
         # 5- set app_thread cpu mask
         if snode.app_thread_mask:
@@ -1732,10 +1734,6 @@ def restart_storage_node(
         if not ret:
             logger.error("Failed to set pollers mask")
             return False
-        ret = rpc_client.bdev_lvol_create_poller_group(snode.pollers_mask)
-        if not ret:
-            logger.error("Failed to set pollers mask")
-            return False
 
     # 4- start spdk framework
     ret = rpc_client.framework_start_init()
@@ -1744,6 +1742,12 @@ def restart_storage_node(
         return False
 
     rpc_client.log_set_print_level("DEBUG")
+
+    if snode.pollers_mask:
+        ret = rpc_client.bdev_lvol_create_poller_group(snode.pollers_mask)
+        if not ret:
+            logger.error("Failed to set pollers mask")
+            return False
 
     # 5- set app_thread cpu mask
     if snode.app_thread_mask:
