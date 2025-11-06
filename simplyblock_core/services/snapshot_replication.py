@@ -142,24 +142,29 @@ def process_snap_replicate_finish(task, snapshot):
         # convert to snapshot on secondary
         sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
 
-    new_snapshot = snapshot
-    new_snapshot.uuid = str(uuid.uuid4())
+    new_snapshot_uuid = str(uuid.uuid4())
+
+    if snapshot.status == SnapShot.STATUS_IN_REPLICATION:
+        snapshot.status = SnapShot.STATUS_ONLINE
+        snapshot.target_replicated_snap_uuid = new_snapshot_uuid
+        snapshot.write_to_db()
+
+    new_snapshot = SnapShot()
+    new_snapshot.uuid = new_snapshot_uuid
     new_snapshot.cluster_id = remote_snode.cluster_id
     new_snapshot.lvol = remote_lv
     new_snapshot.pool_uuid = remote_lv.pool_uuid
     new_snapshot.snap_bdev = remote_lv.top_bdev
     new_snapshot.snap_uuid = remote_lv.lvol_uuid
-    new_snapshot.blobid = remote_lv.blobid
+    new_snapshot.size = snapshot.size
+    new_snapshot.used_size = snapshot.used_size
+    new_snapshot.snap_name = snapshot.snap_name
     new_snapshot.blobid = remote_lv.blobid
     new_snapshot.created_at = int(time.time())
     new_snapshot.source_replicated_snap_uuid = snapshot.uuid
     new_snapshot.status = SnapShot.STATUS_ONLINE
     new_snapshot.write_to_db()
 
-    if snapshot.status == SnapShot.STATUS_IN_REPLICATION:
-        snapshot.status = SnapShot.STATUS_ONLINE
-        snapshot.target_replicated_snap_uuid = new_snapshot.uuid
-        snapshot.write_to_db()
 
     # delete lvol object
     remote_lv.bdev_stack = []
