@@ -887,6 +887,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         app_thread_core = node_config.get("distribution").get("app_thread_core")
         jm_cpu_core = node_config.get("distribution").get("jm_cpu_core")
         number_of_distribs = node_config.get("number_of_distribs")
+        lvol_poller_core = node_config.get("lvol_poller_core")
+        lvol_poller_mask = utils.generate_mask(lvol_poller_core)
 
         pollers_mask = utils.generate_mask(poller_cpu_cores)
         app_thread_mask = utils.generate_mask(app_thread_core)
@@ -1103,6 +1105,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         snode.write_to_db(kv_store)
         snode.app_thread_mask = app_thread_mask or ""
         snode.pollers_mask = pollers_mask or ""
+        snode.lvol_poller_mask = lvol_poller_mask or ""
         snode.jm_cpu_mask = jm_cpu_mask
         snode.alceml_cpu_index = alceml_cpu_index
         snode.alceml_worker_cpu_index = alceml_worker_cpu_index
@@ -1176,8 +1179,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
 
         rpc_client.log_set_print_level("DEBUG")
 
-        if snode.pollers_mask:
-            ret = rpc_client.bdev_lvol_create_poller_group(snode.pollers_mask)
+        if snode.lvol_poller_mask:
+            ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
             if not ret:
                 logger.error("Failed to set pollers mask")
                 return False
@@ -1743,8 +1746,8 @@ def restart_storage_node(
 
     rpc_client.log_set_print_level("DEBUG")
 
-    if snode.pollers_mask:
-        ret = rpc_client.bdev_lvol_create_poller_group(snode.pollers_mask)
+    if snode.lvol_poller_mask:
+        ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
         if not ret:
             logger.error("Failed to set pollers mask")
             return False

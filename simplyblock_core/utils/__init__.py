@@ -447,6 +447,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
+        assigned["lvol_poller_core"] = vcpu
         assigned["alceml_worker_cpu_cores"] = vcpu
         vcpu = reserve_n(1)
         assigned["alceml_cpu_cores"] = vcpu
@@ -455,6 +456,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
+        vcpu = reserve_n(1)
+        assigned["lvol_poller_core"] = vcpu
         vcpus = reserve_n(1)
         assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(2)
@@ -468,6 +471,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(alceml_count)
         assigned["alceml_cpu_cores"] = vcpus
+        vcpus = reserve_n(2)
+        assigned["lvol_poller_core"] = vcpus
     dp = int(len(remaining) / 2)
     vcpus = reserve_n(dp)
     assigned["distrib_cpu_cores"] = vcpus
@@ -486,7 +491,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned.get("alceml_cpu_cores", []),
         assigned.get("alceml_worker_cpu_cores", []),
         assigned.get("distrib_cpu_cores", []),
-        assigned.get("jc_singleton_core", [])
+        assigned.get("jc_singleton_core", []),
+        assigned.get("lvol_poller_core", []),
     )
 
 
@@ -1423,7 +1429,8 @@ def regenerate_config(new_config, old_config, force=False):
                 "alceml_cpu_cores": get_core_indexes(core_to_index, distribution[3]),
                 "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
                 "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
-                "jc_singleton_core": get_core_indexes(core_to_index, distribution[6])}
+                "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
+                "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
 
         isolated_cores = old_config["nodes"][i]["isolated"]
         number_of_distribs = 2
