@@ -115,11 +115,22 @@ def process_snap_replicate_finish(task, snapshot):
         snapshot.status = SnapShot.STATUS_ONLINE
         snapshot.write_to_db()
 
+    # detach remote lvol
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
     snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
     snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
-
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
+
+    # chain snaps
+    snaps = db.get_snapshots_by_node_id(remote_lv.replication_node_id)
+    snaps = sorted(snaps, key=lambda x: x.create_dt)
+    for sn in snaps:
+        if sn.snap_name == snapshot.snap_name:
+            logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
+            remote_snode.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, sn.snap_bdev)
+            break
+
+    # convert to snapshot
     remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
 
     new_snapshot = snapshot
@@ -132,6 +143,8 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot.blobid = remote_lv.blobid
     new_snapshot.created_at = int(time.time())
     new_snapshot.write_to_db()
+
+    # delete lvol object
     remote_lv.bdev_stack = []
     remote_lv.write_to_db()
     lvol_controller.delete_lvol(remote_lv.get_id(), True)

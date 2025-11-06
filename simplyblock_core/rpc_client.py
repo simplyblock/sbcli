@@ -1274,3 +1274,10 @@ class RPCClient:
 
     def nvmf_get_blocked_ports_rdma(self):
         return self._request("nvmf_get_blocked_ports")
+
+    def bdev_lvol_add_clone(self, lvol_name, child_name):
+        params = {
+            "lvol_name": lvol_name,
+            "child_name": child_name,
+        }
+        return self._request("bdev_lvol_add_clone", params)
