@@ -1167,6 +1167,10 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             if not ret:
                 logger.error("Failed to set pollers mask")
                 return False
+            ret = rpc_client.bdev_lvol_create_poller_group(snode.pollers_mask)
+            if not ret:
+                logger.error("Failed to set pollers mask")
+                return False
 
         # 4- start spdk framework
         ret = rpc_client.framework_start_init()
@@ -1725,6 +1729,10 @@ def restart_storage_node(
     # 3- set nvme config
     if snode.pollers_mask:
         ret = rpc_client.nvmf_set_config(snode.pollers_mask)
+        if not ret:
+            logger.error("Failed to set pollers mask")
+            return False
+        ret = rpc_client.bdev_lvol_create_poller_group(snode.pollers_mask)
         if not ret:
             logger.error("Failed to set pollers mask")
             return False
