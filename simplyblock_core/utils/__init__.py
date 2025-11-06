@@ -1563,7 +1563,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     "alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
                                                                 core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
-                    "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6])
+                    "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6]),
+                    "lvol_poller_core": get_core_indexes(core_group["lvol_poller_core"], core_group["distribution"][7])
                 },
                 "ssd_pcis": [],
                 "nic_ports": system_info[nid]["nics"]
