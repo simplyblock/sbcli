@@ -1275,6 +1275,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             remote_devs.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         remote_devs.write_to_db()
 
+        snode.write_to_db(kv_store)
+
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         old_status = snode.status
         snode.status =  StorageNode.STATUS_ONLINE
