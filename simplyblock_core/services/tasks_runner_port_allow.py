@@ -119,8 +119,9 @@ while True:
                                 continue
                             else:
                                 remote_devs = db.get_node_remote_devices(node.get_id())
-                                remote_devs.remote_devices = remote_devices
-                                remote_devs.write_to_db()
+                                if remote_devs:
+                                    remote_devs.remote_devices = remote_devices
+                                    remote_devs.write_to_db()
 
                             logger.info("connect to remote JM devices")
                             remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
@@ -133,8 +134,9 @@ while True:
                                 continue
                             else:
                                 remote_devs = db.get_node_remote_devices(node.get_id())
-                                remote_devs.remote_jm_devices = remote_jm_devices
-                                remote_devs.write_to_db()
+                                if remote_devs:
+                                    remote_devs.remote_jm_devices = remote_jm_devices
+                                    remote_devs.write_to_db()
 
 
                         except Exception as e:
