@@ -1486,8 +1486,6 @@ def restart_storage_node(
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[], force_lvol_recreate=False):
-    db_controller = DBController()
-    kv_store = db_controller.kv_store
 
     db_controller = DBController()
     logger.info("Restarting storage node")
