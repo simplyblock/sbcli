@@ -119,7 +119,7 @@ def process_snap_replicate_finish(task, snapshot):
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
 
     # chain snaps on primary
-    snaps = db.get_snapshots_by_node_id(remote_lv.node_id)
+    snaps = db.get_snapshots()
     for sn in snaps:
         if sn.lvol.get_id() == snapshot.lvol.get_id():
             try:
