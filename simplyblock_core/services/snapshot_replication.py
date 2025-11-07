@@ -120,7 +120,6 @@ def process_snap_replicate_finish(task, snapshot):
 
     # chain snaps on primary
     snaps = db.get_snapshots_by_node_id(remote_lv.replication_node_id)
-    snaps = sorted(snaps, key=lambda x: x.create_dt)
     for sn in snaps:
         if sn.snap_name == snapshot.snap_name:
             logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
@@ -132,9 +131,9 @@ def process_snap_replicate_finish(task, snapshot):
 
     sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
     # chain snaps on secondary
-    if sec_node.status == SnapShot.STATUS_ONLINE:
+    if sec_node.status == StorageNode.STATUS_ONLINE:
         for sn in snaps:
-            if sn.snap_name == snapshot.snap_name:
+            if sn.lvol.get_id() == snapshot.lvol.get_id():
                 logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
                 sec_node.rpc_client().bdev_lvol_add_clone(sn.snap_bdev, remote_lv.top_bdev)
                 break

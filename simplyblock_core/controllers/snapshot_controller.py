@@ -607,7 +607,11 @@ def list_replication_tasks(cluster_id):
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
-            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+
             duration = ""
             try:
                 if task.status == JobSchedule.STATUS_RUNNING:
@@ -617,7 +621,7 @@ def list_replication_tasks(cluster_id):
                         task.function_params["end_time"] - task.function_params["start_time"])
             except Exception as e:
                 logger.error(e)
-            offset = ""
+            offset = 0
             if "offset" in task.function_params:
                 offset = task.function_params["offset"]
             data.append({

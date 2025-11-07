@@ -258,7 +258,9 @@ class DBController(metaclass=Singleton):
         return EventObj().read_from_db(self.kv_store, id=event_id, limit=limit, reverse=reverse)
 
     def get_job_tasks(self, cluster_id, reverse=True, limit=0) -> List[JobSchedule]:
-        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
+        ret = JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
+        return sorted(ret, key=lambda x: x.date)
+
 
     def get_task_by_id(self, task_id) -> JobSchedule:
         for task in self.get_job_tasks(" "):
@@ -272,7 +274,7 @@ class DBController(metaclass=Singleton):
         for snap in snaps:
             if snap.lvol.node_id == node_id:
                 ret.append(snap)
-        return ret
+        return sorted(ret, key=lambda x: x.create_dt)
 
     def get_snode_size(self, node_id) -> int:
         snode = self.get_storage_node_by_id(node_id)
