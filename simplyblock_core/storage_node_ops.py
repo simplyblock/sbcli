@@ -887,7 +887,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         app_thread_core = node_config.get("distribution").get("app_thread_core")
         jm_cpu_core = node_config.get("distribution").get("jm_cpu_core")
         number_of_distribs = node_config.get("number_of_distribs")
-        lvol_poller_core = node_config.get("lvol_poller_core")
+        lvol_poller_core =  node_config.get("distribution").get("lvol_poller_core")
         lvol_poller_mask = utils.generate_mask(lvol_poller_core)
 
         pollers_mask = utils.generate_mask(poller_cpu_cores)
