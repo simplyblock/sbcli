@@ -408,16 +408,17 @@ def _check_node_lvstore(
                                                     bdev_names=node_bdev_names, reattach=False)
                                                 if remote_bdev:
                                                     new_remote_devices = []
-                                                    n = db_controller.get_storage_node_by_id(node.get_id())
-                                                    for rem_dev in n.remote_devices:
-                                                        if dev.get_id() == rem_dev.get_id():
-                                                            continue
-                                                        new_remote_devices.append(rem_dev)
-                                                    dev.remote_bdev = remote_bdev
-                                                    new_remote_devices.append(dev)
-                                                    n.remote_devices = new_remote_devices
-                                                    n.write_to_db()
-                                                    distr_controller.send_dev_status_event(dev, dev.status, node)
+                                                    node_remote_devices = db_controller.get_node_remote_devices(node.get_id())
+                                                    if node_remote_devices:
+                                                        for rem_dev in node_remote_devices.remote_devices:
+                                                            if dev.get_id() == rem_dev.get_id():
+                                                                continue
+                                                            new_remote_devices.append(rem_dev)
+                                                        dev.remote_bdev = remote_bdev
+                                                        new_remote_devices.append(dev)
+                                                        node_remote_devices.remote_devices = new_remote_devices
+                                                        node_remote_devices.write_to_db()
+                                                        distr_controller.send_dev_status_event(dev, dev.status, node)
                                             except Exception as e:
                                                 logger.error(f"Failed to connect to {dev.get_id()}: {e}")
                                 if result['Kind'] == "Node":
@@ -523,15 +524,17 @@ def check_node(node_id, with_devices=True):
                 logger.info(f"Device skipped: {dev.get_id()} status: {dev.status}")
             print("*" * 100)
 
-        logger.info(f"Node remote device: {len(snode.remote_devices)}")
-        print("*" * 100)
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=5, retry=1)
-        for remote_device in snode.remote_devices:
-            node_remote_devices_check &= check_remote_device(remote_device.get_id(), snode)
+        node_remote_devices = db_controller.get_node_remote_devices(snode.get_id())
+        if node_remote_devices:
+            logger.info(f"Node remote device: {len(node_remote_devices.remote_devices)}")
             print("*" * 100)
+            rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port,
+                snode.rpc_username, snode.rpc_password,
+                timeout=5, retry=1)
+            for remote_device in node_remote_devices.remote_devices:
+                node_remote_devices_check &= check_remote_device(remote_device.get_id(), snode)
+                print("*" * 100)
 
         if snode.jm_device:
             jm_device = snode.jm_device
@@ -544,30 +547,31 @@ def check_node(node_id, with_devices=True):
             node_devices_check &= ret
 
         if snode.enable_ha_jm:
-            print("*" * 100)
-            logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
-            for remote_device in snode.remote_jm_devices:
+            remote_devs = db_controller.get_node_remote_devices(snode.get_id())
+            if remote_devs:
+                print("*" * 100)
+                logger.info(f"Node remote JMs: {len(remote_devs.remote_jm_devices)}")
+                for remote_device in remote_devs.remote_jm_devices:
+                    name = f'remote_{remote_device.jm_bdev}n1'
+                    bdev_info = snode.rpc_client().get_bdevs(name)
+                    logger.log(INFO if bdev_info else ERROR,
+                               f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
+                    node_remote_devices_check &= bool(bdev_info)
 
-                name = f'remote_{remote_device.jm_bdev}n1'
-                bdev_info = rpc_client.get_bdevs(name)
-                logger.log(INFO if bdev_info else ERROR,
-                           f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
-                node_remote_devices_check &= bool(bdev_info)
-
-                controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
-                if controller_info:
-                    addr = controller_info[0]['ctrlrs'][0]['trid']['traddr']
-                    port = controller_info[0]['ctrlrs'][0]['trid']['trsvcid']
-                    logger.info(f"IP Address: {addr}:{port}")
-
-                if remote_device.nvmf_multipath:
-                    if controller_info and "alternate_trids" in controller_info[0]['ctrlrs'][0]:
-                        addr = controller_info[0]['ctrlrs'][0]['alternate_trids'][0]['traddr']
-                        port = controller_info[0]['ctrlrs'][0]['alternate_trids'][0]['trsvcid']
+                    controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
+                    if controller_info:
+                        addr = controller_info[0]['ctrlrs'][0]['trid']['traddr']
+                        port = controller_info[0]['ctrlrs'][0]['trid']['trsvcid']
                         logger.info(f"IP Address: {addr}:{port}")
 
-                    if bdev_info:
-                        logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
+                    if remote_device.nvmf_multipath:
+                        if controller_info and "alternate_trids" in controller_info[0]['ctrlrs'][0]:
+                            addr = controller_info[0]['ctrlrs'][0]['alternate_trids'][0]['traddr']
+                            port = controller_info[0]['ctrlrs'][0]['alternate_trids'][0]['trsvcid']
+                            logger.info(f"IP Address: {addr}:{port}")
+
+                        if bdev_info:
+                            logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
 
         print("*" * 100)
         if snode.lvstore_stack:

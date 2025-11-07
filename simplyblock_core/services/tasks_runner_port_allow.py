@@ -8,7 +8,7 @@ from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
-from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.storage_node import StorageNode, StorageNodeRemoteDevices
 from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
@@ -118,9 +118,9 @@ while True:
                                 task.write_to_db(db.kv_store)
                                 continue
                             else:
-                                node = db.get_storage_node_by_id(task.node_id)
-                                node.remote_devices = remote_devices
-                                node.write_to_db()
+                                remote_devs = db.get_node_remote_devices(node.get_id())
+                                remote_devs.remote_devices = remote_devices
+                                remote_devs.write_to_db()
 
                             logger.info("connect to remote JM devices")
                             remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
@@ -132,9 +132,9 @@ while True:
                                 task.write_to_db(db.kv_store)
                                 continue
                             else:
-                                node = db.get_storage_node_by_id(task.node_id)
-                                node.remote_jm_devices = remote_jm_devices
-                                node.write_to_db()
+                                remote_devs = db.get_node_remote_devices(node.get_id())
+                                remote_devs.remote_jm_devices = remote_jm_devices
+                                remote_devs.write_to_db()
 
 
                         except Exception as e:

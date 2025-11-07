@@ -13,6 +13,11 @@ from simplyblock_core.rpc_client import RPCClient, RPCException
 logger = utils.get_logger(__name__)
 
 
+class StorageNodeRemoteDevices(BaseNodeObject):
+    remote_devices: List[NVMeDevice] = []
+    remote_jm_devices: List[JMDevice] = []
+
+
 class StorageNode(BaseNodeObject):
 
     alceml_cpu_cores: List[int] = []
@@ -79,8 +84,6 @@ class StorageNode(BaseNodeObject):
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
-    remote_devices: List[NVMeDevice] = []
-    remote_jm_devices: List[JMDevice] = []
     rpc_password: str = ""
     rpc_port: int = -1
     rpc_username: str = ""

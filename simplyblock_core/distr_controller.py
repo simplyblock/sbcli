@@ -80,10 +80,12 @@ def send_dev_status_event(device, status, target_node=None):
 
         if status == NVMeDevice.STATUS_ONLINE and node.get_id() != device.node_id:
             rem_dev = None
-            for dev2 in node.remote_devices:
-                if dev2.get_id() == device.get_id() :
-                    rem_dev = dev2
-                    break
+            node_remote_devices = db_controller.get_node_remote_devices(node.get_id())
+            if node_remote_devices:
+                for dev2 in node_remote_devices.remote_devices:
+                    if dev2.get_id() == device.get_id() :
+                        rem_dev = dev2
+                        break
 
             if not rem_dev or rem_dev.status != NVMeDevice.STATUS_ONLINE:
                 dev_status = NVMeDevice.STATUS_UNAVAILABLE
@@ -109,14 +111,16 @@ def disconnect_device(device):
             continue
         new_remote_devices = []
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
-        for rem_dev in node.remote_devices:
-            if rem_dev.get_id() == device.get_id():
-                ctrl_name = rem_dev.remote_bdev[:-2]
-                rpc_client.bdev_nvme_detach_controller(ctrl_name)
-            else:
-                new_remote_devices.append(rem_dev)
-        node.remote_devices = new_remote_devices
-        node.write_to_db(db_controller.kv_store)
+        node_remote_devices = db_controller.get_node_remote_devices(node.get_id())
+        if node_remote_devices:
+            for rem_dev in node_remote_devices.remote_devices:
+                if rem_dev.get_id() == device.get_id():
+                    ctrl_name = rem_dev.remote_bdev[:-2]
+                    rpc_client.bdev_nvme_detach_controller(ctrl_name)
+                else:
+                    new_remote_devices.append(rem_dev)
+            node_remote_devices.remote_devices = new_remote_devices
+            node_remote_devices.write_to_db(db_controller.kv_store)
 
 
 def get_distr_cluster_map(snodes, target_node, distr_name=""):
@@ -141,11 +145,13 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 name = dev.alceml_bdev
                 local_node_index = index
             else:
-                for dev2 in target_node.remote_devices:
-                    if dev2.get_id() == dev.get_id():
-                        name = dev2.remote_bdev
-                        dev_status = dev.status
-                        break
+                remote = db_controller.get_node_remote_devices(target_node.get_id())
+                if remote:
+                    for dev2 in remote.remote_devices:
+                        if dev2.get_id() == dev.get_id():
+                            name = dev2.remote_bdev
+                            dev_status = dev.status
+                            break
             if not name:
                 name = f"remote_{dev.alceml_bdev}n1"
                 if dev_status == NVMeDevice.STATUS_ONLINE:

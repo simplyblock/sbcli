@@ -5,7 +5,7 @@ from simplyblock_core import distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
-from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.storage_node import StorageNode, StorageNodeRemoteDevices
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -68,8 +68,11 @@ def device_set_state(device_id, state):
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
-            node.write_to_db()
+            remote_devs = db_controller.get_node_remote_devices(node.get_id())
+            if not remote_devs:
+                remote_devs = StorageNodeRemoteDevices({"uuid": node.uuid})
+            remote_devs.remote_devices = storage_node_ops._connect_to_remote_devs(node)
+            remote_devs.write_to_db()
 
     distr_controller.send_dev_status_event(device, device.status)
 
@@ -646,8 +649,11 @@ def add_device(device_id, add_migration_task=True):
     for node in snodes:
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
-        node.remote_devices = storage_node_ops._connect_to_remote_devs(node, force_connect_restarting_nodes=True)
-        node.write_to_db()
+        remote_devs = db_controller.get_node_remote_devices(node.get_id())
+        if not remote_devs:
+            remote_devs = StorageNodeRemoteDevices({"uuid": node.uuid})
+        remote_devs.remote_devices = storage_node_ops._connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+        remote_devs.write_to_db()
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node in snodes:
@@ -656,81 +662,6 @@ def add_device(device_id, add_migration_task=True):
     if add_migration_task:
         tasks_controller.add_new_device_mig_task(device_id)
     return device_id
-
-    #
-    # # create partitions
-    # partitions = snode.num_partitions_per_dev
-    # rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    # # look for partitions
-    # partitioned_devices = storage_node_ops._search_for_partitions(rpc_client, device_obj)
-    # logger.debug("partitioned_devices")
-    # logger.debug(partitioned_devices)
-    # if len(partitioned_devices) == partitions+1:
-    #     logger.info("Partitioned devices found")
-    # else:
-    #     logger.info(f"Creating partitions for {device_obj.nvme_bdev}")
-    #     storage_node_ops._create_device_partitions(rpc_client, device_obj, snode, partitions, snode.jm_percent)
-    #     partitioned_devices = storage_node_ops._search_for_partitions(rpc_client, device_obj)
-    #     if len(partitioned_devices) == partitions+1:
-    #         logger.info("Device partitions created")
-    #     else:
-    #         logger.error("Failed to create partitions")
-    #         return False
-    #
-    # jm_part = partitioned_devices.pop(0)
-    # new_devices = []
-    # dev_order = storage_node_ops.get_next_cluster_device_order(db_controller, snode.cluster_id)
-    # for dev in partitioned_devices:
-    #     new_device = storage_node_ops._create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
-    #     if not new_device:
-    #         logger.error("failed to create dev stack")
-    #         continue
-    #
-    #     new_device.cluster_device_order = dev_order
-    #     dev_order += 1
-    #     device_events.device_create(new_device)
-    #     new_devices.append(new_device)
-    #
-    # if new_devices:
-    #     snode.nvme_devices.remove(device_obj)
-    #     snode.nvme_devices.extend(new_devices)
-    #     snode.write_to_db(db_controller.kv_store)
-    # else:
-    #     logger.error("failed to create devices")
-    #     return False
-    #
-    # for dev in new_devices:
-    #     distr_controller.send_cluster_map_add_device(dev, snode)
-    #
-    # logger.info("Make other nodes connect to the node devices")
-    # snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-    # for node in snodes:
-    #     if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-    #         continue
-    #     node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
-    #     node.write_to_db()
-    #     for dev in new_devices:
-    #         distr_controller.send_cluster_map_add_device(dev, node)
-    #
-    # for dev in new_devices:
-    #     tasks_controller.add_new_device_mig_task(dev.get_id())
-    #
-    # # add to jm raid
-    # if snode.jm_device and snode.jm_device.raid_bdev and jm_part:
-    #     # looking for jm partition
-    #     jm_dev_part = jm_part.nvme_bdev
-    #     ret = rpc_client.get_bdevs(jm_dev_part)
-    #     if ret:
-    #         logger.info(f"JM part found: {jm_dev_part}")
-    #         if snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_REMOVED]:
-    #             restart_jm_device(snode.jm_device.get_id(), force=True, format_alceml=True)
-    #
-    #         if snode.jm_device.status == JMDevice.STATUS_ONLINE and \
-    #                 jm_dev_part not in snode.jm_device.jm_nvme_bdev_list:
-    #             remove_jm_device(snode.jm_device.get_id(), force=True)
-    #             restart_jm_device(snode.jm_device.get_id(), force=True)
-    #
-    # return "Done"
 
 
 def device_set_failed_and_migrated(device_id):
@@ -776,9 +707,12 @@ def set_jm_device_state(device_id, state):
             if node.status != StorageNode.STATUS_ONLINE:
                 continue
             logger.info(f"Connecting to node: {node.get_id()}")
-            node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
-            node.write_to_db(db_controller.kv_store)
-            logger.info(f"connected to devices count: {len(node.remote_jm_devices)}")
+            remote_devs = db_controller.get_node_remote_devices(node.get_id())
+            if not remote_devs:
+                remote_devs = StorageNodeRemoteDevices({"uuid": node.uuid})
+            remote_devs.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+            remote_devs.write_to_db()
+            logger.info(f"connected to devices count: {len(remote_devs.remote_jm_devices)}")
 
     return True
 

@@ -29,7 +29,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.storage_node import StorageNode, StorageNodeRemoteDevices
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
@@ -1265,15 +1265,15 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
               logger.error("Failed to set Alcemls QOS")
               return False
 
+        remote_devs = db_controller.get_node_remote_devices(snode.get_id())
+        if not remote_devs:
+            remote_devs = StorageNodeRemoteDevices({"uuid": snode.uuid})
         logger.info("Connecting to remote devices")
-        remote_devices = _connect_to_remote_devs(snode)
-        snode.remote_devices = remote_devices
-
+        remote_devs.remote_devices = _connect_to_remote_devs(snode)
         if snode.enable_ha_jm:
             logger.info("Connecting to remote JMs")
-            snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-
-        snode.write_to_db(kv_store)
+            remote_devs.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+        remote_devs.write_to_db()
 
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         old_status = snode.status
@@ -1291,11 +1291,14 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             try:
-                node.remote_devices = _connect_to_remote_devs(node)
+                remote_devs = db_controller.get_node_remote_devices(node.get_id())
+                if not remote_devs:
+                    remote_devs = StorageNodeRemoteDevices({"uuid": node.uuid})
+                remote_devs.remote_devices = _connect_to_remote_devs(node)
+                remote_devs.write_to_db()
             except RuntimeError:
                 logger.error('Failed to connect to remote devices')
                 return False
-            node.write_to_db(kv_store)
 
         if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY, Cluster.STATUS_IN_EXPANSION]:
             logger.warning(
@@ -1877,12 +1880,16 @@ def restart_storage_node(
 
     logger.info("Connecting to remote devices")
     try:
-        snode.remote_devices = _connect_to_remote_devs(snode)
+        remote_devs = db_controller.get_node_remote_devices(snode.get_id())
+        if not remote_devs:
+            remote_devs = StorageNodeRemoteDevices({"uuid": snode.uuid})
+        remote_devs.remote_devices = _connect_to_remote_devs(snode)
     except RuntimeError:
         logger.error('Failed to connect to remote devices')
         return False
     if snode.enable_ha_jm:
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+        remote_devs.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    remote_devs.write_to_db()
     snode.health_check = True
     snode.lvstore_status = ""
     snode.write_to_db(db_controller.kv_store)
@@ -1900,23 +1907,6 @@ def restart_storage_node(
             db_dev.health_check = True
             device_events.device_restarted(db_dev)
     snode.write_to_db(db_controller.kv_store)
-    #
-    # # make other nodes connect to the new devices
-    # logger.info("Make other nodes connect to the node devices")
-    # snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-    # for node in snodes:
-    #     if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-    #         continue
-    #     node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
-    #     node.write_to_db(kv_store)
-    #
-    # logger.info(f"Sending device status event")
-    # snode = db_controller.get_storage_node_by_id(snode.get_id())
-    # for db_dev in snode.nvme_devices:
-    #     distr_controller.send_dev_status_event(db_dev, db_dev.status)
-    #
-    # if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-    #     device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
@@ -1928,11 +1918,14 @@ def restart_storage_node(
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             try:
-                node.remote_devices = _connect_to_remote_devs(node, reattach=True, force_connect_restarting_nodes=True)
+                remote_devs = db_controller.get_node_remote_devices(node.get_id())
+                if not remote_devs:
+                    remote_devs = StorageNodeRemoteDevices({"uuid": node.uuid})
+                remote_devs.remote_devices = _connect_to_remote_devs(node, reattach=True, force_connect_restarting_nodes=True)
+                remote_devs.write_to_db()
             except RuntimeError:
                 logger.error('Failed to connect to remote devices')
                 return False
-            node.write_to_db(kv_store)
 
         logger.info("Sending device status event")
         snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -1975,12 +1968,14 @@ def restart_storage_node(
                     continue
 
                 try:
-                    node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+                    remote_devs = db_controller.get_node_remote_devices(node.get_id())
+                    if not remote_devs:
+                        remote_devs = StorageNodeRemoteDevices({"uuid": node.uuid})
+                    remote_devs.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+                    remote_devs.write_to_db()
                 except RuntimeError:
                     logger.error('Failed to connect to remote devices')
                     return False
-                node.write_to_db(kv_store)
-                    
 
             logger.info("Sending device status event")
             snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -2152,37 +2147,40 @@ def list_storage_devices(node_id, is_json):
             "Health": jm_device.health_check
         })
 
-    for device in snode.remote_devices:
-        logger.debug(device)
-        logger.debug("*" * 20)
-        name = device.alceml_name
-        status = device.status
-        if device.remote_bdev:
-            name = device.remote_bdev
-            try:
-                org_dev = db_controller.get_storage_device_by_id(device.get_id())
-                status = org_dev.status
-            except KeyError:
-                pass
+    node_remote_devices = db_controller.get_node_remote_devices(snode.get_id())
+    if node_remote_devices:
+        for device in node_remote_devices.remote_devices:
+            logger.debug(device)
+            logger.debug("*" * 20)
+            name = device.alceml_name
+            status = device.status
+            if device.remote_bdev:
+                name = device.remote_bdev
+                try:
+                    org_dev = db_controller.get_storage_device_by_id(device.get_id())
+                    status = org_dev.status
+                except KeyError:
+                    pass
 
-        remote_devices.append({
-            "UUID": device.uuid,
-            "Name": name,
-            "Size": utils.humanbytes(device.size),
-            "Node ID": device.node_id,
-            "Status": status,
-        })
+            remote_devices.append({
+                "UUID": device.uuid,
+                "Name": name,
+                "Size": utils.humanbytes(device.size),
+                "Node ID": device.node_id,
+                "Status": status,
+            })
 
-    for device in snode.remote_jm_devices:
-        logger.debug(device)
-        logger.debug("*" * 20)
-        remote_devices.append({
-            "UUID": device.uuid,
-            "Name": device.remote_bdev,
-            "Size": utils.humanbytes(device.size),
-            "Node ID": device.node_id,
-            "Status": device.status,
-        })
+    if node_remote_devices:
+        for device in node_remote_devices.remote_jm_devices:
+            logger.debug(device)
+            logger.debug("*" * 20)
+            remote_devices.append({
+                "UUID": device.uuid,
+                "Name": device.remote_bdev,
+                "Size": utils.humanbytes(device.size),
+                "Node ID": device.node_id,
+                "Status": device.status,
+            })
 
     data: dict[str, List[Any]] = {
         "Storage Devices": storage_devices,
@@ -2423,13 +2421,20 @@ def resume_storage_node(node_id):
     logger.info("Connecting to remote devices")
     snode = db_controller.get_storage_node_by_id(node_id)
     try:
-        snode.remote_devices = _connect_to_remote_devs(snode)
+        remote_devs = db_controller.get_node_remote_devices(snode.get_id())
+        if not remote_devs:
+            remote_devs = StorageNodeRemoteDevices({"uuid": snode.uuid})
+        remote_devs.remote_devices = _connect_to_remote_devs(snode)
+        remote_devs.write_to_db()
     except RuntimeError:
         logger.error('Failed to connect to remote devices')
         return False
     if snode.enable_ha_jm:
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-    snode.write_to_db(db_controller.kv_store)
+        remote_devs = db_controller.get_node_remote_devices(snode.get_id())
+        if not remote_devs:
+            remote_devs = StorageNodeRemoteDevices({"uuid": snode.uuid})
+        remote_devs.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+        remote_devs.write_to_db()
 
     fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
@@ -2969,12 +2974,20 @@ def set_node_status(node_id, status, reconnect_on_online=True):
         snode = db_controller.get_storage_node_by_id(node_id)
         logger.info("Connecting to remote devices")
         try:
-            snode.remote_devices = _connect_to_remote_devs(snode)
+            remote_devs = db_controller.get_node_remote_devices(snode.get_id())
+            if not remote_devs:
+                remote_devs = StorageNodeRemoteDevices({"uuid": snode.uuid})
+            remote_devs.remote_devices = _connect_to_remote_devs(snode)
+            remote_devs.write_to_db()
         except RuntimeError:
             logger.error('Failed to connect to remote devices')
             return False
         if snode.enable_ha_jm:
-            snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+            remote_devs = db_controller.get_node_remote_devices(snode.get_id())
+            if not remote_devs:
+                remote_devs = StorageNodeRemoteDevices({"uuid": snode.uuid})
+            remote_devs.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+            remote_devs.write_to_db()
         snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
         distr_controller.send_cluster_map_to_node(snode)
@@ -2984,8 +2997,11 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 continue
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                 try:
-                    node.remote_devices = _connect_to_remote_devs(node)
-                    node.write_to_db()
+                    remote_devs = db_controller.get_node_remote_devices(node.get_id())
+                    if not remote_devs:
+                        remote_devs = StorageNodeRemoteDevices({"uuid": node.uuid})
+                    remote_devs.remote_devices = _connect_to_remote_devs(node)
+                    remote_devs.write_to_db()
                     distr_controller.send_cluster_map_to_node(node)
                 except RuntimeError:
                     logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
@@ -3108,9 +3124,12 @@ def recreate_lvstore(snode, force=False):
     snode.lvstore_status = "in_creation"
     snode.write_to_db()
 
-    snode = db_controller.get_storage_node_by_id(snode.get_id())
-    snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-    snode.write_to_db()
+    remote_devs = db_controller.get_node_remote_devices(snode.get_id())
+    if not remote_devs:
+        remote_devs = StorageNodeRemoteDevices({"uuid": snode.uuid})
+    remote_devs.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+    remote_devs.write_to_db()
+
     sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
         # check jc_compression status
@@ -3392,6 +3411,7 @@ def get_sorted_ha_jms(current_node):
 
 
 def get_node_jm_names(current_node, remote_node=None):
+    db_controller = DBController()
     jm_list = []
     if current_node.jm_device:
         if remote_node:
@@ -3410,15 +3430,20 @@ def get_node_jm_names(current_node, remote_node=None):
                 if remote_node.jm_device.get_id() == jm_id:
                     jm_list.append(remote_node.jm_device.jm_bdev)
                     continue
-                for jm_dev in remote_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id:
-                        jm_list.append(jm_dev.remote_bdev)
-                        break
+
+                remote_devs = db_controller.get_node_remote_devices(remote_node.get_id())
+                if remote_devs:
+                    for jm_dev in remote_devs.remote_jm_devices:
+                        if jm_dev.get_id() == jm_id:
+                            jm_list.append(jm_dev.remote_bdev)
+                            break
             else:
-                for jm_dev in current_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id:
-                        jm_list.append(jm_dev.remote_bdev)
-                        break
+                remote_devs = db_controller.get_node_remote_devices(current_node.get_id())
+                if remote_devs:
+                    for jm_dev in remote_devs.remote_jm_devices:
+                        if jm_dev.get_id() == jm_id:
+                            jm_list.append(jm_dev.remote_bdev)
+                            break
     return jm_list[:constants.HA_JM_COUNT]
 
 
@@ -3468,10 +3493,15 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
         logger.debug(f"online_jms: {str(jm_ids)}")
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
+        remote_devs = db_controller.get_node_remote_devices(snode.get_id())
+        if not remote_devs:
+            remote_devs = StorageNodeRemoteDevices({"uuid": snode.uuid})
+        remote_devs.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
+        remote_devs.write_to_db()
         snode.jm_ids = jm_ids
         snode.jm_vuid = jm_vuid
         snode.write_to_db()
+
 
     write_protection = False
     if ndcs > 1:
@@ -3565,9 +3595,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     if snode.secondary_node_id:
         sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
 
-        # creating lvstore on secondary
-        sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node)
-        sec_node.write_to_db()
+        remote_devs = db_controller.get_node_remote_devices(sec_node.get_id())
+        if not remote_devs:
+            remote_devs = StorageNodeRemoteDevices({"uuid": sec_node.uuid})
+        remote_devs.remote_jm_devices = _connect_to_remote_jm_devs(sec_node)
+        remote_devs.write_to_db()
         ret, err = _create_bdev_stack(sec_node, lvstore_stack, primary_node=snode)
         if err:
             logger.error(f"Failed to create lvstore on node {sec_node.get_id()}")
