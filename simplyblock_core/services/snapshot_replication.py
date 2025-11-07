@@ -122,9 +122,13 @@ def process_snap_replicate_finish(task, snapshot):
     snaps = db.get_snapshots_by_node_id(remote_lv.node_id)
     for sn in snaps:
         if sn.lvol.get_id() == snapshot.lvol.get_id():
-            logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
-            remote_snode.rpc_client().bdev_lvol_add_clone(sn.snap_bdev, remote_lv.top_bdev)
-            break
+            try:
+                target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
+                logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
+                remote_snode.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
+                break
+            except KeyError:
+                logger.info(f"Snapshot {sn.target_replicated_snap_uuid} not found")
 
     # convert to snapshot on primary
     remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
@@ -134,9 +138,13 @@ def process_snap_replicate_finish(task, snapshot):
     if sec_node.status == StorageNode.STATUS_ONLINE:
         for sn in snaps:
             if sn.lvol.get_id() == snapshot.lvol.get_id():
-                logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
-                sec_node.rpc_client().bdev_lvol_add_clone(sn.snap_bdev, remote_lv.top_bdev)
-                break
+                try:
+                    target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
+                    logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
+                    sec_node.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
+                    break
+                except KeyError:
+                    logger.info(f"Snapshot {sn.target_replicated_snap_uuid} not found")
 
         # convert to snapshot on secondary
         sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
@@ -151,7 +159,7 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot = SnapShot()
     new_snapshot.uuid = new_snapshot_uuid
     new_snapshot.cluster_id = remote_snode.cluster_id
-    new_snapshot.lvol = snapshot.lvol
+    new_snapshot.lvol = remote_lv
     new_snapshot.pool_uuid = remote_lv.pool_uuid
     new_snapshot.snap_bdev = remote_lv.top_bdev
     new_snapshot.snap_uuid = remote_lv.lvol_uuid
