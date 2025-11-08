@@ -101,7 +101,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
     # wait 5 seconds after controller attach
-    time.sleep(5)
+    #time.sleep(5)
 
     if not bdev_name:
         msg = "Bdev name not returned from controller attach"
