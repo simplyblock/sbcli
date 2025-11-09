@@ -721,6 +721,8 @@ def _connect_to_remote_devs(
             remote_bdev.alceml_name = dev.alceml_name
             remote_bdev.node_id = dev.node_id
             remote_bdev.size = dev.size
+            remote_bdev.status = NVMeDevice.STATUS_ONLINE
+            remote_bdev.nvmf_multipath = dev.nvmf_multipath
             remote_bdev.remote_bdev = connect_device(
                     f"remote_{dev.alceml_bdev}", dev, this_node,
                     bdev_names=node_bdev_names, reattach=reattach,
@@ -786,6 +788,8 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         remote_device.node_id = org_dev.node_id
         remote_device.size = org_dev.size
         remote_device.jm_bdev = org_dev.jm_bdev
+        remote_device.status = NVMeDevice.STATUS_ONLINE
+        remote_device.nvmf_multipath = org_dev.nvmf_multipath
         try:
             remote_device.remote_bdev = connect_device(
                     f"remote_{org_dev.jm_bdev}", org_dev, this_node,
@@ -2160,37 +2164,37 @@ def list_storage_devices(node_id, is_json):
 
     node_remote_devices = db_controller.get_node_remote_devices(snode.get_id())
     if node_remote_devices:
-        for device in node_remote_devices.remote_devices:
-            logger.debug(device)
+        for remote_device in node_remote_devices.remote_devices:
+            logger.debug(remote_device)
             logger.debug("*" * 20)
-            name = device.alceml_name
-            status = device.status
-            if device.remote_bdev:
-                name = device.remote_bdev
+            name = remote_device.alceml_name
+            status = remote_device.status
+            if remote_device.remote_bdev:
+                name = remote_device.remote_bdev
                 try:
-                    org_dev = db_controller.get_storage_device_by_id(device.get_id())
+                    org_dev = db_controller.get_storage_device_by_id(remote_device.get_id())
                     status = org_dev.status
                 except KeyError:
                     pass
 
             remote_devices.append({
-                "UUID": device.uuid,
+                "UUID": remote_device.uuid,
                 "Name": name,
-                "Size": utils.humanbytes(device.size),
-                "Node ID": device.node_id,
+                "Size": utils.humanbytes(remote_device.size),
+                "Node ID": remote_device.node_id,
                 "Status": status,
             })
 
     if node_remote_devices:
-        for device in node_remote_devices.remote_jm_devices:
-            logger.debug(device)
+        for remote_jm_device in node_remote_devices.remote_jm_devices:
+            logger.debug(remote_jm_device)
             logger.debug("*" * 20)
             remote_devices.append({
-                "UUID": device.uuid,
-                "Name": device.remote_bdev,
-                "Size": utils.humanbytes(device.size),
-                "Node ID": device.node_id,
-                "Status": device.status,
+                "UUID": remote_jm_device.uuid,
+                "Name": remote_jm_device.remote_bdev,
+                "Size": utils.humanbytes(remote_jm_device.size),
+                "Node ID": remote_jm_device.node_id,
+                "Status": remote_jm_device.status,
             })
 
     data: dict[str, List[Any]] = {

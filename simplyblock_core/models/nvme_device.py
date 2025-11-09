@@ -74,6 +74,7 @@ class RemoteDevice(BaseModel):
     alceml_name: str = ""
     node_id: str = ""
     size: int = -1
+    nvmf_multipath: bool = False
 
 
 class RemoteJMDevice(RemoteDevice):
