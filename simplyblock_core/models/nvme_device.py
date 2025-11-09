@@ -47,19 +47,12 @@ class NVMeDevice(BaseModel):
     nvmf_nqn: str = ""
     nvmf_port: int = 0
     nvmf_multipath: bool = False
-    overload_percentage: int = 0  # Unused
-    partition_jm_bdev: str = ""  # Unused
-    partition_jm_size: int = 0  # Unused
-    partition_main_bdev: str = ""  # Unused
-    partition_main_size: int = 0  # Unused
-    partitions_count: int = 0  # Unused
     pcie_address: str = ""
     physical_label: int = 0
     pt_bdev: str = ""
     qos_bdev: str = ""
     remote_bdev: str = ""
     retries_exhausted: bool = False
-    sequential_number: int = 0  # Unused
     serial_number: str = ""
     size: int = -1
     testing_bdev: str = ""
@@ -73,3 +66,17 @@ class JMDevice(NVMeDevice):
     jm_bdev: str = ""
     jm_nvme_bdev_list: List[str] = []
     raid_bdev: str = ""
+
+
+class RemoteDevice(BaseModel):
+
+    remote_bdev: str = ""
+    alceml_name: str = ""
+    node_id: str = ""
+    size: int = -1
+
+
+class RemoteJMDevice(RemoteDevice):
+
+    jm_bdev: str = ""
+
