@@ -85,9 +85,9 @@ def process_device_event(event):
             distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
             node_remote_devices = db.get_node_remote_devices(event_node_obj.get_id())
             if node_remote_devices:
-                for dev in node_remote_devices.remote_devices:
-                    if dev.get_id() == device_obj.get_id():
-                        node_remote_devices.remote_devices.remove(dev)
+                for remote_dev in node_remote_devices.remote_devices:
+                    if remote_dev.get_id() == device_obj.get_id():
+                        node_remote_devices.remote_devices.remove(remote_dev)
                         node_remote_devices.write_to_db()
                         break
 
