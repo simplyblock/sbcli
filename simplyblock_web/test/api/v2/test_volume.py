@@ -35,6 +35,8 @@ def test_volume_get(call, cluster, storage_pool, volume):
     assert volume_details['name'] == 'volumeX'
     assert volume_details['id'] == volume
     assert volume_details['size'] == 2 * 10 ** 9
+    assert 'used_size' in volume_details
+    assert volume_details['used_size'] >= 0
     # TODO assert schema
 
 
