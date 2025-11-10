@@ -39,4 +39,4 @@ COPY requirements.txt requirements.txt
 
 RUN pip3 install -r requirements.txt
 
-RUN rm -rf /usr/share/terminfo/n/
+RUN rm -rf /usr/share/terminfo/
