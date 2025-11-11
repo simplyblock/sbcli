@@ -142,6 +142,7 @@ class SPDKParams(BaseModel):
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
+    cluster_id: str
 
 
 @api.post('/spdk_process_start', responses={
