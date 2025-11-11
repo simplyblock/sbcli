@@ -457,6 +457,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
 
     default_cluster = clusters[0]
+    cluster.mode = default_cluster.mode
     cluster.db_connection = default_cluster.db_connection
     cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
