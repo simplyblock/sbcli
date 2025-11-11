@@ -490,9 +490,9 @@ def spdk_process_kill(query: utils.RPCPortParams):
     return utils.get_response(True)
 
 
-def _is_pod_up(rpc_port):
+def _is_pod_up(rpc_port, cluster_id):
     k8s_core_v1 = core_utils.get_k8s_core_client()
-    pod_name = f"snode-spdk-pod-{rpc_port}"
+    pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -506,9 +506,9 @@ def _is_pod_up(rpc_port):
         return False
     return False
 
-def _is_pod_present(rpc_port):
+def _is_pod_present(rpc_port, cluster_id):
     k8s_core_v1 = core_utils.get_k8s_core_client()
-    pod_name = f"snode-spdk-pod-{rpc_port}"
+    pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -529,7 +529,8 @@ def _is_pod_present(rpc_port):
     })}}},
 })
 def spdk_process_is_up(query: utils.RPCPortParams):
-    if _is_pod_up(query.rpc_port):
+    first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
+    if _is_pod_up(query.rpc_port, first_six_cluster_id):
         return utils.get_response(True)
     else:
         return utils.get_response(False, "SPDK container is not running")
