@@ -70,6 +70,11 @@ def _add_task(function_name, cluster_id, node_id, device_id,
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
+    elif function_name == JobSchedule.FN_LVOL_SYNC_DEL:
+        task_id = get_lvol_sync_del_task(cluster_id, node_id, function_params['lvol_bdev_name'])
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
 
     task_obj = JobSchedule()
     task_obj.uuid = str(uuid.uuid4())
@@ -386,3 +391,21 @@ def get_jc_comp_task(cluster_id, node_id, jm_vuid=0):
                 if jm_vuid and "jm_vuid" in task.function_params and task.function_params["jm_vuid"] == jm_vuid:
                     return task.uuid
     return False
+
+
+def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name):
+    return _add_task(JobSchedule.FN_LVOL_SYNC_DEL, cluster_id, node_id, "",
+                     function_params={"lvol_bdev_name": lvol_bdev_name}, max_retry=10)
+
+def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL and task.node_id == node_id :
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                if lvol_bdev_name:
+                    if "lvol_bdev_name" in task.function_params and task.function_params["lvol_bdev_name"] == lvol_bdev_name:
+                        return task.uuid
+                else:
+                    return task.uuid
+    return False
+
