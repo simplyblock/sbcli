@@ -1189,7 +1189,7 @@ class RPCClient:
         }
         return self._request("bdev_lvol_remove_from_group", params)
 
-    def alceml_set_qos_weights(self, qos_weights):
+    def distrib_set_qos_weights(self, qos_weights):
         params = {
             "qos_weights": qos_weights,
         }

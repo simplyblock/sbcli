@@ -7,6 +7,7 @@ from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.qos import QOSClass
+from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
 db = DBController()
@@ -34,11 +35,6 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
         logger.error("cluster_id is required")
         return False
 
-    cluster = db.get_cluster_by_id(cluster_id)
-    if cluster.status != Cluster.STATUS_UNREADY:
-        logger.error(f"cluster must be in state UNREADY, current status is {cluster.status}")
-        return False
-
     qos_classes = db.get_qos(cluster_id)
     if len(qos_classes) >= 7:
         logger.error("Can not add more than 6 qos classes")
@@ -59,6 +55,17 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
     qos_class.class_name = name
     qos_class.weight = weight
     qos_class.write_to_db()
+
+    cluster = db.get_cluster_by_id(cluster_id)
+    if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_READONLY, Cluster.STATUS_DEGRADED]:
+        logger.error(f"cluster status is {cluster.status}, applying qos")
+        weighs_list = get_qos_weights_list(cluster_id)
+        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                logger.info(f"Setting Disribs QOS weights on node {node.get_id()}")
+                ret = node.rpc_client().distrib_set_qos_weights(weighs_list)
+                if not ret:
+                    logger.error(f"Failed to set Disribs QOS on node: {node.get_id()}")
 
     return True
 
