@@ -51,6 +51,8 @@ spec:
       containers:
         - command:
             - /manager
+          args:
+            - "--health-probe-bind-address=:9443"
           image: foundationdb/fdb-kubernetes-operator:v2.13.0
           name: manager
           env:
@@ -213,7 +215,11 @@ spec:
     replacements:
       enabled: true
   faultDomain:
-    key: {{- if .Values.foundationdb.multiAZ }}topology.kubernetes.io/zone{{ else }}foundationdb.org/none{{ end }}
+  {{- if .Values.foundationdb.multiAZ }}
+    key: topology.kubernetes.io/zone
+  {{- else }}
+    key: foundationdb.org/none
+  {{- end }}
   imageType: split
   labels:
     filterOnOwnerReference: false
@@ -227,8 +233,8 @@ spec:
   processCounts:
   {{- if .Values.foundationdb.multiAZ }}
     cluster_controller: 1
-    log: 6
-    storage: 6
+    log: 4
+    storage: 4
     stateless: -1
   {{- else }}
     cluster_controller: 1
