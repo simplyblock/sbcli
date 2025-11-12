@@ -6,7 +6,7 @@ from simplyblock_core import utils
 from simplyblock_core.controllers import health_controller, storage_events, device_events, tasks_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
-from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.storage_node import StorageNode, StorageNodeRemoteDevices
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, db_controller, distr_controller, storage_node_ops
 
@@ -144,36 +144,38 @@ while True:
                     if device.status == NVMeDevice.STATUS_ONLINE:
                         node_devices_check &= passed
 
-                logger.info(f"Node remote device: {len(snode.remote_devices)}")
+                node_remote_devices = db.get_node_remote_devices(snode.get_id())
+                if node_remote_devices:
+                    logger.info(f"Node remote device: {len(node_remote_devices.remote_devices)}")
+                    for remote_device in node_remote_devices.remote_devices:
+                        org_dev = db.get_storage_device_by_id(remote_device.get_id())
+                        org_node =  db.get_storage_node_by_id(remote_device.node_id)
+                        if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
+                            if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
+                                connected_devices.append(remote_device.get_id())
+                                continue
 
-                for remote_device in snode.remote_devices:
-                    org_dev = db.get_storage_device_by_id(remote_device.get_id())
-                    org_node =  db.get_storage_node_by_id(remote_device.node_id)
-                    if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
-                        if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
-                            connected_devices.append(remote_device.get_id())
-                            continue
+                            if not org_dev.alceml_bdev:
+                                logger.error(f"device alceml bdev not found!, {org_dev.get_id()}")
+                                continue
 
-                        if not org_dev.alceml_bdev:
-                            logger.error(f"device alceml bdev not found!, {org_dev.get_id()}")
-                            continue
-
-                        try:
-                            storage_node_ops.connect_device(
-                                    f"remote_{org_dev.alceml_bdev}", org_dev, snode,
-                                    bdev_names=list(node_bdev_names), reattach=False,
-                            )
-                            connected_devices.append(org_dev.get_id())
-                            sn = db.get_storage_node_by_id(snode.get_id())
-                            for d in sn.remote_devices:
-                                if d.get_id() == remote_device.get_id():
-                                    d.status = NVMeDevice.STATUS_ONLINE
-                                    sn.write_to_db()
-                                    break
-                            distr_controller.send_dev_status_event(org_dev, NVMeDevice.STATUS_ONLINE, snode)
-                        except RuntimeError:
-                            logger.error(f"Failed to connect to device: {org_dev.get_id()}")
-                            node_remote_devices_check = False
+                            try:
+                                storage_node_ops.connect_device(
+                                        f"remote_{org_dev.alceml_bdev}", org_dev, snode,
+                                        bdev_names=list(node_bdev_names), reattach=False,
+                                )
+                                connected_devices.append(org_dev.get_id())
+                                node_remote_devices = db.get_node_remote_devices(snode.get_id())
+                                if node_remote_devices:
+                                    for d in node_remote_devices.remote_devices:
+                                        if d.get_id() == remote_device.get_id():
+                                            d.status = NVMeDevice.STATUS_ONLINE
+                                            node_remote_devices.write_to_db()
+                                            break
+                                distr_controller.send_dev_status_event(org_dev, NVMeDevice.STATUS_ONLINE, snode)
+                            except RuntimeError:
+                                logger.error(f"Failed to connect to device: {org_dev.get_id()}")
+                                node_remote_devices_check = False
 
                 connected_jms = []
                 if snode.jm_device and snode.jm_device.get_id():
@@ -186,14 +188,16 @@ while True:
                         logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
 
                 if snode.enable_ha_jm:
-                    logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
-                    for remote_device in snode.remote_jm_devices:
-                        if remote_device.remote_bdev:
-                            check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
-                            if check:
-                                connected_jms.append(remote_device.get_id())
-                            else:
-                                node_remote_devices_check = False
+                    remote_devs = db.get_node_remote_devices(snode.get_id())
+                    if remote_devs:
+                        logger.info(f"Node remote JMs: {len(remote_devs.remote_jm_devices)}")
+                        for remote_device in remote_devs.remote_jm_devices:
+                            if remote_device.remote_bdev:
+                                check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
+                                if check:
+                                    connected_jms.append(remote_device.get_id())
+                                else:
+                                    node_remote_devices_check = False
 
                     for jm_id in snode.jm_ids:
                         if jm_id and jm_id not in connected_jms:
@@ -205,9 +209,11 @@ while True:
 
                     if not node_remote_devices_check and cluster.status in [
                         Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-                        snode = db.get_storage_node_by_id(snode.get_id())
-                        snode.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(snode)
-                        snode.write_to_db()
+                        remote_devs = db.get_node_remote_devices(snode.get_id())
+                        if not remote_devs:
+                            remote_devs = StorageNodeRemoteDevices({"uuid": snode.uuid})
+                        remote_devs.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(snode)
+                        remote_devs.write_to_db()
 
                 lvstore_check = True
                 snode = db.get_storage_node_by_id(snode.get_id())
