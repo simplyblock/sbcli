@@ -540,7 +540,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
             6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(small_pool_count), int(large_pool_count)
+    return int(2*small_pool_count), int(1.5*large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -551,11 +551,9 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
 
 
 def calculate_minimum_sys_memory(max_prov):
-    minimum_sys_memory = (2000 * 1024) * convert_size(max_prov, 'GB') + 500 * 1024 * 1024
-
+    minimum_sys_memory = 4000000000
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
-
 
 def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory, huge_total_memory):
     total_free_memory = free_sys_memory + huge_total_memory
