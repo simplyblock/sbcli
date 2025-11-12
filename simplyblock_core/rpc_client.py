@@ -225,7 +225,7 @@ class RPCClient:
             "abort_timeout_sec": 5,
             "zcopy": True,
             "in_capsule_data_size": 8192,
-            "max_io_size": 32768,
+            "max_io_size": 131072,
             "io_unit_size": 8192,
             "max_aq_depth": 128,
             "num_shared_buffers": shared_bufs,
