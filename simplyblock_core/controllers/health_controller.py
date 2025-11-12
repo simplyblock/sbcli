@@ -373,6 +373,13 @@ def _check_node_lvstore(
         else:
             node_bdev_names = []
 
+    nodes = {}
+    devices = {}
+    for n in db_controller.get_storage_nodes():
+        nodes[n.get_id()] = n
+        for dev in n.nvme_devices:
+            devices[dev.get_id()] = dev
+
     for distr in distribs_list:
         if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
@@ -391,7 +398,7 @@ def _check_node_lvstore(
                 logger.error("Failed to get cluster map")
                 lvstore_check = False
             else:
-                results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+                results, is_passed = distr_controller.parse_distr_cluster_map(ret, nodes, devices)
                 if results:
                     logger.info(utils.print_table(results))
                     logger.info(f"Checking Distr map ... {is_passed}")
@@ -436,7 +443,7 @@ def _check_node_lvstore(
                             logger.error("Failed to get cluster map")
                             lvstore_check = False
                         else:
-                            results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+                            results, is_passed = distr_controller.parse_distr_cluster_map(ret, nodes, devices)
                             logger.info(f"Checking Distr map ... {is_passed}")
 
                 else:
