@@ -268,6 +268,7 @@ class SPDKParams(BaseModel):
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
+    cluster_id: str
 
 
 @api.post('/spdk_process_start', responses={
@@ -286,9 +287,10 @@ def spdk_process_start(body: SPDKParams):
 
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MB') if body.total_mem else ""
 
-    if _is_pod_up(body.rpc_port) or _is_pod_present(body.rpc_port):
+    first_six_cluster_id = core_utils.first_six_chars(body.cluster_id)
+    if _is_pod_up(body.rpc_port, first_six_cluster_id) or _is_pod_present(body.rpc_port, first_six_cluster_id):
         logger.info("SPDK pod found, removing...")
-        query = utils.RPCPortParams(rpc_port=body.rpc_port)
+        query = utils.RPCPortParams(rpc_port=body.rpc_port, cluster_id=body.cluster_id)
         spdk_process_kill(query)
 
     node_prepration_job_name = "snode-spdk-job-"
@@ -351,6 +353,7 @@ def spdk_process_start(body: SPDKParams):
             'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
             'GRAYLOG_SERVER_IP': body.cluster_ip,
             'MODE': body.cluster_mode,
+            'CLUSTER_ID': first_six_cluster_id,
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib
@@ -463,7 +466,8 @@ def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
-        pod_name = f"snode-spdk-pod-{query.rpc_port}"
+        first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
+        pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
         resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
         retries = 10
         while retries > 0:
@@ -486,9 +490,9 @@ def spdk_process_kill(query: utils.RPCPortParams):
     return utils.get_response(True)
 
 
-def _is_pod_up(rpc_port):
+def _is_pod_up(rpc_port, cluster_id):
     k8s_core_v1 = core_utils.get_k8s_core_client()
-    pod_name = f"snode-spdk-pod-{rpc_port}"
+    pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -502,9 +506,9 @@ def _is_pod_up(rpc_port):
         return False
     return False
 
-def _is_pod_present(rpc_port):
+def _is_pod_present(rpc_port, cluster_id):
     k8s_core_v1 = core_utils.get_k8s_core_client()
-    pod_name = f"snode-spdk-pod-{rpc_port}"
+    pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -525,7 +529,8 @@ def _is_pod_present(rpc_port):
     })}}},
 })
 def spdk_process_is_up(query: utils.RPCPortParams):
-    if _is_pod_up(query.rpc_port):
+    first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
+    if _is_pod_up(query.rpc_port, first_six_cluster_id):
         return utils.get_response(True)
     else:
         return utils.get_response(False, "SPDK container is not running")
