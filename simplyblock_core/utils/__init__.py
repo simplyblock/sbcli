@@ -725,7 +725,13 @@ def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> in
     raw = size / (base ** exponent)
     return math.ceil(raw) if round_up else int(raw)
 
-
+def first_six_chars(s: str) -> str:
+    """
+    Returns the first six characters of a given string.
+    If the string is shorter than six characters, returns the entire string.
+    """
+    return s[:6]
+    
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:
