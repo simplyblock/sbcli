@@ -3,7 +3,6 @@ import threading
 import time
 from datetime import datetime, timezone
 
-
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
 from simplyblock_core.models.cluster import Cluster
@@ -13,7 +12,6 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
-
 
 # get DB controller
 db = db_controller.DBController()
@@ -77,7 +75,7 @@ def get_next_cluster_status(cluster_id):
             ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
             if ret:
                 for jm in ret:
-                    if ret[jm] is False: # jm is not ready (has active replication task)
+                    if ret[jm] is False:  # jm is not ready (has active replication task)
                         jm_replication_tasks = True
                         logger.warning("Replication task found!")
                         break
@@ -114,11 +112,12 @@ def get_next_cluster_status(cluster_id):
     k = cluster.distr_npcs
 
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
-    if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n+k)):
+    if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):
         return Cluster.STATUS_DEGRADED
     elif jm_replication_tasks:
         return Cluster.STATUS_DEGRADED
-    elif (affected_nodes > k or online_devices < (n + k) or (online_nodes < (n+k) and cluster.strict_node_anti_affinity)):
+    elif (affected_nodes > k or online_devices < (n + k) or (
+            online_nodes < (n + k) and cluster.strict_node_anti_affinity)):
         return Cluster.STATUS_SUSPENDED
     else:
         return Cluster.STATUS_ACTIVE
@@ -136,7 +135,7 @@ def update_cluster_status(cluster_id):
                 first_iter_task_pending += 1
 
     cluster = db.get_cluster_by_id(cluster_id)
-    cluster.is_re_balancing = first_iter_task_pending  > 0
+    cluster.is_re_balancing = first_iter_task_pending > 0
     cluster.write_to_db()
 
     current_cluster_status = cluster.status
@@ -145,7 +144,7 @@ def update_cluster_status(cluster_id):
         return
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
-    # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
+        # if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_UNREADY] and cluster_current_status == Cluster.STATUS_ACTIVE:
         # cluster_ops.cluster_activate(cluster_id, True)
         cluster_ops.set_cluster_status(cluster_id, Cluster.STATUS_ACTIVE)
         return
@@ -186,7 +185,6 @@ def update_cluster_status(cluster_id):
         cluster_ops.set_cluster_status(cluster_id, next_current_status)
 
 
-
 def set_node_online(node):
     if node.status != StorageNode.STATUS_ONLINE:
 
@@ -215,48 +213,54 @@ def set_node_online(node):
 
 
 def set_node_offline(node):
-    if node.status<>StorageNode.STATUS_OFFLINE:
-      try: 
-         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE)
-         for dev in node.nvme_devices:
-           if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-              device_controller.device_set_unavailable(dev.get_id())
-         update_cluster_status(cluster_id)
-         #initiate restart 
-         tasks_controller.add_node_to_auto_restart(snode)
-      except Exception as e:
+    if node.status != StorageNode.STATUS_OFFLINE:
+        try:
+            storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE)
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    device_controller.device_set_unavailable(dev.get_id())
+            update_cluster_status(cluster_id)
+            # initiate restart
+            tasks_controller.add_node_to_auto_restart(node)
+        except Exception as e:
             logger.debug("Setting node to OFFLINE state failed")
             logger.error(e)
-    
+
+
 def set_node_unreachable(node):
-    if node.status<>StorageNode.STATUS_UNREACHABLE:
-       try:
-          storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
-          update_cluster_status(cluster_id)
-       except Exception as e:
+    if node.status != StorageNode.STATUS_UNREACHABLE:
+        try:
+            storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
+            update_cluster_status(cluster_id)
+        except Exception as e:
             logger.debug("Setting node to UNREACHABLE state failed")
             logger.error(e)
 
+
 def set_node_schedulable(node):
-    if node.status<>StorageNode.STATUS_SCHEDULABLE:
-      try: 
-        storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_SCHEDULABLE)
-        #initiate shutdown
-        #initiate restart
-        tasks_controller.add_node_to_auto_restart(snode)  
-        update_cluster_status(cluster_id)  
-        for dev in node.nvme_devices:
-          if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-              device_controller.device_set_unavailable(dev.get_id())
-        update_cluster_status(cluster_id)
-      except Exception as e:
-        logger.debug("Setting node to SCHEDULABLE state failed")
-        logger.error(e)
+    if node.status != StorageNode.STATUS_SCHEDULABLE:
+        try:
+            storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_SCHEDULABLE)
+            # initiate shutdown
+            # initiate restart
+            tasks_controller.add_node_to_auto_restart(node)
+            update_cluster_status(cluster_id)
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    device_controller.device_set_unavailable(dev.get_id())
+            update_cluster_status(cluster_id)
+        except Exception as e:
+            logger.debug("Setting node to SCHEDULABLE state failed")
+            logger.error(e)
+
 
 def set_node_down(node):
     if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
         update_cluster_status(cluster_id)
+
 
 def node_rpc_timeout_check_and_report(node):
     start_time = time.time()
@@ -269,11 +273,13 @@ def node_rpc_timeout_check_and_report(node):
     except Exception as e:
         logger.debug(e)
     # RPC timeout detected, send to cluster log
-    storage_events.snode_rpc_timeout(node, time.time()-start_time)
+    storage_events.snode_rpc_timeout(node, time.time() - start_time)
     return False
 
-def node_port_check(snode):
-   if snode.lvstore_status == "ready":
+
+def node_port_check_fun(snode):
+    node_port_check = True
+    if snode.lvstore_status == "ready":
         ports = [snode.nvmf_port]
         if snode.lvstore_stack_secondary_1:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
@@ -302,12 +308,11 @@ def node_port_check(snode):
                 node_data_nic_ping_check |= data_ping_check
 
         node_port_check &= node_data_nic_ping_check
-     
-   return node_port_check
 
-        
+    return node_port_check
+
+
 def check_node(snode):
-
     snode = db.get_storage_node_by_id(snode.get_id())
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
@@ -346,26 +351,26 @@ def check_node(snode):
 
     node_rpc_check = health_controller._check_node_rpc(
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=60, retry=2)
-    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}") 
+    logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     if not node_rpc_check and snode.get_id() not in node_rpc_timeout_threads:
         t = threading.Thread(target=node_rpc_timeout_check_and_report, args=(snode,))
         t.start()
         node_rpc_timeout_threads[snode.get_id()] = t
-   
+
     if not node_rpc_check:
         logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:FAILED")
         set_node_schedulable(snode)
         return False
 
-    node_port_check = node_port_check(snode)
-    
+    node_port_check = node_port_check_fun(snode)
+
     if not node_port_check:
-       cluster=db.get_cluster_by_id(snode.cluster_id) 
-       if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-          logger.error("Port check failed")
-          set_node_down(snode)
-          return True
+        cluster = db.get_cluster_by_id(snode.cluster_id)
+        if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+            logger.error("Port check failed")
+            set_node_down(snode)
+            return True
 
     set_node_online(snode)
 
