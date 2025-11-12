@@ -27,7 +27,7 @@ while True:
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
 
-                if task.function_name == JobSchedule.FN_PORT_ALLOW:
+                if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL:
                     if task.status != JobSchedule.STATUS_DONE:
 
                         # get new task object because it could be changed from cancel task
@@ -74,4 +74,4 @@ while True:
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db.kv_store)
 
-    time.sleep(5)
+    time.sleep(3)
