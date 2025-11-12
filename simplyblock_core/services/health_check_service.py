@@ -1,4 +1,6 @@
 # coding=utf-8
+import logging
+import sys
 import threading
 import time
 from datetime import datetime
@@ -10,8 +12,6 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, db_controller, distr_controller, storage_node_ops
-
-logger = utils.get_logger(__name__)
 
 
 utils.init_sentry_sdk()
@@ -44,6 +44,12 @@ def set_device_health_check(cluster_id, device, health_check_status):
 
 
 def check_node(snode):
+    logger = logging.getLogger()
+    logger.setLevel("INFO")
+    logger_handler = logging.StreamHandler(stream=sys.stdout)
+    logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
+    logger.addHandler(logger_handler)
+
     logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
