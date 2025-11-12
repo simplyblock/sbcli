@@ -7,4 +7,12 @@ provisioner: openebs.io/local
 allowVolumeExpansion: true
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
-  
+{{- if .Values.storageclass.allowedTopologyZones }}
+allowedTopologies:
+- matchLabelExpressions:
+  - key: topology.kubernetes.io/zone
+    values:
+{{- range .Values.storageclass.allowedTopologyZones }}
+    - {{ . }}
+{{- end }}
+{{- end }}
