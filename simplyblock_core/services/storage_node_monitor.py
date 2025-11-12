@@ -245,7 +245,6 @@ def set_node_schedulable(node):
             # initiate shutdown
             # initiate restart
             tasks_controller.add_node_to_auto_restart(node)
-            update_cluster_status(cluster_id)
             for dev in node.nvme_devices:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
@@ -400,4 +399,5 @@ while True:
                 t.start()
                 threads_maps[node_id] = t
 
-    time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+        time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+        update_cluster_status(cluster_id)
