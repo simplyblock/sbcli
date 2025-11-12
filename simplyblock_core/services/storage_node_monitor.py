@@ -390,6 +390,7 @@ def check_node(snode):
 
 def loop_for_node(snode):
     global logger
+    logger = logging.getLogger()
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
     logger.addHandler(logger_handler)

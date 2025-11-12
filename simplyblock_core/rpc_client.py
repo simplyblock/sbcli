@@ -379,11 +379,11 @@ class RPCClient:
             "clear_method": "unmap",
             "lvol_priority_class": lvol_priority_class,
         }
-        if ndcs or npcs:
-            params.update({
-                'ndcs' : ndcs,
-                'npcs' : npcs,
-            })
+        # if ndcs or npcs:
+        #     params.update({
+        #         'ndcs' : ndcs,
+        #         'npcs' : npcs,
+        #     })
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name, del_async=False):
