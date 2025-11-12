@@ -514,15 +514,15 @@ def generate_mask(cores):
 def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_count):
     '''
     				        Small pool count				            Large pool count
-    Create JM			    256						                    32					                    For each JM
+    Create JM			    						                    32					                    For each JM
 
-    RAID                    256                                         32                                      2 one for raid of JM and one for raid of ditribs
+    RAID                                                             32                                      2 one for raid of JM and one for raid of ditribs
 
-    Create Alceml 			256						                    32					                    For each Alceml
+    Create Alceml 									                    32					                    For each Alceml
 
-    Create Distrib 			256						                    32					                    For each distrib
+    Create Distrib 									                    32					                    For each distrib
 
-    First Send cluster map	256						                    32					                    Calculated or one time
+    First Send cluster map							                    32					                    Calculated or one time
 
     NVMF transport TCP 		127 * poll_groups_mask||CPUCount + 384		15 * poll_groups_mask||CPUCount + 384 	Calculated or one time
 
@@ -530,30 +530,23 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
 
     ####Create snapshot			512						                    64					                    For each snapshot
 
-    ####Clone lvol			    256						                    32					                    For each clone
+    ####Clone lvol			    						                    32					                    For each clone
 
     '''
     poller_number = poller_count if poller_count else cpu_count
 
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (
-            6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+            6 + alceml_count + number_of_distribs) *  + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
             6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(4.0 * small_pool_count), int(2.5 * large_pool_count)
+    return int(small_pool_count), int(large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
-    '''
-    1092 (initial consumption) + 4 * CPU + 1.0277 * POOL_COUNT(Sum in MB) + (25) * lvol_count
-    then you can amend the expected memory need for the creation of lvols (6MB),
-    connection number over lvols (7MB per connection), creation of snaps (12MB),
-    extra buffer 2GB
-    return: minimum_hp_memory in bytes
-    '''
+   
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (
-            250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
+    memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(1.2 * memory_consumption)
 
 
