@@ -7,7 +7,7 @@ from simplyblock_core import utils
 from simplyblock_core.models.base_model import BaseNodeObject
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.rpc_client import RPCClient, RPCException
 
 logger = utils.get_logger(__name__)
@@ -79,8 +79,8 @@ class StorageNode(BaseNodeObject):
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
-    remote_devices: List[NVMeDevice] = []
-    remote_jm_devices: List[JMDevice] = []
+    remote_devices: List[RemoteDevice] = []
+    remote_jm_devices: List[RemoteJMDevice] = []
     rpc_password: str = ""
     rpc_port: int = -1
     rpc_username: str = ""
