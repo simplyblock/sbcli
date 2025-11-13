@@ -81,7 +81,7 @@ class SNodeClient:
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
-                           total_mem=None, system_mem=None, cluster_mode=None):
+                           total_mem=None, system_mem=None, cluster_mode=None, socket=0):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -113,6 +113,7 @@ class SNodeClient:
             params["system_mem"] = system_mem
         if cluster_mode:
             params["cluster_mode"] = cluster_mode
+        params["socket"] = socket
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
