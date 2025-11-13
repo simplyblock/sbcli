@@ -105,6 +105,7 @@ class StorageNode(BaseNodeObject):
     hublvol: HubLVol = None  # type: ignore[assignment]
     active_tcp: bool = True
     active_rdma: bool = False
+    socket: int = 0
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
