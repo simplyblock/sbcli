@@ -337,7 +337,7 @@ def check_node(snode):
 
     # 2- check node API
     try:
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=90, retry=2)
+        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=10, retry=2)
         ret, _ = snode_api.is_live()
         logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {ret}")
         if not ret:
@@ -346,11 +346,12 @@ def check_node(snode):
             return False
     except Exception as e:
         logger.debug(e)
+        set_node_unreachable(snode)
         return False
 
     # 3- check spdk process through node API
     try:
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=90, retry=2)
+        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=20, retry=2)
         is_up, _ = snode_api.spdk_process_is_up( snode.rpc_port)
         logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {bool(is_up)}")
         if not is_up:
@@ -359,11 +360,12 @@ def check_node(snode):
             return False
     except Exception as e:
         logger.debug(e)
+        set_node_unreachable(snode)
         return False
 
     # 4- check node rpc interface
     node_rpc_check = health_controller._check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=60, retry=2)
+        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=20, retry=2)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     if not node_rpc_check and snode.get_id() not in node_rpc_timeout_threads:
