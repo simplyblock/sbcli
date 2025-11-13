@@ -545,7 +545,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
    
-    pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
+    pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
     memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(1.2 * memory_consumption)
 

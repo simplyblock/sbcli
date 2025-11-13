@@ -1,6 +1,6 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
-SIMPLY_BLOCK_VERSION=19.2.23
+SIMPLY_BLOCK_VERSION=19.2.24
 
-SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:R25.10-Hotfix-multi-fix
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:R25.10-Hotfix-da011883
+SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:R25.10-Hotfix
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:R25.10-Hotfix-latest
 

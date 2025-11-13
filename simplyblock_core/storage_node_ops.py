@@ -1002,6 +1002,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         results = None
         l_cores = node_config.get("l-cores")
         spdk_cpu_mask = node_config.get("cpu_mask")
+        socket = node_config.get("socket")
         for ssd in ssd_pcie:
             snode_api.bind_device_to_spdk(ssd)
         try:
@@ -1010,7 +1011,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
                 namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
-                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode)
+                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode, socket=0)
             time.sleep(5)
 
         except Exception as e:
@@ -1125,6 +1126,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         snode.jc_singleton_mask = jc_singleton_mask or ""
         snode.nvmf_port = utils.get_next_dev_port(cluster_id)
         snode.poller_cpu_cores = poller_cpu_cores or []
+
+        snode.socket = socket
 
         snode.iobuf_small_pool_count = small_pool_count or 0
         snode.iobuf_large_pool_count = large_pool_count or 0
@@ -1686,7 +1689,7 @@ def restart_storage_node(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode)
+            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode, socket=snode.socket)
 
     except Exception as e:
         logger.error(e)
