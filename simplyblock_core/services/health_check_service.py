@@ -45,6 +45,7 @@ def set_device_health_check(cluster_id, device, health_check_status):
 
 def check_node(snode, logger):
 
+    snode = db.get_storage_node_by_id(snode.get_id())
     logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
