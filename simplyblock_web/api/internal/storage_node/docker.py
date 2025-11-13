@@ -154,7 +154,8 @@ def spdk_process_start(body: SPDKParams):
     ssd_pcie_list = " ".join(body.ssd_pcie) if body.ssd_pcie else "none"
     spdk_debug = '1' if body.spdk_debug else ''
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MiB') if body.total_mem else ''
-    spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
+    # spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
+    spdk_mem_mib = 0
 
     node_docker = get_docker_client(timeout=60 * 3)
     for name in {f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"}:
