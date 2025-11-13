@@ -43,12 +43,7 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     return
 
 
-def check_node(snode):
-    logger = logging.getLogger()
-    logger.setLevel("INFO")
-    logger_handler = logging.StreamHandler(stream=sys.stdout)
-    logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
-    logger.addHandler(logger_handler)
+def check_node(snode, logger):
 
     logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
@@ -259,9 +254,14 @@ def check_node(snode):
 
 
 def loop_for_node(snode):
-    check_node(snode)
-    # logger.info(f"Sleeping for {constants.HEALTH_CHECK_INTERVAL_SEC} seconds")
-    time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
+    logger = logging.getLogger()
+    logger.setLevel("INFO")
+    logger_handler = logging.StreamHandler(stream=sys.stdout)
+    logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
+    logger.addHandler(logger_handler)
+    while True:
+        check_node(snode, logger)
+        time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
 
 
 # logger.info("Starting health check service")

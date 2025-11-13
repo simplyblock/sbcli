@@ -394,10 +394,10 @@ def loop_for_node(snode):
     # logger_handler = logging.StreamHandler(stream=sys.stdout)
     # logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
     # logger.addHandler(logger_handler)
-
-    check_node(snode)
-    logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
-    time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+    while True:
+        check_node(snode)
+        logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
+        time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
 
 logger.info("Starting node monitor")
