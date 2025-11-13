@@ -1,7 +1,7 @@
 # coding=utf-8
 import logging
 import sys
-import threading
+import multiprocessing
 import time
 from datetime import datetime
 
@@ -266,14 +266,14 @@ def loop_for_node(snode):
 
 # logger.info("Starting health check service")
 db = db_controller.DBController()
-threads_maps: dict[str, threading.Thread] = {}
+threads_maps: dict[str, multiprocessing.Process] = {}
 while True:
     clusters = db.get_clusters()
     for cluster in clusters:
         for node in  db.get_storage_nodes_by_cluster_id(cluster.get_id()):
             node_id = node.get_id()
             if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                t = threading.Thread(target=loop_for_node, args=(node,))
+                t = multiprocessing.Process(target=loop_for_node, args=(node, ))
                 t.start()
                 threads_maps[node_id] = t
 
