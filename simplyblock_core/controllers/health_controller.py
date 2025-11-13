@@ -9,7 +9,7 @@ from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
@@ -117,7 +117,7 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, ret
 
 def _check_node_api(ip):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=10, retry=2)
+        snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
         logger.debug(f"Node API={ip}:5000")
         ret, _ = snode_api.is_live()
         logger.debug(f"snode is alive: {ret}")
@@ -130,7 +130,7 @@ def _check_node_api(ip):
 
 def _check_spdk_process_up(ip, rpc_port, cluster_id):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=10, retry=2)
+        snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
         logger.debug(f"Node API={ip}:5000")
         is_up, _ = snode_api.spdk_process_is_up(rpc_port, cluster_id)
         logger.debug(f"SPDK is {is_up}")
@@ -373,6 +373,13 @@ def _check_node_lvstore(
         else:
             node_bdev_names = []
 
+    nodes = {}
+    devices = {}
+    for n in db_controller.get_storage_nodes():
+        nodes[n.get_id()] = n
+        for dev in n.nvme_devices:
+            devices[dev.get_id()] = dev
+
     for distr in distribs_list:
         if distr in node_bdev_names:
             logger.info(f"Checking distr bdev : {distr} ... ok")
@@ -391,7 +398,7 @@ def _check_node_lvstore(
                 logger.error("Failed to get cluster map")
                 lvstore_check = False
             else:
-                results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+                results, is_passed = distr_controller.parse_distr_cluster_map(ret, nodes, devices)
                 if results:
                     logger.info(utils.print_table(results))
                     logger.info(f"Checking Distr map ... {is_passed}")
@@ -413,8 +420,16 @@ def _check_node_lvstore(
                                                         if dev.get_id() == rem_dev.get_id():
                                                             continue
                                                         new_remote_devices.append(rem_dev)
-                                                    dev.remote_bdev = remote_bdev
-                                                    new_remote_devices.append(dev)
+
+                                                    remote_device = RemoteDevice()
+                                                    remote_device.uuid = dev.uuid
+                                                    remote_device.alceml_name = dev.alceml_name
+                                                    remote_device.node_id = dev.node_id
+                                                    remote_device.size = dev.size
+                                                    remote_device.status = NVMeDevice.STATUS_ONLINE
+                                                    remote_device.nvmf_multipath = dev.nvmf_multipath
+                                                    remote_device.remote_bdev = remote_bdev
+                                                    new_remote_devices.append(remote_device)
                                                     n.remote_devices = new_remote_devices
                                                     n.write_to_db()
                                                     distr_controller.send_dev_status_event(dev, dev.status, node)
@@ -428,7 +443,7 @@ def _check_node_lvstore(
                             logger.error("Failed to get cluster map")
                             lvstore_check = False
                         else:
-                            results, is_passed = distr_controller.parse_distr_cluster_map(ret)
+                            results, is_passed = distr_controller.parse_distr_cluster_map(ret, nodes, devices)
                             logger.info(f"Checking Distr map ... {is_passed}")
 
                 else:

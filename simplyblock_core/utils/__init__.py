@@ -536,7 +536,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
             6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(4.0 * small_pool_count), int(2.5 * large_pool_count)
+    return int(small_pool_count), int(large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -727,7 +727,7 @@ def first_six_chars(s: str) -> str:
     If the string is shorter than six characters, returns the entire string.
     """
     return s[:6]
-    
+
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:
@@ -1981,7 +1981,7 @@ def patch_cr_node_status(
 ):
     """
     Patch status.nodes[*] fields for a specific node identified by UUID.
-    
+
     Operations:
       - Update a node (by uuid or mgmtIp)
       - Remove a node (by uuid or mgmtIp)
@@ -2066,7 +2066,7 @@ def patch_cr_node_status(
                 }
             },
         )
-        
+
     except ApiException as e:
         raise RuntimeError(
             f"Failed to patch node for {name}: {e.reason} {e.body}"
@@ -2377,7 +2377,7 @@ def create_k8s_service(namespace: str, deployment_name: str,
     container = V1Container(
         name=container_name,
         image=container_image,
-        command=["python", service_file], 
+        command=["python", service_file],
         env=env_list,
         volume_mounts=volume_mounts,
         resources=V1ResourceRequirements(
