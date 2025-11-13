@@ -139,7 +139,7 @@ def check_node(snode, logger):
         for remote_device in snode.remote_devices:
             org_dev = db.get_storage_device_by_id(remote_device.get_id())
             org_node = db.get_storage_node_by_id(remote_device.node_id)
-            if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
+            if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                 if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
                     connected_devices.append(remote_device.get_id())
                     continue
