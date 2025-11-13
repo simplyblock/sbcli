@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
-from simplyblock_core.controllers import tcp_ports_events, health_controller
+from simplyblock_core.controllers import tcp_ports_events, health_controller, tasks_controller
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
@@ -203,19 +203,13 @@ while True:
                             task.status = JobSchedule.STATUS_RUNNING
                             task.write_to_db(db.kv_store)
 
-                        not_deleted = []
-                        for bdev_name in snode.lvol_sync_del_queue:
-                            logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
-                            ret, err = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
-                            if not ret:
-                                if "code" in err and err["code"] == -19:
-                                    logger.error(f"Sync delete completed with error: {err}")
-                                else:
-                                    logger.error(
-                                        f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
-                                    not_deleted.append(bdev_name)
-                        snode.lvol_sync_del_queue = not_deleted
-                        snode.write_to_db()
+                        # wait for lvol sync delete
+                        lvol_sync_del_found = tasks_controller.get_lvol_sync_del_task(task.cluster_id, task.node_id)
+                        while lvol_sync_del_found:
+                            logger.info("Lvol sync delete task found, waiting")
+                            can_continue = False
+                            time.sleep(3)
+                            lvol_sync_del_found = tasks_controller.get_lvol_sync_del_task(task.cluster_id, task.node_id)
 
                         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                             sec_rpc_client = sec_node.rpc_client()
