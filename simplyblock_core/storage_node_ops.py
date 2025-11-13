@@ -1259,10 +1259,10 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
 
         # set qos values if enabled
         if cluster.is_qos_set():
-            logger.info("Setting Alcemls QOS weights")
-            ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
+            logger.info("Setting Disribs QOS weights")
+            ret = rpc_client.distrib_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
             if not ret:
-              logger.error("Failed to set Alcemls QOS")
+              logger.error("Failed to set Disribs QOS")
               return False
 
         logger.info("Connecting to remote devices")
@@ -1869,10 +1869,10 @@ def restart_storage_node(
 
     # set qos values if enabled
     if cluster.is_qos_set():
-        logger.info("Setting Alcemls QOS weights")
-        ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
+        logger.info("Setting Disribs QOS weights")
+        ret = rpc_client.distrib_set_qos_weights(qos_controller.get_qos_weights_list(snode.cluster_id))
         if not ret:
-            logger.error("Failed to set Alcemls QOS")
+            logger.error("Failed to set Disribs QOS")
             return False
 
     logger.info("Connecting to remote devices")

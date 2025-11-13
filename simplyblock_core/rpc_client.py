@@ -379,11 +379,11 @@ class RPCClient:
             "clear_method": "unmap",
             "lvol_priority_class": lvol_priority_class,
         }
-        # if ndcs or npcs:
-        #     params.update({
-        #         'ndcs' : ndcs,
-        #         'npcs' : npcs,
-        #     })
+        if ndcs or npcs:
+            params.update({
+                'ndcs' : ndcs,
+                'npcs' : npcs,
+            })
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name, del_async=False):
@@ -1189,7 +1189,7 @@ class RPCClient:
         }
         return self._request("bdev_lvol_remove_from_group", params)
 
-    def alceml_set_qos_weights(self, qos_weights):
+    def distrib_set_qos_weights(self, qos_weights):
         params = {
             "qos_weights": qos_weights,
         }

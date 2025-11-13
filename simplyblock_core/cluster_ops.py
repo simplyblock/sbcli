@@ -637,11 +637,11 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
 
     if cluster.is_qos_set():
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-            if node.status == StorageNode.STATUS_ONLINE:
-                logger.info(f"Setting Alcemls QOS weights on node {node.get_id()}")
-                ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
+            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                logger.info(f"Setting Disribs QOS weights on node {node.get_id()}")
+                ret = node.rpc_client().distrib_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
                 if not ret:
-                    logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
+                    logger.error(f"Failed to set Disribs QOS on node: {node.get_id()}")
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
