@@ -1,6 +1,6 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
 SIMPLY_BLOCK_VERSION=19.2.25
 
-SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:main
+SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:main-lvol-sync-delete
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:main-latest
 

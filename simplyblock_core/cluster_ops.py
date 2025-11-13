@@ -1194,6 +1194,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 networks=["host"],
                 constraints=["node.role == manager"]
             )
+
+        if "app_TasksRunnerLVolSyncDelete" not in service_names:
+            logger.info("Creating lvol sync delete service")
+            cluster_docker.services.create(
+                image=service_image,
+                command="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                name="app_TasksRunnerLVolSyncDelete",
+                mounts=["/etc/foundationdb:/etc/foundationdb"],
+                env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
+                networks=["host"],
+                constraints=["node.role == manager"]
+            )
         logger.info("Done updating mgmt cluster")
 
     elif cluster.mode == "kubernetes":
