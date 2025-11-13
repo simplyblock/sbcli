@@ -24,9 +24,15 @@ image:
 
 ports:
   lvolNvmfPortStart:
-  
+
+storageclass:  
+  allowedTopologyZones: []
+
 openebs:
   enabled: true
+
+foundationdb:
+  multiAZ: false
 
 mongodb:
   name: "simplyblock-mongodb"

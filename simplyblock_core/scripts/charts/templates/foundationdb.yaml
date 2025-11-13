@@ -2,20 +2,20 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: controller-manager
+  name: simplyblock-fdb-controller-manager
   labels:
-    control-plane: controller-manager
-    app: controller-manager
+    control-plane: simplyblock-fdb-controller-manager
+    app: simplyblock-fdb-controller-manager
 spec:
   selector:
     matchLabels:
-      app: controller-manager
+      app: simplyblock-fdb-controller-manager
   replicas: 1
   template:
     metadata:
       labels:
-        control-plane: controller-manager
-        app: controller-manager
+        control-plane: simplyblock-fdb-controller-manager
+        app: simplyblock-fdb-controller-manager
     spec:
       securityContext:
         runAsUser: 4059
@@ -28,7 +28,7 @@ spec:
           emptyDir: {}
         - name: fdb-binaries
           emptyDir: {}
-      serviceAccountName: controller-manager
+      serviceAccountName: simplyblock-fdb-controller-manager
       initContainers:
         - name: foundationdb-kubernetes-init-7-3
           image: foundationdb/fdb-kubernetes-monitor:7.3.63
@@ -51,6 +51,8 @@ spec:
       containers:
         - command:
             - /manager
+          args:
+            - "--health-probe-bind-address=:9443"
           image: foundationdb/fdb-kubernetes-operator:v2.13.0
           name: manager
           env:
@@ -86,13 +88,13 @@ spec:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: controller-manager
+  name: simplyblock-fdb-controller-manager
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: manager-role
+  name: simplyblock-fdb-manager-role
 rules:
 - apiGroups:
   - ""
@@ -164,7 +166,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   creationTimestamp: null
-  name: manager-clusterrole
+  name: simplyblock-fdb-manager-clusterrole
 rules:
 - apiGroups:
   - ""
@@ -179,27 +181,27 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   creationTimestamp: null
-  name: manager-rolebinding
+  name: simplyblock-fdb-manager-rolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: manager-role
+  name: simplyblock-fdb-manager-role
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: simplyblock-fdb-controller-manager
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   creationTimestamp: null
-  name: manager-clusterrolebinding
+  name: simplyblock-fdb-manager-clusterrolebinding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: manager-clusterrole
+  name: simplyblock-fdb-manager-clusterrole
 subjects:
 - kind: ServiceAccount
-  name: controller-manager
+  name: simplyblock-fdb-controller-manager
   namespace: metadata.namespace
 
 ##### cluster file #################
@@ -213,7 +215,11 @@ spec:
     replacements:
       enabled: true
   faultDomain:
+  {{- if .Values.foundationdb.multiAZ }}
+    key: topology.kubernetes.io/zone
+  {{- else }}
     key: foundationdb.org/none
+  {{- end }}
   imageType: split
   labels:
     filterOnOwnerReference: false
@@ -225,10 +231,17 @@ spec:
     - foundationdb.org/fdb-process-group-id
   minimumUptimeSecondsForBounce: 60
   processCounts:
+  {{- if .Values.foundationdb.multiAZ }}
+    cluster_controller: 1
+    log: 4
+    storage: 4
+    stateless: -1
+  {{- else }}
     cluster_controller: 1
     log: 3
     storage: 3
     stateless: -1
+  {{- end }}
   processes:
     general:
       customParameters:
