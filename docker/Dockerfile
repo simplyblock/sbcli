@@ -9,6 +9,8 @@ LABEL summary="Simplyblock controlplane plane component"
 LABEL description="Simplyblock controlplane plane container"
 LABEL maintainer="engineering@simplyblock.io"
 
+COPY LICENSE /licenses/LICENSE
+
 WORKDIR /app
 
 COPY requirements.txt .
