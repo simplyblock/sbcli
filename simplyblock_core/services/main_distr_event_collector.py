@@ -19,6 +19,16 @@ db = db_controller.DBController()
 EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap",
                "error_write_cannot_allocate"]
 
+
+def remove_remote_device_from_node(node, device):
+    node = db.get_storage_node_by_id(node.get_id())
+    for remote_dev in node.remote_devices:
+        if remote_dev.get_id() == device.get_id():
+            node.remote_devices.remove(remote_dev)
+            node.write_to_db()
+            break
+
+
 def process_device_event(event):
     if event.message in EVENTS_LIST:
         node_id = event.node_id
@@ -48,6 +58,7 @@ def process_device_event(event):
             logger.info(f"The device is not online, skipping. status: {device_obj.status}")
             event.status = f'skipped:dev_{device_obj.status}'
             distr_controller.send_dev_status_event(device_obj, device_obj.status, event_node_obj)
+            remove_remote_device_from_node(event_node_obj.get_id(), device_obj.get_id())
             return
 
 
@@ -55,12 +66,14 @@ def process_device_event(event):
             distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
             logger.info(f"Node is not online, skipping. status: {event_node_obj.status}")
             event.status = 'skipped:node_offline'
+            remove_remote_device_from_node(event_node_obj.get_id(), device_obj.get_id())
             return
 
         if device_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
             distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
             logger.info(f"Node is not online, skipping. status: {device_node_obj.status}")
             event.status = f'skipped:device_node_{device_node_obj.status}'
+            remove_remote_device_from_node(event_node_obj.get_id(), device_obj.get_id())
             return
 
 
@@ -83,12 +96,7 @@ def process_device_event(event):
                 device_controller.device_set_io_error(device_obj.get_id(), True)
         else:
             distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
-            event_node_obj = db.get_storage_node_by_id(event_node_obj.get_id())
-            for remote_dev in event_node_obj.remote_devices:
-                if remote_dev.get_id() == device_obj.get_id():
-                    event_node_obj.remote_devices.remove(remote_dev)
-                    event_node_obj.write_to_db()
-                    break
+            remove_remote_device_from_node(event_node_obj.get_id(), device_obj.get_id())
 
         event.status = 'processed'
 
