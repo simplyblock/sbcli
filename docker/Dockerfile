@@ -7,7 +7,7 @@ LABEL version="1.0.0"
 LABEL release="1"
 LABEL summary="Simplyblock controlplane plane component"
 LABEL description="Simplyblock controlplane plane container"
-LABEL maintainer="engineering@simplyblock.io"
+LABEL maintainer="developers@simplyblock.io"
 
 COPY LICENSE /licenses/LICENSE
 
