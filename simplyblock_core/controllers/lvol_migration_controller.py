@@ -1,251 +1,122 @@
-# Ticket description for live lvol migration:
-# Live lvol migration moves lvols together with all related objects
-# (related snapshots, related clones) from one storage node to another
-# storage node in the same cluster. This happens online and very fast,
-# as no actual data is copied.
-#
-# It is NOT possible:
-# - to move snapshots or clones independently from the lvol
-# - to move namespace lvols belonging to the same subsystem independently
-#
-# We need to implement this feature in control plane in two steps:
-# a) move a specific lvol and its related objects based on the lvol name
-#    or uuid from one node to another node. The other node must be online
-#    and it must not be the secondary of the node the lvol is currently attached to.
-# b) create an automatism, which periodically controls the balance of
-#    performance and ram consumption across nodes and re-balances certain
-#    lvols if a node becomes over-loaded
-
 import asyncio
-from typing import Iterable
+from typing import Optional
 
 from ..models.lvol_migration import (
-    LvolMigration,
-    MigrationItem,
-    MigrationState,
-    StorageObject
+    MigrationObject, MigrationStream, Snapshot,
+    MigrationState, StreamState, ObjectMigrationState
 )
-from enum import Enum
 
+# ---------------------------------------------------------------------------
+# CONTROLLER
+# ---------------------------------------------------------------------------
 
-class ObjType(Enum):
-    SNAPSHOT = "snapshot"
-    CLONE = "clone"
-    LVOL = "lvol"
+class MigrationController:
 
+    def __init__(self, migration: MigrationObject):
+        self.migration = migration
+        if self.migration.completion_poll_queue is None:
+            self.migration.completion_poll_queue = asyncio.Queue()
 
-class MigrationQueue(LvolMigration):
-    def add_object(self, storage_obj: StorageObject, obj_type: ObjType):
-        item = MigrationItem(storage=storage_obj, state=MigrationState.NEW)
-        item.type = obj_type
-        self.migrations.append(item)
-        return item
+    # -----------------------------------------------------------------------
+    # START MIGRATION
+    # -----------------------------------------------------------------------
+    async def migrate_start(self):
+        """Entry point: prepare snapshots and streams, start migration."""
+        self.migration.status = MigrationState.PREPARING
 
-    def iter_snapshots(self):
-        return (m for m in self.migrations if m.type == ObjType.SNAPSHOT)
+        # 1. Check all nodes online (mocked)
+        if not self._nodes_online():
+            self.migration.status = MigrationState.SUSPENDED
+            return
 
-    def iter_clones(self):
-        return (m for m in self.migrations if m.type == ObjType.CLONE)
+        # 2. Build streams for all logical volumes
+        await self.migrate_prepare()
 
-    def iter_lvol(self):
-        return (m for m in self.migrations if m.type == ObjType.LVOL)
+        self.migration.status = MigrationState.RUNNING
+        await self.migration_iterate_streams()
 
+    async def migrate_prepare(self):
+        """Prepare each logical volume: build streams and snapshot references."""
+        for lv in self.migration.logical_volumes:
+            stream = MigrationStream(
+                lvol_name=lv.name,
+                lvol_state=ObjectMigrationState.NEW,
+                lvol_namespace=lv.namespace_uuid
+            )
+            # Link snapshots if any exist for this LV
+            for snapshot in self.migration.snapshots:
+                if snapshot.name.startswith(lv.name):  # simple match; customize
+                    stream.append_snapshot(snapshot)
+            self.migration.streams.append(stream)
 
-# -------------------------------------------------------------------------
-# Async-capable Controller
-# -------------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # ITERATE STREAMS
+    # -----------------------------------------------------------------------
+    async def migration_iterate_streams(self):
+        """Iterate over all streams sequentially."""
+        for stream in self.migration.streams:
+            if stream.status not in {StreamState.DONE, StreamState.FAILED}:
+                await self.migrate_stream_start(stream)
 
-class LvolMigrationController:
+        # If all streams done, mark migration done
+        if all(s.status == StreamState.DONE for s in self.migration.streams):
+            self.migration.status = MigrationState.DONE
 
-    # ---------------------------------------------------------------------
-    # Public entry point
-    # ---------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # STREAM OPERATIONS
+    # -----------------------------------------------------------------------
+    async def migrate_stream_start(self, stream: MigrationStream):
+        """Start migration for a stream."""
+        stream.status = StreamState.RUNNING
 
-    async def migrate_lvol(self, lvol) -> str:
-        mq = self.create_migration_queue(lvol)
+        # Iterate snapshots in the stream
+        current = stream.head_snapshot_ref
+        while current:
+            snapshot = current.snapshot
+            if snapshot.status == ObjectMigrationState.NEW:
+                await spdk_set_migration_flag(snapshot.name)
+                await spdk_transfer_snapshot(snapshot.name, stream.lvol_name)
+                snapshot.status = ObjectMigrationState.DONE
+                # Add to completion poll queue
+                await self.migration.completion_poll_queue.put(snapshot.name)
+            current = current.next
 
-        if self.all_nodes_online():
-            self.freeze_snapshots_clones(lvol)
+        # Once snapshots done, migrate the main LV
+        await self.migrate_stream_resume(stream)
 
-            result = await self.process_migration_queue(mq)
+    async def migrate_stream_resume(self, stream: MigrationStream):
+        """Handle LV migration after snapshots."""
+        if stream.lvol_state == ObjectMigrationState.NEW:
+            await spdk_final_lvol_migration(stream.lvol_name)
+            stream.lvol_state = ObjectMigrationState.DONE
+            stream.status = StreamState.DONE
 
-            if result != "DONE":
-                self.register_continue(mq)
-                return "SUSPENDED"
+        # Clean up intermediate resources
+        await self.migrate_stream_cleanup(stream)
 
-            self.unfreeze_snapshots_clones(lvol)
-            return "DONE"
+    async def migrate_stream_cleanup(self, stream: MigrationStream):
+        """Cleanup temporary namespaces, NQNs, etc."""
+        # Placeholder: remove temp subsystems or namespaces
+        await asyncio.sleep(0.01)
+        # No additional state changes needed for this skeleton
 
-        return "SUSPENDED"
-
-    # ---------------------------------------------------------------------
-
-    def create_migration_queue(self, lvol) -> MigrationQueue:
-        mq = MigrationQueue(
-            primary_source=lvol.primary,
-            secondary_source=lvol.secondary,
-            primary_target=lvol.target_primary,
-            secondary_target=lvol.target_secondary,
-        )
-
-        for s in lvol.get_snapshots():
-            mq.add_object(s, ObjType.SNAPSHOT)
-
-        for c in lvol.get_clones():
-            mq.add_object(c, ObjType.CLONE)
-
-        mq.add_object(lvol, ObjType.LVOL)
-        return mq
-
-    # ---------------------------------------------------------------------
-    # Core logic with asyncio
-    # ---------------------------------------------------------------------
-
-    async def process_migration_queue(self, mq: MigrationQueue) -> str:
-
-        if not await self._process_subset(mq, mq.iter_snapshots()):
-            return "CANCELED"
-
-        if not await self._process_subset(mq, mq.iter_clones()):
-            return "CANCELED"
-
-        if not await self._process_subset(mq, mq.iter_lvol()):
-            return "CANCELED"
-
-        return "DONE"
-
-    # ---------------------------------------------------------------------
-
-    async def _process_subset(self, mq: MigrationQueue, iterator: Iterable[MigrationItem]) -> bool:
-        tasks = []
-
-        for item in iterator:
-            if item.state in (MigrationState.NEW, MigrationState.IN_MIGRATION):
-                item.state = MigrationState.IN_MIGRATION
-                tasks.append(asyncio.create_task(self.migrate_object(item)))
-
-        if not tasks:
-            return True
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        if not self.all_nodes_online():
-            return False
-
-        # Check for errors
-        for r in results:
-            if isinstance(r, Exception):
-                return False
-            if getattr(r, "failed", False):
-                return False
-
-        # Mark items done
-        for item in iterator:
-            if item.state == MigrationState.IN_MIGRATION:
-                item.state = MigrationState.MIGRATED
-
-        return True
-
-    # ---------------------------------------------------------------------
-    # Cleanup
-    # ---------------------------------------------------------------------
-
-    async def cleanup_migration_queue(self, mq: MigrationQueue, lvol):
-        mq.status = "IN_DELETION"
-
-        tasks = []
-        for item in mq.migrations:
-            if item.state != MigrationState.NEW:
-                tasks.append(asyncio.create_task(
-                    self.async_delete(item.storage, mq.primary_target)
-                ))
-                tasks.append(asyncio.create_task(
-                    self.register_syn_delete(item.storage, mq.secondary_target)
-                ))
-
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        mq.status = "DELETED"
-        self.unfreeze_snapshots_clones(lvol)
-
-    # ---------------------------------------------------------------------
-    # Individual migration operations (async)
-    # ---------------------------------------------------------------------
-
-    async def migrate_object(self, item: MigrationItem):
-        src = item.storage.source_node
-        dst = item.storage.target_node
-
-        await self.create_target_namespace(dst, item.storage)
-        await self.connect_source_to_target(src, dst, item.storage)
-
-        if item.type == ObjType.SNAPSHOT:
-            return await self._migrate_snapshot(item)
-        elif item.type == ObjType.CLONE:
-            return await self._migrate_clone(item)
+    # -----------------------------------------------------------------------
+    # MIGRATION CLEANUP
+    # -----------------------------------------------------------------------
+    async def migrate_cleanup(self, failed: bool = False):
+        """Global migration cleanup."""
+        if failed:
+            self.migration.status = MigrationState.FAILED
+            # Mark streams failed if not done
+            for stream in self.migration.streams:
+                if stream.status != StreamState.DONE:
+                    stream.status = StreamState.FAILED
         else:
-            return await self._migrate_lvol(item)
+            self.migration.status = MigrationState.DONE
 
-    # ---------------------------------------------------------------------
-    # Snapshot migration with retries
-    # ---------------------------------------------------------------------
-
-    async def _migrate_snapshot(self, item):
-        for attempt in range(5):
-            result = await self.run_migration_rpc(item)
-            if result.success:
-                return result
-
-            if not self.all_nodes_online():
-                break
-
-            await asyncio.sleep(self.retry_delay(attempt))
-
-        return result
-
-    async def _migrate_clone(self, item):
-        return await self.run_migration_rpc(item)
-
-    async def _migrate_lvol(self, item):
-        return await self.run_migration_rpc(item)
-
-    # ---------------------------------------------------------------------
-    # Placeholder hooks (inject actual system implementation)
-    # ---------------------------------------------------------------------
-
-    async def create_target_namespace(self, dst, storage):
-        pass
-
-    async def connect_source_to_target(self, src, dst, storage):
-        pass
-
-    async def run_migration_rpc(self, item):
-        """
-        Must return an object with fields:
-            .success  -> bool
-            .failed   -> bool
-        or raise exception.
-        """
-        pass
-
-    async def async_delete(self, storage, target):
-        pass
-
-    async def register_syn_delete(self, storage, target):
-        pass
-
-    def freeze_snapshots_clones(self, lvol):
-        pass
-
-    def unfreeze_snapshots_clones(self, lvol):
-        pass
-
-    def all_nodes_online(self) -> bool:
-        pass
-
-    def register_continue(self, mq):
-        pass
-
-    def retry_delay(self, attempt: int) -> float:
-        return min(2 ** attempt, 60)   # exponential backoff
+    # -----------------------------------------------------------------------
+    # HELPER FUNCTIONS
+    # -----------------------------------------------------------------------
+    def _nodes_online(self) -> bool:
+        """Mock node health check."""
+        return True

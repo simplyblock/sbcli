@@ -1229,3 +1229,57 @@ class RPCClient:
 
     def nvmf_get_blocked_ports_rdma(self):
         return self._request("nvmf_get_blocked_ports")
+
+    def lvol_final_migration(
+            self,
+            lvol_name: str,
+            lvol_id: str,
+            snapshot_name: str,
+            batch: int,
+            nqn: str
+    ):
+        params = {
+            "lvol_name": lvol_name,
+            "lvol_id": lvol_id,
+            "snapshot_name": snapshot_name,
+            "b": batch,
+            "g": nqn
+        }
+        return self._request("bdev_lvol_final_migration", params)
+
+    def lvol_set_migration_flag(self, lvol_name: str):
+        params = {
+            "lvol_name": lvol_name
+        }
+        return self._request("bdev_lvol_set_migration_flag", params)
+
+    def lvol_convert(self, lvol_name: str):
+        params = {
+            "lvol_name": lvol_name
+        }
+        return self._request("bdev_lvol_convert", params)
+
+    def lvol_add_clone(self, clone_name: str, source_lvol_name: str):
+        params = {
+            "clone_name": clone_name,
+            "source_lvol_name": source_lvol_name
+        }
+        return self._request("bdev_lvol_add_clone", params)
+
+
+def lvol_transfer(
+        self,
+        lvol_name: str,
+        offset: int,
+        batch: int,
+        nqn: str,
+        O: str
+):
+    params = {
+        "n": lvol_name,
+        "o": offset,
+        "b": batch,
+        "g": nqn,
+        "O": O
+    }
+    return self._request("bdev_lvol_transfer", params)
