@@ -245,7 +245,8 @@ def spdk_process_kill(query: utils.RPCPortParams):
     })}}},
 })
 def spdk_process_is_up(query: utils.RPCPortParams):
-    logger.debug("function:spdk_process_is_up start")
+    req_unique_id = time.time_ns()
+    logger.debug(f"function:spdk_process_is_up start f{req_unique_id}")
     try:
         node_docker = get_docker_client()
         for cont in node_docker.containers.list(all=True):
@@ -260,7 +261,9 @@ def spdk_process_is_up(query: utils.RPCPortParams):
                     return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
     except Exception as e:
         logger.error(e)
-    logger.debug("function:spdk_process_is_up end")
+    logger.debug(f"function:spdk_process_is_up end f{req_unique_id}")
+    total_time = int(( time.time_ns()-req_unique_id)/(1000*1000*1000))
+    logger.debug(f"function:spdk_process_is_up total time {total_time}")
     return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
 
 
