@@ -225,4 +225,4 @@ prometheus_patch = {
 
 qos_class_meta_and_migration_weight_percent = 25
 
-MIG_PARALLEL_JOBS = 16
+MIG_PARALLEL_JOBS = 64
