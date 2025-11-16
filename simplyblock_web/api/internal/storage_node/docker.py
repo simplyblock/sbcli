@@ -212,6 +212,7 @@ def spdk_process_start(body: SPDKParams):
         ]
         # restart_policy={"Name": "always"}
     )
+    start_docker_info_poller_if_needed()
     retries = 10
     while retries > 0:
         info = node_docker.containers.get(container.attrs['Id'])
@@ -696,12 +697,13 @@ docker_info_poller_thread: threading.Thread
 containers_info: dict
 def start_docker_info_poller_if_needed():
     def loop_for_containers():
-        logger.info("Getting docker info ... start")
-        node_docker = get_docker_client(timeout=5)
-        for cont in node_docker.containers.list(all=True):
-            containers_info[cont.attrs['Name']] = cont.attrs
-        logger.info("Getting docker info ... end")
-        time.sleep(5)
+        while True:
+            logger.info("Getting docker info ... start")
+            node_docker = get_docker_client(timeout=5)
+            for cont in node_docker.containers.list(all=True):
+                containers_info[cont.attrs['Name']] = cont.attrs
+            logger.info("Getting docker info ... end")
+            time.sleep(5)
 
     global docker_info_poller_thread
     if not docker_info_poller_thread or docker_info_poller_thread.is_alive() is False:
