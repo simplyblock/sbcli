@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import threading
 from pathlib import Path
 import subprocess
 import time
@@ -245,26 +246,13 @@ def spdk_process_kill(query: utils.RPCPortParams):
     })}}},
 })
 def spdk_process_is_up(query: utils.RPCPortParams):
-    req_unique_id = time.time_ns()
-    logger.debug(f"function:spdk_process_is_up start f{req_unique_id}")
-    try:
-        node_docker = get_docker_client()
-        for cont in node_docker.containers.list(all=True):
-            logger.debug(f"Container: {cont.attrs['Name']} status: {cont.attrs['State']}")
-            if cont.attrs['Name'] == f"/spdk_{query.rpc_port}":
-                status = cont.attrs['State']["Status"]
-                is_running = cont.attrs['State']["Running"]
-                logger.debug("function:spdk_process_is_up end")
-                if is_running:
-                    return utils.get_response(True)
-                else:
-                    return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
-    except Exception as e:
-        logger.error(e)
-    logger.debug(f"function:spdk_process_is_up end f{req_unique_id}")
-    total_time = int(( time.time_ns()-req_unique_id)/(1000*1000*1000))
-    logger.debug(f"function:spdk_process_is_up total time {total_time}")
-    return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
+    start_docker_info_poller_if_needed()
+    cont_info = containers_info[f"/spdk_{query.rpc_port}"]
+    is_running = cont_info.attrs['State']["Running"]
+    if is_running:
+        return utils.get_response(True)
+    else:
+        return utils.get_response(False)
 
 
 @api.get('/spdk_proxy_restart', responses={
@@ -702,3 +690,20 @@ def ifc_is_tcp(query: NicQuery):
 })
 def is_alive():
     return utils.get_response(True)
+
+
+docker_info_poller_thread: threading.Thread
+containers_info: dict
+def start_docker_info_poller_if_needed():
+    def loop_for_containers():
+        logger.info("Getting docker info ... start")
+        node_docker = get_docker_client(timeout=5)
+        for cont in node_docker.containers.list(all=True):
+            containers_info[cont.attrs['Name']] = cont.attrs
+        logger.info("Getting docker info ... end")
+        time.sleep(5)
+
+    global docker_info_poller_thread
+    if not docker_info_poller_thread or docker_info_poller_thread.is_alive() is False:
+        docker_info_poller_thread = threading.Thread(target=loop_for_containers)
+        docker_info_poller_thread.start()
