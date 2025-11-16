@@ -20,10 +20,10 @@ EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_writ
                "error_write_cannot_allocate"]
 
 
-def remove_remote_device_from_node(node, device):
-    node = db.get_storage_node_by_id(node.get_id())
+def remove_remote_device_from_node(node_id, device_id):
+    node = db.get_storage_node_by_id(node_id)
     for remote_dev in node.remote_devices:
-        if remote_dev.get_id() == device.get_id():
+        if remote_dev.get_id() == device_id:
             node.remote_devices.remove(remote_dev)
             node.write_to_db()
             break
