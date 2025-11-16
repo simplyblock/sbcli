@@ -250,8 +250,10 @@ def spdk_process_is_up(query: utils.RPCPortParams):
     try:
         with open("/var/cont_info", "r") as f:
             containers_info = json.load(f)
-    except:
-        pass
+    except Exception as e:
+        logger.error(e)
+        return utils.get_response(False)
+
     cont_name = f"/spdk_{query.rpc_port}"
     if not containers_info or cont_name not in containers_info:
         return utils.get_response(False)

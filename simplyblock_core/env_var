@@ -1,6 +1,6 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
 SIMPLY_BLOCK_VERSION=19.2.27
 
-SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:R25.10-Hotfix-snode-docker-poller
+SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:R25.10-Hotfix
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.10-Hotfix-33f51cff
 
