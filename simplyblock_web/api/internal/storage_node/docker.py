@@ -212,7 +212,6 @@ def spdk_process_start(body: SPDKParams):
         ]
         # restart_policy={"Name": "always"}
     )
-    start_docker_info_poller_if_needed()
     retries = 10
     while retries > 0:
         info = node_docker.containers.get(container.attrs['Id'])
@@ -247,7 +246,12 @@ def spdk_process_kill(query: utils.RPCPortParams):
     })}}},
 })
 def spdk_process_is_up(query: utils.RPCPortParams):
-    start_docker_info_poller_if_needed()
+    containers_info = {}
+    try:
+        with open("/var/cont_info", "r") as f:
+            containers_info = json.load(f)
+    except:
+        pass
     cont_name = f"/spdk_{query.rpc_port}"
     if not containers_info or cont_name not in containers_info:
         return utils.get_response(False)
@@ -696,19 +700,18 @@ def is_alive():
     return utils.get_response(True)
 
 
-docker_info_poller_thread: threading.Thread
-containers_info: dict
-def start_docker_info_poller_if_needed():
-    def loop_for_containers():
-        while True:
-            logger.info("Getting docker info ... start")
-            node_docker = get_docker_client(timeout=5)
-            for cont in node_docker.containers.list(all=True):
-                containers_info[cont.attrs['Name']] = cont.attrs
-            logger.info("Getting docker info ... end")
-            time.sleep(5)
+def loop_for_containers():
+    containers_info = {}
+    while True:
+        logger.info("Getting docker info ... start")
+        node_docker = get_docker_client(timeout=5)
+        for cont in node_docker.containers.list(all=True):
+            containers_info[cont.attrs['Name']] = cont.attrs
+        logger.info("Getting docker info ... end")
+        with open("/var/cont_info", "w") as f:
+            f.write(json.dumps(containers_info))
+        time.sleep(5)
 
-    global docker_info_poller_thread
-    if not docker_info_poller_thread or docker_info_poller_thread.is_alive() is False:
-        docker_info_poller_thread = threading.Thread(target=loop_for_containers)
-        docker_info_poller_thread.start()
+
+docker_info_poller_thread = threading.Thread(target=loop_for_containers)
+docker_info_poller_thread.start()
