@@ -255,8 +255,7 @@ def spdk_process_is_up(query: utils.RPCPortParams):
     cont_name = f"/spdk_{query.rpc_port}"
     if not containers_info or cont_name not in containers_info:
         return utils.get_response(False)
-    cont_info = containers_info[cont_name]
-    is_running = cont_info.attrs['State']["Running"]
+    is_running = containers_info[cont_name]['State']["Running"]
     if is_running:
         return utils.get_response(True)
     else:
