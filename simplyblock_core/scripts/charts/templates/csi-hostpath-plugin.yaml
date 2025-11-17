@@ -86,8 +86,6 @@ spec:
             - -v=5
             - --csi-address=/csi/csi.sock
             - --feature-gates=Topology=true
-            - --enable-capacity
-            - --capacity-ownerref-level=0 # pod is owner
             - --node-deployment=true
             - --strict-topology=true
             - --immediate-topology=false
