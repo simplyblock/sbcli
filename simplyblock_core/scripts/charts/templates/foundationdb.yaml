@@ -283,7 +283,7 @@ spec:
               runAsUser: 0
       volumeClaimTemplate:
         spec:
-          storageClassName: openebs-local-hostpath
+          storageClassName: local-hostpath
           accessModes:
             - ReadWriteOnce
           resources:
