@@ -182,7 +182,9 @@ def spdk_process_start(body: SPDKParams):
             f'/tmp/shm_{body.rpc_port}/:/dev/shm/',
             '/lib/modules/:/lib/modules/',
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
-            '/sys:/sys'],
+            '/sys:/sys',
+            '/mnt/ramdisk:/mnt/ramdisk',
+        ],
         environment=[
             f"RPC_PORT={body.rpc_port}",
             f"ssd_pcie={ssd_pcie_params}",
