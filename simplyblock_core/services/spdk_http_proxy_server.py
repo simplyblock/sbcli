@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import sys
+import time
 
 from http.server import HTTPServer
 from http.server import ThreadingHTTPServer
@@ -32,10 +33,11 @@ def get_env_var(name, default=None, is_required=False):
 
 def rpc_call(req):
     req_data = json.loads(req.decode('ascii'))
+    req_time = time.time_ns()
     params = ""
     if "params" in req_data:
         params = str(req_data['params'])
-    logger.info(f"Request function: {str(req_data['method'])}, params: {params}")
+    logger.info(f"Request:{req_time} function: {str(req_data['method'])}, params: {params}")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(TIMEOUT)
     sock.connect(rpc_sock)
@@ -65,7 +67,7 @@ def rpc_call(req):
     if not response and len(buf) > 0:
         raise ValueError('Invalid response')
 
-    logger.debug(f"Response data: {buf}")
+    logger.info(f"Response:{req_time} data: {buf}")
 
     return buf
 
