@@ -109,10 +109,12 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, ret
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
-            return True
+            return True, True
+        else:
+            return True, False
     except Exception as e:
         logger.debug(e)
-    return False
+    return False, False
 
 
 def _check_node_api(ip):
@@ -496,7 +498,7 @@ def check_node(node_id, with_devices=True):
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC
-    node_rpc_check = _check_node_rpc(
+    node_rpc_check, _ = _check_node_rpc(
         snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
