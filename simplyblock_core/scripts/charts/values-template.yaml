@@ -58,7 +58,7 @@ opensearch:
   antiAffinity: "hard"
   persistence:
     enabled: true
-    storageClass: openebs-local-hostpath
+    storageClass: local-hostpath
     size: 10Gi
 
   resources:
@@ -121,7 +121,7 @@ prometheus:
     persistentVolume:
       enabled: true
       size: 5Gi
-      storageClass: openebs-local-hostpath
+      storageClass: local-hostpath
     extraArgs:
       storage.tsdb.min-block-duration: 2h
       storage.tsdb.max-block-duration: 2h
