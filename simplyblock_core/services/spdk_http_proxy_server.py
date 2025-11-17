@@ -140,7 +140,7 @@ class ServerHandler(BaseHTTPRequestHandler):
                 logger.error(f"[{request_id}] Invalid RPC request from {self.client_address[0]}: {e}")
                 self.do_INTERNALERROR()
 
-        except Exception as e:
+        except Exception:
             logger.error(f"[{request_id}] Error processing request from {self.client_address[0]}", exc_info=True)
 
 
