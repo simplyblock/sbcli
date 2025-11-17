@@ -56,6 +56,20 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             return bdev
 
     rpc_client = node.rpc_client()
+    while True:
+        try:
+            ret, err = rpc_client.bdev_get_bdevs()
+            if not err:
+                for bdev in ret:
+                    if "name" in bdev and bdev['name'].startswith(name):
+                        logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev['name']}")
+                        return bdev['name']
+                logger.info(f"bdev starts with: {name} not found in bdev_get_bdevs")
+                break
+        except Exception as e:
+            logger.error(f"Failed to get bdevs retrying")
+        time.sleep(3)
+
     # check connection status
     if device.connecting_from_node and device.connecting_from_node != node.get_id():
         logger.warning("This device is being connected to from other node, sleep for 5 seconds")

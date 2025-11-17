@@ -1229,3 +1229,9 @@ class RPCClient:
 
     def nvmf_get_blocked_ports_rdma(self):
         return self._request("nvmf_get_blocked_ports")
+
+    def bdev_get_bdevs(self, name=None):
+        params = None
+        if name:
+            params = {"name": name}
+        return self._request2("bdev_get_bdevs", params)
