@@ -147,121 +147,120 @@ while True:
                         for sub in ret:
                             sec_node_lvols_nqns[sub['nqn']] = sub
 
-            if snode.lvstore_status == "ready":
+            for snap in db.get_snapshots_by_node_id(snode.get_id()):
+                if snap.status == SnapShot.STATUS_ONLINE:
 
-                for snap in db.get_snapshots_by_node_id(snode.get_id()):
-                    if snap.status == SnapShot.STATUS_ONLINE:
-
-                        present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
+                    present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
+                    if snode.lvstore_status == "ready":
                         set_snapshot_health_check(snap, present)
 
-                    elif snap.status == SnapShot.STATUS_IN_DELETION:
+                elif snap.status == SnapShot.STATUS_IN_DELETION:
 
-                        # check leadership
-                        leader_node = None
-                        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                                            StorageNode.STATUS_DOWN]:
-                            ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                            if not ret:
-                                raise Exception("Failed to get LVol store info")
-                            lvs_info = ret[0]
-                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                leader_node = snode
+                    # check leadership
+                    leader_node = None
+                    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+                                        StorageNode.STATUS_DOWN]:
+                        ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                        if not ret:
+                            raise Exception("Failed to get LVol store info")
+                        lvs_info = ret[0]
+                        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                            leader_node = snode
 
-                        if not leader_node and sec_node:
-                            ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
-                            if not ret:
-                                raise Exception("Failed to get LVol store info")
-                            lvs_info = ret[0]
-                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                leader_node = sec_node
+                    if not leader_node and sec_node:
+                        ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
+                        if not ret:
+                            raise Exception("Failed to get LVol store info")
+                        lvs_info = ret[0]
+                        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                            leader_node = sec_node
 
-                        if not leader_node:
-                            raise Exception("Failed to get leader node")
+                    if not leader_node:
+                        raise Exception("Failed to get leader node")
 
-                        if snap.deletion_status == "" or snap.deletion_status != leader_node.get_id():
+                    if snap.deletion_status == "" or snap.deletion_status != leader_node.get_id():
 
-                            ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev)
-                            if not ret:
-                                logger.error(f"Failed to delete snap from node: {snode.get_id()}")
-                                continue
-                            snap = db.get_snapshot_by_id(snap.get_id())
-                            snap.deletion_status = leader_node.get_id()
-                            snap.write_to_db()
+                        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev)
+                        if not ret:
+                            logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+                            continue
+                        snap = db.get_snapshot_by_id(snap.get_id())
+                        snap.deletion_status = leader_node.get_id()
+                        snap.write_to_db()
 
-                            time.sleep(3)
+                        time.sleep(3)
 
-                        try:
-                            ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(snap.snap_bdev)
-                        except Exception as e:
-                            logger.error(e)
-                            # timeout detected, check other node
-                            break
+                    try:
+                        ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(snap.snap_bdev)
+                    except Exception as e:
+                        logger.error(e)
+                        # timeout detected, check other node
+                        break
 
-                        if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-                            process_snap_delete_finish(snap, leader_node)
+                    if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
+                        process_snap_delete_finish(snap, leader_node)
 
-                        elif ret == 1:  # Async lvol deletion is in progress or queued
-                            logger.info(f"Snap deletion in progress, id: {snap.get_id()}")
+                    elif ret == 1:  # Async lvol deletion is in progress or queued
+                        logger.info(f"Snap deletion in progress, id: {snap.get_id()}")
 
-                        elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error(
-                                "Async deletion is done, but leadership has changed (sync deletion is now blocked)")
+                    elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error(
+                            "Async deletion is done, but leadership has changed (sync deletion is now blocked)")
 
-                        elif ret == 4:  # No async delete request exists for this Snap
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("No async delete request exists for this snap")
-                            set_snap_offline(snap)
+                    elif ret == 4:  # No async delete request exists for this Snap
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("No async delete request exists for this snap")
+                        set_snap_offline(snap)
 
-                        elif ret == -1:  # Operation not permitted
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Operation not permitted")
-                            process_snap_delete_try_again(snap)
+                    elif ret == -1:  # Operation not permitted
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("Operation not permitted")
+                        process_snap_delete_try_again(snap)
 
-                        elif ret == -2:  # No such file or directory
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("No such file or directory")
-                            process_snap_delete_finish(snap, leader_node)
+                    elif ret == -2:  # No such file or directory
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("No such file or directory")
+                        process_snap_delete_finish(snap, leader_node)
 
-                        elif ret == -5:  # I/O error
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("I/O error")
-                            process_snap_delete_try_again(snap)
+                    elif ret == -5:  # I/O error
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("I/O error")
+                        process_snap_delete_try_again(snap)
 
-                        elif ret == -11:  # Try again
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Try again")
-                            process_snap_delete_try_again(snap)
+                    elif ret == -11:  # Try again
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("Try again")
+                        process_snap_delete_try_again(snap)
 
-                        elif ret == -12:  # Out of memory
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Out of memory")
-                            process_snap_delete_try_again(snap)
+                    elif ret == -12:  # Out of memory
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("Out of memory")
+                        process_snap_delete_try_again(snap)
 
-                        elif ret == -16:  # Device or resource busy
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Device or resource busy")
-                            process_snap_delete_try_again(snap)
+                    elif ret == -16:  # Device or resource busy
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("Device or resource busy")
+                        process_snap_delete_try_again(snap)
 
-                        elif ret == -19:  # No such device
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("No such device")
-                            set_snap_offline(snap)
+                    elif ret == -19:  # No such device
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("No such device")
+                        set_snap_offline(snap)
 
-                        elif ret == -35:  # Leadership changed
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Leadership changed")
-                            process_snap_delete_try_again(snap)
+                    elif ret == -35:  # Leadership changed
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("Leadership changed")
+                        process_snap_delete_try_again(snap)
 
-                        elif ret == -36:  # Failed to update lvol for deletion
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Failed to update snapshot for deletion")
-                            process_snap_delete_try_again(snap)
+                    elif ret == -36:  # Failed to update lvol for deletion
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("Failed to update snapshot for deletion")
+                        process_snap_delete_try_again(snap)
 
-                        else:  # Failed to update lvol for deletion
-                            logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
-                            logger.error("Failed to update snapshot for deletion")
+                    else:  # Failed to update lvol for deletion
+                        logger.info(f"Snap deletion error, id: {snap.get_id()}, error code: {ret}")
+                        logger.error("Failed to update snapshot for deletion")
 
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)

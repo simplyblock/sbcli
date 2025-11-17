@@ -35,15 +35,6 @@ def set_lvol_health_check(lvol, health_check_status):
     lvol_events.lvol_health_check_change(lvol, lvol.health_check, old_status, caused_by="monitor")
 
 
-def set_snapshot_health_check(snap, health_check_status):
-    snap = db.get_snapshot_by_id(snap.get_id())
-    if snap.health_check == health_check_status:
-        return
-    snap.health_check = health_check_status
-    snap.updated_at = str(datetime.now())
-    snap.write_to_db()
-
-
 lvol_del_start_time = 0.0
 def pre_lvol_delete_rebalance():
     global lvol_del_start_time
@@ -341,13 +332,6 @@ while True:
                     set_lvol_health_check(lvol, passed)
                     if passed:
                         set_lvol_status(lvol, LVol.STATUS_ONLINE)
-
-            if snode.lvstore_status == "ready":
-
-                for snap in db.get_snapshots_by_node_id(snode.get_id()):
-                    present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
-                    set_snapshot_health_check(snap, present)
-
 
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
