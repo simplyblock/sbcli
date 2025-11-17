@@ -69,61 +69,69 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
-        for controller in ret[0]["ctrlrs"]:
+        counter=0
+        while(counter<5):
+          for controller in ret[0]["ctrlrs"]:
             controller_state = controller["state"]
             logger.info(f"Controller found: {name}, status: {controller_state}")
             if controller_state == "deleting":
-                raise RuntimeError(f"Controller: {name}, status is {controller_state}")
+                if counter < 5:
+                   time.sleep(1)
+                else:
+                   raise RuntimeError(f"Controller: {name}, status is {controller_state}")
+                counter += 1
+            else:
+               counter=5
 
-        if reattach:
-            rpc_client.bdev_nvme_detach_controller(name)
-            time.sleep(1)
-
-    bdev_name = None
-
-    db_ctrl=DBController()
-    node=db_ctrl.get_storage_node_by_id(device.node_id)
-    if node.active_rdma:
-        tr_type="RDMA"
+        #if reattach:
+        #    rpc_client.bdev_nvme_detach_controller(name)
+        #    time.sleep(1)
     else:
-        if node.active_tcp:
-            tr_type="TCP"
-        else:
-            msg="target node to connect has no active fabric."
-            logger.error(msg)
-            raise RuntimeError(msg)
+        bdev_name = None
 
-    for ip in device.nvmf_ip.split(","):
-        ret = rpc_client.bdev_nvme_attach_controller(
+        db_ctrl=DBController()
+        node=db_ctrl.get_storage_node_by_id(device.node_id)
+        if node.active_rdma:
+           tr_type="RDMA"
+        else:
+           if node.active_tcp:
+              tr_type="TCP"
+           else:
+             msg="target node to connect has no active fabric."
+             logger.error(msg)
+             raise RuntimeError(msg)
+
+        for ip in device.nvmf_ip.split(","):
+           ret = rpc_client.bdev_nvme_attach_controller(
                 name, device.nvmf_nqn, ip, device.nvmf_port,tr_type,
                 multipath=device.nvmf_multipath)
-        if not bdev_name and ret and isinstance(ret, list):
-            bdev_name = ret[0]
+           if not bdev_name and ret and isinstance(ret, list):
+                bdev_name = ret[0]
 
-        if device.nvmf_multipath:
-            rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
+           if device.nvmf_multipath:
+                rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
-    if not bdev_name:
-        msg = "Bdev name not returned from controller attach"
-        logger.error(msg)
-        raise RuntimeError(msg)
-    bdev_found = False
-    for i in range(5):
-        ret = rpc_client.get_bdevs(bdev_name)
-        if ret:
-            bdev_found = True
-            break
-        else:
-            time.sleep(1)
+        if not bdev_name:
+           msg = "Bdev name not returned from controller attach"
+           logger.error(msg)
+           raise RuntimeError(msg)
+        bdev_found = False
+        for i in range(5):
+              ret = rpc_client.get_bdevs(bdev_name)
+              if ret:
+                bdev_found = True
+                break
+              else:
+                time.sleep(1)
 
-    device.connecting_from_node = ""
-    device.write_to_db()
+        device.connecting_from_node = ""
+        device.write_to_db()
 
-    if not bdev_found:
-        logger.error("Bdev not found after 5 attempts")
-        raise RuntimeError(f"Failed to connect to device: {device.get_id()}")
+        if not bdev_found:
+            logger.error("Bdev not found after 5 attempts")
+            raise RuntimeError(f"Failed to connect to device: {device.get_id()}")
 
-    return bdev_name
+        return bdev_name
 
 
 def get_next_cluster_device_order(db_controller, cluster_id):
