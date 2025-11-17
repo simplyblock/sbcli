@@ -66,26 +66,32 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     device.connecting_from_node = node.get_id()
     device.write_to_db()
 
+    was_deleted=False
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
         counter=0
         while(counter<5):
+          deleting = False
           for controller in ret[0]["ctrlrs"]:
             controller_state = controller["state"]
             logger.info(f"Controller found: {name}, status: {controller_state}")
             if controller_state == "deleting":
+                was_deleted=True
                 if counter < 5:
                    time.sleep(1)
+                   deleting = True
+                   break
                 else:
                    raise RuntimeError(f"Controller: {name}, status is {controller_state}")
-                counter += 1
-            else:
+          if not deleting:
                counter=5
+          else:
+               counter+=1
 
         #if reattach:
         #    rpc_client.bdev_nvme_detach_controller(name)
         #    time.sleep(1)
-    else:
+    if (not ret) or was_deleted:
         bdev_name = None
 
         db_ctrl=DBController()
@@ -131,6 +137,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             raise RuntimeError(f"Failed to connect to device: {device.get_id()}")
 
         return bdev_name
+    return None
 
 
 def get_next_cluster_device_order(db_controller, cluster_id):
