@@ -14,7 +14,7 @@ spec:
             name: data-volume
           spec:
             accessModes: [ "ReadWriteOnce" ]
-            storageClassName: openebs-local-hostpath
+            storageClassName: local-hostpath
             resources:
               requests:
                 storage: 5Gi
@@ -22,7 +22,7 @@ spec:
             name: logs-volume
           spec:
             accessModes: [ "ReadWriteOnce" ]
-            storageClassName: openebs-local-hostpath
+            storageClassName: local-hostpath
             resources:
               requests:
                 storage: 5Gi
