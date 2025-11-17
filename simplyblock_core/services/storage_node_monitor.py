@@ -290,13 +290,6 @@ def node_port_check_fun(snode):
                     ports.append(n.lvol_subsys_port)
         if not snode.is_secondary_node:
             ports.append(snode.lvol_subsys_port)
-        ports = [snode.nvmf_port]
-        if snode.lvstore_stack_secondary_1:
-            for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
-                if n.lvstore_status == "ready":
-                    ports.append(n.lvol_subsys_port)
-        if not snode.is_secondary_node:
-            ports.append(snode.lvol_subsys_port)
 
         for port in ports:
             ret = health_controller._check_port_on_node(snode, port)
@@ -315,6 +308,15 @@ def node_port_check_fun(snode):
     return node_port_check
 
 
+class State:
+    counter = 0
+def increment():
+    State.counter = 1
+def decrement():
+    State.counter = 0
+def value():
+    return State.counter
+
 def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
 
@@ -328,6 +330,7 @@ def check_node(snode):
         return False
 
     logger.info(f"Checking node {snode.hostname}")
+
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)
@@ -362,23 +365,31 @@ def check_node(snode):
             return False
     except Exception as e:
         logger.debug(e)
-        set_node_unreachable(snode)
         return False
 
     # 4- check node rpc interface
-    node_rpc_check = health_controller._check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=20, retry=2)
+    node_rpc_check, node_rpc_check_1 = health_controller._check_node_rpc(
+        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=20, retry=1)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
-    if not node_rpc_check and snode.get_id() not in node_rpc_timeout_threads:
-        t = threading.Thread(target=node_rpc_timeout_check_and_report, args=(snode,))
-        t.start()
-        node_rpc_timeout_threads[snode.get_id()] = t
-
+    #if RPC times out, we dont know if its due to node becoming unavailable or spdk hanging
+    #so we try it twice. If all other checks pass again, but only this one fails: it's the spdk process
     if not node_rpc_check:
+        logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:TIMEOUT")
+        if value()==0:
+           increment()
+           return False
+
+    decrement()
+    if not node_rpc_check or not node_rpc_check_1:
         logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}:FAILED")
         set_node_schedulable(snode)
         return False
+
+    #if not node_rpc_check and snode.get_id() not in node_rpc_timeout_threads:
+    #    t = threading.Thread(target=node_rpc_timeout_check_and_report, args=(snode,))
+    #    t.start()
+    #    node_rpc_timeout_threads[snode.get_id()] = t
 
     node_port_check = node_port_check_fun(snode)
 
