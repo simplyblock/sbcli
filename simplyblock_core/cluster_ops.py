@@ -25,6 +25,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, NodeStatObject, DeviceStatObject
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.prom_client import PromClient
 from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
@@ -1009,7 +1010,8 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
     else:
         records_number = 20
 
-    records = db_controller.get_cluster_capacity(cluster, records_number)
+    prom_client = PromClient(cluster_id)
+    records = prom_client.get_cluster_capacity(cluster, history)
 
     cap_stats_keys = [
         "date",
