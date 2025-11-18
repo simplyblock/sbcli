@@ -197,13 +197,14 @@ def spdk_process_start(body: SPDKParams):
     )
     node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "python simplyblock_core/services/spdk_http_proxy_server.py",
+        "python simplyblock_core/services/spdk_http_proxy_server.py ",
         name=f"spdk_proxy_{body.rpc_port}",
         detach=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
             f'/var/tmp/spdk_{body.rpc_port}:/var/tmp',
+            '/mnt/ramdisk:/mnt/ramdisk',
         ],
         environment=[
             f"SERVER_IP={body.server_ip}",
