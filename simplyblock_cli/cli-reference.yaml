@@ -47,7 +47,7 @@ commands:
               _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
             dest: max_prov
             type: str
-            required: true
+            required: false
           - name: "--nodes-per-socket"
             help: "number of each node to be added per each socket."
             dest: nodes_per_socket

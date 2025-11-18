@@ -1585,7 +1585,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["large_pool_count"] = large_pool_count
             node_info["max_lvol"] = max_lvol
             node_info["max_size"] = max_prov
-            node_info["huge_page_memory"] = minimum_hp_memory
+            node_info["huge_page_memory"] = max(minimum_hp_memory, max_prov)
             minimum_sys_memory = calculate_minimum_sys_memory(max_prov)
             node_info["sys_memory"] = minimum_sys_memory
             all_nodes.append(node_info)

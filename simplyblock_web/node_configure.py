@@ -130,7 +130,6 @@ def parse_arguments() -> argparse.Namespace:
     
     return parser.parse_args()
 
-
 def validate_arguments(args: argparse.Namespace) -> None:
     """
     Validate the provided command line arguments.
@@ -145,8 +144,8 @@ def validate_arguments(args: argparse.Namespace) -> None:
         if not args.max_lvol:
             raise argparse.ArgumentError(None, '--max-lvol is required')
         if not args.max_prov:
-            raise argparse.ArgumentError(None, '--max-size is required')
-            
+            args.max_prov=0
+
         try:
             max_lvol = int(args.max_lvol)
             if max_lvol <= 0:
@@ -164,7 +163,7 @@ def validate_arguments(args: argparse.Namespace) -> None:
             )
             
         max_prov = utils.parse_size(args.max_prov, assume_unit='G')
-        if max_prov <= 0:
+        if max_prov < 0:
             raise argparse.ArgumentError(
                 None,
                 f"Invalid storage size: {args.max_prov}. Must be a positive value with optional unit (e.g., 100G, 1T)"
@@ -179,7 +178,9 @@ def main() -> None:
         if args.upgrade:
             upgrade_automated_deployment_config()
             return
-            
+
+        if not args.max_prov:
+            args.max_prov=0
         validate_arguments(args)
         
         if _is_pod_present_for_node():
