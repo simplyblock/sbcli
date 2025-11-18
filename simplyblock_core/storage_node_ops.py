@@ -1640,8 +1640,8 @@ def restart_storage_node(
         try:
           max_prov = int(utils.parse_size(max_prov))
           snode.max_prov = max_prov
-          
-        except Exception as e:
+
+        except Exception:
             logger.error(f"Invalid max_prov value: {max_prov}")
             return False
     else:
