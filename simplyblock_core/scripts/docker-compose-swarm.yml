@@ -130,6 +130,7 @@ services:
       - 80:80
       - 12202:12202
       - 9200:9200
+      - 9090:9090
     networks:
       - localnet
       - monitoring-net
