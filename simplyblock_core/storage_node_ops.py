@@ -36,7 +36,6 @@ from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
-import os
 import subprocess
 
 logger = utils.get_logger(__name__)
@@ -1670,7 +1669,7 @@ def restart_storage_node(
 
     # Calculate minimum sys memory
     #minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov, memory_details['total'])
-    #minimum_sys_memory = snode.minimum_sys_memory
+    minimum_sys_memory = snode.minimum_sys_memory
     #satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
     #                                                  minimum_sys_memory,
     #                                                  int(memory_details['free']),
