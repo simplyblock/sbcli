@@ -449,6 +449,7 @@ def spdk_process_start(body: SPDKParams):
                     logger.info(f"No pre-existing Job '{node_prepration_core_name}' found. Proceeding.")
                 else:
                     raise
+                
             core_template = env.get_template('oc_storage_core_isolation.yaml.j2')
             core_yaml = yaml.safe_load(core_template.render(values))
             core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
