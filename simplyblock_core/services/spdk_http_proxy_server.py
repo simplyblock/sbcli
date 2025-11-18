@@ -13,7 +13,7 @@ from http.server import ThreadingHTTPServer
 from http.server import BaseHTTPRequestHandler
 
 
-rpc_sock = '/var/tmp/spdk.sock'
+rpc_sock = '/mnt/ramdisk/spdk.sock'
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
