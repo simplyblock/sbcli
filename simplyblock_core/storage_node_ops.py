@@ -1684,13 +1684,16 @@ def restart_storage_node(
     #if not satisfied:
     #    logger.error(
     #        f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
-
+    minimum_sys_memory = snode.minimum_sys_memory or 0
     snode.spdk_mem = minimum_hp_memory
 
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
         spdk_debug = True
         snode.spdk_debug = spdk_debug
+
+    if minimum_sys_memory:
+        snode.minimum_sys_memory = minimum_sys_memory
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
