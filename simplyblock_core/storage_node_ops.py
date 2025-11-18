@@ -1640,11 +1640,12 @@ def restart_storage_node(
         try:
           max_prov = int(utils.parse_size(max_prov))
           snode.max_prov = max_prov
-        except:
+          
+        except Exception as e:
             logger.error(f"Invalid max_prov value: {max_prov}")
             return False
     else:
-        max_prov = snode.max_prove
+        max_prov = snode.max_prov
 
     if spdk_image:
         snode.spdk_image = spdk_image
