@@ -2747,29 +2747,6 @@ def deploy(ifname, isolate_cores=False):
     logger.info(f"Node IP: {dev_ip}")
     scripts.configure_docker(dev_ip)
 
-    logger.info(f"create RPC socket mount")
-    mount_point = "/mnt/ramdisk"
-    size = "1G"
-    fstab_entry = f"tmpfs {mount_point} tmpfs size={size},mode=1777,noatime 0 0\n"
-
-    # 1️⃣ Create the mount point if it doesn't exist
-    os.makedirs(mount_point, exist_ok=True)
-
-    # 2️⃣ Add to /etc/fstab if not already present
-    with open("/etc/fstab", "r+") as fstab:
-        lines = fstab.readlines()
-        if not any(mount_point in line for line in lines):
-            fstab.write(fstab_entry)
-            print(f"Added fstab entry for {mount_point}")
-        else:
-            print(f"fstab entry for {mount_point} already exists")
-
-    # 3️⃣ Mount the RAM disk immediately
-    subprocess.run(["mount", mount_point], check=True)
-
-    # 4️⃣ Verify
-    subprocess.run(["df", "-h", mount_point])
-
     start_storage_node_api_container(dev_ip)
 
     if isolate_cores:

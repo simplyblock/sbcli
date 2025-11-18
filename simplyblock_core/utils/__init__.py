@@ -447,7 +447,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
-        assigned["alceml_worker_cpu_cores"] = vcpu
+        #assigned["alceml_worker_cpu_cores"] = vcpu
         vcpu = reserve_n(1)
         assigned["alceml_cpu_cores"] = vcpu
     elif (len(vcpu_list) < 22):
@@ -455,8 +455,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
-        vcpus = reserve_n(1)
-        assigned["alceml_worker_cpu_cores"] = vcpus
+        #vcpus = reserve_n(1)
+        #assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(2)
         assigned["alceml_cpu_cores"] = vcpus
     else:
@@ -464,8 +464,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpus
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
-        vcpus = reserve_n(int(alceml_count / 3) + ((alceml_count % 3) > 0))
-        assigned["alceml_worker_cpu_cores"] = vcpus
+        #vcpus = reserve_n(int(alceml_count / 3) + ((alceml_count % 3) > 0))
+        #assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(alceml_count)
         assigned["alceml_cpu_cores"] = vcpus
     dp = int(len(remaining) / 2)
@@ -1293,11 +1293,11 @@ def calculate_unisolated_cores(cores, cores_percentage=0):
     if cores_percentage:
         return math.ceil(total * (100 - cores_percentage) / 100)
     if total <= 10:
-        return 1
-    if total <= 20:
         return 2
-    if total <= 28:
+    if total <= 20:
         return 3
+    if total <= 28:
+        return 4
     return math.ceil(total * 0.15)
 
 
@@ -1543,8 +1543,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     "jm_cpu_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][1]),
                     "poller_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][2]),
                     "alceml_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][3]),
-                    "alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
-                                                                core_group["distribution"][4]),
+                    #"alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
+                    #                                            core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
                     "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6])
                 },
