@@ -603,8 +603,8 @@ def apply_config():
     huge_page_memory_dict: dict = {}
     for node_config in nodes:
         hg_memory = node_config["huge_page_memory"]
-        if int(node_config["max_size"]) > 0:
-            hg_memory = node_config["max_size"]
+        #if int(node_config["max_size"]) > 0:
+        #    hg_memory = node_config["max_size"]
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + hg_memory
     for numa, huge_page_memory in huge_page_memory_dict.items():
