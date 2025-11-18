@@ -23,7 +23,7 @@ def get_namespace():
             return out
     return default_namespace
 
-def wait_for_job_completion(job_name, namespace, timeout=60):
+def wait_for_job_completion(job_name, namespace, timeout=120):
     batch_v1 = get_k8s_batch_client()
     for _ in range(timeout):
         job = batch_v1.read_namespaced_job(job_name, namespace)
