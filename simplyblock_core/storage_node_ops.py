@@ -67,24 +67,28 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     device.connecting_from_node = node.get_id()
     device.write_to_db()
 
-    was_deleted=False
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
         counter=0
         while(counter<5):
-          deleting = False
+          waiting = False
           for controller in ret[0]["ctrlrs"]:
             controller_state = controller["state"]
             logger.info(f"Controller found: {name}, status: {controller_state}")
-            if controller_state == "deleting":
-                was_deleted=True
+            if controller.state == "failed":
+                #we can remove the controller only for certain, if its failed. other states are intermediate and require retry.
+                rpc_client.bdev_nvme_detach_controller(name)
+                time.sleep(2)
+                break
+            elif controller_state == "resetting" or controller_state == "deleting" or controller_state == "reconnect_is_delayed":
+                if controller_state == "deleting":
                 if counter < 5:
-                   time.sleep(1)
-                   deleting = True
+                   time.sleep(2)
+                   waiting = True
                    break
-                else:
+                else: #this should never happen. It means controller is "hanging" in an intermediate state for more than 10 seconds. usually if some io is hanging.
                    raise RuntimeError(f"Controller: {name}, status is {controller_state}")
-          if not deleting:
+          if not waiting:
                counter=5
           else:
                counter+=1
@@ -92,7 +96,9 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
         #if reattach:
         #    rpc_client.bdev_nvme_detach_controller(name)
         #    time.sleep(1)
-    if (not ret) or was_deleted:
+
+    # only if the controller is really gone we try to reattach it
+    if not rpc_client.bdev_nvme_controller_list(name):
         bdev_name = None
 
         db_ctrl=DBController()
