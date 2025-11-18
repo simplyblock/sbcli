@@ -87,8 +87,7 @@ class CLIWrapperBase:
     def storage_node__configure(self, sub_command, args):
         if not args.max_lvol:
             self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
-        if not args.max_prov:
-            self.parser.error(f"Mandatory argument '--max-size' not provided for {sub_command}")
+        max_size = getattr(args, "max_prov") or 0
         sockets_to_use = [0]
         if args.sockets_to_use:
             try:
@@ -101,7 +100,7 @@ class CLIWrapperBase:
             self.parser.error(f"nodes_per_socket {args.nodes_per_socket}must be either 1 or 2")
         if args.pci_allowed and args.pci_blocked:
             self.parser.error("pci-allowed and pci-blocked cannot be both specified")
-        max_prov = utils.parse_size(args.max_prov, assume_unit='G')
+        max_prov = utils.parse_size(max_size, assume_unit='G')
         pci_allowed = []
         pci_blocked = []
         if args.pci_allowed:

@@ -1645,7 +1645,7 @@ def restart_storage_node(
             logger.error(f"Invalid max_prov value: {max_prov}")
             return False
     else:
-        max_prov = snode.max_prove
+        max_prov = snode.max_prov
 
     if spdk_image:
         snode.spdk_image = spdk_image

@@ -142,6 +142,7 @@ class SPDKParams(BaseModel):
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
+    socket: Optional[int] = Field(None, ge=0)
 
 
 @api.post('/spdk_process_start', responses={
@@ -189,19 +190,20 @@ def spdk_process_start(body: SPDKParams):
             f"ssd_pcie={ssd_pcie_params}",
             f"PCI_ALLOWED={ssd_pcie_list}",
             f"TOTAL_HP={total_mem_mib}",
-            f"NSOCKET={socket}",
+            f"NSOCKET={body.socket}",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
     node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "python simplyblock_core/services/spdk_http_proxy_server.py",
+        "python simplyblock_core/services/spdk_http_proxy_server.py ",
         name=f"spdk_proxy_{body.rpc_port}",
         detach=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
             f'/var/tmp/spdk_{body.rpc_port}:/var/tmp',
+            '/mnt/ramdisk:/mnt/ramdisk',
         ],
         environment=[
             f"SERVER_IP={body.server_ip}",
