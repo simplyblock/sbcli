@@ -143,6 +143,7 @@ class SPDKParams(BaseModel):
     cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
     cluster_id: str
+    socket: Optional[int] = Field(None, ge=0)
 
 
 @api.post('/spdk_process_start', responses={
