@@ -201,68 +201,66 @@ while True:
                 continue
 
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                try:
+                    rpc_client = snode.rpc_client(timeout=3, retry=2)
+                    if snode.get_id() in all_node_bdev_names and all_node_bdev_names[snode.get_id()]:
+                        node_bdev_names = all_node_bdev_names[snode.get_id()]
+                    else:
+                        node_bdevs = rpc_client.get_bdevs()
+                        if node_bdevs:
+                            node_bdev_names = {b['name']: b for b in node_bdevs}
+                            all_node_bdev_names[snode.get_id()] = node_bdev_names
 
-                rpc_client = RPCClient(
-                    snode.mgmt_ip, snode.rpc_port,
-                    snode.rpc_username, snode.rpc_password, timeout=3, retry=2)
-
-                if snode.get_id() in all_node_bdev_names and all_node_bdev_names[snode.get_id()]:
-                    node_bdev_names = all_node_bdev_names[snode.get_id()]
-                else:
-                    node_bdevs = rpc_client.get_bdevs()
-                    if node_bdevs:
-                        node_bdev_names = {b['name']: b for b in node_bdevs}
-                        all_node_bdev_names[snode.get_id()] = node_bdev_names
-
-                if snode.get_id() in all_node_lvols_nqns and all_node_lvols_nqns[snode.get_id()]:
-                    node_lvols_nqns = all_node_lvols_nqns[snode.get_id()]
-                else:
-                    ret = rpc_client.subsystem_list()
-                    if ret:
-                        node_lvols_nqns = {}
-                        for sub in ret:
-                            node_lvols_nqns[sub['nqn']] = sub
-                        all_node_lvols_nqns[snode.get_id()] = node_lvols_nqns
-
-                if snode.get_id() in all_node_lvols_stats and all_node_lvols_stats[snode.get_id()]:
-                    node_lvols_stats = all_node_lvols_stats[snode.get_id()]
-                else:
-                    ret = rpc_client.get_lvol_stats()
-                    if ret:
-                        node_lvols_stats = {}
-                        for st in ret['bdevs']:
-                            node_lvols_stats[st['name']] = st
-                        all_node_lvols_stats[snode.get_id()] = node_lvols_stats
-
-            if snode.secondary_node_id:
-                sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-                if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
-                    sec_rpc_client = RPCClient(
-                        sec_node.mgmt_ip, sec_node.rpc_port,
-                        sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
-
-                    if sec_node.get_id() not in all_node_bdev_names or not all_node_bdev_names[sec_node.get_id()]:
-                        ret = sec_rpc_client.get_bdevs()
-                        if ret:
-                            # node_bdev_names = {}
-                            node_bdev_names = {b['name']: b for b in ret}
-                            all_node_bdev_names[sec_node.get_id()] = node_bdev_names
-
-                    if sec_node.get_id() not in all_node_lvols_nqns or not all_node_lvols_nqns[sec_node.get_id()]:
-                        ret = sec_rpc_client.subsystem_list()
+                    if snode.get_id() in all_node_lvols_nqns and all_node_lvols_nqns[snode.get_id()]:
+                        node_lvols_nqns = all_node_lvols_nqns[snode.get_id()]
+                    else:
+                        ret = rpc_client.subsystem_list()
                         if ret:
                             node_lvols_nqns = {}
                             for sub in ret:
                                 node_lvols_nqns[sub['nqn']] = sub
-                            all_node_lvols_nqns[sec_node.get_id()] = node_lvols_nqns
+                            all_node_lvols_nqns[snode.get_id()] = node_lvols_nqns
 
-                    if sec_node.get_id() not in all_node_lvols_stats or not all_node_lvols_stats[sec_node.get_id()]:
-                        ret = sec_rpc_client.get_lvol_stats()
+                    if snode.get_id() in all_node_lvols_stats and all_node_lvols_stats[snode.get_id()]:
+                        node_lvols_stats = all_node_lvols_stats[snode.get_id()]
+                    else:
+                        ret = rpc_client.get_lvol_stats()
                         if ret:
-                            sec_node_lvols_stats = {}
+                            node_lvols_stats = {}
                             for st in ret['bdevs']:
-                                sec_node_lvols_stats[st['name']] = st
-                            all_node_lvols_stats[sec_node.get_id()] = sec_node_lvols_stats
+                                node_lvols_stats[st['name']] = st
+                            all_node_lvols_stats[snode.get_id()] = node_lvols_stats
+                except Exception as e:
+                    logger.error(e)
+
+            if snode.secondary_node_id:
+                sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+                if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
+                    try:
+                        sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
+                        if sec_node.get_id() not in all_node_bdev_names or not all_node_bdev_names[sec_node.get_id()]:
+                                ret = sec_rpc_client.get_bdevs()
+                                if ret:
+                                    # node_bdev_names = {}
+                                    node_bdev_names = {b['name']: b for b in ret}
+                                    all_node_bdev_names[sec_node.get_id()] = node_bdev_names
+                        if sec_node.get_id() not in all_node_lvols_nqns or not all_node_lvols_nqns[sec_node.get_id()]:
+                            ret = sec_rpc_client.subsystem_list()
+                            if ret:
+                                node_lvols_nqns = {}
+                                for sub in ret:
+                                    node_lvols_nqns[sub['nqn']] = sub
+                                all_node_lvols_nqns[sec_node.get_id()] = node_lvols_nqns
+
+                        if sec_node.get_id() not in all_node_lvols_stats or not all_node_lvols_stats[sec_node.get_id()]:
+                            ret = sec_rpc_client.get_lvol_stats()
+                            if ret:
+                                sec_node_lvols_stats = {}
+                                for st in ret['bdevs']:
+                                    sec_node_lvols_stats[st['name']] = st
+                                all_node_lvols_stats[sec_node.get_id()] = sec_node_lvols_stats
+                    except Exception as e:
+                        logger.error(e)
 
             for lvol in lvol_list:
                 if lvol.status in [LVol.STATUS_IN_CREATION, LVol.STATUS_IN_DELETION]:
