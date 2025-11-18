@@ -925,9 +925,10 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         jm_cpu_mask = utils.generate_mask(jm_cpu_core)
 
         # Calculate pool count
-        max_prov = int(utils.parse_size(node_config.get("max_size")))
-
-        if max_prov <= 0:
+        max_prov = 0
+        if node_config.get("max_size"):
+           max_prov = int(utils.parse_size(node_config.get("max_size")))
+        if max_prov < 0:
             logger.error(f"Incorrect max-prov value {max_prov}")
             return False
 
@@ -939,6 +940,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
 
         minimum_hp_memory = node_config.get("huge_page_memory")
 
+        minimum_hp_memory = max(minimum_hp_memory, max_prov)
+
         # check for memory
         if "memory_details" in node_info and node_info['memory_details']:
             memory_details = node_info['memory_details']
@@ -947,7 +950,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
             logger.info(f"huge_total: {utils.humanbytes(memory_details['huge_total'])}")
             logger.info(f"huge_free: {utils.humanbytes(memory_details['huge_free'])}")
-            logger.info(f"Minimum required huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
+            logger.info(f"Set huge pages memory is : {utils.humanbytes(minimum_hp_memory)}")
         else:
             logger.error("Cannot get memory info from the instance.. Exiting")
             return False
@@ -955,14 +958,15 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         # Calculate minimum sys memory
         minimum_sys_memory = node_config.get("sys_memory")
 
-        satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
-                                                          minimum_sys_memory,
-                                                          int(memory_details['free']),
-                                                          int(memory_details['huge_total']))
+        #satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
+        #                                                  minimum_sys_memory,
+        #                                                  int(memory_details['free']),
+        #                                                  int(memory_details['huge_total']))
         max_lvol = node_config.get("max_lvol")
-        if not satisfied:
-            logger.warning(
-                f"Not enough memory for the provided max_lvo: {max_lvol}, max_prov: {max_prov}..")
+
+        #if not satisfied:
+        #    logger.warning(
+        #        f"Not enough memory for the provided max_lvo: {max_lvol}, max_prov: {max_prov}..")
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
@@ -1011,10 +1015,11 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
                 start_storage_node_api_container(mgmt_ip, cluster_ip)
 
         total_mem = minimum_hp_memory
-        for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if n.api_endpoint == node_addr:
-                total_mem += n.spdk_mem
-        total_mem += utils.parse_size("500m")
+        #for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        #    if n.api_endpoint == node_addr:
+        #        total_mem += n.spdk_mem
+        #total_mem += utils.parse_size("500m")
+
         logger.info("Deploying SPDK")
         results = None
         l_cores = node_config.get("l-cores")
@@ -1632,27 +1637,25 @@ def restart_storage_node(
                     snode.l_cores = node['l-cores']
                     break
 
-    if max_prov:
-        if not isinstance(max_prov, int):
-            try:
-                max_prov = int(max_prov)
-                max_prov = f"{max_prov}g"
-                max_prov = int(utils.parse_size(max_prov))
-            except Exception:
-                logger.error(f"Invalid max_prov value: {max_prov}")
-                return False
+    if max_prov > 0:
+        try:
+          max_prov = int(utils.parse_size(max_prov))
+          snode.max_prov = max_prov
+        except:
+            logger.error(f"Invalid max_prov value: {max_prov}")
+            return False
+    else:
+        max_prov = snode.max_prove
 
-        snode.max_prov = max_prov
-    if snode.max_prov <= 0:
-        logger.error(f"Incorrect max-prov value {snode.max_prov}")
-        return False
     if spdk_image:
         snode.spdk_image = spdk_image
 
     # Calculate minimum huge page memory
     minimum_hp_memory = utils.calculate_minimum_hp_memory(snode.iobuf_small_pool_count, snode.iobuf_large_pool_count, snode.max_lvol,
-                                                          snode.max_prov,
+                                                          max_prov,
                                                           len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask)))
+
+    minimum_hp_memory = max(minimum_hp_memory, max_prov)
 
     # check for memory
     if "memory_details" in node_info and node_info['memory_details']:
@@ -1667,16 +1670,17 @@ def restart_storage_node(
 
     # Calculate minimum sys memory
     #minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov, memory_details['total'])
-    minimum_sys_memory = snode.minimum_sys_memory
-    satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
-                                                      minimum_sys_memory,
-                                                      int(memory_details['free']),
-                                                      int(memory_details['huge_total']))
-    if not satisfied:
-        logger.error(
-            f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
+    #minimum_sys_memory = snode.minimum_sys_memory
+    #satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
+    #                                                  minimum_sys_memory,
+    #                                                  int(memory_details['free']),
+    #                                                  int(memory_details['huge_total']))
+    #if not satisfied:
+    #    logger.error(
+    #        f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
 
-    snode.spdk_mem = spdk_mem
+    snode.spdk_mem = minimum_hp_memory
+
     spdk_debug = snode.spdk_debug
     if set_spdk_debug:
         spdk_debug = True
@@ -1691,11 +1695,11 @@ def restart_storage_node(
     else:
         cluster_ip = utils.get_k8s_node_ip()
 
-    total_mem = 0
-    for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-        if n.api_endpoint == snode.api_endpoint:
-            total_mem += n.spdk_mem
-    total_mem+= utils.parse_size("500m")
+    total_mem = minimum_hp_memory
+    #for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+    #    if n.api_endpoint == snode.api_endpoint:
+    #        total_mem += n.spdk_mem
+    #total_mem+= utils.parse_size("500m")
 
     results = None
     try:
@@ -2705,9 +2709,9 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     for node_config in nodes_config["nodes"]:
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-    for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // (2048 * 1024)
-        utils.set_hugepages_if_needed(numa, num_pages)
+    #for numa, huge_page_memory in huge_page_memory_dict.items():
+    #    num_pages = huge_page_memory // (2048 * 1024)
+    #    utils.set_hugepages_if_needed(numa, num_pages)
     return True
 
 def deploy(ifname, isolate_cores=False):
