@@ -2747,7 +2747,7 @@ def deploy(ifname, isolate_cores=False):
     logger.info(f"Node IP: {dev_ip}")
     scripts.configure_docker(dev_ip)
 
-    logger.info(f"create RPC socket mount")
+    logger.info("create RPC socket mount")
     mount_point = "/mnt/ramdisk"
     size = "1G"
     fstab_entry = f"tmpfs {mount_point} tmpfs size={size},mode=1777,noatime 0 0\n"
