@@ -1287,6 +1287,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             try:
                 storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
             except Exception as e:
+                logger.debug(e)
                 logger.error(f"Failed to restart node: {node.get_id()}")
                 return
 

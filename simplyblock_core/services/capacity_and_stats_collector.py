@@ -4,7 +4,6 @@ import time
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
 logger = utils.get_logger(__name__)

@@ -8,7 +8,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.controllers import health_controller, snapshot_events, tasks_controller
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
