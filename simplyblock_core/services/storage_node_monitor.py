@@ -434,5 +434,5 @@ while True:
                 t.start()
                 threads_maps[node_id] = t
 
-        time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
         update_cluster_status(cluster_id)
+    time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
