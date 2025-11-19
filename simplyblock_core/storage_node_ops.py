@@ -431,7 +431,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
 
 
 def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent, partition_size=0):
-    nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
+    ctrl_id = nvme.nvme_controller[-1]
+    nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev, f"/dev/nbd{ctrl_id}")
     time.sleep(3)
     if not nbd_device:
         logger.error("Failed to start nbd dev")
@@ -499,6 +500,8 @@ def _prepare_cluster_devices_partitions(snode, devices):
         partitioned_devices = _search_for_partitions(snode.rpc_client(), nvme)
         if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
             logger.info("Device partitions created")
+            # remove 1st partition for jm
+            partitioned_devices.pop(0)
             for dev in partitioned_devices:
                 t = threading.Thread(target=_create_storage_device_stack,
                                      args=(snode.rpc_client(), dev, snode, False,))
@@ -525,7 +528,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
     jm_devices = []
     bdevs_names = [d['name'] for d in snode.rpc_client().get_bdevs()]
     for nvme in new_devices:
-        if nvme.status != NVMeDevice.STATUS_ONLINE:
+        if nvme.status == NVMeDevice.STATUS_ONLINE:
             dev_part = f"{nvme.nvme_bdev[:-2]}p1"
             if dev_part in bdevs_names:
                 if dev_part not in jm_devices:
