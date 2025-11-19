@@ -107,9 +107,20 @@ class CLIWrapperBase:
             pci_allowed = [str(x) for x in args.pci_allowed.split(',')]
         if args.pci_blocked:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
+        if (args.device_model and not args.size_range) or (not args.device_model and args.size_range):
+            self.parser.error(f"device_model and size_range must be set together")
+        use_pci_allowed = bool(args.pci_allowed)
+        use_pci_blocked = bool(args.pci_blocked)
+        use_model_range = bool(args.device_model and args.size_range)
+        if sum([use_pci_allowed, use_pci_blocked, use_model_range]) > 1:
+            self.parser.error(
+                "Options --pci-allowed, --pci-blocked, and "
+                "(--device-model with --size-range) are mutually exclusive; choose only one."
+            )
+
 
         return storage_ops.generate_automated_deployment_config(args.max_lvol, max_prov, sockets_to_use,
-                                                                args.nodes_per_socket, pci_allowed, pci_blocked)
+                                                                args.nodes_per_socket, pci_allowed, pci_blocked, force=args.force, device_model=args.device_model, size_range=args.size_range)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()

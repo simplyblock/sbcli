@@ -11,7 +11,7 @@ import sys
 import uuid
 import time
 import socket
-from typing import Union, Any, Optional, Tuple
+from typing import Union, Any, Optional, Tuple, List, Dict
 from kubernetes import client, config
 from kubernetes.client import ApiException
 import docker
@@ -1224,7 +1224,7 @@ def get_nvme_pci_devices():
         return [], []
 
 
-def detect_nvmes(pci_allowed, pci_blocked):
+def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range):
     pci_addresses, blocked_devices = get_nvme_pci_devices()
     ssd_pci_set = set(pci_addresses)
 
@@ -1242,6 +1242,10 @@ def detect_nvmes(pci_allowed, pci_blocked):
             return []
 
         pci_addresses = list(user_pci_set)
+        for pci in pci_addresses:
+            pci_utils.ensure_driver(pci, 'nvme', override=True)
+    elif device_model and size_range:
+        pci_addresses = query_nvme_ssd_by_model_and_size(device_model, size_range)
     elif pci_blocked:
         user_pci_set = set(
             addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
@@ -1252,19 +1256,14 @@ def detect_nvmes(pci_allowed, pci_blocked):
 
     for pci in pci_addresses:
         pci_utils.ensure_driver(pci, 'nvme')
-
     nvme_base_path = '/sys/class/nvme/'
     nvme_devices = [dev for dev in os.listdir(nvme_base_path) if dev.startswith('nvme')]
     nvmes = {}
     for dev in nvme_devices:
-        dev_name = os.path.basename(dev)
-        pattern = re.compile(rf"^{re.escape(dev_name)}n\d+$")
-        if any(pattern.match(block_device) for block_device in blocked_devices):
-            logger.debug(f"device {dev_name} is busy.. skipping")
-            continue
-        device_symlink = os.path.join(nvme_base_path, dev)
         try:
-            pci_address = "unknown"
+            dev_name = os.path.basename(dev)
+            pattern = re.compile(rf"^{re.escape(dev_name)}n\d+$")
+            device_symlink = os.path.join(nvme_base_path, dev)
 
             # Resolve the real path to get the actual device path
             real_path = os.path.realpath(device_symlink)
@@ -1273,18 +1272,22 @@ def detect_nvmes(pci_allowed, pci_blocked):
             address_file = os.path.join(real_path, 'address')
             with open(address_file, 'r') as f:
                 pci_address = f.read().strip()
-
+            if any(pattern.match(block_device) for block_device in blocked_devices):
+                if pci_address not in pci_allowed:
+                    logger.debug(f"device {dev_name} is busy.. skipping")
+                    continue
+                logger.warn(f"PCI {pci_address} passed as allowed PCI, even it has partitions.. Formatting it now")
             # Read the NUMA node information
             numa_node_file = os.path.join(real_path, 'numa_node')
             with open(numa_node_file, 'r') as f:
                 numa_node = f.read().strip()
-
             if pci_address not in pci_addresses:
                 continue
             nvmes[dev_name] = {"pci_address": pci_address, "numa_node": numa_node}
         except Exception:
             continue
     return nvmes
+
 
 
 def calculate_unisolated_cores(cores, cores_percentage=0):
@@ -1464,7 +1467,7 @@ def regenerate_config(new_config, old_config, force=False):
 
 
 def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                     cores_percentage=0):
+                     cores_percentage=0, force=False, device_model="", size_range=""):
     system_info = {}
     nodes_config: dict = {"nodes": []}
 
@@ -1472,7 +1475,22 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     validate_sockets(sockets_to_use, cores_by_numa)
     logger.debug(f"Cores by numa {cores_by_numa}")
     nics = detect_nics()
-    nvmes = detect_nvmes(pci_allowed, pci_blocked)
+    nvmes = detect_nvmes(pci_allowed, pci_blocked, device_model, size_range)
+    if force:
+        nvme_devices = " ".join([f"/dev/{d}n1" for d in nvmes.keys()])
+        logger.warn(f"Formating Nvme devices {nvme_devices}")
+        answer = input("Type YES to continue: ").strip().lower()
+        if answer != "yes":
+            logger.warn("Aborted by user.")
+            exit(1)
+        logger.info("OK, continuing formating...")
+        for nvme_device in nvmes.keys():
+            nvme_device_path = f"/dev/{nvme_device}n1"
+            clean_partitions(nvme_device_path)
+            nvme_json_string = get_idns(nvme_device_path)
+            lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
+            format_nvme_device(nvme_device_path, lbaf_id)
+
 
     for nid in sockets_to_use:
         if nid in cores_by_numa:
@@ -2068,3 +2086,162 @@ def patch_prometheus_configmap(username: str, password: str):
     except Exception as e:
         logger.error(f"Unexpected error while patching ConfigMap: {e}")
         return False
+
+
+def clean_partitions(nvme_device: str):
+    command = ['wipefs', '-a', nvme_device]
+    print(" ".join(command))
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True  # Raise a CalledProcessError if the exit code is non-zero
+        )
+        return result.stdout
+
+    except subprocess.CalledProcessError as e:
+        # Handle errors (e.g., nvme not found, permission denied, or other command failures)
+        return (f"Error executing command: {' '.join(command)}\n"
+                f"Return Code: {e.returncode}\n"
+                f"Standard Error:\n{e.stderr}")
+    except FileNotFoundError:
+        return "Error: The 'nvme' command was not found. Is 'nvme-cli' installed?"
+
+
+def find_lbaf_id(json_data: str, target_ms: int, target_ds: int) -> int:
+    try:
+        data = json.loads(json_data)
+    except json.JSONDecodeError:
+        print("Error: Invalid JSON format provided.")
+        return 0
+
+    lbafs_list: List[Dict[str, int]] = data.get('lbafs', [])
+
+    # LBAF IDs are 1-based, so we use enumerate starting from 1
+    for index, lbaf in enumerate(lbafs_list, start=0):
+        if lbaf.get('ms') == target_ms and lbaf.get('ds') == target_ds:
+            return index
+
+    return 0
+
+def get_idns(nvme_device: str):
+    command = ['nvme', 'id-ns', nvme_device, '--output-format', 'json']
+    try:
+        # Run the command
+        # capture_output=True captures stdout and stderr.
+        # text=True decodes the output as text (using default encoding, typically UTF-8).
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True  # Raise a CalledProcessError if the exit code is non-zero
+        )
+
+        # Return the captured standard output
+        return result.stdout
+
+    except subprocess.CalledProcessError as e:
+        # Handle errors (e.g., nvme not found, permission denied, or other command failures)
+        return (f"Error executing command: {' '.join(command)}\n"
+                f"Return Code: {e.returncode}\n"
+                f"Standard Error:\n{e.stderr}")
+    except FileNotFoundError:
+        return "Error: The 'nvme' command was not found. Is 'nvme-cli' installed?"
+
+
+def format_nvme_device(nvme_device: str, lbaf_id: int):
+    command = ['nvme', 'format', nvme_device, f"--lbaf={lbaf_id}", '--force']
+    print(" ".join(command))
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True  # Raise a CalledProcessError if the exit code is non-zero
+        )
+
+        return result.stdout
+
+    except subprocess.CalledProcessError as e:
+        # Handle errors (e.g., nvme not found, permission denied, or other command failures)
+        return (f"Error executing command: {' '.join(command)}\n"
+                f"Return Code: {e.returncode}\n"
+                f"Standard Error:\n{e.stderr}")
+    except FileNotFoundError:
+        return "Error: The 'nvme' command was not found. Is 'nvme-cli' installed?"
+
+
+def get_nvme_list_verbose() -> str:
+    """
+    Executes the 'nvme list -v' command and returns the output.
+
+    Returns:
+        str: The standard output of the command, or an error message
+             if the command fails.
+    """
+    command = ['nvme', 'list', '-v', '--output-format', 'json']
+
+    try:
+        # Run the command
+        # capture_output=True captures stdout and stderr.
+        # text=True decodes the output as text (using default encoding, typically UTF-8).
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True  # Raise a CalledProcessError if the exit code is non-zero
+        )
+
+        # Return the captured standard output
+        return result.stdout
+
+    except subprocess.CalledProcessError as e:
+        # Handle errors (e.g., nvme not found, permission denied, or other command failures)
+        return (f"Error executing command: {' '.join(command)}\n"
+                f"Return Code: {e.returncode}\n"
+                f"Standard Error:\n{e.stderr}")
+    except FileNotFoundError:
+        return "Error: The 'nvme' command was not found. Is 'nvme-cli' installed?"
+
+
+def query_nvme_ssd_by_model_and_size(model: str, size_range: str) -> list:
+    if not model:
+        print("No model specified.")
+        return []
+    if not size_range:
+        print("No size range specified.")
+        return []
+
+    size_from = 0
+    size_to = 0
+    try:
+        range_split = size_range.split('-')
+        if len(range_split) == 1:
+            size_from = parse_size(range_split[0])
+        elif len(range_split) == 2:
+            size_from = parse_size(range_split[0])
+            size_to = parse_size(range_split[1])
+        else:
+            raise ValueError("Invalid size range")
+    except Exception as e:
+        print(e)
+        return []
+
+    json_string = get_nvme_list_verbose()
+    data = json.loads(json_string)
+
+    pci_lst = []
+    for device_entry in data.get('Devices', []):
+        for subsystem in device_entry.get('Subsystems', []):
+            for controller in subsystem.get('Controllers', []):
+                model_number = controller.get("ModelNumber")
+                if model_number != model:
+                    continue
+                address = controller.get("Address")
+                if len(controller.get("Namespaces")) > 0:
+                    size = controller.get("Namespaces")[0].get("PhysicalSize")
+                    if size > size_from:
+                        if size_to > 0 and size < size_to:
+                            pci_lst.append(address)
+    return pci_lst

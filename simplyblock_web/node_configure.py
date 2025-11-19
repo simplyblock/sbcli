@@ -128,7 +128,30 @@ def parse_arguments() -> argparse.Namespace:
         required=False,
         default=0
     )
-    
+    parser.add_argument(
+        '--force',
+        help='Force format detected or passed nvme pci address to 4K and clean partitions',
+        action='store_true',
+        dest='force',
+        required=False
+    )
+    parser.add_argument(
+        '--device-model',
+        help='NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together',
+        type=str,
+        default='',
+        dest='device_model',
+        required=False
+    )
+    parser.add_argument(
+        '--size-range',
+        help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together',
+        type=str,
+        default='',
+        dest='size_range',
+        required=False
+    )
+
     return parser.parse_args()
 
 def validate_arguments(args: argparse.Namespace) -> None:
@@ -228,7 +251,10 @@ def main() -> None:
             sockets_to_use=sockets_to_use,
             pci_allowed=pci_allowed,
             pci_blocked=pci_blocked,
-            cores_percentage=args.cores_percentage
+            cores_percentage=args.cores_percentage,
+            force=args.force,
+            device_model=args.device_model,
+            size_range=args.size_range
         )
 
         logger.info("create RPC socket mount")

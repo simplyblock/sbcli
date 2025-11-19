@@ -38,7 +38,7 @@ commands:
             type: int
             required: true
           - name: "--max-size"
-            help: "Maximum amount of GB to be utilized on this storage node"
+            help: "Max size of hugepages to be set for a storage node"
             description: >
               Maximum amount of GB to be utilized on this storage node. This cannot be larger than the total effective
               cluster capacity. A safe value is `1/n * 2.0` of effective cluster capacity. Meaning, if you have three
@@ -76,6 +76,27 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--device-model"
+            help: "NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together"
+            description: >
+              NVMe SSD model string, example: --model PM1628,  --device-model and --size-range must be set together
+            dest: device_model
+            required: false
+            type: str
+            default: ""
+          - name: "--size-range"
+            help: "NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together"
+            description: >
+              NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987,  --device-model and --size-range must be set together
+            dest: size_range
+            required: false
+            type: str
+            default: ""
+          - name: "--force"
+            help: "Force format detected or passed nvme pci address to 4K and clean partitions"
+            dest: force_remove
+            type: bool
+            action: store_true
       - name: configure-upgrade
         help: "Upgrade the automated configuration file with new changes of cpu mask or storage devices"
         description: >
