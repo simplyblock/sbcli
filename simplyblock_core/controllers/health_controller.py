@@ -242,6 +242,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
     except Exception as e:
         logger.exception(e)
+        return False
     return passed
 
 
@@ -337,6 +338,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                 logger.info(line)
     except Exception as e:
         logger.exception(e)
+        return False
     return passed
 
 
