@@ -743,6 +743,8 @@ def first_six_chars(s: str) -> str:
     If the string is shorter than six characters, returns the entire string.
     """
     return s[:6]
+
+
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:
@@ -1351,10 +1353,10 @@ def get_core_indexes(core_to_index, list_of_cores):
 
 
 def build_unisolated_stride(
-    all_cores: List[int],
-    num_unisolated: int,
-    client_qpair_count: int,
-    pool_stride: int = 2,
+        all_cores: List[int],
+        num_unisolated: int,
+        client_qpair_count: int,
+        pool_stride: int = 2,
 ) -> List[int]:
     """
     Build a list of 'unisolated' CPUs by picking from per-qpair pools.
@@ -1392,7 +1394,7 @@ def build_unisolated_stride(
 
     # Build pools
     pool_size = math.ceil(total / client_qpair_count)
-    pools = [cores[i * pool_size : min((i + 1) * pool_size, total)] for i in range(client_qpair_count)]
+    pools = [cores[i * pool_size: min((i + 1) * pool_size, total)] for i in range(client_qpair_count)]
     pools = [p for p in pools if p]  # drop empties
 
     # Per-pool index (within each pool)
@@ -1455,8 +1457,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, co
             continue
         all_cores = sorted(cores_by_numa[numa_node])
         num_unisolated = calculate_unisolated_cores(all_cores, cores_percentage)
-        unisolated = build_unisolated_stride(all_cores,num_unisolated,constants.CLIENT_QPAIR_COUNT)
-
+        unisolated = build_unisolated_stride(all_cores, num_unisolated, constants.CLIENT_QPAIR_COUNT)
 
         available_cores = [c for c in all_cores if c not in unisolated]
         q1 = len(available_cores) // 4
