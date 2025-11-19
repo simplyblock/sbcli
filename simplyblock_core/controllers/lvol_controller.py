@@ -1574,7 +1574,6 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
         "write_bytes_ps",
         "write_io_ps",
         "write_latency_ps",
-        "connected_clients",
     ]
     if with_sizes:
         io_stats_keys.extend(
@@ -1619,7 +1618,6 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
             "Write speed": utils.humanbytes(record['write_bytes_ps']),
             "Write IOPS": record['write_io_ps'],
             "Write lat": record['write_latency_ps'],
-            "Con": record['connected_clients'],
         })
     return out
 
