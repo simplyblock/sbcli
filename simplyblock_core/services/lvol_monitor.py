@@ -132,8 +132,7 @@ def process_lvol_delete_finish(lvol):
         sec_node = db.get_storage_node_by_id(snode.get_id())
 
     if sec_node:
-        sec_node.lvol_sync_del_queue.append(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-        sec_node.write_to_db()
+        tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
