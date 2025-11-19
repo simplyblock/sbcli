@@ -1012,7 +1012,7 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
         "size_prov_util",
     ]
     prom_client = PromClient(cluster_id)
-    records = prom_client.get_cluster_metrics(cluster, cap_stats_keys, history)
+    records = prom_client.get_cluster_metrics(cluster_id, cap_stats_keys, history)
     return utils.process_records(records, records_count, keys=cap_stats_keys)
 
 
@@ -1064,7 +1064,7 @@ def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes
         )
 
     prom_client = PromClient(cluster_id)
-    records = prom_client.get_cluster_metrics(cluster, io_stats_keys, history_string)
+    records = prom_client.get_cluster_metrics(cluster_id, io_stats_keys, history_string)
     # combine records
     return utils.process_records(records, records_count, keys=io_stats_keys)
 

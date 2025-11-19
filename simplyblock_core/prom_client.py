@@ -44,21 +44,22 @@ class PromClient:
             logger.info("History format: xxdyyh , e.g: 1d12h, 1d, 2h, 1m")
             return False
 
-        history_in_seconds = 0
+        history_in_days = 0
+        history_in_hours = 0
+        history_in_minutes = 0
         for s in results.groups():
             if not s:
                 continue
             ind = s[-1]
             v = int(s[:-1])
             if ind == 'd':
-                history_in_seconds += v * (60 * 60 * 24)
+                history_in_days = v * (60 * 60 * 24)
             if ind == 'h':
-                history_in_seconds += v * (60 * 60)
+                history_in_hours = v * (60 * 60)
             if ind == 'm':
-                history_in_seconds += v * 60
+                history_in_minutes = v * 60
 
-        records_number = int(history_in_seconds / 5)
-        return records_number
+        return history_in_days, history_in_hours, history_in_minutes
 
     def get_cluster_metrics(self, cluster_uuid, metrics_lst, history=None):
         start_time = datetime.now() - timedelta(minutes=10)
@@ -77,7 +78,7 @@ class PromClient:
             metrics = self.client.get_metric_range_data(
                 f"cluster_{key}", label_config=params, start_time=start_time)
             for m in metrics:
-                mt_name = m['metric']["__name__"]
+                mt_name = key
                 mt_values = m["values"]
                 for i, v in enumerate(mt_values):
                     value = v[1]
@@ -93,7 +94,3 @@ class PromClient:
                             d[mt_name] = value
 
         return data_out
-
-cl = PromClient("c448e89a-7671-44e6-94a1-8964b1459200")
-d=cl.get_cluster_capacity("c448e89a-7671-44e6-94a1-8964b1459200")
-print(json.dumps(d, indent=2))
