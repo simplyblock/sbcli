@@ -1245,8 +1245,11 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range):
         pci_addresses = list(user_pci_set)
         for pci in pci_addresses:
             pci_utils.ensure_driver(pci, 'nvme', override=True)
+        logger.debug(f"Found nvme devices are {pci_addresses}")
     elif device_model and size_range:
         pci_addresses = query_nvme_ssd_by_model_and_size(device_model, size_range)
+        logger.debug(f"Found nvme devices are {pci_addresses}")
+        pci_allowed = pci_addresses
     elif pci_blocked:
         user_pci_set = set(
             addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
@@ -1277,7 +1280,7 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range):
                 if pci_address not in pci_allowed:
                     logger.debug(f"device {dev_name} is busy.. skipping")
                     continue
-                logger.warn(f"PCI {pci_address} passed as allowed PCI, even it has partitions.. Formatting it now")
+                logger.warning(f"PCI {pci_address} passed as allowed PCI, even it has partitions.. Formatting it now")
             # Read the NUMA node information
             numa_node_file = os.path.join(real_path, 'numa_node')
             with open(numa_node_file, 'r') as f:
@@ -1484,7 +1487,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         nvme_devices = " ".join([f"/dev/{d}n1" for d in nvmes.keys()])
         logger.warning(f"Formating Nvme devices {nvme_devices}")
         answer = input("Type YES/Y to continue: ").strip().lower()
-        if not (answer != "yes" or answer != "y"):
+        if answer not in ("yes", "y"):
             logger.warning("Aborted by user.")
             exit(1)
         logger.info("OK, continuing formating...")
@@ -2272,7 +2275,7 @@ def clean_devices(nvme_devices_list):
                         nvme_devices += f"/dev/{controller.get('Namespaces')[0].get('NameSpace')} "
         logger.warning(f"Formating Nvme devices {nvme_devices}")
         answer = input("Type YES/Y to continue: ").strip().lower()
-        if not (answer != "yes" or answer != "y"):
+        if answer not in ("yes", "y"):
             logger.warning("Aborted by user.")
             exit(1)
 
