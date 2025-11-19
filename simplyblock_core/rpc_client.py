@@ -112,8 +112,7 @@ class RPCClient:
             logger.debug("Requesting method: %s, params: %s", method, params)
             response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
         except Exception as e:
-            logger.error(e)
-            return False, str(e)
+            raise RPCException(str(e))
 
         ret_code = response.status_code
         ret_content = response.content
