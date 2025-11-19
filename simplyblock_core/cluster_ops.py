@@ -1187,6 +1187,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 networks=["host"],
                 constraints=["node.role == manager"]
             )
+
+        if "app_TasksRunnerLVolSyncDelete" not in service_names:
+            logger.info("Creating lvol sync delete service")
+            cluster_docker.services.create(
+                image=service_image,
+                command="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                name="app_TasksRunnerLVolSyncDelete",
+                mounts=["/etc/foundationdb:/etc/foundationdb"],
+                env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
+                networks=["host"],
+                constraints=["node.role == manager"]
+            )
         logger.info("Done updating mgmt cluster")
 
     elif cluster.mode == "kubernetes":
@@ -1266,7 +1278,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.info(f"Restarting node: {node.get_id()} with SPDK image: {spdk_image}")
             else:
                 logger.info(f"Restarting node: {node.get_id()}")
-            storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
+            try:
+                storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
+            except Exception as e:
+                logger.debug(e)
+                logger.error(f"Failed to restart node: {node.get_id()}")
+                return
 
     logger.info("Done")
 

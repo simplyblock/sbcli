@@ -133,26 +133,29 @@ class CLIWrapperBase:
         enable_ha_jm = args.enable_ha_jm
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
-
-        out = storage_ops.add_node(
-            cluster_id=cluster_id,
-            node_addr=node_addr,
-            iface_name=ifname,
-            data_nics_list=data_nics,
-            max_snap=max_snap,
-            spdk_image=spdk_image,
-            spdk_debug=spdk_debug,
-            small_bufsize=small_bufsize,
-            large_bufsize=large_bufsize,
-            num_partitions_per_dev=num_partitions_per_dev,
-            jm_percent=jm_percent,
-            enable_test_device=enable_test_device,
-            namespace=namespace,
-            enable_ha_jm=enable_ha_jm,
-            id_device_by_nqn=args.id_device_by_nqn,
-            partition_size=args.partition_size,
-            ha_jm_count=ha_jm_count,
-        )
+        try:
+            out = storage_ops.add_node(
+                cluster_id=cluster_id,
+                node_addr=node_addr,
+                iface_name=ifname,
+                data_nics_list=data_nics,
+                max_snap=max_snap,
+                spdk_image=spdk_image,
+                spdk_debug=spdk_debug,
+                small_bufsize=small_bufsize,
+                large_bufsize=large_bufsize,
+                num_partitions_per_dev=num_partitions_per_dev,
+                jm_percent=jm_percent,
+                enable_test_device=enable_test_device,
+                namespace=namespace,
+                enable_ha_jm=enable_ha_jm,
+                id_device_by_nqn=args.id_device_by_nqn,
+                partition_size=args.partition_size,
+                ha_jm_count=ha_jm_count,
+            )
+        except Exception as e:
+            print(e)
+            return False
 
         return out
 
@@ -183,11 +186,15 @@ class CLIWrapperBase:
         large_bufsize = args.large_bufsize
         ssd_pcie = args.ssd_pcie
 
-        return storage_ops.restart_storage_node(
-            node_id, max_lvol, max_snap, max_prov,
-            spdk_image, spdk_debug,
-            small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
-            new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
+        try:
+            return storage_ops.restart_storage_node(
+                node_id, max_lvol, max_snap, max_prov,
+                spdk_image, spdk_debug,
+                small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
+                new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
+        except Exception as e:
+            print(e)
+            return False
 
     def storage_node__shutdown(self, sub_command, args):
         return storage_ops.shutdown_storage_node(args.node_id, args.force)

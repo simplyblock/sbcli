@@ -41,7 +41,7 @@ class FirewallClient:
             response = self.session.request(method, self.url+path, data=data,
                                             timeout=self.timeout, params=params)
         except Exception as e:
-            raise e
+            raise FirewallClientException(str(e))
 
         logger.debug("Response: status_code: %s, content: %s",
                      response.status_code, response.content)

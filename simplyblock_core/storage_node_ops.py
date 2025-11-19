@@ -36,8 +36,7 @@ from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
-import os
-import subprocess
+
 
 logger = utils.get_logger(__name__)
 
@@ -80,7 +79,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
                 time.sleep(2)
                 break
             elif controller_state == "resetting" or controller_state == "deleting" or controller_state == "reconnect_is_delayed":
-                if controller_state == "deleting":
                 if counter < 5:
                    time.sleep(2)
                    waiting = True
@@ -1647,7 +1645,8 @@ def restart_storage_node(
         try:
           max_prov = int(utils.parse_size(max_prov))
           snode.max_prov = max_prov
-        except:
+        except Exception as e:
+            logger.debug(e)
             logger.error(f"Invalid max_prov value: {max_prov}")
             return False
     else:
