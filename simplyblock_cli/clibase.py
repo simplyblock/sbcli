@@ -108,7 +108,7 @@ class CLIWrapperBase:
         if args.pci_blocked:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
         if (args.device_model and not args.size_range) or (not args.device_model and args.size_range):
-            self.parser.error(f"device_model and size_range must be set together")
+            self.parser.error("device_model and size_range must be set together")
         use_pci_allowed = bool(args.pci_allowed)
         use_pci_blocked = bool(args.pci_blocked)
         use_model_range = bool(args.device_model and args.size_range)
@@ -124,6 +124,10 @@ class CLIWrapperBase:
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
+        return True  # remove once CLI changed to exceptions
+
+    def storage_node__clean_devices(self, sub_command, args):
+        storage_ops.clean_devices(args.config_path)
         return True  # remove once CLI changed to exceptions
 
     def storage_node__add_node(self, sub_command, args):

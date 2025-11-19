@@ -38,7 +38,7 @@ commands:
             type: int
             required: true
           - name: "--max-size"
-            help: "Max size of hugepages to be set for a storage node"
+            help: "Maximum amount of GB to be utilized on this storage node"
             description: >
               Maximum amount of GB to be utilized on this storage node. This cannot be larger than the total effective
               cluster capacity. A safe value is `1/n * 2.0` of effective cluster capacity. Meaning, if you have three
@@ -94,7 +94,7 @@ commands:
             default: ""
           - name: "--force"
             help: "Force format detected or passed nvme pci address to 4K and clean partitions"
-            dest: force_remove
+            dest: force
             type: bool
             action: store_true
       - name: configure-upgrade
@@ -107,6 +107,19 @@ commands:
         description: >
           Run locally on storage nodes and control plane hosts. Remove a previous deployment to support a fresh
           scratch-deployment of cluster software.
+
+      - name: clean-devices
+        help: "clean devices stored in /etc/simplyblock/sn_config_file (local run)"
+        description: >
+          Run locally on storage nodes to clean nvme devices and free them.
+        arguments:
+          - name: "--config-path"
+            help: "Config path to read stored nvme devices from"
+            dest: config_path
+            required: false
+            type: str
+            default: "/etc/simplyblock/sn_config_file"
+
       - name: add-node
         help: "Adds a storage node by its IP address"
         arguments:

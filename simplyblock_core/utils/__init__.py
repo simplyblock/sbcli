@@ -145,7 +145,7 @@ _humanbytes_parameter = {
 }
 
 
-def humanbytes(size: int, mode: str = 'iec') -> str: # show size using 1024 base
+def humanbytes(size: int, mode: str = 'iec') -> str:  # show size using 1024 base
     """Return the given bytes as a human friendly including the appropriate unit."""
     if not size or size < 0:
         return '0 B'
@@ -447,7 +447,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
-        #assigned["alceml_worker_cpu_cores"] = vcpu
+        # assigned["alceml_worker_cpu_cores"] = vcpu
         vcpu = reserve_n(1)
         assigned["alceml_cpu_cores"] = vcpu
     elif (len(vcpu_list) < 22):
@@ -455,8 +455,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
-        #vcpus = reserve_n(1)
-        #assigned["alceml_worker_cpu_cores"] = vcpus
+        # vcpus = reserve_n(1)
+        # assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(2)
         assigned["alceml_cpu_cores"] = vcpus
     else:
@@ -464,8 +464,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpus
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
-        #vcpus = reserve_n(int(alceml_count / 3) + ((alceml_count % 3) > 0))
-        #assigned["alceml_worker_cpu_cores"] = vcpus
+        # vcpus = reserve_n(int(alceml_count / 3) + ((alceml_count % 3) > 0))
+        # assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(alceml_count)
         assigned["alceml_cpu_cores"] = vcpus
     dp = int(len(remaining) / 2)
@@ -536,7 +536,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     poller_number = poller_count if poller_count else cpu_count
 
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (
-            6 + alceml_count + number_of_distribs) *  + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+            6 + alceml_count + number_of_distribs) * + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
             6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
@@ -544,9 +544,9 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
-   
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
-    memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
+    memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (
+                1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(1.2 * memory_consumption)
 
 
@@ -704,6 +704,7 @@ def get_total_cpu_cores(mapping: str) -> int:
     # Split by commas and count the number of valid items
     items = [pair for pair in mapping.split(",") if "@" in pair]
     return len(items)
+
 
 def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> int:
     """Convert the given number of bytes to target unit
@@ -1289,7 +1290,6 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range):
     return nvmes
 
 
-
 def calculate_unisolated_cores(cores, cores_percentage=0):
     # calculate the number if unused system cores (UnIsolated cores)
     total = len(cores)
@@ -1453,7 +1453,7 @@ def regenerate_config(new_config, old_config, force=False):
     all_isolated_cores = set()
     for node in old_config["nodes"]:
         if len(node["ssd_pcis"]) == 0:
-            logger.error(f"There are not enough SSD devices on numa node {node['socket']}")
+            logger.error(f"There are no enough SSD devices on numa node {node['socket']}")
             return False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
         node_cores_set = set(node["isolated"])
@@ -1476,12 +1476,16 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     logger.debug(f"Cores by numa {cores_by_numa}")
     nics = detect_nics()
     nvmes = detect_nvmes(pci_allowed, pci_blocked, device_model, size_range)
+    if not nvmes:
+        logger.error(
+            "There are no enough SSD devices on system, you may run 'sbctl sn clean-devices', to clean devices stored in /etc/simplyblock/sn_config_file")
+        return False, False
     if force:
         nvme_devices = " ".join([f"/dev/{d}n1" for d in nvmes.keys()])
-        logger.warn(f"Formating Nvme devices {nvme_devices}")
-        answer = input("Type YES to continue: ").strip().lower()
-        if answer != "yes":
-            logger.warn("Aborted by user.")
+        logger.warning(f"Formating Nvme devices {nvme_devices}")
+        answer = input("Type YES/Y to continue: ").strip().lower()
+        if not (answer != "yes" or answer != "y"):
+            logger.warning("Aborted by user.")
             exit(1)
         logger.info("OK, continuing formating...")
         for nvme_device in nvmes.keys():
@@ -1490,7 +1494,6 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             nvme_json_string = get_idns(nvme_device_path)
             lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
             format_nvme_device(nvme_device_path, lbaf_id)
-
 
     for nid in sockets_to_use:
         if nid in cores_by_numa:
@@ -1561,7 +1564,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     "jm_cpu_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][1]),
                     "poller_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][2]),
                     "alceml_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][3]),
-                    #"alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
+                    # "alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
                     #                                            core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
                     "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6])
@@ -1607,7 +1610,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     all_isolated_cores = set()
     for node in all_nodes:
         if len(node["ssd_pcis"]) == 0:
-            logger.error(f"There are not enough SSD devices on numa node {node['socket']}")
+            logger.error(f"There are no enough SSD devices on numa node {node['socket']}")
             return False, False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
         node_cores_set = set(node["isolated"])
@@ -1668,8 +1671,7 @@ def validate_node_config(node):
 
     required_distribution_fields = [
         "app_thread_core", "jm_cpu_core", "poller_cpu_cores",
-        "alceml_cpu_cores", "alceml_worker_cpu_cores",
-        "distrib_cpu_cores", "jc_singleton_core"
+        "alceml_cpu_cores", "distrib_cpu_cores", "jc_singleton_core"
     ]
 
     # Check top-level fields
@@ -2087,7 +2089,6 @@ def patch_prometheus_configmap(username: str, password: str):
         logger.error(f"Unexpected error while patching ConfigMap: {e}")
         return False
 
-
 def clean_partitions(nvme_device: str):
     command = ['wipefs', '-a', nvme_device]
     print(" ".join(command))
@@ -2124,6 +2125,7 @@ def find_lbaf_id(json_data: str, target_ms: int, target_ds: int) -> int:
             return index
 
     return 0
+
 
 def get_idns(nvme_device: str):
     command = ['nvme', 'id-ns', nvme_device, '--output-format', 'json']
@@ -2245,3 +2247,38 @@ def query_nvme_ssd_by_model_and_size(model: str, size_range: str) -> list:
                         if size_to > 0 and size < size_to:
                             pci_lst.append(address)
     return pci_lst
+
+
+def clean_devices(nvme_devices_list):
+    for pci in nvme_devices_list:
+        pci_utils.ensure_driver(pci, 'nvme')
+    try:
+        json_string = get_nvme_list_verbose()
+        data = json.loads(json_string)
+        controllers_list = []
+
+        # The structure is Devices[0] -> Subsystems[] -> Controllers[]
+        nvme_devices = ""
+        for device_entry in data.get('Devices', []):
+            for subsystem in device_entry.get('Subsystems', []):
+                for controller in subsystem.get('Controllers', []):
+                    # 3. Pull out the desired fields
+                    if len(controller.get("Namespaces")) > 0:
+                        controllers_list.append({
+                            "NVMe_Controller": controller.get("Controller"),
+                            "PCI_Address": controller.get("Address"),
+                            "NAMESPACE": controller.get("Namespaces")[0].get("NameSpace")
+                        })
+                        nvme_devices += f"/dev/{controller.get('Namespaces')[0].get('NameSpace')} "
+        logger.warning(f"Formating Nvme devices {nvme_devices}")
+        answer = input("Type YES/Y to continue: ").strip().lower()
+        if not (answer != "yes" or answer != "y"):
+            logger.warning("Aborted by user.")
+            exit(1)
+
+        for mapping in controllers_list:
+            if mapping['PCI_Address'] in nvme_devices_list:
+                nvme_device_path = f"/dev/{mapping['NAMESPACE']}"
+                clean_partitions(nvme_device_path)
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON: {e}")

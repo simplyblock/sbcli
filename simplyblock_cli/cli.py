@@ -36,6 +36,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__configure(subparser)
         self.init_storage_node__configure_upgrade(subparser)
         self.init_storage_node__deploy_cleaner(subparser)
+        self.init_storage_node__clean_devices(subparser)
         self.init_storage_node__add_node(subparser)
         self.init_storage_node__delete(subparser)
         self.init_storage_node__remove(subparser)
@@ -101,6 +102,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__deploy_cleaner(self, subparser):
         subcommand = self.add_sub_command(subparser, 'deploy-cleaner', 'Cleans a previous simplyblock deploy (local run)')
+
+    def init_storage_node__clean_devices(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clean-devices', 'clean devices stored in /etc/simplyblock/sn_config_file')
+        argument = subcommand.add_argument('--config-path', help='Config path to read stored nvme devices from', type=str, default='/etc/simplyblock/sn_config_file', dest='config_path', required=False)
 
     def init_storage_node__add_node(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a storage node by its IP address')
@@ -812,6 +817,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_node__configure_upgrade(sub_command, args)
                 elif sub_command in ['deploy-cleaner']:
                     ret = self.storage_node__deploy_cleaner(sub_command, args)
+                elif sub_command in ['clean-devices']:
+                    ret = self.storage_node__clean_devices(sub_command, args)
                 elif sub_command in ['add-node']:
                     if not self.developer_mode:
                         args.jm_percent = 3

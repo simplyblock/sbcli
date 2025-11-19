@@ -2814,6 +2814,16 @@ def deploy_cleaner():
     scripts.deploy_cleaner()
 
 
+def clean_devices(config_path):
+    with open(config_path) as f:
+        cfg = json.load(f)
+    ssd_pcis = [
+        pci
+        for node in cfg.get("nodes", [])
+        for pci in node.get("ssd_pcis", [])
+    ]
+    utils.clean_devices(ssd_pcis)
+
 def get_host_secret(node_id):
     db_controller = DBController()
     try:
