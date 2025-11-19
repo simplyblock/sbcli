@@ -7,7 +7,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.stats import LVolStatObject, PoolStatObject
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 

@@ -3,7 +3,6 @@
 
 import argparse
 import logging
-import os
 import sys
 from typing import List, Optional, cast
 
@@ -232,7 +231,7 @@ def main() -> None:
             cores_percentage=args.cores_percentage
         )
 
-        logger.info(f"create RPC socket mount")
+        logger.info("create RPC socket mount")
         mount_point = "/mnt/ramdisk"
         size = "1G"
         fstab_entry = f"tmpfs {mount_point} tmpfs size={size},mode=1777,noatime 0 0\n"
