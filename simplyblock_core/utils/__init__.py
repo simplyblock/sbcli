@@ -13,6 +13,8 @@ import time
 from typing import Union, Any, Optional, Tuple, Dict
 from datetime import datetime, timezone
 from docker import DockerClient
+import socket
+from typing import Union, Any, Optional, Tuple, List, Dict
 from kubernetes import client, config
 from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
     V1PodTemplateSpec, V1PodSpec, V1Container, V1EnvVar, V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, \
@@ -149,7 +151,7 @@ _humanbytes_parameter = {
 }
 
 
-def humanbytes(size: int, mode: str = 'iec') -> str: # show size using 1024 base
+def humanbytes(size: int, mode: str = 'iec') -> str:  # show size using 1024 base
     """Return the given bytes as a human friendly including the appropriate unit."""
     if not size or size < 0:
         return '0 B'
@@ -443,7 +445,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
-        #assigned["alceml_worker_cpu_cores"] = vcpu
+        # assigned["alceml_worker_cpu_cores"] = vcpu
         vcpu = reserve_n(1)
         assigned["alceml_cpu_cores"] = vcpu
     elif (len(vcpu_list) < 22):
@@ -451,8 +453,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
-        #vcpus = reserve_n(1)
-        #assigned["alceml_worker_cpu_cores"] = vcpus
+        # vcpus = reserve_n(1)
+        # assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(2)
         assigned["alceml_cpu_cores"] = vcpus
     else:
@@ -460,8 +462,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpus
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
-        #vcpus = reserve_n(int(alceml_count / 3) + ((alceml_count % 3) > 0))
-        #assigned["alceml_worker_cpu_cores"] = vcpus
+        # vcpus = reserve_n(int(alceml_count / 3) + ((alceml_count % 3) > 0))
+        # assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(alceml_count)
         assigned["alceml_cpu_cores"] = vcpus
     dp = int(len(remaining) / 2)
@@ -532,7 +534,8 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     poller_number = poller_count if poller_count else cpu_count
 
     small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (
-            6 + alceml_count + number_of_distribs) * 256 + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
+
+            6 + alceml_count + number_of_distribs) * + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
             6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
@@ -547,9 +550,9 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     extra buffer 2GB
     return: minimum_hp_memory in bytes
     '''
-    pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024 + 1092
-    memory_consumption = (4 * cpu_count + 1.0277 * pool_consumption + 25 * lvol_count) * (1024 * 1024) + (
-            250 * 1024 * 1024) * 1.1 * convert_size(max_prov, 'TiB') + constants.EXTRA_HUGE_PAGE_MEMORY
+    pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
+    memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (
+            1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(1.2 * memory_consumption)
 
 
@@ -708,6 +711,7 @@ def get_total_cpu_cores(mapping: str) -> int:
     items = [pair for pair in mapping.split(",") if "@" in pair]
     return len(items)
 
+
 def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> int:
     """Convert the given number of bytes to target unit
 
@@ -721,13 +725,15 @@ def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> in
     raw = size / (base ** exponent)
     return math.ceil(raw) if round_up else int(raw)
 
+
 def first_six_chars(s: str) -> str:
     """
     Returns the first six characters of a given string.
     If the string is shorter than six characters, returns the entire string.
     """
     return s[:6]
-    
+
+
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:
@@ -1233,7 +1239,7 @@ def get_nvme_pci_devices():
         return [], []
 
 
-def detect_nvmes(pci_allowed, pci_blocked):
+def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range):
     pci_addresses, blocked_devices = get_nvme_pci_devices()
     ssd_pci_set = set(pci_addresses)
 
@@ -1251,6 +1257,13 @@ def detect_nvmes(pci_allowed, pci_blocked):
             return []
 
         pci_addresses = list(user_pci_set)
+        for pci in pci_addresses:
+            pci_utils.ensure_driver(pci, 'nvme', override=True)
+        logger.debug(f"Found nvme devices are {pci_addresses}")
+    elif device_model and size_range:
+        pci_addresses = query_nvme_ssd_by_model_and_size(device_model, size_range)
+        logger.debug(f"Found nvme devices are {pci_addresses}")
+        pci_allowed = pci_addresses
     elif pci_blocked:
         user_pci_set = set(
             addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
@@ -1261,19 +1274,14 @@ def detect_nvmes(pci_allowed, pci_blocked):
 
     for pci in pci_addresses:
         pci_utils.ensure_driver(pci, 'nvme')
-
     nvme_base_path = '/sys/class/nvme/'
     nvme_devices = [dev for dev in os.listdir(nvme_base_path) if dev.startswith('nvme')]
     nvmes = {}
     for dev in nvme_devices:
-        dev_name = os.path.basename(dev)
-        pattern = re.compile(rf"^{re.escape(dev_name)}n\d+$")
-        if any(pattern.match(block_device) for block_device in blocked_devices):
-            logger.debug(f"device {dev_name} is busy.. skipping")
-            continue
-        device_symlink = os.path.join(nvme_base_path, dev)
         try:
-            pci_address = "unknown"
+            dev_name = os.path.basename(dev)
+            pattern = re.compile(rf"^{re.escape(dev_name)}n\d+$")
+            device_symlink = os.path.join(nvme_base_path, dev)
 
             # Resolve the real path to get the actual device path
             real_path = os.path.realpath(device_symlink)
@@ -1282,12 +1290,15 @@ def detect_nvmes(pci_allowed, pci_blocked):
             address_file = os.path.join(real_path, 'address')
             with open(address_file, 'r') as f:
                 pci_address = f.read().strip()
-
+            if any(pattern.match(block_device) for block_device in blocked_devices):
+                if pci_address not in pci_allowed:
+                    logger.debug(f"device {dev_name} is busy.. skipping")
+                    continue
+                logger.warning(f"PCI {pci_address} passed as allowed PCI, even it has partitions.. Formatting it now")
             # Read the NUMA node information
             numa_node_file = os.path.join(real_path, 'numa_node')
             with open(numa_node_file, 'r') as f:
                 numa_node = f.read().strip()
-
             if pci_address not in pci_addresses:
                 continue
             nvmes[dev_name] = {"pci_address": pci_address, "numa_node": numa_node}
@@ -1459,7 +1470,7 @@ def regenerate_config(new_config, old_config, force=False):
     all_isolated_cores = set()
     for node in old_config["nodes"]:
         if len(node["ssd_pcis"]) == 0:
-            logger.error(f"There are not enough SSD devices on numa node {node['socket']}")
+            logger.error(f"There are no enough SSD devices on numa node {node['socket']}")
             return False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
         node_cores_set = set(node["isolated"])
@@ -1473,7 +1484,7 @@ def regenerate_config(new_config, old_config, force=False):
 
 
 def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                     cores_percentage=0):
+                     cores_percentage=0, force=False, device_model="", size_range=""):
     system_info = {}
     nodes_config: dict = {"nodes": []}
 
@@ -1481,7 +1492,25 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     validate_sockets(sockets_to_use, cores_by_numa)
     logger.debug(f"Cores by numa {cores_by_numa}")
     nics = detect_nics()
-    nvmes = detect_nvmes(pci_allowed, pci_blocked)
+    nvmes = detect_nvmes(pci_allowed, pci_blocked, device_model, size_range)
+    if not nvmes:
+        logger.error(
+            "There are no enough SSD devices on system, you may run 'sbctl sn clean-devices', to clean devices stored in /etc/simplyblock/sn_config_file")
+        return False, False
+    if force:
+        nvme_devices = " ".join([f"/dev/{d}n1" for d in nvmes.keys()])
+        logger.warning(f"Formating Nvme devices {nvme_devices}")
+        answer = input("Type YES/Y to continue: ").strip().lower()
+        if answer not in ("yes", "y"):
+            logger.warning("Aborted by user.")
+            exit(1)
+        logger.info("OK, continuing formating...")
+        for nvme_device in nvmes.keys():
+            nvme_device_path = f"/dev/{nvme_device}n1"
+            clean_partitions(nvme_device_path)
+            nvme_json_string = get_idns(nvme_device_path)
+            lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
+            format_nvme_device(nvme_device_path, lbaf_id)
 
     for nid in sockets_to_use:
         if nid in cores_by_numa:
@@ -1552,7 +1581,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     "jm_cpu_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][1]),
                     "poller_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][2]),
                     "alceml_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][3]),
-                    #"alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
+                    # "alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
                     #                                            core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
                     "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6])
@@ -1598,7 +1627,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     all_isolated_cores = set()
     for node in all_nodes:
         if len(node["ssd_pcis"]) == 0:
-            logger.error(f"There are not enough SSD devices on numa node {node['socket']}")
+            logger.error(f"There are no enough SSD devices on numa node {node['socket']}")
             return False, False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
         node_cores_set = set(node["isolated"])
@@ -1659,8 +1688,7 @@ def validate_node_config(node):
 
     required_distribution_fields = [
         "app_thread_core", "jm_cpu_core", "poller_cpu_cores",
-        "alceml_cpu_cores", "alceml_worker_cpu_cores",
-        "distrib_cpu_cores", "jc_singleton_core"
+        "alceml_cpu_cores", "distrib_cpu_cores", "jc_singleton_core"
     ]
 
     # Check top-level fields
@@ -1929,14 +1957,15 @@ def load_kube_config_with_fallback():
     except Exception:
         config.load_kube_config()
 
+
 def patch_cr_status(
-    *,
-    group: str,
-    version: str,
-    plural: str,
-    namespace: str,
-    name: str,
-    status_patch: dict,
+        *,
+        group: str,
+        version: str,
+        plural: str,
+        namespace: str,
+        name: str,
+        status_patch: dict,
 ):
     """
     Patch the status subresource of a Custom Resource.
@@ -1967,17 +1996,18 @@ def patch_cr_status(
             f"Failed to patch status for {name}: {e.reason} {e.body}"
         )
 
+
 def patch_cr_node_status(
-    *,
-    group: str,
-    version: str,
-    plural: str,
-    namespace: str,
-    name: str,
-    node_uuid: str,
-    node_mgmt_ip: str,
-    updates: Optional[Dict[str, Any]] = None,
-    remove: bool = False,
+        *,
+        group: str,
+        version: str,
+        plural: str,
+        namespace: str,
+        name: str,
+        node_uuid: str,
+        node_mgmt_ip: str,
+        updates: Optional[Dict[str, Any]] = None,
+        remove: bool = False,
 ):
     """
     Patch status.nodes[*] fields for a specific node identified by UUID.
@@ -2015,8 +2045,8 @@ def patch_cr_node_status(
 
         for node in status_nodes:
             match = (
-                node.get("uuid") == node_uuid or
-                node.get("mgmtIp") == node_mgmt_ip
+                    node.get("uuid") == node_uuid or
+                    node.get("mgmtIp") == node_mgmt_ip
             )
 
             if match:
@@ -2066,23 +2096,24 @@ def patch_cr_node_status(
                 }
             },
         )
-        
+
     except ApiException as e:
         raise RuntimeError(
             f"Failed to patch node for {name}: {e.reason} {e.body}"
         )
 
+
 def patch_cr_lvol_status(
-    *,
-    group: str,
-    version: str,
-    plural: str,
-    namespace: str,
-    name: str,
-    lvol_uuid: Optional[str] = None,
-    updates: Optional[Dict[str, Any]] = None,
-    remove: bool = False,
-    add: Optional[Dict[str, Any]] = None,
+        *,
+        group: str,
+        version: str,
+        plural: str,
+        namespace: str,
+        name: str,
+        lvol_uuid: Optional[str] = None,
+        updates: Optional[Dict[str, Any]] = None,
+        remove: bool = False,
+        add: Optional[Dict[str, Any]] = None,
 ):
     """
     Patch status.lvols[*] for an LVOL CustomResource.
@@ -2177,6 +2208,7 @@ def patch_cr_lvol_status(
         raise RuntimeError(
             f"Failed to patch lvol status for {name}: {e.reason} {e.body}"
         )
+
 
 def get_node_name_by_ip(target_ip: str) -> str:
     load_kube_config_with_fallback()
@@ -2342,9 +2374,9 @@ def create_docker_service(cluster_docker: DockerClient, service_name: str, servi
             "com.docker.stack.namespace": "app"}
     )
 
+
 def create_k8s_service(namespace: str, deployment_name: str,
                        container_name: str, service_file: str, container_image: str):
-
     logger.info(f"Creating deployment: {deployment_name} in namespace {namespace}")
     load_kube_config_with_fallback()
     apps_v1 = client.AppsV1Api()
@@ -2377,7 +2409,7 @@ def create_k8s_service(namespace: str, deployment_name: str,
     container = V1Container(
         name=container_name,
         image=container_image,
-        command=["python", service_file], 
+        command=["python", service_file],
         env=env_list,
         volume_mounts=volume_mounts,
         resources=V1ResourceRequirements(
@@ -2413,3 +2445,208 @@ def create_k8s_service(namespace: str, deployment_name: str,
 
     apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
     logger.info(f"Deployment {deployment_name} created successfully.")
+
+
+def clean_partitions(nvme_device: str):
+    command = ['wipefs', '-a', nvme_device]
+    print(" ".join(command))
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True  # Raise a CalledProcessError if the exit code is non-zero
+        )
+        return result.stdout
+
+    except subprocess.CalledProcessError as e:
+        # Handle errors (e.g., nvme not found, permission denied, or other command failures)
+        return (f"Error executing command: {' '.join(command)}\n"
+                f"Return Code: {e.returncode}\n"
+                f"Standard Error:\n{e.stderr}")
+    except FileNotFoundError:
+        return "Error: The 'nvme' command was not found. Is 'nvme-cli' installed?"
+
+
+def find_lbaf_id(json_data: str, target_ms: int, target_ds: int) -> int:
+    try:
+        data = json.loads(json_data)
+    except json.JSONDecodeError:
+        print("Error: Invalid JSON format provided.")
+        return 0
+
+    lbafs_list: List[Dict[str, int]] = data.get('lbafs', [])
+
+    # LBAF IDs are 1-based, so we use enumerate starting from 1
+    for index, lbaf in enumerate(lbafs_list, start=0):
+        if lbaf.get('ms') == target_ms and lbaf.get('ds') == target_ds:
+            return index
+
+    return 0
+
+
+def get_idns(nvme_device: str):
+    command = ['nvme', 'id-ns', nvme_device, '--output-format', 'json']
+    try:
+        # Run the command
+        # capture_output=True captures stdout and stderr.
+        # text=True decodes the output as text (using default encoding, typically UTF-8).
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True  # Raise a CalledProcessError if the exit code is non-zero
+        )
+
+        # Return the captured standard output
+        return result.stdout
+
+    except subprocess.CalledProcessError as e:
+        # Handle errors (e.g., nvme not found, permission denied, or other command failures)
+        return (f"Error executing command: {' '.join(command)}\n"
+                f"Return Code: {e.returncode}\n"
+                f"Standard Error:\n{e.stderr}")
+    except FileNotFoundError:
+        return "Error: The 'nvme' command was not found. Is 'nvme-cli' installed?"
+
+
+def format_nvme_device(nvme_device: str, lbaf_id: int):
+    command = ['nvme', 'format', nvme_device, f"--lbaf={lbaf_id}", '--force']
+    print(" ".join(command))
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True  # Raise a CalledProcessError if the exit code is non-zero
+        )
+
+        return result.stdout
+
+    except subprocess.CalledProcessError as e:
+        # Handle errors (e.g., nvme not found, permission denied, or other command failures)
+        return (f"Error executing command: {' '.join(command)}\n"
+                f"Return Code: {e.returncode}\n"
+                f"Standard Error:\n{e.stderr}")
+    except FileNotFoundError:
+        return "Error: The 'nvme' command was not found. Is 'nvme-cli' installed?"
+
+
+def get_nvme_list_verbose() -> str:
+    """
+    Executes the 'nvme list -v' command and returns the output.
+
+    Returns:
+        str: The standard output of the command, or an error message
+             if the command fails.
+    """
+    command = ['nvme', 'list', '-v', '--output-format', 'json']
+
+    try:
+        # Run the command
+        # capture_output=True captures stdout and stderr.
+        # text=True decodes the output as text (using default encoding, typically UTF-8).
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True  # Raise a CalledProcessError if the exit code is non-zero
+        )
+
+        # Return the captured standard output
+        return result.stdout
+
+    except subprocess.CalledProcessError as e:
+        # Handle errors (e.g., nvme not found, permission denied, or other command failures)
+        return (f"Error executing command: {' '.join(command)}\n"
+                f"Return Code: {e.returncode}\n"
+                f"Standard Error:\n{e.stderr}")
+    except FileNotFoundError:
+        return "Error: The 'nvme' command was not found. Is 'nvme-cli' installed?"
+
+
+def query_nvme_ssd_by_model_and_size(model: str, size_range: str) -> list:
+    if not model:
+        print("No model specified.")
+        return []
+    if not size_range:
+        print("No size range specified.")
+        return []
+
+    size_from = 0
+    size_to = 0
+    try:
+        range_split = size_range.split('-')
+        if len(range_split) == 1:
+            size_from = parse_size(range_split[0])
+        elif len(range_split) == 2:
+            size_from = parse_size(range_split[0])
+            size_to = parse_size(range_split[1])
+        else:
+            raise ValueError("Invalid size range")
+    except Exception as e:
+        print(e)
+        return []
+
+    json_string = get_nvme_list_verbose()
+    data = json.loads(json_string)
+
+    pci_lst = []
+    for device_entry in data.get('Devices', []):
+        for subsystem in device_entry.get('Subsystems', []):
+            for controller in subsystem.get('Controllers', []):
+                model_number = controller.get("ModelNumber")
+                if model_number != model:
+                    continue
+                address = controller.get("Address")
+                if len(controller.get("Namespaces")) > 0:
+                    size = controller.get("Namespaces")[0].get("PhysicalSize")
+                    if size > size_from:
+                        if size_to > 0 and size < size_to:
+                            pci_lst.append(address)
+    return pci_lst
+
+
+def clean_devices(nvme_devices_list):
+    for pci in nvme_devices_list:
+        pci_utils.ensure_driver(pci, 'nvme')
+    try:
+        json_string = get_nvme_list_verbose()
+        data = json.loads(json_string)
+        controllers_list = []
+
+        # The structure is Devices[0] -> Subsystems[] -> Controllers[]
+        nvme_devices = ""
+        for device_entry in data.get('Devices', []):
+            for subsystem in device_entry.get('Subsystems', []):
+                for controller in subsystem.get('Controllers', []):
+                    # 3. Pull out the desired fields
+                    if len(controller.get("Namespaces")) > 0:
+                        controllers_list.append({
+                            "NVMe_Controller": controller.get("Controller"),
+                            "PCI_Address": controller.get("Address"),
+                            "NAMESPACE": controller.get("Namespaces")[0].get("NameSpace")
+                        })
+                        nvme_devices += f"/dev/{controller.get('Namespaces')[0].get('NameSpace')} "
+        logger.warning(f"Formating Nvme devices {nvme_devices}")
+        answer = input("Type YES/Y to continue: ").strip().lower()
+        if answer not in ("yes", "y"):
+            logger.warning("Aborted by user.")
+            exit(1)
+
+        for mapping in controllers_list:
+            if mapping['PCI_Address'] in nvme_devices_list:
+                nvme_device_path = f"/dev/{mapping['NAMESPACE']}"
+                clean_partitions(nvme_device_path)
+    except json.JSONDecodeError as e:
+        logger.error(f"Error decoding JSON: {e}")
+
+>> >> >> > a1301606(Format
+nvme
+devices
+when
+run
+sbcli
+sn
+configure
+with --force(  # 760))
