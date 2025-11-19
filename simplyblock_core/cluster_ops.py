@@ -359,7 +359,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if ingress_host_source == "hostip":
             dns_name = dev_ip
 
-        
+
         _set_max_result_window(os_endpoint)
 
         _add_graylog_input(graylog_endpoint, monitoring_secret)
@@ -438,7 +438,7 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None, 
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
                 cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None) -> str:
 
 
@@ -489,7 +489,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
         if enable_monitoring == "true":
             graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
-            os_endpoint = constants.OS_K8S_ENDPOINT          
+            os_endpoint = constants.OS_K8S_ENDPOINT
             _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
             _set_max_result_window(os_endpoint)
@@ -498,7 +498,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     if cluster.mode  == "kubernetes":
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
-                    
+
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
     cluster.distr_bs = distr_bs
