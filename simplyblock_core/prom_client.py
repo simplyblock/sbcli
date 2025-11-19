@@ -1,10 +1,12 @@
 import json
-
-import requests
 import logging
+import re
+from datetime import datetime, timedelta
 
-from requests.adapters import HTTPAdapter
-from urllib3 import Retry
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.mgmt_node import MgmtNode
+
+from prometheus_api_client import PrometheusConnect
 
 logger = logging.getLogger()
 
@@ -16,76 +18,82 @@ class PromClientException(Exception):
 
 class PromClient:
 
-    def __init__(self, cluster_ip, timeout=300, retry=5):
+    def __init__(self, cluster_id):
+        db_controller = DBController()
+        cluster_ip = None
+        for node in db_controller.get_mgmt_nodes():
+            if node.cluster_id == cluster_id and node.status == MgmtNode.STATUS_ONLINE:
+                cluster_ip = node.mgmt_ip
+                break
+        if cluster_ip is None:
+            raise PromClientException("Cluster has no online mgmt nodes")
+
         self.ip_address = f"{cluster_ip}:9090"
         self.url = 'http://%s/' % self.ip_address
-        self.timeout = timeout
-        self.session = requests.session()
-        self.session.verify = False
-        self.session.headers['Content-Type'] = "application/json"
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
-        self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.client = PrometheusConnect(url=self.url, disable_ssl=True)
 
-    def _request(self, method, path, payload=None):
-        try:
-            logger.debug("Requesting path: %s, params: %s", path, payload)
-            data = None
-            params = None
-            if payload:
-                if method == "GET" :
-                    params = payload
-                else:
-                    data = json.dumps(payload)
+    def parse_history_param(self, history_string):
+        if not history_string:
+            logger.error("Invalid history value")
+            return False
 
-            response = self.session.request(method, self.url+path, data=data,
-                                            timeout=self.timeout, params=params)
-        except Exception as e:
-            raise e
+        # process history
+        results = re.search(r'^(\d+[hmd])(\d+[hmd])?$', history_string.lower())
+        if not results:
+            logger.error(f"Error parsing history string: {history_string}")
+            logger.info("History format: xxdyyh , e.g: 1d12h, 1d, 2h, 1m")
+            return False
 
-        logger.debug("Response: status_code: %s, content: %s",
-                     response.status_code, response.content)
-        ret_code = response.status_code
+        history_in_seconds = 0
+        for s in results.groups():
+            if not s:
+                continue
+            ind = s[-1]
+            v = int(s[:-1])
+            if ind == 'd':
+                history_in_seconds += v * (60 * 60 * 24)
+            if ind == 'h':
+                history_in_seconds += v * (60 * 60)
+            if ind == 'm':
+                history_in_seconds += v * 60
 
-        result = None
-        error = None
-        if ret_code == 200:
+        records_number = int(history_in_seconds / 5)
+        return records_number
+
+    def get_cluster_metrics(self, cluster_uuid, metrics_lst, history=None):
+        start_time = datetime.now() - timedelta(minutes=10)
+        if history:
             try:
-                decoded_data = response.json()
-            except Exception:
-                return response.content, None
-
-            result = decoded_data.get('results')
-            error = decoded_data.get('error')
-            if result is not None or error is not None:
-                return result, error
-            else:
-                return data, None
-
-        if ret_code in [500, 400]:
-            raise PromClientException("Invalid http status: %s" % ret_code)
-
-        if ret_code == 422:
-            raise PromClientException(f"Request validation failed: '{response.text}'")
-
-        logger.error("Unknown http status: %s", ret_code)
-        return None, None
-
-    def query(self, query_st):
-        return self._request("GET", f"/api/{query_st}")
-
-    def get_cluster_capacity(self, cluster_id, start, end, step=15):
-        from prometheus_api_client import PrometheusConnect
-        # Connect to Prometheus
-        prom = PrometheusConnect(url="http://localhost:9090", disable_ssl=True)
-
-        # Get all metrics
-
-        metrics = prom.all_metrics()
+                days,hours,minutes = self.parse_history_param(history)
+                start_time = datetime.now() - timedelta(days=days, hours=hours, minutes=minutes)
+            except Exception as e:
+                raise PromClientException(f"Error parsing history string: {history}")
 
         params = {
-            'cluster': cluster_id,
-            'start': start, #  start=2015-07-01T20:10:30.781Z
-            'end': end,     #  end=2015-07-01T20:11:00.781Z
-            'step': f'{step}s',   #  step=15s
+            "cluster": cluster_uuid
         }
-        return self._request("GET", "/api/v1/query", params)
+        data_out=[]
+        for key in metrics_lst:
+            metrics = self.client.get_metric_range_data(
+                f"cluster_{key}", label_config=params, start_time=start_time)
+            for m in metrics:
+                mt_name = m['metric']["__name__"]
+                mt_values = m["values"]
+                for i, v in enumerate(mt_values):
+                    value = v[1]
+                    try:
+                        value = int(value)
+                    except Exception:
+                        pass
+                    if len(data_out) <= i:
+                        data_out.append({mt_name: value})
+                    else:
+                        d = data_out[i]
+                        if mt_name not in d:
+                            d[mt_name] = value
+
+        return data_out
+
+cl = PromClient("c448e89a-7671-44e6-94a1-8964b1459200")
+d=cl.get_cluster_capacity("c448e89a-7671-44e6-94a1-8964b1459200")
+print(json.dumps(d, indent=2))

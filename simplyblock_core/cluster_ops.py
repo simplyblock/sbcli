@@ -1002,17 +1002,6 @@ def list_all_info(cluster_id) -> str:
 
 def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
     cluster = db_controller.get_cluster_by_id(cluster_id)
-
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            raise ValueError(f"Error parsing history string: {history}")
-    else:
-        records_number = 20
-
-    prom_client = PromClient(cluster_id)
-    records = prom_client.get_cluster_capacity(cluster, history)
-
     cap_stats_keys = [
         "date",
         "size_total",
@@ -1022,20 +1011,20 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
         "size_util",
         "size_prov_util",
     ]
+    prom_client = PromClient(cluster_id)
+    records = prom_client.get_cluster_metrics(cluster, cap_stats_keys, history)
     return utils.process_records(records, records_count, keys=cap_stats_keys)
 
 
 def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> t.List[dict]:
     cluster = db_controller.get_cluster_by_id(cluster_id)
 
-    if history_string:
-        records_number = utils.parse_history_param(history_string)
-        if not records_number:
-            raise ValueError(f"Error parsing history string: {history_string}")
-    else:
-        records_number = 20
-
-    records = db_controller.get_cluster_stats(cluster, records_number)
+    # if history_string:
+    #     records_number = utils.parse_history_param(history_string)
+    #     if not records_number:
+    #         raise ValueError(f"Error parsing history string: {history_string}")
+    # else:
+    #     records_number = 20
 
     io_stats_keys = [
         "date",
@@ -1073,6 +1062,9 @@ def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes
                 "write_latency_ticks",
             ]
         )
+
+    prom_client = PromClient(cluster_id)
+    records = prom_client.get_cluster_metrics(cluster, io_stats_keys, history_string)
     # combine records
     return utils.process_records(records, records_count, keys=io_stats_keys)
 
