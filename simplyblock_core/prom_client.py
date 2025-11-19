@@ -1,4 +1,3 @@
-import json
 import logging
 import re
 from datetime import datetime, timedelta
@@ -67,10 +66,10 @@ class PromClient:
             try:
                 days,hours,minutes = self.parse_history_param(history)
                 start_time = datetime.now() - timedelta(days=days, hours=hours, minutes=minutes)
-            except Exception as e:
+            except Exception:
                 raise PromClientException(f"Error parsing history string: {history}")
 
-        data_out=[]
+        data_out: list[dict] = []
         for key in metrics_lst:
             metrics = self.client.get_metric_range_data(
                 f"{key_prefix}_{key}", label_config=params, start_time=start_time)

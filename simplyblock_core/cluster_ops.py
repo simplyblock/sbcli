@@ -1002,7 +1002,7 @@ def list_all_info(cluster_id) -> str:
 
 def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
     try:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
+        _ = db_controller.get_cluster_by_id(cluster_id)
     except KeyError:
         logger.error(f"Cluster not found: {cluster_id}")
         return []
@@ -1023,7 +1023,7 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
 
 def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> t.List[dict]:
     try:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
+        _ = db_controller.get_cluster_by_id(cluster_id)
     except KeyError:
         logger.error(f"Cluster not found: {cluster_id}")
         return []
