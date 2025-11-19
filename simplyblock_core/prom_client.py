@@ -61,7 +61,7 @@ class PromClient:
 
         return history_in_days, history_in_hours, history_in_minutes
 
-    def get_cluster_metrics(self, cluster_uuid, metrics_lst, history=None):
+    def get_metrics(self, key_prefix, metrics_lst, params, history=None):
         start_time = datetime.now() - timedelta(minutes=10)
         if history:
             try:
@@ -70,13 +70,10 @@ class PromClient:
             except Exception as e:
                 raise PromClientException(f"Error parsing history string: {history}")
 
-        params = {
-            "cluster": cluster_uuid
-        }
         data_out=[]
         for key in metrics_lst:
             metrics = self.client.get_metric_range_data(
-                f"cluster_{key}", label_config=params, start_time=start_time)
+                f"{key_prefix}_{key}", label_config=params, start_time=start_time)
             for m in metrics:
                 mt_name = key
                 mt_values = m["values"]
@@ -94,3 +91,21 @@ class PromClient:
                             d[mt_name] = value
 
         return data_out
+
+    def get_cluster_metrics(self, cluster_uuid, metrics_lst, history=None):
+        params = {
+            "cluster": cluster_uuid
+        }
+        return self.get_metrics("cluster", metrics_lst, params, history)
+
+    def get_node_metrics(self, snode_uuid, metrics_lst, history=None):
+        params = {
+            "snode": snode_uuid
+        }
+        return self.get_metrics("snode", metrics_lst, params, history)
+
+    def get_device_metrics(self, device_uuid, metrics_lst, history=None):
+        params = {
+            "device": device_uuid
+        }
+        return self.get_metrics("device", metrics_lst, params, history)
