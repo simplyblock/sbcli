@@ -109,3 +109,15 @@ class PromClient:
             "device": device_uuid
         }
         return self.get_metrics("device", metrics_lst, params, history)
+
+    def get_lvol_metrics(self, lvol_uuid, metrics_lst, history=None):
+        params = {
+            "lvol": lvol_uuid
+        }
+        return self.get_metrics("lvol", metrics_lst, params, history)
+
+    def get_pool_metrics(self, pool_uuid, metrics_lst, history=None):
+        params = {
+            "pool": pool_uuid
+        }
+        return self.get_metrics("pool", metrics_lst, params, history)
