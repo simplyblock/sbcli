@@ -80,8 +80,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
                 time.sleep(2)
                 break
             elif controller_state == "resetting" or controller_state == "deleting" or controller_state == "reconnect_is_delayed":
-                if controller_state == "deleting":
-                  if counter < 5:
+                if counter < 5:
                    time.sleep(2)
                    waiting = True
                    break
