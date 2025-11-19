@@ -49,10 +49,13 @@ while True:
                             task.status = JobSchedule.STATUS_RUNNING
                             task.write_to_db(db.kv_store)
 
-                        res = storage_node_ops.add_node(**task.function_params)
-                        logger.info(f"Node add result: {res}")
-                        task.function_result = str(res)
-                        task.status = JobSchedule.STATUS_DONE
-                        task.write_to_db(db.kv_store)
-
+                        try:
+                            res = storage_node_ops.add_node(**task.function_params)
+                            logger.info(f"Node add result: {res}")
+                            task.function_result = str(res)
+                            task.status = JobSchedule.STATUS_DONE
+                            task.write_to_db(db.kv_store)
+                        except Exception as e:
+                            logger.error(e)
+                            continue
     time.sleep(5)

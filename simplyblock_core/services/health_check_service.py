@@ -261,7 +261,10 @@ def loop_for_node(snode):
     logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
     logger.addHandler(logger_handler)
     while True:
-        check_node(snode, logger)
+        try:
+            check_node(snode, logger)
+        except Exception as e:
+            logger.error(e)
         time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
 
 

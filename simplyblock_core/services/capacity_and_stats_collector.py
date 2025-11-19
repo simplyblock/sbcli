@@ -173,15 +173,15 @@ while True:
                 logger.error("No devices found in node: %s", node.get_id())
                 continue
 
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password,
-                timeout=5, retry=2)
-
+            rpc_client = node.rpc_client(timeout=5, retry=2)
             node_devs_stats = {}
-            ret = rpc_client.get_lvol_stats()
-            if ret:
-                node_devs_stats = {b['name']: b for b in ret['bdevs']}
+            try:
+                ret = rpc_client.get_lvol_stats()
+                if ret:
+                    node_devs_stats = {b['name']: b for b in ret['bdevs']}
+            except Exception as e:
+                logger.error(e)
+                continue
 
             devices_records = []
             for device in node.nvme_devices:
@@ -189,7 +189,11 @@ while True:
                 if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
-                capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)
+                try:
+                    capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)
+                except Exception as e:
+                    logger.error(e)
+                    continue
                 if device.nvme_bdev in node_devs_stats:
                     stats_dict = node_devs_stats[device.nvme_bdev]
                     record = add_device_stats(cl, device, capacity_dict, stats_dict)

@@ -167,7 +167,7 @@ def _check_port_on_node(snode, port_id):
         return True
     except Exception as e:
         logger.error(e)
-    return True
+        return False
 
 
 def _check_node_ping(ip):
@@ -347,8 +347,7 @@ def _check_node_lvstore(
     db_controller = DBController()
     lvstore_check = True
     logger.info(f"Checking distr stack on node : {node.get_id()}")
-    rpc_client = RPCClient(
-        node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
+
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         auto_fix = False
@@ -371,7 +370,12 @@ def _check_node_lvstore(
             node_distribs_list = bdev["distribs_list"]
 
     if not node_bdev_names:
-        ret = rpc_client.get_bdevs()
+        try:
+            ret = node.rpc_client().get_bdevs()
+        except Exception as e:
+            logger.info(e)
+            return False
+
         if ret:
             node_bdev_names = [b['name'] for b in ret]
         else:
@@ -397,7 +401,11 @@ def _check_node_lvstore(
             for jm in jm_names:
                 logger.info(jm)
             logger.info("Checking Distr map ...")
-            ret = rpc_client.distr_get_cluster_map(distr)
+            try:
+                ret = node.rpc_client().distr_get_cluster_map(distr)
+            except Exception as e:
+                logger.info(f"Failed to get cluster map: {e}")
+                return False
             if not ret:
                 logger.error("Failed to get cluster map")
                 lvstore_check = False
@@ -444,7 +452,12 @@ def _check_node_lvstore(
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
                                     distr_controller.send_node_status_event(n, n.status, node)
-                        ret = rpc_client.distr_get_cluster_map(distr)
+
+                        try:
+                            ret = node.rpc_client().distr_get_cluster_map(distr)
+                        except Exception as e:
+                            logger.error(e)
+                            return False
                         if not ret:
                             logger.error("Failed to get cluster map")
                             lvstore_check = False
@@ -465,7 +478,11 @@ def _check_node_lvstore(
             logger.info(f"Checking raid bdev: {raid} ... not found")
             lvstore_check = False
     if bdev_lvstore:
-        ret = rpc_client.bdev_lvol_get_lvstores(bdev_lvstore)
+        try:
+            ret = node.rpc_client().bdev_lvol_get_lvstores(bdev_lvstore)
+        except Exception as e:
+            logger.error(e)
+            return False
         if ret:
             logger.info(f"Checking lvstore: {bdev_lvstore} ... ok")
         else:

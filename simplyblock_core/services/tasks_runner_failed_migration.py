@@ -87,8 +87,12 @@ def task_runner(task):
         qos_high_priority = False
         if db.get_cluster_by_id(snode.cluster_id).is_qos_set():
             qos_high_priority = True
-        rsp = rpc_client.distr_migration_failure_start(
-            distr_name, device.cluster_device_order, qos_high_priority, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS)
+        try:
+            rsp = rpc_client.distr_migration_failure_start(
+                distr_name, device.cluster_device_order, qos_high_priority, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS)
+        except Exception as e:
+            logger.error(e)
+            rsp = False
         if not rsp:
             logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
             task.function_result = "Failed to start device migration task"

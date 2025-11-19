@@ -191,19 +191,26 @@ def task_runner_node(task):
         return False
 
 
-    # shutting down node
-    logger.info(f"Shutdown node {node.get_id()}")
-    ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-    if ret:
-        logger.info("Node shutdown succeeded")
+    try:
+        # shutting down node
+        logger.info(f"Shutdown node {node.get_id()}")
+        ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+        if ret:
+            logger.info("Node shutdown succeeded")
+        time.sleep(3)
+    except Exception as e:
+        logger.error(e)
+        return False
 
-    time.sleep(3)
-
-    # resetting node
-    logger.info(f"Restart node {node.get_id()}")
-    ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
-    if ret:
-        logger.info("Node restart succeeded")
+    try:
+        # resetting node
+        logger.info(f"Restart node {node.get_id()}")
+        ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
+        if ret:
+            logger.info("Node restart succeeded")
+    except Exception as e:
+        logger.error(e)
+        return False
 
     time.sleep(3)
     node = db.get_storage_node_by_id(task.node_id)
