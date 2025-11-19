@@ -13,6 +13,18 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
+import threading
+from collections import defaultdict
+
+# A dictionary to hold locks per node
+node_locks = defaultdict(threading.Lock)
+node_locks_global_lock = threading.Lock()  # protects the node_locks dict
+
+def get_node_lock(node_id):
+    # Ensure thread-safe creation of locks
+    with node_locks_global_lock:
+        return node_locks[node_id]
+
 
 logger = lg.getLogger()
 
@@ -20,11 +32,20 @@ db_controller = DBController()
 
 
 def add(lvol_id, snapshot_name):
-    try:
+
+
+  try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
-    except KeyError as e:
+  except KeyError as e:
         logger.error(e)
         return False, str(e)
+
+  if lvol.frozen:
+        logger.warning(f"Lvol in migration: Cannot create snapshot from lvol {lvol.uuid} ")
+        return False
+
+  node_lock = get_node_lock(lvol.node_id)
+  with node_lock:
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
@@ -250,6 +271,10 @@ def delete(snapshot_uuid, force_delete=False):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
+    if snap.frozen:
+        logger.warning(f"lvol in migration. cannot delete snapshot {snap.uuid}")
+        return False
+
     try:
         snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
     except KeyError:
@@ -361,6 +386,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     except KeyError as e:
         logger.error(e)
         return False, str(e)
+
+    if snap.frozen:
+        logger.warning(f"lvol in migration. cannot create clone {snap.uuid}")
+        return False
 
     try:
         pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
