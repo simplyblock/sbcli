@@ -37,7 +37,6 @@ from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
 
-
 logger = utils.get_logger(__name__)
 
 
@@ -67,30 +66,30 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
-        counter=0
-        while(counter<5):
-          waiting = False
-          for controller in ret[0]["ctrlrs"]:
-            controller_state = controller["state"]
-            logger.info(f"Controller found: {name}, status: {controller_state}")
-            if controller.state == "failed":
-                #we can remove the controller only for certain, if its failed. other states are intermediate and require retry.
-                rpc_client.bdev_nvme_detach_controller(name)
-                time.sleep(2)
-                break
-            elif controller_state == "resetting" or controller_state == "deleting" or controller_state == "reconnect_is_delayed":
-                if counter < 5:
-                   time.sleep(2)
-                   waiting = True
-                   break
-                else: #this should never happen. It means controller is "hanging" in an intermediate state for more than 10 seconds. usually if some io is hanging.
-                   raise RuntimeError(f"Controller: {name}, status is {controller_state}")
-          if not waiting:
-               counter=5
-          else:
-               counter+=1
+        counter = 0
+        while (counter < 5):
+            waiting = False
+            for controller in ret[0]["ctrlrs"]:
+                controller_state = controller["state"]
+                logger.info(f"Controller found: {name}, status: {controller_state}")
+                if controller.state == "failed":
+                    # we can remove the controller only for certain, if its failed. other states are intermediate and require retry.
+                    rpc_client.bdev_nvme_detach_controller(name)
+                    time.sleep(2)
+                    break
+                elif controller_state == "resetting" or controller_state == "deleting" or controller_state == "reconnect_is_delayed":
+                    if counter < 5:
+                        time.sleep(2)
+                        waiting = True
+                        break
+                    else:  # this should never happen. It means controller is "hanging" in an intermediate state for more than 10 seconds. usually if some io is hanging.
+                        raise RuntimeError(f"Controller: {name}, status is {controller_state}")
+            if not waiting:
+                counter = 5
+            else:
+                counter += 1
 
-        #if reattach:
+        # if reattach:
         #    rpc_client.bdev_nvme_detach_controller(name)
         #    time.sleep(1)
 
@@ -98,39 +97,39 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     if not rpc_client.bdev_nvme_controller_list(name):
         bdev_name = None
 
-        db_ctrl=DBController()
-        node=db_ctrl.get_storage_node_by_id(device.node_id)
+        db_ctrl = DBController()
+        node = db_ctrl.get_storage_node_by_id(device.node_id)
         if node.active_rdma:
-           tr_type="RDMA"
+            tr_type = "RDMA"
         else:
-           if node.active_tcp:
-              tr_type="TCP"
-           else:
-             msg="target node to connect has no active fabric."
-             logger.error(msg)
-             raise RuntimeError(msg)
+            if node.active_tcp:
+                tr_type = "TCP"
+            else:
+                msg = "target node to connect has no active fabric."
+                logger.error(msg)
+                raise RuntimeError(msg)
 
         for ip in device.nvmf_ip.split(","):
-           ret = rpc_client.bdev_nvme_attach_controller(
-                name, device.nvmf_nqn, ip, device.nvmf_port,tr_type,
+            ret = rpc_client.bdev_nvme_attach_controller(
+                name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
                 multipath=device.nvmf_multipath)
-           if not bdev_name and ret and isinstance(ret, list):
+            if not bdev_name and ret and isinstance(ret, list):
                 bdev_name = ret[0]
 
-           if device.nvmf_multipath:
+            if device.nvmf_multipath:
                 rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
         if not bdev_name:
-           msg = "Bdev name not returned from controller attach"
-           logger.error(msg)
-           raise RuntimeError(msg)
+            msg = "Bdev name not returned from controller attach"
+            logger.error(msg)
+            raise RuntimeError(msg)
         bdev_found = False
         for i in range(5):
-              ret = rpc_client.get_bdevs(bdev_name)
-              if ret:
+            ret = rpc_client.get_bdevs(bdev_name)
+            if ret:
                 bdev_found = True
                 break
-              else:
+            else:
                 time.sleep(1)
 
         device.connecting_from_node = ""
@@ -242,9 +241,9 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
             return False
 
         for iface in snode.data_nics:
-                logger.info(f"adding {iface.trtype} listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
-                ip_list.append(iface.ip4_address)
+            logger.info(f"adding {iface.trtype} listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
+            ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+            ip_list.append(iface.ip4_address)
 
     if len(ip_list) > 1:
         IP = ",".join(ip_list)
@@ -742,8 +741,8 @@ def _connect_to_remote_devs(
             remote_bdev.status = NVMeDevice.STATUS_ONLINE
             remote_bdev.nvmf_multipath = dev.nvmf_multipath
             remote_bdev.remote_bdev = connect_device(
-                    f"remote_{dev.alceml_bdev}", dev, this_node,
-                    bdev_names=node_bdev_names, reattach=reattach,
+                f"remote_{dev.alceml_bdev}", dev, this_node,
+                bdev_names=node_bdev_names, reattach=reattach,
             )
             remote_devices.append(remote_bdev)
 
@@ -810,8 +809,8 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
         try:
             remote_device.remote_bdev = connect_device(
-                    f"remote_{org_dev.jm_bdev}", org_dev, this_node,
-                    bdev_names=node_bdev_names, reattach=True,
+                f"remote_{org_dev.jm_bdev}", org_dev, this_node,
+                bdev_names=node_bdev_names, reattach=True,
             )
         except RuntimeError:
             logger.error(f'Failed to connect to {org_dev.get_id()}')
@@ -819,12 +818,14 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
 
     return new_devs
 
+
 def ifc_is_tcp(nic):
     addrs = psutil.net_if_addrs().get(nic, [])
     for addr in addrs:
         if addr.family == socket.AF_INET:
             return True
     return False
+
 
 def ifc_is_roce(nic):
     rdma_path = "/sys/class/infiniband/"
@@ -839,7 +840,8 @@ def ifc_is_roce(nic):
                     return True
     return False
 
-def add_node(cluster_id, node_addr, iface_name,data_nics_list,
+
+def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
@@ -931,7 +933,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         # Calculate pool count
         max_prov = 0
         if node_config.get("max_size"):
-           max_prov = int(utils.parse_size(node_config.get("max_size")))
+            max_prov = int(utils.parse_size(node_config.get("max_size")))
         if max_prov < 0:
             logger.error(f"Incorrect max-prov value {max_prov}")
             return False
@@ -962,13 +964,13 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         # Calculate minimum sys memory
         minimum_sys_memory = node_config.get("sys_memory")
 
-        #satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
+        # satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
         #                                                  minimum_sys_memory,
         #                                                  int(memory_details['free']),
         #                                                  int(memory_details['huge_total']))
         max_lvol = node_config.get("max_lvol")
 
-        #if not satisfied:
+        # if not satisfied:
         #    logger.warning(
         #        f"Not enough memory for the provided max_lvo: {max_lvol}, max_prov: {max_prov}..")
         ssd_pcie = node_config.get("ssd_pcis")
@@ -1019,10 +1021,10 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
                 start_storage_node_api_container(mgmt_ip, cluster_ip)
 
         total_mem = minimum_hp_memory
-        #for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        # for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         #    if n.api_endpoint == node_addr:
         #        total_mem += n.spdk_mem
-        #total_mem += utils.parse_size("500m")
+        # total_mem += utils.parse_size("500m")
 
         logger.info("Deploying SPDK")
         results = None
@@ -1037,7 +1039,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
                 namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
-                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode, socket=0)
+                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
+                socket=0)
             time.sleep(5)
 
         except Exception as e:
@@ -1050,8 +1053,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
 
         data_nics = []
 
-        active_tcp=False
-        active_rdma=False
+        active_tcp = False
+        active_rdma = False
         fabric_tcp = cluster.fabric_tcp
         fabric_rdma = cluster.fabric_rdma
         names = data_nics_list or [mgmt_iface]
@@ -1060,17 +1063,17 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         logger.debug(f"Data nics ports are: {names}")
         for nic in names:
             device = node_info['network_interface'][nic]
-            base_ifc_cfg={
-                      'uuid': str(uuid.uuid4()),
-                      'if_name': nic,
-                      'ip4_address': device['ip'],
-                      'status': device['status'],
-                       'net_type': device['net_type'],}
+            base_ifc_cfg = {
+                'uuid': str(uuid.uuid4()),
+                'if_name': nic,
+                'ip4_address': device['ip'],
+                'status': device['status'],
+                'net_type': device['net_type'], }
             if fabric_rdma and snode_api.ifc_is_roce(nic):
                 cfg = base_ifc_cfg.copy()
                 cfg['trtype'] = "RDMA"
                 data_nics.append(IFace(cfg))
-                active_rdma=True
+                active_rdma = True
                 if fabric_tcp and snode_api.ifc_is_tcp(nic):
                     active_tcp = True
             elif fabric_tcp and snode_api.ifc_is_tcp(nic):
@@ -1119,8 +1122,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         snode.enable_ha_jm = enable_ha_jm
         snode.ha_jm_count = ha_jm_count
         snode.minimum_sys_memory = minimum_sys_memory
-        snode.active_tcp=active_tcp
-        snode.active_rdma=active_rdma
+        snode.active_tcp = active_tcp
+        snode.active_rdma = active_rdma
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -1245,15 +1248,15 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             return False
 
         if cluster.fabric_tcp:
-           ret = rpc_client.transport_create("TCP", qpair,512*(req_cpu_count+1))
-           if not ret:
-              logger.error(f"Failed to create transport TCP with qpair: {qpair}")
-              return False
+            ret = rpc_client.transport_create("TCP", qpair, 512 * (req_cpu_count + 1))
+            if not ret:
+                logger.error(f"Failed to create transport TCP with qpair: {qpair}")
+                return False
         if cluster.fabric_rdma:
-           ret = rpc_client.transport_create("RDMA", qpair,512*(req_cpu_count+1))
-           if not ret:
-              logger.error(f"Failed to create transport RDMA with qpair: {qpair}")
-              return False
+            ret = rpc_client.transport_create("RDMA", qpair, 512 * (req_cpu_count + 1))
+            if not ret:
+                logger.error(f"Failed to create transport RDMA with qpair: {qpair}")
+                return False
 
         # 7- set jc singleton mask
         if snode.jc_singleton_mask:
@@ -1303,8 +1306,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             logger.info("Setting Alcemls QOS weights")
             ret = rpc_client.alceml_set_qos_weights(qos_controller.get_qos_weights_list(cluster_id))
             if not ret:
-              logger.error("Failed to set Alcemls QOS")
-              return False
+                logger.error("Failed to set Alcemls QOS")
+                return False
 
         logger.info("Connecting to remote devices")
         remote_devices = _connect_to_remote_devs(snode)
@@ -1318,7 +1321,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
 
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         old_status = snode.status
-        snode.status =  StorageNode.STATUS_ONLINE
+        snode.status = StorageNode.STATUS_ONLINE
         snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
         snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
         snode.write_to_db(db_controller.kv_store)
@@ -1338,7 +1341,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
                 return False
             node.write_to_db(kv_store)
 
-        if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY, Cluster.STATUS_IN_EXPANSION]:
+        if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY,
+                                  Cluster.STATUS_IN_EXPANSION]:
             logger.warning(
                 f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
             continue
@@ -1522,7 +1526,6 @@ def restart_storage_node(
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[], force_lvol_recreate=False):
-
     db_controller = DBController()
     logger.info("Restarting storage node")
     try:
@@ -1604,23 +1607,22 @@ def restart_storage_node(
                         snode_api.bind_device_to_spdk(dev['address'])
         else:
             node_ip = None
-    active_tcp=False
-    active_rdma=False
+    active_tcp = False
+    active_rdma = False
     fabric_tcp = cluster.fabric_tcp
     fabric_rdma = cluster.fabric_rdma
     snode_api = SNodeClient(snode.api_endpoint, timeout=5 * 60, retry=3)
     for nic in snode.data_nics:
         if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
             nic.trtype = "RDMA"
-            active_rdma=True
+            active_rdma = True
             if fabric_tcp and snode_api.ifc_is_tcp(nic["if_name"]):
                 active_tcp = True
         elif fabric_tcp and snode_api.ifc_is_tcp(nic["if_name"]):
             nic.trtype = "TCP"
             active_tcp = True
-    snode.active_tcp=active_tcp
-    snode.active_rdma=active_rdma
-
+    snode.active_tcp = active_tcp
+    snode.active_rdma = active_rdma
 
     logger.info(f"Restarting Storage node: {snode.mgmt_ip}")
     node_info, _ = snode_api.info()
@@ -1643,8 +1645,8 @@ def restart_storage_node(
 
     if max_prov > 0:
         try:
-          max_prov = int(utils.parse_size(max_prov))
-          snode.max_prov = max_prov
+            max_prov = int(utils.parse_size(max_prov))
+            snode.max_prov = max_prov
         except Exception as e:
             logger.debug(e)
             logger.error(f"Invalid max_prov value: {max_prov}")
@@ -1656,7 +1658,8 @@ def restart_storage_node(
         snode.spdk_image = spdk_image
 
     # Calculate minimum huge page memory
-    minimum_hp_memory = utils.calculate_minimum_hp_memory(snode.iobuf_small_pool_count, snode.iobuf_large_pool_count, snode.max_lvol,
+    minimum_hp_memory = utils.calculate_minimum_hp_memory(snode.iobuf_small_pool_count, snode.iobuf_large_pool_count,
+                                                          snode.max_lvol,
                                                           max_prov,
                                                           len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask)))
 
@@ -1674,13 +1677,13 @@ def restart_storage_node(
         return False
 
     # Calculate minimum sys memory
-    #minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov, memory_details['total'])
-    #minimum_sys_memory = snode.minimum_sys_memory
-    #satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
+    # minimum_sys_memory = utils.calculate_minimum_sys_memory(snode.max_prov, memory_details['total'])
+    # minimum_sys_memory = snode.minimum_sys_memory
+    # satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
     #                                                  minimum_sys_memory,
     #                                                  int(memory_details['free']),
     #                                                  int(memory_details['huge_total']))
-    #if not satisfied:
+    # if not satisfied:
     #    logger.error(
     #        f"Not enough memory for the provided max_lvo: {snode.max_lvol}, max_snap: {snode.max_snap}, max_prov: {utils.humanbytes(snode.max_prov)}.. Exiting")
     minimum_sys_memory = snode.minimum_sys_memory or 0
@@ -1704,10 +1707,10 @@ def restart_storage_node(
         cluster_ip = utils.get_k8s_node_ip()
 
     total_mem = minimum_hp_memory
-    #for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+    # for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
     #    if n.api_endpoint == snode.api_endpoint:
     #        total_mem += n.spdk_mem
-    #total_mem+= utils.parse_size("500m")
+    # total_mem+= utils.parse_size("500m")
 
     results = None
     try:
@@ -1718,7 +1721,8 @@ def restart_storage_node(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode, socket=snode.socket)
+            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
+            socket=snode.socket)
 
     except Exception as e:
         logger.error(e)
@@ -1803,12 +1807,12 @@ def restart_storage_node(
     qpair = cluster.qpair_count
     req_cpu_count = len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask))
     if cluster.fabric_tcp:
-        ret = rpc_client.transport_create("TCP", qpair, 512*(req_cpu_count+1))
+        ret = rpc_client.transport_create("TCP", qpair, 512 * (req_cpu_count + 1))
         if not ret:
             logger.error(f"Failed to create transport TCP with qpair: {qpair}")
             return False
     if cluster.fabric_rdma:
-        ret = rpc_client.transport_create("RDMA", qpair, 512*(req_cpu_count+1))
+        ret = rpc_client.transport_create("RDMA", qpair, 512 * (req_cpu_count + 1))
         if not ret:
             logger.error(f"Failed to create transport RDMA with qpair: {qpair}")
             return False
@@ -1841,10 +1845,11 @@ def restart_storage_node(
     active_devices = []
     removed_devices = []
     known_devices_sn = []
-    devices_sn_dict = {d.serial_number:d for d in nvme_devs}
+    devices_sn_dict = {d.serial_number: d for d in nvme_devs}
     for db_dev in snode.nvme_devices:
         known_devices_sn.append(db_dev.serial_number)
-        if db_dev.status in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_REMOVED]:
+        if db_dev.status in [NVMeDevice.STATUS_FAILED_AND_MIGRATED, NVMeDevice.STATUS_FAILED,
+                             NVMeDevice.STATUS_REMOVED]:
             removed_devices.append(db_dev)
             continue
         if db_dev.serial_number in devices_sn_dict.keys():
@@ -1853,7 +1858,7 @@ def restart_storage_node(
             if not db_dev.is_partition and not found_dev.is_partition:
                 db_dev.device_name = found_dev.device_name
                 db_dev.nvme_bdev = found_dev.nvme_bdev
-                db_dev.nvme_controller =found_dev.nvme_controller
+                db_dev.nvme_controller = found_dev.nvme_controller
                 db_dev.pcie_address = found_dev.pcie_address
 
             # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
@@ -1882,7 +1887,7 @@ def restart_storage_node(
             snode.nvme_devices.append(dev)
 
     snode.write_to_db(db_controller.kv_store)
-    if node_ip and len(new_devices)>0:
+    if node_ip and len(new_devices) > 0:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
@@ -1928,7 +1933,6 @@ def restart_storage_node(
     snode.health_check = True
     snode.lvstore_status = ""
     snode.write_to_db(db_controller.kv_store)
-
 
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     for db_dev in snode.nvme_devices:
@@ -2028,11 +2032,11 @@ def restart_storage_node(
             pools = db_controller.get_pools()
             for pool in pools:
                 ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id,
-                                                        pool.max_rw_ios_per_sec,
-                                                        pool.max_rw_mbytes_per_sec,
-                                                        pool.max_r_mbytes_per_sec,
-                                                        pool.max_w_mbytes_per_sec,
-                                                        )
+                                                         pool.max_rw_ios_per_sec,
+                                                         pool.max_rw_mbytes_per_sec,
+                                                         pool.max_r_mbytes_per_sec,
+                                                         pool.max_w_mbytes_per_sec,
+                                                         )
                 if not ret:
                     logger.error("RPC failed bdev_lvol_set_qos_limit")
                     return False
@@ -2382,7 +2386,7 @@ def suspend_storage_node(node_id, force=False):
     if snode.lvstore_stack_secondary_1:
         nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
         if nodes:
-           for node in nodes:
+            for node in nodes:
                 try:
                     fw_api.firewall_set_port(
                         node.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
@@ -2408,7 +2412,6 @@ def suspend_storage_node(node_id, force=False):
     rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
     rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
     time.sleep(1)
-
 
     logger.info("Done")
     return True
@@ -2461,7 +2464,7 @@ def resume_storage_node(node_id):
         port_type = "udp"
     nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
     if nodes:
-       for node in nodes:
+        for node in nodes:
             try:
                 fw_api.firewall_set_port(
                     node.lvol_subsys_port, port_type, "allow", snode.rpc_port)
@@ -2693,8 +2696,8 @@ def upgrade_automated_deployment_config():
         return False
 
 
-def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked, cores_percentage=0):
-
+def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
+                                         cores_percentage=0, force=False, device_model="", size_range=""):
     # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
     total_cores = os.cpu_count() or 0
     if total_cores < 6:
@@ -2705,7 +2708,8 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     utils.load_kernel_module("uio_pci_generic")
 
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
-                                                       pci_allowed, pci_blocked, cores_percentage)
+                                                       pci_allowed, pci_blocked, cores_percentage, force=force,
+                                                       device_model=device_model, size_range=size_range)
     if not nodes_config or not nodes_config.get("nodes"):
         return False
     utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
@@ -2717,10 +2721,11 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     for node_config in nodes_config["nodes"]:
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-    #for numa, huge_page_memory in huge_page_memory_dict.items():
+    # for numa, huge_page_memory in huge_page_memory_dict.items():
     #    num_pages = huge_page_memory // (2048 * 1024)
     #    utils.set_hugepages_if_needed(numa, num_pages)
     return True
+
 
 def deploy(ifname, isolate_cores=False):
     if not ifname:
@@ -2745,7 +2750,8 @@ def deploy(ifname, isolate_cores=False):
     logger.info("Config Validated successfully.")
 
     logger.info("NVMe SSD devices found on node:")
-    stream = os.popen(f"lspci -Dnn | grep -i '\\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\\]'")
+    stream = os.popen(
+        f"lspci -Dnn | grep -i '\\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\\]'")
     for line in stream.readlines():
         logger.info(line.strip())
 
@@ -2812,6 +2818,17 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
 
 def deploy_cleaner():
     scripts.deploy_cleaner()
+
+
+def clean_devices(config_path):
+    with open(config_path) as f:
+        cfg = json.load(f)
+    ssd_pcis = [
+        pci
+        for node in cfg.get("nodes", [])
+        for pci in node.get("ssd_pcis", [])
+    ]
+    utils.clean_devices(ssd_pcis)
 
 
 def get_host_secret(node_id):
@@ -2903,12 +2920,12 @@ def health_check(node_id):
 
         #     subsystem = rpc_client.subsystem_list(dev.nvmf_nqn)
 
-            # dev.testing_bdev = test_name
-            # dev.alceml_bdev = alceml_name
-            # dev.pt_bdev = pt_name
-            # # nvme.nvmf_nqn = subsystem_nqn
-            # # nvme.nvmf_ip = IP
-            # # nvme.nvmf_port = 4420
+        # dev.testing_bdev = test_name
+        # dev.alceml_bdev = alceml_name
+        # dev.pt_bdev = pt_name
+        # # nvme.nvmf_nqn = subsystem_nqn
+        # # nvme.nvmf_ip = IP
+        # # nvme.nvmf_port = 4420
 
     except Exception as e:
         logger.error(f"Failed to connect to node's SPDK: {e}")
@@ -3033,7 +3050,6 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                     except Exception as e:
                         logger.error("Error establishing hublvol: %s", e)
 
-
     return True
 
 
@@ -3081,7 +3097,6 @@ def recreate_lvstore_on_sec(secondary_node):
             port_type = "udp"
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
             ### 3- block primary port
             fw_api.firewall_set_port(primary_node.lvol_subsys_port, port_type, "block", primary_node.rpc_port)
@@ -3107,7 +3122,6 @@ def recreate_lvstore_on_sec(secondary_node):
             except Exception as e:
                 logger.error("Error connecting to hublvol: %s", e)
                 # return False
-
 
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
             ### 8- allow port on primary
@@ -3220,7 +3234,8 @@ def recreate_lvstore(snode, force=False):
                     logger.info("Inflight IO NOT found, continuing")
                     break
             else:
-                logger.error(f"Timeout while checking for inflight IO after 10 seconds on node {snode.secondary_node_id}")
+                logger.error(
+                    f"Timeout while checking for inflight IO after 10 seconds on node {snode.secondary_node_id}")
 
         if sec_node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN]:
             logger.info(f"Secondary node is not online, forcing journal replication on node: {snode.get_id()}")
@@ -3358,7 +3373,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
     for iface in snode.data_nics:
-        if iface.ip4_address and lvol.fabric==iface.trtype.lower():
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(
                 lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
@@ -3373,9 +3388,9 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     lvol_obj.health_check = True
     lvol_obj.write_to_db()
     # set QOS
-    if lvol.rw_ios_per_sec or lvol.rw_mbytes_per_sec or lvol.r_mbytes_per_sec or lvol.w_mbytes_per_sec :
+    if lvol.rw_ios_per_sec or lvol.rw_mbytes_per_sec or lvol.r_mbytes_per_sec or lvol.w_mbytes_per_sec:
         lvol_controller.set_lvol(lvol.uuid, lvol.rw_ios_per_sec, lvol.rw_mbytes_per_sec,
-                 lvol.r_mbytes_per_sec , lvol.w_mbytes_per_sec)
+                                 lvol.r_mbytes_per_sec, lvol.w_mbytes_per_sec)
     return True, None
 
 
@@ -3412,7 +3427,7 @@ def get_sorted_ha_jms(current_node):
                 continue
             mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
             out.append(jm_id)
-    return out[:constants.HA_JM_COUNT-1]
+    return out[:constants.HA_JM_COUNT - 1]
 
 
 def get_node_jm_names(current_node, remote_node=None):
@@ -3460,8 +3475,8 @@ def get_secondary_nodes(current_node):
         if node.get_id() == current_node.get_id():
             nod_found = True
             continue
-        elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip :
-        # elif node.status == StorageNode.STATUS_ONLINE :
+        elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip:
+            # elif node.status == StorageNode.STATUS_ONLINE :
             if node.is_secondary_node:
                 nodes.append(node.get_id())
 
