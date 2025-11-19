@@ -724,6 +724,8 @@ def _connect_to_remote_devs(
         allowed_node_statuses.append(StorageNode.STATUS_RESTARTING)
         allowed_dev_statuses.append(NVMeDevice.STATUS_UNAVAILABLE)
 
+    devices_to_connect = []
+    connect_threads = []
     nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     # connect to remote devs
     for node_index, node in enumerate(nodes):
@@ -738,19 +740,36 @@ def _connect_to_remote_devs(
 
             if not dev.alceml_bdev:
                 raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
+            devices_to_connect.append(dev)
+            t = threading.Thread(
+                target=connect_device,
+                args=(f"remote_{dev.alceml_bdev}", dev, this_node, node_bdev_names, reattach,))
+            connect_threads.append(t)
+            t.start()
 
-            remote_bdev = RemoteDevice()
-            remote_bdev.uuid = dev.uuid
-            remote_bdev.alceml_name = dev.alceml_name
-            remote_bdev.node_id = dev.node_id
-            remote_bdev.size = dev.size
-            remote_bdev.status = NVMeDevice.STATUS_ONLINE
-            remote_bdev.nvmf_multipath = dev.nvmf_multipath
-            remote_bdev.remote_bdev = connect_device(
-                f"remote_{dev.alceml_bdev}", dev, this_node,
-                bdev_names=node_bdev_names, reattach=reattach,
-            )
-            remote_devices.append(remote_bdev)
+    for t in connect_threads:
+        t.join()
+
+    node_bdevs = rpc_client.get_bdevs()
+    if node_bdevs:
+        node_bdev_names = [b['name'] for b in node_bdevs]
+
+    for dev in devices_to_connect:
+        remote_bdev = RemoteDevice()
+        remote_bdev.uuid = dev.uuid
+        remote_bdev.alceml_name = dev.alceml_name
+        remote_bdev.node_id = dev.node_id
+        remote_bdev.size = dev.size
+        remote_bdev.status = NVMeDevice.STATUS_ONLINE
+        remote_bdev.nvmf_multipath = dev.nvmf_multipath
+        for bdev in node_bdev_names:
+            if bdev.startswith(f"remote_{dev.alceml_bdev}"):
+                remote_bdev.remote_bdev = bdev
+                break
+        if not remote_bdev.remote_bdev:
+            logger.error(f"Failed to connect to remote device {dev.alceml_name}")
+            continue
+        remote_devices.append(remote_bdev)
 
     return remote_devices
 
@@ -2169,21 +2188,6 @@ def list_storage_devices(node_id, is_json):
             "Status": snode.jm_device.status,
             "IO Err": snode.jm_device.io_error,
             "Health": snode.jm_device.health_check
-        })
-
-    for jm_id in snode.jm_ids:
-        try:
-            jm_device = db_controller.get_jm_device_by_id(jm_id)
-        except KeyError:
-            continue
-
-        jm_devices.append({
-            "UUID": jm_device.uuid,
-            "Name": jm_device.device_name,
-            "Size": utils.humanbytes(jm_device.size),
-            "Status": jm_device.status,
-            "IO Err": jm_device.io_error,
-            "Health": jm_device.health_check
         })
 
     for remote_device in snode.remote_devices:
