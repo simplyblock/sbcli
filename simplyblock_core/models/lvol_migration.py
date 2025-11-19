@@ -4,6 +4,7 @@ from enum import Enum
 from typing import List, Optional
 import uuid
 import asyncio
+import storage_node
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ class ObjectMigrationState(str, Enum):
     NEW = "new"
     RUNNING = "running"
     SUSPENDED = "suspended"
-    CANCELED = "canceled"
+    CANCELED = "failed"
     DONE = "done"
 
 
@@ -45,7 +46,17 @@ class ObjectMigrationState(str, Enum):
 class LogicalVolumeRef:
     """Reference to a logical volume participating in a migration."""
     name: str  # "LVS/LV"
-    namespace_uuid: str
+    uuid: str
+    namespace_id: str
+    nqn : str
+    node_id: str
+    sec_node_id :str
+    target_node_id : str
+    target_sec_node_id : str
+    mapid: str
+    target_uuid: str
+    cloned : str
+    state : ObjectMigrationState
     crypto_bdev_name: Optional[str] = None
 
 
@@ -80,19 +91,11 @@ class MigrationStream:
     Contains a linked list of snapshot references.
     Tracks only LV migration state and metadata.
     """
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    status: StreamState = StreamState.NEW
-
-    # Logical volume info and per-LV migration metadata
-    lvol_name: Optional[str] = None
-    lvol_state: ObjectMigrationState = ObjectMigrationState.NEW
-    lvol_namespace: Optional[str] = None
-    lvol_nqn: Optional[str] = None
-    lvol_source_uuid: Optional[str] = None
-    lvol_target_uuid: Optional[str] = None
-
+    volume : LogicalVolumeRef
     # Linked list of snapshot references (per-stream)
     head_snapshot_ref: Optional[SnapshotRef] = None
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    status: StreamState = StreamState.NEW
 
     def append_snapshot(self, snapshot: Snapshot):
         """Append a snapshot reference to the stream linked list."""
@@ -122,25 +125,21 @@ class MigrationObject:
     Full migration object, containing multiple streams and logical volumes.
     Snapshots exist independently and are referenced by streams.
     """
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    status: MigrationState = MigrationState.NEW
 
-    primary_source: Optional[str] = None
-    secondary_source: Optional[str] = None
-    primary_target: Optional[str] = None
-    secondary_target: Optional[str] = None
+    main_logical_volume : LogicalVolumeRef
+    node_pri : storage_node.StorageNode
+    node_sec: storage_node.StorageNode
+    target_node_pri: storage_node.StorageNode
+    target_node_sec: storage_node.StorageNode
 
-    logical_volumes: List[LogicalVolumeRef] = field(default_factory=list)
-
-    # Top-level subsystem NQN (if any)
-    nqn: Optional[str] = None
-
-    streams: List[MigrationStream] = field(default_factory=list)
-
+    clones: List[LogicalVolumeRef]
+    streams: List[MigrationStream]
     # Global snapshot objects (shared across streams)
-    snapshots: List[Snapshot] = field(default_factory=list)
-
+    snapshots: List[Snapshot]
     # Async queue for polling migration completion (set externally)
     completion_poll_queue: Optional[asyncio.Queue] = None
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    status: MigrationState = MigrationState.NEW
 
 

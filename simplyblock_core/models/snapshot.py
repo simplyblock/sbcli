@@ -29,3 +29,4 @@ class SnapShot(BaseModel):
     deletion_status: str = ""
     status: str = ""
     fabric: str = "tcp"
+    frozen: bool = False
