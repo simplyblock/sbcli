@@ -2641,12 +2641,31 @@ def clean_devices(nvme_devices_list):
     except json.JSONDecodeError as e:
         logger.error(f"Error decoding JSON: {e}")
 
->> >> >> > a1301606(Format
-nvme
-devices
-when
-run
-sbcli
-sn
-configure
-with --force(  # 760))
+
+def create_rpc_socket_mount():
+    try:
+
+        logger.info("create RPC socket mount")
+        mount_point = "/mnt/ramdisk"
+        size = "1G"
+        fstab_entry = f"tmpfs {mount_point} tmpfs size={size},mode=1777,noatime 0 0\n"
+
+        # Create the mount point if it doesn't exist
+        os.makedirs(mount_point, exist_ok=True)
+
+        # Add to /etc/fstab if not already present
+        with open("/etc/fstab", "r+") as fstab:
+            lines = fstab.readlines()
+            if not any(mount_point in line for line in lines):
+                fstab.write(fstab_entry)
+                print(f"Added fstab entry for {mount_point}")
+            else:
+                print(f"fstab entry for {mount_point} already exists")
+
+        # Mount the RAM disk immediately
+        subprocess.run(["mount", mount_point], check=True)
+
+        # Verify
+        subprocess.run(["df", "-h", mount_point])
+    except Exception as e:
+        logger.error(e)

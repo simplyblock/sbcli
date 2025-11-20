@@ -2706,6 +2706,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     for node_config in nodes_config["nodes"]:
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+    utils.create_rpc_socket_mount()
     # for numa, huge_page_memory in huge_page_memory_dict.items():
     #    num_pages = huge_page_memory // (2048 * 1024)
     #    utils.set_hugepages_if_needed(numa, num_pages)
