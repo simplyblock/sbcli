@@ -268,6 +268,7 @@ class SPDKParams(BaseModel):
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
+    socket: Optional[int] = Field(None, ge=0)
 
 
 @api.post('/spdk_process_start', responses={
@@ -353,7 +354,8 @@ def spdk_process_start(body: SPDKParams):
             'MODE': body.cluster_mode,
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
-            'TOTAL_HP': total_mem_mib
+            'TOTAL_HP': total_mem_mib,
+            'NSOCKET': body.socket
         }
 
         if ubuntu_host:
