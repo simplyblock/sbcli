@@ -229,8 +229,9 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
                         passed = False
                 else:
                     lvs_info_dict.append({"Key": k, "Value": v, "expected": " "})
-            for line in utils.print_table(lvs_info_dict).splitlines():
-                logger.info(line)
+            if not passed:
+                for line in utils.print_table(lvs_info_dict).splitlines():
+                    logger.info(line)
 
     except Exception as e:
         logger.exception(e)
@@ -326,8 +327,9 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
                 else:
                     lvs_info_dict.append({"Key": k, "Value": v, "expected": " "})
-            for line in utils.print_table(lvs_info_dict).splitlines():
-                logger.info(line)
+            if not passed:
+                for line in utils.print_table(lvs_info_dict).splitlines():
+                    logger.info(line)
     except Exception as e:
         logger.exception(e)
         return False
@@ -404,9 +406,9 @@ def _check_node_lvstore(
             else:
                 results, is_passed = distr_controller.parse_distr_cluster_map(ret, nodes, devices)
                 if results:
-                    logger.info(utils.print_table(results))
                     logger.info(f"Checking Distr map ... {is_passed}")
                     if not is_passed and auto_fix:
+                        logger.info(utils.print_table(results))
                         for result in results:
                             if result['Results'] == 'failed':
                                 if result['Kind'] == "Device":
