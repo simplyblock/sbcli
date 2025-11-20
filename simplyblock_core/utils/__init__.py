@@ -2621,7 +2621,7 @@ def clean_devices(nvme_devices_list):
             for subsystem in device_entry.get('Subsystems', []):
                 for controller in subsystem.get('Controllers', []):
                     # 3. Pull out the desired fields
-                    if len(controller.get("Namespaces")) > 0:
+                    if len(controller.get("Namespaces")) > 0 and controller.get("Address") in nvme_devices_list:
                         controllers_list.append({
                             "NVMe_Controller": controller.get("Controller"),
                             "PCI_Address": controller.get("Address"),
