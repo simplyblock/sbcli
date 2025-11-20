@@ -355,7 +355,7 @@ def spdk_process_start(body: SPDKParams):
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib,
-            'NSOCKET' : body.socket
+            'NSOCKET': body.socket
         }
 
         if ubuntu_host:
