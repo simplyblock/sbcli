@@ -48,8 +48,9 @@ class StorageNodeParams(BaseModel):
     iobuf_small_pool_count: int = Field(0)
     iobuf_large_pool_count: int = Field(0)
     cr_name: str
-    cr_namespace: str 
+    cr_namespace: str
     cr_plural: str
+    ha_jm_count: int = Field(3)
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -75,6 +76,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams):
             'cr_name': parameters.cr_name,
             'cr_namespace': parameters.cr_namespace,
             'cr_plural': parameters.cr_plural,
+            "ha_jm_count": parameters.ha_jm_count,
         }
     )
     if not task_id_or_false:
@@ -112,7 +114,7 @@ def delete(
     )
     if none_or_false == False:  # noqa
         raise ValueError('Failed to remove storage node')
-    
+
     if force_delete:
         none_or_false = storage_node_ops.delete_storage_node(
             storage_node.get_id(), force=force_delete
