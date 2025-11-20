@@ -67,7 +67,7 @@ def rpc_call(req):
     if not response and len(buf) > 0:
         raise ValueError('Invalid response')
 
-    logger.info(f"Response:{req_time} data: {buf}")
+    logger.info(f"Response:{req_time}")
 
     return buf
 
