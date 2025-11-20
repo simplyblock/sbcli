@@ -157,6 +157,7 @@ try:
     rpc_port = int(rpc_port)
 except Exception:
     rpc_port = 8080
+rpc_sock = f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
 
 is_threading_enabled = bool(is_threading_enabled)
 run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)
