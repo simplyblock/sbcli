@@ -3683,7 +3683,6 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
         type = bdev['type']
         name = bdev['name']
         params = bdev['params']
-        ret = False
         if name in node_bdev_names:
             continue
 
@@ -3702,9 +3701,9 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
             t = threading.Thread(target=_create_distr, args=(snode, name, params,))
             thread_list.append(t)
             t.start()
+            ret = True
 
-        elif type == "bdev_lvstore":
-            if  lvstore_stack and not primary_node:
+        elif type == "bdev_lvstore" and lvstore_stack and not primary_node:
                 ret = rpc_client.create_lvstore(**params)
 
         elif type == "bdev_ptnonexcl":
