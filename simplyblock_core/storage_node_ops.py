@@ -2394,26 +2394,25 @@ def suspend_storage_node(node_id, force=False):
                         node.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
                     fw_api.firewall_set_port(
                         node.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
+                    time.sleep(0.5)
+                    rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
+                    rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
                 except Exception as e:
                     logger.error(e)
                     return False
-                time.sleep(0.5)
-                rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
-                rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
     try:
         fw_api.firewall_set_port(
             snode.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
         fw_api.firewall_set_port(
             snode.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
+        time.sleep(0.5)
+        rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
+        rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+        time.sleep(1)
     except Exception as e:
         logger.error(e)
         return False
-
-    time.sleep(0.5)
-    rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
-    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    time.sleep(1)
 
 
     logger.info("Done")
