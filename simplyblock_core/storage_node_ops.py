@@ -3428,7 +3428,7 @@ def get_sorted_ha_jms(current_node):
                 continue
             mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
             out.append(jm_id)
-    return out[:constants.HA_JM_COUNT - 1]
+    return out[:current_node.ha_jm_count - 1]
 
 
 def get_node_jm_names(current_node, remote_node=None):
@@ -3459,7 +3459,7 @@ def get_node_jm_names(current_node, remote_node=None):
                     if jm_dev.get_id() == jm_id:
                         jm_list.append(jm_dev.remote_bdev)
                         break
-    return jm_list[:constants.HA_JM_COUNT]
+    return jm_list[:current_node.ha_jm_count]
 
 
 def get_secondary_nodes(current_node):
