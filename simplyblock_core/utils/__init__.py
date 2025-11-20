@@ -2901,7 +2901,6 @@ def clean_devices(config_path, format, force):
     except json.JSONDecodeError as e:
         logger.error(f"Error decoding JSON: {e}")
 
-
 def create_rpc_socket_mount():
     try:
 
