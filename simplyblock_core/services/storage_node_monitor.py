@@ -288,9 +288,12 @@ def node_port_check_fun(snode):
             ports.append(snode.lvol_subsys_port)
 
         for port in ports:
-            ret = health_controller._check_port_on_node(snode, port)
-            logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
-            node_port_check &= ret
+            try:
+                ret = health_controller.check_port_on_node(snode, port)
+                logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
+                node_port_check &= ret
+            except Exception:
+                logger.error("Check node port failed, connection error")
 
         node_data_nic_ping_check = False
         for data_nic in snode.data_nics:

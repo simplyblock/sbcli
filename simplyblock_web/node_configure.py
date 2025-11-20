@@ -16,7 +16,6 @@ from simplyblock_core.storage_node_ops import (
 )
 from simplyblock_cli.clibase import range_type
 from simplyblock_web import node_utils_k8s
-import subprocess
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
