@@ -3653,6 +3653,15 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
 
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
+    def _create_distr(snode, name, params):
+        try:
+            rpc_client.bdev_distrib_create(**params)
+        except Exception:
+            logger.error("Failed to create bdev distrib")
+        ret = distr_controller.send_cluster_map_to_distr(snode, name)
+        if not ret:
+            logger.error("Failed to send cluster map")
+
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
@@ -3669,11 +3678,12 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     else:
         node_bdev_names = []
 
+    thread_list = []
     for bdev in stack:
         type = bdev['type']
         name = bdev['name']
         params = bdev['params']
-
+        ret = False
         if name in node_bdev_names:
             continue
 
@@ -3689,23 +3699,21 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 snode.distrib_cpu_index = (snode.distrib_cpu_index + 1) % len(snode.distrib_cpu_cores)
 
             params['full_page_unmap'] = cluster.full_page_unmap
-            ret = rpc_client.bdev_distrib_create(**params)
-            if ret:
-                ret = distr_controller.send_cluster_map_to_distr(snode, name)
-                if not ret:
-                    return False, "Failed to send cluster map"
-                # time.sleep(1)
+            t = threading.Thread(target=_create_distr, args=(snode, name, params,))
+            thread_list.append(t)
+            t.start()
 
-        elif type == "bdev_lvstore" and lvstore_stack and not primary_node:
-            ret = rpc_client.create_lvstore(**params)
-            # if ret and snode.jm_vuid > 0:
-            #     rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
+        elif type == "bdev_lvstore":
+            if  lvstore_stack and not primary_node:
+                ret = rpc_client.create_lvstore(**params)
 
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
 
         elif type == "bdev_raid":
-
+            if thread_list:
+                for t in thread_list:
+                    t.join()
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
@@ -3723,6 +3731,9 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 _remove_bdev_stack(created_bdevs[::-1], rpc_client)
             return False, f"Failed to create BDev: {name}"
 
+    if thread_list:
+        for t in thread_list:
+            t.join()
     return True, None
 
 
