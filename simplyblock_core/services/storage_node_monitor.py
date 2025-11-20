@@ -72,13 +72,15 @@ def get_next_cluster_status(cluster_id):
                 continue
             online_nodes += 1
             # check for jm rep tasks:
-            ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
-            if ret:
+            try:
+                ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
                 for jm in ret:
                     if ret[jm] is False: # jm is not ready (has active replication task)
                         jm_replication_tasks = True
                         logger.warning("Replication task found!")
                         break
+            except Exception:
+                logger.warning("Failed to get replication task!")
         elif node.status == StorageNode.STATUS_REMOVED:
             pass
         else:
@@ -288,9 +290,12 @@ def node_port_check_fun(snode):
             ports.append(snode.lvol_subsys_port)
 
         for port in ports:
-            ret = health_controller._check_port_on_node(snode, port)
-            logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
-            node_port_check &= ret
+            try:
+                ret = health_controller.check_port_on_node(snode, port)
+                logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
+                node_port_check &= ret
+            except Exception:
+                logger.error("Check node port failed, connection error")
 
         node_data_nic_ping_check = False
         for data_nic in snode.data_nics:
@@ -430,5 +435,8 @@ while True:
                 t.start()
                 threads_maps[node_id] = t
 
-        update_cluster_status(cluster_id)
+        try:
+            update_cluster_status(cluster_id)
+        except Exception:
+            logger.error("Error while updating cluster status")
     time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)

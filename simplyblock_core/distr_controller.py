@@ -46,8 +46,9 @@ def send_node_status_event(node, node_status, target_node=None):
             continue
         logger.info(f"Sending to: {node.get_id()}")
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
-        ret = rpc_client.distr_status_events_update(events)
-        if not ret:
+        try:
+            rpc_client.distr_status_events_update(events)
+        except Exception:
             logger.warning("Failed to send event update")
 
 
@@ -95,9 +96,9 @@ def send_dev_status_event(device, status, target_node=None):
             "storage_ID": storage_ID,
             "status": dev_status}]}
         logger.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
-        ret = rpc_client.distr_status_events_update(events)
-        if not ret:
+        try:
+            node.rpc_client(timeout=3, retry=1).distr_status_events_update(events)
+        except Exception:
             logger.warning("Failed to send event update")
 
 
@@ -259,38 +260,26 @@ def parse_distr_cluster_map(map_string, nodes=None, devices=None):
     return results, passed
 
 
-def send_cluster_map_to_node(node):
+def send_cluster_map_to_node(node: StorageNode):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
-    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10)
-
-    # if node.lvstore_stack_secondary_1:
-    #     for snode in db_controller.get_primary_storage_nodes_by_secondary_node_id(node.get_id()):
-    #         for bdev in snode.lvstore_stack:
-    #             if bdev['type'] == "bdev_distr":
-    #                 cluster_map_data = get_distr_cluster_map(snodes, node, bdev["name"])
-    #                 ret = rpc_client.distr_send_cluster_map(cluster_map_data)
-    #                 if not ret:
-    #                     logger.error("Failed to send cluster map")
-    #                     return False
-    #     return True
-    # else:
     cluster_map_data = get_distr_cluster_map(snodes, node)
-    ret = rpc_client.distr_send_cluster_map(cluster_map_data)
-    if not ret:
+    try:
+        node.rpc_client(timeout=10).distr_send_cluster_map(cluster_map_data)
+    except Exception:
         logger.error("Failed to send cluster map")
         logger.info(cluster_map_data)
         return False
     return True
 
 
-def send_cluster_map_to_distr(node, distr_name):
+def send_cluster_map_to_distr(node: StorageNode, distr_name: str):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(node.cluster_id)
-    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10)
     cluster_map_data = get_distr_cluster_map(snodes, node, distr_name)
-    ret = rpc_client.distr_send_cluster_map(cluster_map_data)
-    if not ret:
+    try:
+        node.rpc_client(timeout=10).distr_send_cluster_map(cluster_map_data)
+    except Exception:
         logger.error("Failed to send cluster map")
         logger.info(cluster_map_data)
         return False
@@ -301,14 +290,13 @@ def send_cluster_map_add_node(snode, target_node):
     if target_node.status != StorageNode.STATUS_ONLINE:
         return False
     logger.info(f"Sending to: {target_node.get_id()}")
-    rpc_client = RPCClient(target_node.mgmt_ip, target_node.rpc_port, target_node.rpc_username, target_node.rpc_password, timeout=5)
-
     cluster_map_data = get_distr_cluster_map([snode], target_node)
     cl_map = {
         "map_cluster": cluster_map_data['map_cluster'],
         "map_prob": cluster_map_data['map_prob']}
-    ret = rpc_client.distr_add_nodes(cl_map)
-    if not ret:
+    try:
+        target_node.rpc_client(timeout=10).distr_add_nodes(cl_map)
+    except Exception:
         logger.error("Failed to send cluster map")
         return False
     return True
@@ -362,8 +350,9 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
                 "weight": dev_w_gib,
             }}
         }
-        ret = rpc_client.distr_add_devices(cl_map)
-        if not ret:
+        try:
+            rpc_client.distr_add_devices(cl_map)
+        except Exception:
             logger.error("Failed to send cluster map")
             return False
     return True

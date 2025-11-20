@@ -1,34 +1,58 @@
-
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: csi-hostpath-node-sa
+  name: csi-hostpathplugin-sa
   namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: csi-hostpath-node
+  name: csi-hostpathplugin
 rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "update"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["storage.k8s.io"]
-    resources: ["volumeattachments"]
-    verbs: ["get", "list", "watch", "update"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csistoragecapacities"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update", "get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: csi-hostpath-node
+  name: csi-hostpathplugin
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: csi-hostpath-node
+  name: csi-hostpathplugin
 subjects:
   - kind: ServiceAccount
-    name: csi-hostpath-node-sa
+    name: csi-hostpathplugin-sa
     namespace: {{ .Release.Namespace }}
+
 ---
 kind: DaemonSet
 apiVersion: apps/v1
@@ -54,8 +78,54 @@ spec:
         app.kubernetes.io/name: csi-hostpathplugin
         app.kubernetes.io/component: plugin
     spec:
-      serviceAccountName: csi-hostpath-node-sa
+      serviceAccountName: csi-hostpathplugin-sa
       containers:
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v6.0.0
+          args:
+            - -v=5
+            - --csi-address=/csi/csi.sock
+            - --feature-gates=Topology=true
+            - --node-deployment=true
+            - --strict-topology=true
+            - --immediate-topology=false
+            - --worker-threads=5
+          env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: spec.nodeName
+          - name: NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          securityContext:
+            # This is necessary only for systems with SELinux, where
+            # non-privileged sidecar containers cannot access unix domain socket
+            # created by privileged CSI driver container.
+            privileged: true
+          volumeMounts:
+            - mountPath: /csi
+              name: socket-dir
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v2.0.0
+          args:
+            - -v=5
+            - -csi-address=/csi/csi.sock
+          securityContext:
+            # This is necessary only for systems with SELinux, where
+            # non-privileged sidecar containers cannot access unix domain socket
+            # created by privileged CSI driver container.
+            privileged: true
+          volumeMounts:
+            - mountPath: /csi
+              name: socket-dir
+
         - name: node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
           args:

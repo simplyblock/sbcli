@@ -1065,7 +1065,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=0)
+                socket=socket)
             time.sleep(5)
 
         except Exception as e:
@@ -2402,26 +2402,25 @@ def suspend_storage_node(node_id, force=False):
                         node.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
                     fw_api.firewall_set_port(
                         node.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
+                    time.sleep(0.5)
+                    rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
+                    rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
                 except Exception as e:
                     logger.error(e)
                     return False
-                time.sleep(0.5)
-                rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
-                rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
     try:
         fw_api.firewall_set_port(
             snode.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
         fw_api.firewall_set_port(
             snode.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
+        time.sleep(0.5)
+        rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
+        rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
+        time.sleep(1)
     except Exception as e:
         logger.error(e)
         return False
-
-    time.sleep(0.5)
-    rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
-    rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
-    time.sleep(1)
 
     logger.info("Done")
     return True
@@ -2731,6 +2730,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     for node_config in nodes_config["nodes"]:
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+    utils.create_rpc_socket_mount()
     # for numa, huge_page_memory in huge_page_memory_dict.items():
     #    num_pages = huge_page_memory // (2048 * 1024)
     #    utils.set_hugepages_if_needed(numa, num_pages)
@@ -3437,7 +3437,7 @@ def get_sorted_ha_jms(current_node):
                 continue
             mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
             out.append(jm_id)
-    return out[:constants.HA_JM_COUNT - 1]
+    return out[:current_node.ha_jm_count - 1]
 
 
 def get_node_jm_names(current_node, remote_node=None):
@@ -3468,7 +3468,7 @@ def get_node_jm_names(current_node, remote_node=None):
                     if jm_dev.get_id() == jm_id:
                         jm_list.append(jm_dev.remote_bdev)
                         break
-    return jm_list[:constants.HA_JM_COUNT]
+    return jm_list[:current_node.ha_jm_count]
 
 
 def get_secondary_nodes(current_node):
