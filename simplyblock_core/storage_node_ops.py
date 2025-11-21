@@ -1014,18 +1014,17 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             if log_config_type and log_config_type != LogConfig.types.GELF:
                 logger.info("SNodeAPI container found but not configured with gelf logger")
                 start_storage_node_api_container(mgmt_ip, cluster_ip)
+        node_socket = node_config.get("socket")
 
         total_mem = minimum_hp_memory
-        # for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        #    if n.api_endpoint == node_addr:
-        #        total_mem += n.spdk_mem
-        # total_mem += utils.parse_size("500m")
+        for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if n.api_endpoint == node_addr and n.socket == node_socket:
+                total_mem += n.spdk_mem
 
         logger.info("Deploying SPDK")
         results = None
         l_cores = node_config.get("l-cores")
         spdk_cpu_mask = node_config.get("cpu_mask")
-        socket = node_config.get("socket")
         for ssd in ssd_pcie:
             snode_api.bind_device_to_spdk(ssd)
         try:
@@ -1154,7 +1153,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.nvmf_port = utils.get_next_dev_port(cluster_id)
         snode.poller_cpu_cores = poller_cpu_cores or []
 
-        snode.socket = socket
+        snode.socket = node_socket
 
         snode.iobuf_small_pool_count = small_pool_count or 0
         snode.iobuf_large_pool_count = large_pool_count or 0
@@ -1705,10 +1704,9 @@ def restart_storage_node(
         cluster_ip = utils.get_k8s_node_ip()
 
     total_mem = minimum_hp_memory
-    # for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-    #    if n.api_endpoint == snode.api_endpoint:
-    #        total_mem += n.spdk_mem
-    # total_mem+= utils.parse_size("500m")
+    for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if n.api_endpoint == snode.api_endpoint and n.socket == snode.socket and n.uuid != snode.uuid:
+            total_mem += n.spdk_mem
 
     results = None
     try:
