@@ -19,10 +19,22 @@ api = APIRouter(prefix='/volumes')
 db = DBController()
 
 
+def _get_used_size(volume: LVol) -> int:
+    stats = db.get_lvol_stats(volume, limit=1)
+    if stats:
+        return stats[0].size_used
+    return 0
+
+
 @api.get('/', name='clusters:storage-pools:volumes:list')
 def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDTO]:
     return [
-        VolumeDTO.from_model(lvol, request, cluster.get_id())
+        VolumeDTO.from_model(
+            lvol,
+            request,
+            cluster.get_id(),
+            used_size=_get_used_size(lvol),
+        )
         for lvol
         in db.get_lvols_by_pool_id(pool.get_id())
     ]
@@ -122,7 +134,7 @@ Volume = Annotated[LVol, Depends(_lookup_volume)]
 
 @instance_api.get('/', name='clusters:storage-pools:volumes:detail')
 def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> VolumeDTO:
-    return VolumeDTO.from_model(volume, request, cluster.get_id())
+    return VolumeDTO.from_model(volume, request, cluster.get_id(), used_size=_get_used_size(volume))
 
 
 class UpdatableLVolParams(BaseModel):

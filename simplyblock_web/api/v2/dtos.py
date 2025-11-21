@@ -197,6 +197,7 @@ class VolumeDTO(BaseModel):
     nodes: List[util.UrlPath]
     port: util.Port
     size: util.Unsigned
+    used_size: util.Unsigned
     cloned_from: Optional[util.UrlPath]
     crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
@@ -206,7 +207,7 @@ class VolumeDTO(BaseModel):
     max_w_mbytes: util.Unsigned
 
     @staticmethod
-    def from_model(model: LVol, request: Request, cluster_id: str):
+    def from_model(model: LVol, request: Request, cluster_id: str, used_size: util.Unsigned = 0):
         return VolumeDTO(
             id=UUID(model.get_id()),
             name=model.lvol_name,
@@ -223,6 +224,7 @@ class VolumeDTO(BaseModel):
             ],
             port=model.subsys_port,
             size=model.size,
+            used_size=used_size,
             cloned_from=str(request.url_for(
                 'clusters:storage-pools:snapshots:detail',
                 cluster_id=cluster_id,
