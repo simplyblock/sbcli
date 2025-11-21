@@ -20,6 +20,11 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
+USER root
+RUN mkdir -p /var/lib/rpm /usr/lib/sysimage/rpm && \
+    touch /var/lib/rpm/Packages && \
+    touch /usr/lib/sysimage/rpm/Packages
+    
 RUN python setup.py install
 
 RUN if [ -d /usr/share/terminfo ]; then \
