@@ -169,22 +169,36 @@ def exec_port_allow_task(task):
             logger.error(e)
             return
 
-    lvstore_check = True
     if node.lvstore_status == "ready":
-        lvstore_check &= health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
+        lvstore_check = health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
+        if not lvstore_check:
+            msg = "Node LVolStore check fail, retry later"
+            logger.warning(msg)
+            task.function_result = msg
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return
+
         if node.secondary_node_id:
-            lvstore_check &= health_controller._check_node_hublvol(node)
+            primary_hublvol_check = health_controller._check_node_hublvol(node)
+            if not primary_hublvol_check:
+                msg = "Node hublvol check fail, retry later"
+                logger.warning(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return
+
             sec_node = db.get_storage_node_by_id(node.secondary_node_id)
             if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                lvstore_check &= health_controller._check_sec_node_hublvol(sec_node, auto_fix=True)
-
-    if lvstore_check is False:
-        msg = "Node LVolStore check fail, retry later"
-        logger.warning(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+                secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True)
+                if not secondary_hublvol_check:
+                    msg = "Secondary node hublvol check fail, retry later"
+                    logger.warning(msg)
+                    task.function_result = msg
+                    task.status = JobSchedule.STATUS_SUSPENDED
+                    task.write_to_db(db.kv_store)
+                    return
 
     if task.status != JobSchedule.STATUS_RUNNING:
         task.status = JobSchedule.STATUS_RUNNING

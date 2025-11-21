@@ -18,7 +18,7 @@ from simplyblock_core.controllers import device_controller
 logger = utils.get_logger(__name__)
 
 
-def check_bdev(name, *, rpc_client=None, bdev_names=None):
+def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
     present = (
             ((bdev_names is not None) and (name in bdev_names)) or
             (rpc_client is not None and (rpc_client.get_bdevs(name) is not None))
@@ -27,7 +27,7 @@ def check_bdev(name, *, rpc_client=None, bdev_names=None):
     return present
 
 
-def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None):
+def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None) -> bool:
     if rpc_client:
         subsystem = subsystems[0] if (subsystems := rpc_client.subsystem_list(nqn)) is not None else None
     elif nqns:
@@ -59,7 +59,7 @@ def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None):
         for listener in listeners:
             logger.info(f"Checking listener {listener['traddr']}:{listener['trsvcid']} ... ok")
 
-    return bool(listeners) and namespaces
+    return bool(listeners) and bool(namespaces)
 
 
 def check_cluster(cluster_id):
@@ -169,7 +169,7 @@ def _check_node_ping(ip):
     else:
         return False
 
-def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None):
+def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None) -> bool:
     if not node.hublvol:
         logger.error(f"Node {node.get_id()} does not have a hublvol")
         return False
@@ -239,7 +239,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
     return passed
 
 
-def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None, auto_fix=False):
+def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None, auto_fix=False) -> bool:
     db_controller = DBController()
     try:
         primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
@@ -290,6 +290,16 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             passed = bool(ret)
             logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
 
+            node_bdev = {}
+            ret = rpc_client.get_bdevs()
+            if ret:
+                for b in ret:
+                    node_bdev[b['name']] = b
+                    for al in b['aliases']:
+                        node_bdev[al]= b
+            else:
+                node_bdev = []
+
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
         if not passed:
             return False
@@ -337,9 +347,8 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
 
 def _check_node_lvstore(
-        lvstore_stack, node, auto_fix=False, node_bdev_names=None, stack_src_node=None):
+        lvstore_stack, node, auto_fix=False, node_bdev_names=None, stack_src_node=None) -> bool:
     db_controller = DBController()
-    lvstore_check = True
     logger.info(f"Checking distr stack on node : {node.get_id()}")
 
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
@@ -402,12 +411,18 @@ def _check_node_lvstore(
                 return False
             if not ret:
                 logger.error("Failed to get cluster map")
-                lvstore_check = False
+                return False
             else:
                 results, is_passed = distr_controller.parse_distr_cluster_map(ret, nodes, devices)
                 if results:
                     logger.info(f"Checking Distr map ... {is_passed}")
-                    if not is_passed and auto_fix:
+                    if is_passed:
+                        continue
+
+                    elif not auto_fix:
+                        return False
+
+                    else: #  is_passed is False and auto_fix is True
                         logger.info(utils.print_table(results))
                         for result in results:
                             if result['Results'] == 'failed':
@@ -443,6 +458,9 @@ def _check_node_lvstore(
                                                     distr_controller.send_dev_status_event(dev, dev.status, node)
                                             except Exception as e:
                                                 logger.error(f"Failed to connect to {dev.get_id()}: {e}")
+                                        else:
+                                            distr_controller.send_dev_status_event(dev, dev.status, node)
+
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
                                     distr_controller.send_node_status_event(n, n.status, node)
@@ -454,23 +472,25 @@ def _check_node_lvstore(
                             return False
                         if not ret:
                             logger.error("Failed to get cluster map")
-                            lvstore_check = False
+                            return False
                         else:
                             results, is_passed = distr_controller.parse_distr_cluster_map(ret, nodes, devices)
                             logger.info(f"Checking Distr map ... {is_passed}")
+                            if not is_passed:
+                                return False
 
                 else:
                     logger.error("Failed to parse distr cluster map")
-                lvstore_check &= is_passed
+                    return False
         else:
             logger.info(f"Checking distr bdev : {distr} ... not found")
-            lvstore_check = False
+            return False
     if raid:
         if raid in node_bdev_names:
             logger.info(f"Checking raid bdev: {raid} ... ok")
         else:
             logger.info(f"Checking raid bdev: {raid} ... not found")
-            lvstore_check = False
+            return False
     if bdev_lvstore:
         try:
             ret = node.rpc_client().bdev_lvol_get_lvstores(bdev_lvstore)
@@ -481,8 +501,8 @@ def _check_node_lvstore(
             logger.info(f"Checking lvstore: {bdev_lvstore} ... ok")
         else:
             logger.info(f"Checking lvstore: {bdev_lvstore} ... not found")
-            lvstore_check = False
-    return lvstore_check
+            return False
+    return True
 
 def check_node(node_id, with_devices=True):
     db_controller = DBController()
