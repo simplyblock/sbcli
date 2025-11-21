@@ -184,21 +184,10 @@ def pool_iostats(uuid, history):
     except KeyError:
         return utils.get_response_error(f"Pool not found: {uuid}", 404)
 
-    if history:
-        records_number = core_utils.parse_history_param(history)
-        if not records_number:
-            logger.error(f"Error parsing history string: {history}")
-            return False
-    else:
-        records_number = 20
-
-    out = db.get_pool_stats(pool, records_number)
-    records_count = 20
-    new_records = core_utils.process_records(out, records_count)
-
+    data = pool_controller.get_io_stats(uuid, history)
     ret = {
         "object_data": pool.get_clean_dict(),
-        "stats": new_records or []
+        "stats": data or []
     }
     return utils.get_response(ret)
 
@@ -207,21 +196,13 @@ def pool_iostats(uuid, history):
 @bp.route('/pool/iostats-all-lvols/<string:pool_uuid>', methods=['GET'])
 def lvol_iostats(pool_uuid):
     try:
-        db.get_pool_by_id(pool_uuid)
+        pool = db.get_pool_by_id(pool_uuid)
     except KeyError:
         return utils.get_response_error(f"Pool not found: {pool_uuid}", 404)
 
-    ret = []
-    for lvol in db.get_lvols_by_pool_id(pool_uuid):
-
-        records_list = db.get_lvol_stats(lvol, limit=1)
-
-        if records_list:
-            data = records_list[0].get_clean_dict()
-        else:
-            data = {}
-        ret.append({
-            "object_data": lvol.get_clean_dict(),
-            "stats": data
-        })
+    data = pool_controller.get_capacity(pool_uuid)
+    ret = {
+        "object_data": pool.get_clean_dict(),
+        "stats": data or []
+    }
     return utils.get_response(ret)

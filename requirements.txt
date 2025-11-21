@@ -24,3 +24,4 @@ flask-openapi3
 jsonschema
 fastapi
 uvicorn
+prometheus_api_client
