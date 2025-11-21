@@ -7,7 +7,7 @@ from simplyblock_core.controllers import tcp_ports_events, health_controller, ta
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.snode_client import SNodeClient
 
@@ -105,11 +105,18 @@ while True:
                                     if not dev.alceml_bdev:
                                         raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
 
-                                    dev.remote_bdev = storage_node_ops.connect_device(
+                                    remote_device = RemoteDevice()
+                                    remote_device.uuid = dev.uuid
+                                    remote_device.alceml_name = dev.alceml_name
+                                    remote_device.node_id = dev.node_id
+                                    remote_device.size = dev.size
+                                    remote_device.nvmf_multipath = dev.nvmf_multipath
+                                    remote_device.status = NVMeDevice.STATUS_ONLINE
+                                    remote_device.remote_bdev = storage_node_ops.connect_device(
                                         f"remote_{dev.alceml_bdev}", dev, node,
                                         bdev_names=list(node_bdev_names), reattach=False)
 
-                                    remote_devices.append(dev)
+                                    remote_devices.append(remote_device)
                             if not remote_devices:
                                 msg = "Node unable to connect to remote devs, retry task"
                                 logger.info(msg)

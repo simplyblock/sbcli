@@ -192,11 +192,19 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
     return cl_map
 
 
-def parse_distr_cluster_map(map_string):
+def parse_distr_cluster_map(map_string, nodes=None, devices=None):
     db_controller = DBController()
     node_pattern = re.compile(r".*uuid_node=(.*)  status=(.*)$", re.IGNORECASE)
     device_pattern = re.compile(
         r".*storage_ID=(.*)  status=(.*)  uuid_device=(.*)  storage_bdev_name=(.*)$", re.IGNORECASE)
+
+    if not nodes or not devices:
+        nodes = {}
+        devices = {}
+        for n in db_controller.get_storage_nodes():
+            nodes[n.get_id()] = n
+            for dev in n.nvme_devices:
+                devices[dev.get_id()] = dev
 
     results = []
     passed = True
@@ -213,8 +221,7 @@ def parse_distr_cluster_map(map_string):
                 "Results": "",
             }
             try:
-                nd = db_controller.get_storage_node_by_id(node_id)
-                node_status = nd.status
+                node_status = nodes[node_id].status
                 if node_status == StorageNode.STATUS_SCHEDULABLE:
                     node_status = StorageNode.STATUS_UNREACHABLE
                 data["Desired Status"] = node_status
@@ -238,7 +245,7 @@ def parse_distr_cluster_map(map_string):
                 "Results": "",
             }
             try:
-                sd = db_controller.get_storage_device_by_id(device_id)
+                sd =  devices[device_id]
                 data["Desired Status"] = sd.status
                 if sd.status == status:
                     data["Results"] = "ok"
