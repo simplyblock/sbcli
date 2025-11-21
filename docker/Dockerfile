@@ -22,11 +22,9 @@ COPY . /app
 
 RUN python setup.py install
 
-RUN problematic="/usr/share/terminfo/n/ncr260vt300wpp"; \
-    if [ -L "$problematic" ]; then \
-        echo "Fixing cyclic terminfo symlink: $problematic"; \
-        rm -f "$problematic"; \
-        ln -s "vt100" "$problematic"; \
+RUN if [ -d /usr/share/terminfo ]; then \
+       find /usr/share/terminfo -lname '*ncr260vt300wpp*' -exec rm -f {} + ; \
+       rm -f /usr/share/terminfo/n/ncr260vt300wpp || true ; \
     fi
 
 RUN useradd -u 1001 -r -g 0 -d /app -s /sbin/nologin simplyblock && \
