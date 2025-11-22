@@ -17,11 +17,11 @@ from simplyblock_core.storage_node_ops import (
 from simplyblock_cli.clibase import range_type
 from simplyblock_web import node_utils_k8s
 
-
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
 
 POD_PREFIX: str = "snode-spdk-pod"
+
 
 def _is_pod_present_for_node() -> bool:
     """
@@ -44,11 +44,11 @@ def _is_pod_present_for_node() -> bool:
         resp = k8s_core_v1.list_namespaced_pod(namespace)
         for pod in resp.items:
             if (
-                pod.metadata and 
-                pod.metadata.name and 
-                pod.spec and 
-                pod.spec.node_name == node_name and
-                pod.metadata.name.startswith(POD_PREFIX)
+                    pod.metadata and
+                    pod.metadata.name and
+                    pod.spec and
+                    pod.spec.node_name == node_name and
+                    pod.metadata.name.startswith(POD_PREFIX)
             ):
                 return True
     except ApiException as e:
@@ -66,7 +66,7 @@ def parse_arguments() -> argparse.Namespace:
         argparse.Namespace: Parsed command line arguments
     """
     parser = argparse.ArgumentParser(description="Automated Deployment Configuration Script")
-    
+
     # Define command line arguments
     parser.add_argument(
         '--max-lvol',
@@ -127,8 +127,32 @@ def parse_arguments() -> argparse.Namespace:
         required=False,
         default=0
     )
-    
+    parser.add_argument(
+        '--force',
+        help='Force format detected or passed nvme pci address to 4K and clean partitions',
+        action='store_true',
+        dest='force',
+        required=False
+    )
+    parser.add_argument(
+        '--device-model',
+        help='NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together',
+        type=str,
+        default='',
+        dest='device_model',
+        required=False
+    )
+    parser.add_argument(
+        '--size-range',
+        help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together',
+        type=str,
+        default='',
+        dest='size_range',
+        required=False
+    )
+
     return parser.parse_args()
+
 
 def validate_arguments(args: argparse.Namespace) -> None:
     """
@@ -144,7 +168,7 @@ def validate_arguments(args: argparse.Namespace) -> None:
         if not args.max_lvol:
             raise argparse.ArgumentError(None, '--max-lvol is required')
         if not args.max_prov:
-            args.max_prov=0
+            args.max_prov = 0
 
         try:
             max_lvol = int(args.max_lvol)
@@ -155,13 +179,13 @@ def validate_arguments(args: argparse.Namespace) -> None:
                 None,
                 f"Invalid value for max-lvol '{args.max_lvol}': {str(e)}"
             )
-            
+
         if args.pci_allowed and args.pci_blocked:
             raise argparse.ArgumentError(
                 None,
                 "pci-allowed and pci-blocked cannot be both specified"
             )
-            
+
         max_prov = utils.parse_size(args.max_prov, assume_unit='G')
         if max_prov < 0:
             raise argparse.ArgumentError(
@@ -174,19 +198,19 @@ def main() -> None:
     """Main entry point for the node configuration script."""
     try:
         args = parse_arguments()
-        
+
         if args.upgrade:
             upgrade_automated_deployment_config()
             return
 
         if not args.max_prov:
-            args.max_prov=0
+            args.max_prov = 0
         validate_arguments(args)
-        
+
         if _is_pod_present_for_node():
             logger.info("Skipped generating automated deployment configuration — pod already present.")
             sys.exit(0)
-            
+
         # Process socket configuration
         sockets_to_use: List[int] = [0]
         if args.sockets_to_use:
@@ -197,7 +221,7 @@ def main() -> None:
                     None,
                     f"Invalid value for sockets-to-use '{args.sockets_to_use}': {str(e)}"
                 )
-        
+
         nodes_per_socket: int = 1
         if args.nodes_per_socket:
             try:
@@ -209,16 +233,16 @@ def main() -> None:
                     None,
                     f"Invalid value for nodes-per-socket '{args.nodes_per_socket}': {str(e)}"
                 )
-        
+
         # Process PCI device filters
         pci_allowed: List[str] = []
         pci_blocked: List[str] = []
-        
+
         if args.pci_allowed:
             pci_allowed = [pci.strip() for pci in args.pci_allowed.split(',') if pci.strip()]
         if args.pci_blocked:
             pci_blocked = [pci.strip() for pci in args.pci_blocked.split(',') if pci.strip()]
-        
+
         # Generate the deployment configuration
         generate_automated_deployment_config(
             max_lvol=int(args.max_lvol),
@@ -227,9 +251,12 @@ def main() -> None:
             sockets_to_use=sockets_to_use,
             pci_allowed=pci_allowed,
             pci_blocked=pci_blocked,
-            cores_percentage=args.cores_percentage
+            cores_percentage=args.cores_percentage,
+            force=args.force,
+            device_model=args.device_model,
+            size_range=args.size_range
         )
-        
+
     except argparse.ArgumentError as e:
         logger.error(f"Argument error: {e}")
         sys.exit(1)

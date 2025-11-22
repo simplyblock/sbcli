@@ -13,7 +13,6 @@ from http.server import ThreadingHTTPServer
 from http.server import BaseHTTPRequestHandler
 
 
-rpc_sock = '/var/tmp/spdk.sock'
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
@@ -67,7 +66,7 @@ def rpc_call(req):
     if not response and len(buf) > 0:
         raise ValueError('Invalid response')
 
-    logger.info(f"Response:{req_time} data: {buf}")
+    logger.info(f"Response:{req_time}")
 
     return buf
 
@@ -159,6 +158,7 @@ try:
     rpc_port = int(rpc_port)
 except Exception:
     rpc_port = 8080
+rpc_sock = f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
 
 is_threading_enabled = bool(is_threading_enabled)
 run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)

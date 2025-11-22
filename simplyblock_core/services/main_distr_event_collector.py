@@ -205,8 +205,7 @@ def start_event_collector_on_node(node_id):
                         logger.info("no events found, sleeping")
                         break
                 except Exception as e:
-                    logger.error("Failed to process distr events")
-                    logger.exception(e)
+                    logger.error(f"Failed to process distr events: {e}")
                     break
 
             time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)

@@ -131,42 +131,34 @@ def _check_node_api(ip):
 
 
 def _check_spdk_process_up(ip, rpc_port):
-    try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
-        logger.debug(f"Node API={ip}:5000")
-        is_up, _ = snode_api.spdk_process_is_up(rpc_port)
-        logger.debug(f"SPDK is {is_up}")
-        return is_up
-    except Exception as e:
-        logger.debug(e)
-    return False
+    snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
+    logger.debug(f"Node API={ip}:5000")
+    is_up, _ = snode_api.spdk_process_is_up(rpc_port)
+    logger.debug(f"SPDK is {is_up}")
+    return is_up
 
 
-def _check_port_on_node(snode, port_id):
-    try:
-        fw_api = FirewallClient(snode, timeout=5, retry=2)
-        iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
-        if type(iptables_command_output) is str:
-            iptables_command_output = [iptables_command_output]
-        for rules in iptables_command_output:
-            result = jc.parse('iptables', rules)
-            for chain in result:
-                if chain['chain'] in ["INPUT", "OUTPUT"]:  # type: ignore
-                    for rule in chain['rules']:  # type: ignore
-                        if str(port_id) in rule['options']:  # type: ignore
-                            action = rule['target']  # type: ignore
-                            if action in ["DROP"]:
-                                return False
+def check_port_on_node(snode, port_id):
+    fw_api = FirewallClient(snode, timeout=5, retry=2)
+    iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
+    if type(iptables_command_output) is str:
+        iptables_command_output = [iptables_command_output]
+    for rules in iptables_command_output:
+        result = jc.parse('iptables', rules)
+        for chain in result:
+            if chain['chain'] in ["INPUT", "OUTPUT"]:  # type: ignore
+                for rule in chain['rules']:  # type: ignore
+                    if str(port_id) in rule['options']:  # type: ignore
+                        action = rule['target']  # type: ignore
+                        if action in ["DROP"]:
+                            return False
 
-        # check RDMA port block
-        if snode.active_rdma:
-            rdma_fw_port_list = snode.rpc_client().nvmf_get_blocked_ports_rdma()
-            if port_id in rdma_fw_port_list:
-                return False
+    # check RDMA port block
+    if snode.active_rdma:
+        rdma_fw_port_list = snode.rpc_client().nvmf_get_blocked_ports_rdma()
+        if port_id in rdma_fw_port_list:
+            return False
 
-        return True
-    except Exception as e:
-        logger.error(e)
     return True
 
 
@@ -237,11 +229,13 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
                         passed = False
                 else:
                     lvs_info_dict.append({"Key": k, "Value": v, "expected": " "})
-            for line in utils.print_table(lvs_info_dict).splitlines():
-                logger.info(line)
+            if not passed:
+                for line in utils.print_table(lvs_info_dict).splitlines():
+                    logger.info(line)
 
     except Exception as e:
         logger.exception(e)
+        return False
     return passed
 
 
@@ -333,10 +327,12 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
                 else:
                     lvs_info_dict.append({"Key": k, "Value": v, "expected": " "})
-            for line in utils.print_table(lvs_info_dict).splitlines():
-                logger.info(line)
+            if not passed:
+                for line in utils.print_table(lvs_info_dict).splitlines():
+                    logger.info(line)
     except Exception as e:
         logger.exception(e)
+        return False
     return passed
 
 
@@ -345,8 +341,7 @@ def _check_node_lvstore(
     db_controller = DBController()
     lvstore_check = True
     logger.info(f"Checking distr stack on node : {node.get_id()}")
-    rpc_client = RPCClient(
-        node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
+
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
         auto_fix = False
@@ -369,7 +364,12 @@ def _check_node_lvstore(
             node_distribs_list = bdev["distribs_list"]
 
     if not node_bdev_names:
-        ret = rpc_client.get_bdevs()
+        try:
+            ret = node.rpc_client().get_bdevs()
+        except Exception as e:
+            logger.info(e)
+            return False
+
         if ret:
             node_bdev_names = [b['name'] for b in ret]
         else:
@@ -395,16 +395,20 @@ def _check_node_lvstore(
             for jm in jm_names:
                 logger.info(jm)
             logger.info("Checking Distr map ...")
-            ret = rpc_client.distr_get_cluster_map(distr)
+            try:
+                ret = node.rpc_client().distr_get_cluster_map(distr)
+            except Exception as e:
+                logger.info(f"Failed to get cluster map: {e}")
+                return False
             if not ret:
                 logger.error("Failed to get cluster map")
                 lvstore_check = False
             else:
                 results, is_passed = distr_controller.parse_distr_cluster_map(ret, nodes, devices)
                 if results:
-                    logger.info(utils.print_table(results))
                     logger.info(f"Checking Distr map ... {is_passed}")
                     if not is_passed and auto_fix:
+                        logger.info(utils.print_table(results))
                         for result in results:
                             if result['Results'] == 'failed':
                                 if result['Kind'] == "Device":
@@ -442,7 +446,12 @@ def _check_node_lvstore(
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
                                     distr_controller.send_node_status_event(n, n.status, node)
-                        ret = rpc_client.distr_get_cluster_map(distr)
+
+                        try:
+                            ret = node.rpc_client().distr_get_cluster_map(distr)
+                        except Exception as e:
+                            logger.error(e)
+                            return False
                         if not ret:
                             logger.error("Failed to get cluster map")
                             lvstore_check = False
@@ -463,7 +472,11 @@ def _check_node_lvstore(
             logger.info(f"Checking raid bdev: {raid} ... not found")
             lvstore_check = False
     if bdev_lvstore:
-        ret = rpc_client.bdev_lvol_get_lvstores(bdev_lvstore)
+        try:
+            ret = node.rpc_client().bdev_lvol_get_lvstores(bdev_lvstore)
+        except Exception as e:
+            logger.error(e)
+            return False
         if ret:
             logger.info(f"Checking lvstore: {bdev_lvstore} ... ok")
         else:
@@ -512,13 +525,19 @@ def check_node(node_id, with_devices=True):
     if snode.lvstore_stack_secondary_1:
         try:
             n = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-            lvol_port_check = _check_port_on_node(snode, n.lvol_subsys_port)
+            lvol_port_check = check_port_on_node(snode, n.lvol_subsys_port)
             logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
         except KeyError:
-            pass
+            logger.error("node not found")
+        except Exception:
+            logger.error("Check node port failed, connection error")
+
     if not snode.is_secondary_node:
-        lvol_port_check = _check_port_on_node(snode, snode.lvol_subsys_port)
-        logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
+        try:
+            lvol_port_check = check_port_on_node(snode, snode.lvol_subsys_port)
+            logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
+        except Exception:
+            logger.error("Check node port failed, connection error")
 
     is_node_online = ping_check and node_api_check and node_rpc_check
 

@@ -44,6 +44,7 @@ class StorageNodeParams(BaseModel):
     partitions: int = Field(1)
     iobuf_small_pool_count: int = Field(0)
     iobuf_large_pool_count: int = Field(0)
+    ha_jm_count: int = Field(3)
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -66,6 +67,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Re
             'namespace': parameters.namespace,
             'enable_ha_jm': parameters.ha_jm,
             'full_page_unmap': parameters.full_page_unmap,
+            "ha_jm_count": parameters.ha_jm_count,
         }
     )
     if not task_id_or_false:

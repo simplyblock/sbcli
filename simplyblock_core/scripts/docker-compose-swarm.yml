@@ -130,6 +130,7 @@ services:
       - 80:80
       - 12202:12202
       - 9200:9200
+      - 9090:9090
     networks:
       - localnet
       - monitoring-net
@@ -339,6 +340,20 @@ services:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python simplyblock_core/services/tasks_runner_jc_comp.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  TasksRunnerLVolSyncDelete:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python simplyblock_core/services/tasks_runner_sync_lvol_del.py"
     deploy:
       placement:
         constraints: [node.role == manager]
