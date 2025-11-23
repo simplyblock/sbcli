@@ -61,7 +61,7 @@ spec:
 
                   echo "Writing systemd unit to $UNIT_PATH"
 
-                  cat <<EOF > "$UNIT_PATH"
+                  cat <<'EOF' > "$UNIT_PATH"
 [Unit]
 Description=1G RAM disk at /var/mnt/ramdisk
 After=local-fs-pre.target
