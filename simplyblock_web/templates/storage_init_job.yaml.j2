@@ -75,16 +75,21 @@ spec:
               WantedBy=local-fs.target
               EOF
 
-                echo "Reloading systemd..."
-                systemctl daemon-reload || echo "systemd reload failed"
+                echo "Starting RAM disk mounting."
+                nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
+                  if command -v systemctl >/dev/null 2>&1; then
+                    echo "Reloading systemd..."
+                    systemctl daemon-reload || echo "systemd reload failed"
 
-                echo "Enabling mount unit..."
-                systemctl enable var-mnt-ramdisk.mount || echo "enable failed"
+                    echo "Enabling mount unit..."
+                    systemctl enable var-mnt-ramdisk.mount || echo "enable failed"
 
-                echo "Starting mount unit..."
-                systemctl start var-mnt-ramdisk.mount || echo "start failed (check logs or unit file)"
-
-                echo "RAM disk mounting completed."
+                    echo "Starting mount unit..."
+                    systemctl start var-mnt-ramdisk.mount || echo "start failed (check logs or unit file)"
+                  else
+                    echo "systemctl not found; skipping RAM disk mounting"
+                  fi
+                '
 
                 echo "--- Restarting kubelet ---"
                 nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
