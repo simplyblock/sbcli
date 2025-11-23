@@ -638,7 +638,7 @@ def apply_config():
     for numa, huge_page_memory in huge_page_memory_dict.items():
         num_pages = huge_page_memory // 2000000
         core_utils.set_hugepages_if_needed(numa, num_pages)
-
+    
     return utils.get_response(True)
 
 
