@@ -54,40 +54,37 @@ spec:
 
                 echo "--- Creating RAM disk systemd unit on host ---"
 
-                nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
-                  set -e
 
-                  UNIT_PATH="/etc/systemd/system/var-mnt-ramdisk.mount"
+                UNIT_PATH="/etc/systemd/system/var-mnt-ramdisk.mount"
 
-                  echo "Writing systemd unit to $UNIT_PATH"
+                echo "Writing systemd unit to $UNIT_PATH"
 
-                  cat <<EOF > "$UNIT_PATH"
-                  [Unit]
-                  Description=1G RAM disk at /var/mnt/ramdisk
-                  After=local-fs-pre.target
-                  Before=local-fs.target
+                cat <<EOF > "$UNIT_PATH"
+                [Unit]
+                Description=1G RAM disk at /var/mnt/ramdisk
+                After=local-fs-pre.target
+                Before=local-fs.target
 
-                  [Mount]
-                  What=tmpfs
-                  Where=/var/mnt/ramdisk
-                  Type=tmpfs
-                  Options=size=1G,mode=1777
+                [Mount]
+                What=tmpfs
+                Where=/var/mnt/ramdisk
+                Type=tmpfs
+                Options=size=1G,mode=1777
 
-                  [Install]
-                  WantedBy=local-fs.target
-                  EOF
+                [Install]
+                WantedBy=local-fs.target
+                EOF
 
-                  echo "Reloading systemd..."
-                  systemctl daemon-reload || echo "systemd reload failed"
+                echo "Reloading systemd..."
+                systemctl daemon-reload || echo "systemd reload failed"
 
-                  echo "Enabling mount unit..."
-                  systemctl enable var-mnt-ramdisk.mount || echo "enable failed"
+                echo "Enabling mount unit..."
+                systemctl enable var-mnt-ramdisk.mount || echo "enable failed"
 
-                  echo "Starting mount unit..."
-                  systemctl start var-mnt-ramdisk.mount || echo "start failed (check logs or unit file)"
+                echo "Starting mount unit..."
+                systemctl start var-mnt-ramdisk.mount || echo "start failed (check logs or unit file)"
 
-                  echo "RAM disk mounting completed."
-                '
+                echo "RAM disk mounting completed."
 
                 echo "--- Restarting kubelet ---"
                 nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
