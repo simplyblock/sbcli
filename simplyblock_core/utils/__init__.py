@@ -576,7 +576,7 @@ def get_total_size_per_instance_type(instance_type):
         device_size = instance_storage_data[instance_type]["size_per_device_gb"]
         return True, number_of_devices, device_size
 
-    return False, 0, 0256
+    return False, 0, 256
 
 
 def validate_add_lvol_or_snap_on_node(memory_free, huge_free, max_lvol_or_snap,
