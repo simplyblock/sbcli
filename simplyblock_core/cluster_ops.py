@@ -457,6 +457,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
 
     default_cluster = clusters[0]
+    cluster.mode = default_cluster.mode
     cluster.db_connection = default_cluster.db_connection
     cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
@@ -1175,9 +1176,13 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         for service in cluster_docker.services.list():
             if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
             "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
-                logger.info(f"Updating service {service.name}")
-                service.update(image=service_image, force_update=True)
-                service_names.append(service.attrs['Spec']['Name'])
+                if service.name == "app_CachingNodeMonitor":
+                    logger.info(f"Removing service {service.name}")
+                    service.remove()
+                else:
+                    logger.info(f"Updating service {service.name}")
+                    service.update(image=service_image, force_update=True)
+                    service_names.append(service.attrs['Spec']['Name'])
 
         if "app_SnapshotMonitor" not in service_names:
             logger.info("Creating snapshot monitor service")
@@ -1185,6 +1190,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 image=service_image,
                 command="python simplyblock_core/services/snapshot_monitor.py",
                 name="app_SnapshotMonitor",
+                mounts=["/etc/foundationdb:/etc/foundationdb"],
+                env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
+                networks=["host"],
+                constraints=["node.role == manager"]
+            )
+
+        if "app_TasksRunnerLVolSyncDelete" not in service_names:
+            logger.info("Creating lvol sync delete service")
+            cluster_docker.services.create(
+                image=service_image,
+                command="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                name="app_TasksRunnerLVolSyncDelete",
                 mounts=["/etc/foundationdb:/etc/foundationdb"],
                 env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
                 networks=["host"],

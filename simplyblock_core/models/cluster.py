@@ -45,7 +45,7 @@ class Cluster(BaseModel):
     distr_npcs: int = 0
     enable_node_affinity: bool = False
     grafana_endpoint: str = ""
-    mode: str = ""
+    mode: str = "docker"
     grafana_secret: str = ""
     contact_point: str = ""
     ha_type: str = "single"

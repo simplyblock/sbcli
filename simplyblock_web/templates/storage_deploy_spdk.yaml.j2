@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: snode-spdk-pod-{{ RPC_PORT }}
+  name: snode-spdk-pod-{{ RPC_PORT }}-{{ CLUSTER_ID }}
   namespace: {{ NAMESPACE }}
   labels:
     app: spdk-app-{{ RPC_PORT }}
