@@ -130,7 +130,7 @@ def process_event(event, logger):
 def start_event_collector_on_node(node_id):
     snode = db.get_storage_node_by_id(node_id)
     logger = logging.getLogger()
-    logger.setLevel("INFO")
+    logger.setLevel("DEBUG")
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
     logger.addHandler(logger_handler)
