@@ -3,7 +3,7 @@ import logging
 import sys
 import threading
 import time
-
+from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller
 from simplyblock_core.controllers import events_controller, device_controller
@@ -12,6 +12,7 @@ from simplyblock_core.models.storage_node import StorageNode
 
 
 utils.init_sentry_sdk()
+logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
@@ -48,6 +49,14 @@ def process_device_event(event, logger):
             logger.info(f"Device not found!, storage id: {storage_id} from node: {node_id}")
             event.status = 'device_not_found'
             return
+
+        if "timestamp" in event.object_dict:
+            ev_time = event.object_dict['timestamp']
+            time_delta = datetime.now() - datetime.strptime(ev_time, '%Y-%m-%dT%H:%M:%S.%fZ')
+            if time_delta.total_seconds() > 8:
+                logger.info(f"event skipped because it was fired {time_delta.total_seconds()} seconds ago")
+                event.status = f'skipped_late_by_{int(time_delta.total_seconds())}s'
+                return
 
         if device_obj.is_connection_in_progress_to_node(event_node_obj.get_id()):
             logger.warning("Connection attempt was found from node to device, sleeping 5 seconds")
@@ -129,11 +138,6 @@ def process_event(event, logger):
 
 def start_event_collector_on_node(node_id):
     snode = db.get_storage_node_by_id(node_id)
-    logger = logging.getLogger()
-    logger.setLevel("DEBUG")
-    logger_handler = logging.StreamHandler(stream=sys.stdout)
-    logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
-    logger.addHandler(logger_handler)
 
     logger.info(f"Starting Distr event collector on node: {node_id}")
 
