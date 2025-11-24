@@ -59,6 +59,27 @@ class NVMeDevice(BaseModel):
     connecting_from_node: str = ""
     previous_status: str = ""
 
+    def __change_dev_connection_to(self, connecting_from_node):
+        from simplyblock_core.db_controller import DBController
+        db = DBController()
+        for n in db.get_storage_nodes():
+            if n.nvme_devices:
+                for d in n.nvme_devices:
+                    if d.get_id() == self.get_id():
+                        d.connecting_from_node = connecting_from_node
+                        n.write_to_db()
+                        break
+
+    def lock_device_connection(self, node_id):
+        self.__change_dev_connection_to(node_id)
+
+    def release_device_connection(self):
+        self.__change_dev_connection_to("")
+
+    def is_connection_in_progress_to_node(self, node_id):
+        if self.connecting_from_node and self.connecting_from_node == node_id:
+            return True
+
 
 class JMDevice(NVMeDevice):
 

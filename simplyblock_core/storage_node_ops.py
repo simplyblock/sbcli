@@ -57,12 +57,11 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     rpc_client = node.rpc_client()
     # check connection status
-    if device.connecting_from_node and device.connecting_from_node != node.get_id():
+    if device.is_connection_in_progress_to_node(node.get_id()):
         logger.warning("This device is being connected to from other node, sleep for 5 seconds")
         time.sleep(5)
 
-    device.connecting_from_node = node.get_id()
-    device.write_to_db()
+    device.lock_device_connection(node.get_id())
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
@@ -132,8 +131,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             else:
                 time.sleep(1)
 
-        device.connecting_from_node = ""
-        device.write_to_db()
+        device.release_device_connection()
 
         if not bdev_found:
             logger.error("Bdev not found after 5 attempts")

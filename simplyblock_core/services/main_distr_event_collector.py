@@ -49,9 +49,11 @@ def process_device_event(event):
             event.status = 'device_not_found'
             return
 
-        if device_obj.connecting_from_node == event_node_obj.get_id():
+        if device_obj.is_connection_in_progress_to_node(event_node_obj.get_id()):
             logger.warning("Connection attempt was found from node to device, sleeping 5 seconds")
             time.sleep(5)
+
+        device_obj.lock_device_connection(event_node_obj.get_id())
 
         if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                      NVMeDevice.STATUS_CANNOT_ALLOCATE]:
@@ -59,6 +61,7 @@ def process_device_event(event):
             event.status = f'skipped:dev_{device_obj.status}'
             distr_controller.send_dev_status_event(device_obj, device_obj.status, event_node_obj)
             remove_remote_device_from_node(event_node_obj.get_id(), device_obj.get_id())
+            device_obj.release_device_connection()
             return
 
 
@@ -67,6 +70,7 @@ def process_device_event(event):
             logger.info(f"Node is not online, skipping. status: {event_node_obj.status}")
             event.status = 'skipped:node_offline'
             remove_remote_device_from_node(event_node_obj.get_id(), device_obj.get_id())
+            device_obj.release_device_connection()
             return
 
         if device_node_obj.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
@@ -74,6 +78,7 @@ def process_device_event(event):
             logger.info(f"Node is not online, skipping. status: {device_node_obj.status}")
             event.status = f'skipped:device_node_{device_node_obj.status}'
             remove_remote_device_from_node(event_node_obj.get_id(), device_obj.get_id())
+            device_obj.release_device_connection()
             return
 
 
@@ -99,6 +104,7 @@ def process_device_event(event):
             remove_remote_device_from_node(event_node_obj.get_id(), device_obj.get_id())
 
         event.status = 'processed'
+        device_obj.release_device_connection()
 
 
 def process_lvol_event(event):
