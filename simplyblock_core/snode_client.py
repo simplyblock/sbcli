@@ -73,7 +73,7 @@ class SNodeClient:
         return None, None
 
     def is_live(self):
-        return self._request("GET", "/check")
+        return self._request("GET", "check")
 
     def info(self):
         return self._request("GET", "info")
