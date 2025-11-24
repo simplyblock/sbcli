@@ -22,10 +22,12 @@ from simplyblock_core import utils
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
+from simplyblock_core.controllers.lvol_migration_controller import MigrationController
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_migration import MigrationState
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.snapshot import SnapShot
@@ -125,6 +127,15 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     return bdev_name
 
+#if a node was rebooted during an ongoing migration,
+def restart_migration(node:StorageNode):
+    db_controller = DBController()
+    migs=db_controller.get_migrations()
+    for m in migs:
+        if m.node_pri==node.uuid:
+          if m.status!=MigrationState.DONE:
+            #TODO: continue to run that migration by enabling the migration service.
+    return
 
 def get_next_cluster_device_order(db_controller, cluster_id):
     max_order = 0
@@ -2022,6 +2033,7 @@ def restart_storage_node(
                     online_devices_list.append(dev.get_id())
             if online_devices_list:
                 tasks_controller.add_device_mig_task(online_devices_list, snode.cluster_id)
+            restart_migration(snode)
             return True
 
 

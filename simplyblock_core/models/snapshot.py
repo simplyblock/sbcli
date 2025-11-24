@@ -30,3 +30,4 @@ class SnapShot(BaseModel):
     status: str = ""
     fabric: str = "tcp"
     frozen: bool = False
+    node_id : str = ""

@@ -108,6 +108,7 @@ def add(lvol_id, snapshot_name):
     blobid = 0
     snap_uuid = ""
     used_size = 0
+    node_id = lvol.node_id
 
     if lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
@@ -223,6 +224,7 @@ def add(lvol_id, snapshot_name):
     snap.lvol = lvol
     snap.fabric = lvol.fabric
     snap.vuid = snap_vuid
+    snap.node_id = node_id
     snap.status = SnapShot.STATUS_ONLINE
 
     snap.write_to_db(db_controller.kv_store)
