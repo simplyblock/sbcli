@@ -1,4 +1,6 @@
 # coding=utf-8
+import logging
+import sys
 import threading
 import time
 
@@ -8,8 +10,6 @@ from simplyblock_core.controllers import events_controller, device_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
-
-logger = utils.get_logger(__name__)
 
 utils.init_sentry_sdk()
 
@@ -29,7 +29,7 @@ def remove_remote_device_from_node(node_id, device_id):
             break
 
 
-def process_device_event(event):
+def process_device_event(event, logger):
     if event.message in EVENTS_LIST:
         node_id = event.node_id
         storage_id = event.storage_id
@@ -107,53 +107,36 @@ def process_device_event(event):
         device_obj.release_device_connection()
 
 
-def process_lvol_event(event):
+def process_lvol_event(event, logger):
     if event.message in ["error_open", 'error_read', "error_write", "error_unmap"]:
         vuid = event.object_dict['vuid']
-        # node_id = event.node_id
-        # storage_node_ops.set_node_status(node_id, StorageNode.STATUS_SUSPENDED)
-        # event_node_obj = db.get_storage_node_by_id(node_id)
-        # tasks_controller.add_node_to_auto_restart(event_node_obj)
-
-        # lvols = []
-        # for lv in db.get_lvols():  # pass
-        #     if lv.node_id == node_id:
-        #         lvols.append(lv)
-        #
-        # if not lvols:
-        #     logger.error(f"LVols on node {node_id} not found")
-        #     event.status = 'lvols_not_found'
-        # else:
-        #     for lvol in lvols:
-        #         if lvol.status == LVol.STATUS_ONLINE:
-        #             logger.info("Setting LVol to offline")
-        #             lvol.io_error = True
-        #             old_status = lvol.status
-        #             lvol.status = LVol.STATUS_OFFLINE
-        #             lvol.write_to_db(db.kv_store)
-        #             lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
-        #             lvol_events.lvol_io_error_change(lvol, True, False, caused_by="monitor")
         event.status = f'distr error {vuid}'
     else:
         logger.error(f"Unknown event message: {event.message}")
         event.status = "event_unknown"
 
 
-def process_event(event):
+def process_event(event, logger):
     if event.event == "device_status":
         if event.storage_id >= 0:
-            process_device_event(event)
+            process_device_event(event, logger)
 
         if event.vuid >= 0:
-            process_lvol_event(event)
+            process_lvol_event(event, logger)
 
     event.write_to_db(db.kv_store)
 
 
 def start_event_collector_on_node(node_id):
+    snode = db.get_storage_node_by_id(node_id)
+    logger = logging.getLogger()
+    logger.setLevel("INFO")
+    logger_handler = logging.StreamHandler(stream=sys.stdout)
+    logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
+    logger.addHandler(logger_handler)
+
     logger.info(f"Starting Distr event collector on node: {node_id}")
 
-    snode = db.get_storage_node_by_id(node_id)
     client = rpc_client.RPCClient(
         snode.mgmt_ip,
         snode.rpc_port,
@@ -165,6 +148,7 @@ def start_event_collector_on_node(node_id):
         while True:
             page = 1
             events_groups = {}
+            events_list = []
             while True:
                 try:
                     events = client.distr_status_events_discard_then_get(
@@ -195,14 +179,17 @@ def start_event_collector_on_node(node_id):
                                 events_groups[sid][et][msg]: 1  # type: ignore
                             else:
                                 events_groups[sid][et][msg].count += 1  # type: ignore
-                                events_groups[sid][et][msg].write_to_db()  # type: ignore
-                                logger.info(f"Event {msg} already processed")
                                 continue
 
                             event = events_controller.log_distr_event(snode.cluster_id, snode.get_id(), event_dict)
                             logger.info(f"Processing event: {event.get_id()}")
-                            process_event(event)
+                            process_event(event, logger)
                             events_groups[sid][et][msg] = event
+                            events_list.append(event)
+
+                        for ev in events_list:
+                            if ev.count > 1 :
+                                ev.write_to_db(db.kv_store)
 
                         logger.info(f"Discarding events: {len(events)}")
                         client.distr_status_events_discard_then_get(len(events), 0)
