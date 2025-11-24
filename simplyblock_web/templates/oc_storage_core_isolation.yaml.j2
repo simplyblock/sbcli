@@ -73,8 +73,7 @@ spec:
                     - key: machineconfiguration.openshift.io/role
                       operator: In
                       values:
-                        - worker
-                        - worker-isolated
+                        - worker-isolated-{{ HOSTNAME }}
                 nodeSelector:
                   matchLabels:
                     kubernetes.io/hostname: {{ HOSTNAME }}
@@ -87,7 +86,7 @@ spec:
               metadata:
                 name: worker-isolated-{{ HOSTNAME }}
                 labels:
-                  machineconfiguration.openshift.io/role: worker-isolated
+                  machineconfiguration.openshift.io/role: worker-isolated-{{ HOSTNAME }}
               spec:
                 kernelArguments:
                   - "nohz_full=${ISOLATED_CORES}"
@@ -102,11 +101,11 @@ spec:
               apiVersion: machineconfiguration.openshift.io/v1
               kind: KubeletConfig
               metadata:
-                name: set-static-cpu-manager
+                name: set-static-cpu-manager-{{ HOSTNAME }}
               spec:
                 machineConfigPoolSelector:
                   matchLabels:
-                    machineconfiguration.openshift.io/role: worker-isolated
+                    machineconfiguration.openshift.io/role: worker-isolated-{{ HOSTNAME }}
                 kubeletConfig:
                   cpuManagerPolicy: static
                   cpuManagerReconcilePeriod: 5s
