@@ -20,6 +20,12 @@ def process_task(task):
         task.write_to_db(db.kv_store)
         return False
 
+    if task.retry >= task.max_retry:
+        task.function_result = "max retry reached"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
+
     if db.get_cluster_by_id(cl.get_id()).status == Cluster.STATUS_IN_ACTIVATION:
         task.function_result = "Cluster is in_activation, waiting"
         task.status = JobSchedule.STATUS_NEW
@@ -32,9 +38,14 @@ def process_task(task):
 
     try:
         res = storage_node_ops.add_node(**task.function_params)
-        logger.info(f"Node add result: {res}")
-        task.function_result = str(res)
-        task.status = JobSchedule.STATUS_DONE
+        msg = f"Node add result: {res}"
+        logger.info(msg)
+        task.function_result = msg
+        if res:
+            task.status = JobSchedule.STATUS_DONE
+        else:
+            task.retry += 1
+            task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
         return True
     except Exception as e:
@@ -65,4 +76,4 @@ while True:
                             delay_seconds *= 2
                         time.sleep(delay_seconds)
 
-    time.sleep(30)
+    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
