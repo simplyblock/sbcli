@@ -230,6 +230,8 @@ spec:
     processGroupIDLabels:
     - foundationdb.org/fdb-process-group-id
   minimumUptimeSecondsForBounce: 60
+  databaseConfiguration:
+    redundancy_mode: triple
   processCounts:
   {{- if .Values.foundationdb.multiAZ }}
     cluster_controller: 1
