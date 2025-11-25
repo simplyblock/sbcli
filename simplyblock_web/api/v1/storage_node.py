@@ -249,6 +249,10 @@ def storage_node_add():
     if 'iobuf_large_pool_count' in req_data:
         iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
 
+    ha_jm_count = 3
+    if 'ha_jm_count' in req_data:
+        ha_jm_count = int(req_data['ha_jm_count'])
+
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
         "node_addr": node_addr,
@@ -264,6 +268,7 @@ def storage_node_add():
         "enable_test_device": enable_test_device,
         "namespace": namespace,
         "enable_ha_jm": not disable_ha_jm,
+        "ha_jm_count": ha_jm_count,
     })
 
     return utils.get_response(True)

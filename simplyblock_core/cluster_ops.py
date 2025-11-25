@@ -1157,10 +1157,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
-        sbcli=constants.SIMPLY_BLOCK_CLI_NAME
-        subprocess.check_call(f"pip install {sbcli} --upgrade".split(' '))
-        logger.info(f"{sbcli} upgraded")
-
         cluster_docker = utils.get_docker_client(cluster_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
@@ -1284,7 +1280,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.info(f"Restarting node: {node.get_id()} with SPDK image: {spdk_image}")
             else:
                 logger.info(f"Restarting node: {node.get_id()}")
-            storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
+            try:
+                storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
+            except Exception as e:
+                logger.debug(e)
+                logger.error(f"Failed to restart node: {node.get_id()}")
+                return
 
     logger.info("Done")
 

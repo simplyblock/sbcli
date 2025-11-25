@@ -107,12 +107,27 @@ class CLIWrapperBase:
             pci_allowed = [str(x) for x in args.pci_allowed.split(',')]
         if args.pci_blocked:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
+        if (args.device_model and not args.size_range) or (not args.device_model and args.size_range):
+            self.parser.error("device_model and size_range must be set together")
+        use_pci_allowed = bool(args.pci_allowed)
+        use_pci_blocked = bool(args.pci_blocked)
+        use_model_range = bool(args.device_model and args.size_range)
+        if sum([use_pci_allowed, use_pci_blocked, use_model_range]) > 1:
+            self.parser.error(
+                "Options --pci-allowed, --pci-blocked, and "
+                "(--device-model with --size-range) are mutually exclusive; choose only one."
+            )
+
 
         return storage_ops.generate_automated_deployment_config(args.max_lvol, max_prov, sockets_to_use,
-                                                                args.nodes_per_socket, pci_allowed, pci_blocked)
+                                                                args.nodes_per_socket, pci_allowed, pci_blocked, force=args.force, device_model=args.device_model, size_range=args.size_range)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
+        return True  # remove once CLI changed to exceptions
+
+    def storage_node__clean_devices(self, sub_command, args):
+        storage_ops.clean_devices(args.config_path)
         return True  # remove once CLI changed to exceptions
 
     def storage_node__add_node(self, sub_command, args):
@@ -133,26 +148,29 @@ class CLIWrapperBase:
         enable_ha_jm = args.enable_ha_jm
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
-
-        out = storage_ops.add_node(
-            cluster_id=cluster_id,
-            node_addr=node_addr,
-            iface_name=ifname,
-            data_nics_list=data_nics,
-            max_snap=max_snap,
-            spdk_image=spdk_image,
-            spdk_debug=spdk_debug,
-            small_bufsize=small_bufsize,
-            large_bufsize=large_bufsize,
-            num_partitions_per_dev=num_partitions_per_dev,
-            jm_percent=jm_percent,
-            enable_test_device=enable_test_device,
-            namespace=namespace,
-            enable_ha_jm=enable_ha_jm,
-            id_device_by_nqn=args.id_device_by_nqn,
-            partition_size=args.partition_size,
-            ha_jm_count=ha_jm_count,
-        )
+        try:
+            out = storage_ops.add_node(
+                cluster_id=cluster_id,
+                node_addr=node_addr,
+                iface_name=ifname,
+                data_nics_list=data_nics,
+                max_snap=max_snap,
+                spdk_image=spdk_image,
+                spdk_debug=spdk_debug,
+                small_bufsize=small_bufsize,
+                large_bufsize=large_bufsize,
+                num_partitions_per_dev=num_partitions_per_dev,
+                jm_percent=jm_percent,
+                enable_test_device=enable_test_device,
+                namespace=namespace,
+                enable_ha_jm=enable_ha_jm,
+                id_device_by_nqn=args.id_device_by_nqn,
+                partition_size=args.partition_size,
+                ha_jm_count=ha_jm_count,
+            )
+        except Exception as e:
+            print(e)
+            return False
 
         return out
 
@@ -183,11 +201,15 @@ class CLIWrapperBase:
         large_bufsize = args.large_bufsize
         ssd_pcie = args.ssd_pcie
 
-        return storage_ops.restart_storage_node(
-            node_id, max_lvol, max_snap, max_prov,
-            spdk_image, spdk_debug,
-            small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
-            new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
+        try:
+            return storage_ops.restart_storage_node(
+                node_id, max_lvol, max_snap, max_prov,
+                spdk_image, spdk_debug,
+                small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
+                new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
+        except Exception as e:
+            print(e)
+            return False
 
     def storage_node__shutdown(self, sub_command, args):
         return storage_ops.shutdown_storage_node(args.node_id, args.force)

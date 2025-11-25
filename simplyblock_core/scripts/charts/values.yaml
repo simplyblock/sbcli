@@ -19,14 +19,17 @@ grafana:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "main"
+    tag: "R25.10-Hotfix"
     pullPolicy: "Always"
 
 ports:
   lvolNvmfPortStart:
-  
-openebs:
-  enabled: true
+
+storageclass:  
+  allowedTopologyZones: []
+
+foundationdb:
+  multiAZ: false
 
 mongodb:
   name: "simplyblock-mongodb"
@@ -57,7 +60,7 @@ opensearch:
   antiAffinity: "hard"
   persistence:
     enabled: true
-    storageClass: openebs-local-hostpath
+    storageClass: local-hostpath
     size: 10Gi
 
   resources:
@@ -123,7 +126,7 @@ prometheus:
     persistentVolume:
       enabled: true
       size: 5Gi
-      storageClass: openebs-local-hostpath
+      storageClass: local-hostpath
     extraArgs:
       storage.tsdb.min-block-duration: 2h
       storage.tsdb.max-block-duration: 2h
@@ -185,8 +188,19 @@ ingress:
   controller:
     hostNetwork: true  
     dnsPolicy: ClusterFirstWithHostNet
+    replicaCount: 2
     service:
       type: ClusterIP
     extraArgs:
       tcp-services-configmap: "simplyblock/simplyblock-tcp-services"
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - ingress
+            topologyKey: "kubernetes.io/hostname"
     nodeSelector: {}
