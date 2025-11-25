@@ -2,7 +2,6 @@ import logging
 from logging import exception
 from time import sleep
 
-from ..cluster_ops import db_controller
 from ..models.lvol_migration import *
 from dataclasses import dataclass
 from typing import Optional
@@ -102,7 +101,7 @@ class MigrationController:
         m.main_logical_volume.cloned = lvol.cloned_from_snap
         return m.main_logical_volume
 
-    def snap_assign(lvol: LogicalVolumeRef, snap: SnapShot, target_lvs: str):
+    def snap_assign(self, lvol: LogicalVolumeRef, snap: SnapShot, target_lvs: str):
         s = Snapshot()
         s.retry = 0
         s.status = ObjectMigrationState.NEW
@@ -152,22 +151,6 @@ class MigrationController:
             s.write_to_db(db_controller.kv_store)
         return
 
-    def get_transfer_state(self, lvolname: str, node_id: str):
-
-        return
-
-    def export_lvol(self, s: Snapshot):
-        # create subsystem
-        # create listener
-        # create namespace
-        return
-
-    def delete_tmp_nqn(self, s: Snapshot):
-        return
-
-    def get_lvol_by_name(self, lvol_name):
-        return
-
     def create_lvol(self, snap: Snapshot):
             name = snap.target_lvs_name + "/" + snap.bdev_name
             if snap.status == ObjectMigrationState.NEW:
@@ -194,6 +177,22 @@ class MigrationController:
                     snap.status = ObjectMigrationState.MIG_FLAG_SET
                     self.m.write_to_db(self.db_controller.kv_store)
             return True
+
+    def get_transfer_state(self, lvolname: str, node_id: str):
+
+        return
+
+    def export_lvol(self, s: Snapshot):
+        # create subsystem
+        # create listener
+        # create namespace
+        return
+
+    def delete_tmp_nqn(self, s: Snapshot):
+        return
+
+    def get_lvol_by_name(self, lvol_name):
+        return
 
     def connect_lvol(self, s: Snapshot):
         return
@@ -241,7 +240,6 @@ class MigrationController:
               return
         else:
               return
-        return
 
     def migrate_final_lvol(self):
       try:
@@ -341,7 +339,7 @@ class MigrationController:
                     s.frozen = True
                     # need to reset that one on node restart
                     s.write_to_db(self.db_controller.kv_store)
-                    sr = self.snap_assign(self.m.main_logical_volume, s,  self.db_controller.get(self.m.target_node_pri.lvstore)
+                    sr = self.snap_assign(self.m.main_logical_volume, s,  self.db_controller.get(self.m.target_node_pri.lvstore))
                     self.m.snapshots.append(sr)
         except:
             return False
