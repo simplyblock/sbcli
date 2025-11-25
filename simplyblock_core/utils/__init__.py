@@ -622,7 +622,7 @@ def get_logger(name=""):
 
     if not logg.hasHandlers():
         logger_handler = logging.StreamHandler(stream=sys.stdout)
-        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
         logg.addHandler(logger_handler)
         # gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
         # logg.addHandler(gelf_handler)
