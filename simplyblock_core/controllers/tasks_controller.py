@@ -76,6 +76,12 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
 
+    elif function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+        task_id = get_snapshot_replication_task(cluster_id, function_params['snapshot_id'])
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+
     task_obj = JobSchedule()
     task_obj.uuid = str(uuid.uuid4())
     task_obj.cluster_id = cluster_id
@@ -167,6 +173,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
     for task in tasks:
         if task.function_name == JobSchedule.FN_DEV_MIG:
             continue
+        logger.debug(task)
         if task.max_retry > 0:
             retry = f"{task.retry}/{task.max_retry}"
         else:
@@ -409,3 +416,15 @@ def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
                     return task.uuid
     return False
 
+def get_snapshot_replication_task(cluster_id, snapshot_id):
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.function_params["snapshot_id"] == snapshot_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                return task.uuid
+    return False
+
+
+def add_snapshot_replication_task(snapshot):
+    return _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, snapshot.cluster_id, snapshot.lvol.node_id, "",
+                     function_params={"snapshot_id": snapshot.get_id()})

@@ -10,8 +10,10 @@ from datetime import datetime
 from typing import List, Tuple
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
+    snapshot_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
@@ -263,10 +265,11 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
-                distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
+def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
+                distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
+                do_replicate=False):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -484,6 +487,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     else:
         lvol.npcs = cl.distr_npcs
         lvol.ndcs = cl.distr_ndcs
+    lvol.do_replicate = bool(do_replicate)
+    if lvol.do_replicate:
+        random_nodes = _get_next_3_nodes(cl.snapshot_replication_target_cluster, lvol.size)
+        lvol.replication_node_id = random_nodes[0].get_id()
 
     lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
     if lvol_count > host_node.max_lvol:
@@ -1225,7 +1232,8 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
-            "Mode": mode
+            "Mode": mode,
+            "Replicated On": lvol.replication_node_id,
         }
         data.append(lvol_data)
 
@@ -1765,3 +1773,46 @@ def inflate_lvol(lvol_id):
     else:
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
+
+def replication_start(lvol_id):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    logger.info("Setting LVol do_replicate: True")
+    lvol.do_replicate = True
+    lvol.write_to_db()
+
+    for snap in db_controller.get_snapshots():
+        if snap.lvol.uuid == lvol.uuid:
+            if not snap.target_replicated_snap_uuid:
+                task = tasks_controller.add_snapshot_replication_task(snap)
+                if task:
+                    snapshot_events.replication_task_created(snap)
+
+def replication_stop(lvol_id, delete=False):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    logger.info("Setting LVol do_replicate: False")
+    lvol.do_replicate = False
+    lvol.write_to_db()
+
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    tasks = db_controller.get_job_tasks(snode.cluster_id)
+
+
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.status != JobSchedule.STATUS_DONE:
+            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            if snap.lvol.uuid == lvol.uuid:
+                tasks_controller.cancel_task(task.uuid)
+
+    return True

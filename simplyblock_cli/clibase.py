@@ -447,6 +447,9 @@ class CLIWrapperBase:
         cluster_ops.cluster_expand(args.cluster_id)
         return True
 
+    def cluster__add_replication(self, sub_command, args):
+        return cluster_ops.add_replication(args.cluster_id, args.target_cluster_id, args.timeout, args.target_pool)
+
     def volume__add(self, sub_command, args):
         name = args.name
         size = args.size
@@ -474,7 +477,8 @@ class CLIWrapperBase:
             crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace, 
-            max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric)
+            max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
+            do_replicate=args.replicate)
         if results:
             return results
         else:
@@ -555,6 +559,15 @@ class CLIWrapperBase:
     def volume__inflate(self, sub_command, args):
         return lvol_controller.inflate_lvol(args.volume_id)
 
+    def volume__replication_start(self, sub_command, args):
+        return lvol_controller.replication_start(args.lvol_id)
+
+    def volume__replication_stop(self, sub_command, args):
+        return lvol_controller.replication_stop(args.lvol_id)
+
+    def volume__replication_status(self, sub_command, args):
+        return snapshot_controller.list_replication_tasks(args.cluster_id)
+
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_ip = args.cluster_ip
@@ -633,6 +646,12 @@ class CLIWrapperBase:
 
         success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
         return details
+
+    def snapshot__replication_status(self, sub_command, args):
+        return snapshot_controller.list_replication_tasks(args.cluster_id)
+
+    def snapshot__delete_replication_only(self, sub_command, args):
+        return snapshot_controller.delete_replicated(args.snapshot_id)
 
     def qos__add(self, sub_command, args):
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)
