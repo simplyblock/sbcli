@@ -77,7 +77,6 @@ class SNodeClient:
             logger.warning("Failed to call snode/check, trying snode/info")
             return self.info()
 
-
     def info(self):
         return self._request("GET", "info")
 

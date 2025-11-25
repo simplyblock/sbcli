@@ -493,7 +493,11 @@ def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
-        pod_name = f"snode-spdk-pod-{query.rpc_port}"
+        if not query.cluster_id:
+            return utils.get_response(False, "param required: cluster_id")
+
+        first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
+        pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
         resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
         retries = 10
         while retries > 0:
@@ -555,7 +559,11 @@ def _is_pod_present(rpc_port):
     })}}},
 })
 def spdk_process_is_up(query: utils.RPCPortParams):
-    if _is_pod_up(query.rpc_port):
+    if not query.cluster_id:
+        return utils.get_response(False, "param required: cluster_id")
+
+    first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
+    if _is_pod_up(query.rpc_port, first_six_cluster_id):
         return utils.get_response(True)
     else:
         return utils.get_response(False, "SPDK container is not running")
