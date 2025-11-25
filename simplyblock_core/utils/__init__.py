@@ -547,7 +547,7 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
     memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (
                 1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
-    return int(1.2 * memory_consumption)
+    return int(2.0 * memory_consumption)
 
 
 def calculate_minimum_sys_memory(max_prov):
@@ -576,7 +576,7 @@ def get_total_size_per_instance_type(instance_type):
         device_size = instance_storage_data[instance_type]["size_per_device_gb"]
         return True, number_of_devices, device_size
 
-    return False, 0, 0
+    return False, 0, 256
 
 
 def validate_add_lvol_or_snap_on_node(memory_free, huge_free, max_lvol_or_snap,
@@ -619,7 +619,7 @@ def get_logger(name=""):
 
     if not logg.hasHandlers():
         logger_handler = logging.StreamHandler(stream=sys.stdout)
-        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
         logg.addHandler(logger_handler)
         # gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
         # logg.addHandler(gelf_handler)

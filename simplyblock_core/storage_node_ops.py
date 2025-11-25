@@ -57,12 +57,11 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     rpc_client = node.rpc_client()
     # check connection status
-    if device.connecting_from_node and device.connecting_from_node != node.get_id():
+    if device.is_connection_in_progress_to_node(node.get_id()):
         logger.warning("This device is being connected to from other node, sleep for 5 seconds")
         time.sleep(5)
 
-    device.connecting_from_node = node.get_id()
-    device.write_to_db()
+    device.lock_device_connection(node.get_id())
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
@@ -132,8 +131,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             else:
                 time.sleep(1)
 
-        device.connecting_from_node = ""
-        device.write_to_db()
+        device.release_device_connection()
 
         if not bdev_found:
             logger.error("Bdev not found after 5 attempts")
@@ -808,6 +806,10 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             if jm_dev and jm_dev not in remote_devices:
                 remote_devices.append(jm_dev)
 
+    logger.debug(f"remote_devices: {remote_devices}")
+    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
+    allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE]
+
     new_devs = []
     for jm_dev in remote_devices:
         if not jm_dev.jm_bdev:
@@ -822,6 +824,14 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
                 break
 
         if not org_dev or org_dev in new_devs or org_dev_node and org_dev_node.get_id() == this_node.get_id():
+            continue
+
+        if org_dev_node.status not in allowed_node_statuses:
+            logger.warning(f"Skipping node:{org_dev_node.get_id()} with status: {org_dev_node.status}")
+            continue
+
+        if org_dev.status not in allowed_dev_statuses:
+            logger.warning(f"Skipping device:{org_dev.get_id()} with status: {org_dev.status}")
             continue
 
         remote_device = RemoteJMDevice()
@@ -1044,18 +1054,17 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             if log_config_type and log_config_type != LogConfig.types.GELF:
                 logger.info("SNodeAPI container found but not configured with gelf logger")
                 start_storage_node_api_container(mgmt_ip, cluster_ip)
+        node_socket = node_config.get("socket")
 
         total_mem = minimum_hp_memory
-        # for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        #    if n.api_endpoint == node_addr:
-        #        total_mem += n.spdk_mem
-        # total_mem += utils.parse_size("500m")
+        for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if n.api_endpoint == node_addr and n.socket == node_socket:
+                total_mem += n.spdk_mem
 
         logger.info("Deploying SPDK")
         results = None
         l_cores = node_config.get("l-cores")
         spdk_cpu_mask = node_config.get("cpu_mask")
-        socket = node_config.get("socket")
         for ssd in ssd_pcie:
             snode_api.bind_device_to_spdk(ssd)
         try:
@@ -1065,7 +1074,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=socket)
+                socket=node_socket)
             time.sleep(5)
 
         except Exception as e:
@@ -1181,7 +1190,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.nvmf_port = utils.get_next_dev_port(cluster_id)
         snode.poller_cpu_cores = poller_cpu_cores or []
 
-        snode.socket = socket
+        snode.socket = node_socket
 
         snode.iobuf_small_pool_count = small_pool_count or 0
         snode.iobuf_large_pool_count = large_pool_count or 0
@@ -1732,10 +1741,9 @@ def restart_storage_node(
         cluster_ip = utils.get_k8s_node_ip()
 
     total_mem = minimum_hp_memory
-    # for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-    #    if n.api_endpoint == snode.api_endpoint:
-    #        total_mem += n.spdk_mem
-    # total_mem+= utils.parse_size("500m")
+    for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if n.api_endpoint == snode.api_endpoint and n.socket == snode.socket and n.uuid != snode.uuid:
+            total_mem += n.spdk_mem
 
     results = None
     try:
