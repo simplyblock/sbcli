@@ -52,9 +52,7 @@ def process_device_event(event, logger):
             ev_time = event.object_dict['timestamp']
             time_delta = datetime.now() - datetime.strptime(ev_time, '%Y-%m-%dT%H:%M:%S.%fZ')
             if time_delta.total_seconds() > 8:
-                logger.info(f"event skipped because it was fired {time_delta.total_seconds()} seconds ago")
-                event.status = f'skipped_late_by_{int(time_delta.total_seconds())}s'
-                return
+                logger.info(f"event was fired {time_delta.total_seconds()} seconds ago")
 
         if device_obj.is_connection_in_progress_to_node(event_node_obj.get_id()):
             logger.warning("Connection attempt was found from node to device, sleeping 5 seconds")
