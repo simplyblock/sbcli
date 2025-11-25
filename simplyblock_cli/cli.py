@@ -36,6 +36,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__configure(subparser)
         self.init_storage_node__configure_upgrade(subparser)
         self.init_storage_node__deploy_cleaner(subparser)
+        self.init_storage_node__clean_devices(subparser)
         self.init_storage_node__add_node(subparser)
         self.init_storage_node__delete(subparser)
         self.init_storage_node__remove(subparser)
@@ -92,12 +93,19 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes', type=str, default='0', dest='sockets_to_use')
         argument = subcommand.add_argument('--pci-allowed', help='Comma separated list of PCI addresses of Nvme devices to use for storage devices.', type=str, default='', dest='pci_allowed', required=False)
         argument = subcommand.add_argument('--pci-blocked', help='Comma separated list of PCI addresses of Nvme devices to not use for storage devices', type=str, default='', dest='pci_blocked', required=False)
+        argument = subcommand.add_argument('--device-model', help='NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together', type=str, default='', dest='device_model', required=False)
+        argument = subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together', type=str, default='', dest='size_range', required=False)
+        argument = subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions', dest='force', action='store_true')
 
     def init_storage_node__configure_upgrade(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure-upgrade', 'Upgrade the automated configuration file with new changes of cpu mask or storage devices')
 
     def init_storage_node__deploy_cleaner(self, subparser):
         subcommand = self.add_sub_command(subparser, 'deploy-cleaner', 'Cleans a previous simplyblock deploy (local run)')
+
+    def init_storage_node__clean_devices(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clean-devices', 'clean devices stored in /etc/simplyblock/sn_config_file (local run)')
+        argument = subcommand.add_argument('--config-path', help='Config path to read stored nvme devices from', type=str, default='/etc/simplyblock/sn_config_file', dest='config_path', required=False)
 
     def init_storage_node__add_node(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a storage node by its IP address')
@@ -809,6 +817,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_node__configure_upgrade(sub_command, args)
                 elif sub_command in ['deploy-cleaner']:
                     ret = self.storage_node__deploy_cleaner(sub_command, args)
+                elif sub_command in ['clean-devices']:
+                    ret = self.storage_node__clean_devices(sub_command, args)
                 elif sub_command in ['add-node']:
                     if not self.developer_mode:
                         args.jm_percent = 3

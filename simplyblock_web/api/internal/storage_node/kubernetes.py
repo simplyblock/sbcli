@@ -268,6 +268,7 @@ class SPDKParams(BaseModel):
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
+    socket: Optional[int] = Field(None, ge=0)
 
 
 @api.post('/spdk_process_start', responses={
@@ -353,7 +354,8 @@ def spdk_process_start(body: SPDKParams):
             'MODE': body.cluster_mode,
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
-            'TOTAL_HP': total_mem_mib
+            'TOTAL_HP': total_mem_mib,
+            'NSOCKET': body.socket
         }
 
         if ubuntu_host:
@@ -628,10 +630,13 @@ def apply_config():
     # Set Huge page memory
     huge_page_memory_dict: dict = {}
     for node_config in nodes:
+        hg_memory = node_config["huge_page_memory"]
+        if int(node_config["max_size"]) > 0:
+            hg_memory = max(hg_memory , node_config["max_size"])
         numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + hg_memory
     for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // (2048 * 1024)
+        num_pages = huge_page_memory // 2000000
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)

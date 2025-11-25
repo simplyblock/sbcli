@@ -19,26 +19,12 @@ kubectl label namespace simplyblock \
   --overwrite
 ```
 
-
-Patch the host machine so that OpenEBS could work
-
 Create a machine config patch with the contents below and save as patch.yaml
 ```
 cat > patch.yaml <<'EOF'
 machine:
   sysctls:
     vm.nr_hugepages: "1024"
-  nodeLabels:
-    openebs.io/engine: mayastor
-  kubelet:
-    extraMounts:
-      - destination: /var/openebs/local
-        type: bind
-        source: /var/openebs/local
-        options:
-          - rbind
-          - rshared
-          - rw
 EOF
 
 talosctl -e <endpoint ip/hostname> -n <node ip/hostname> patch mc -p @patch.yaml

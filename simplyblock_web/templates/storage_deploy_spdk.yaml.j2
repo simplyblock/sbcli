@@ -23,8 +23,8 @@ spec:
       operator: Exists
   volumes:
     - name: socket-dir
-      emptyDir:
-        medium: "Memory"
+      hostPath:
+        path: /mnt/ramdisk
     - name: host-sys
       hostPath:
         path: /sys
@@ -87,6 +87,8 @@ spec:
           value: "{{ TOTAL_HP }}"
         - name: RPC_PORT
           value: "{{ RPC_PORT }}"
+        - name: NSOCKET
+          value: "{{ NSOCKET }}"
         - name: SPDKCSI_SECRET
           valueFrom:
             secretKeyRef:
@@ -105,7 +107,7 @@ spec:
         privileged: true
       volumeMounts:
         - name: socket-dir
-          mountPath: /var/tmp
+          mountPath: /mnt/ramdisk
         - name: host-sys
           mountPath: /sys
         - name: host-modules
@@ -129,7 +131,7 @@ spec:
       command: ["python", "simplyblock_core/services/spdk_http_proxy_server.py"]
       volumeMounts:
         - name: socket-dir
-          mountPath: /var/tmp
+          mountPath: /mnt/ramdisk
       env:
         - name: SERVER_IP
           value: "{{ SERVER_IP }}"
