@@ -117,5 +117,5 @@ spec:
               echo "[INFO] Marking node as configured."
               touch "$MARKER"
 
-              echo "[INFO] Node is rebooting. Sleeping indefinitely to stop pipeline..."
-              sleep infinity
+              echo "[INFO] Node is rebooting. Sleeping for 5 minutes to stop pipeline gracefully..."
+              sleep 300
