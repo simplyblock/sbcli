@@ -783,6 +783,10 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             if jm_dev and jm_dev not in remote_devices:
                 remote_devices.append(jm_dev)
 
+    logger.debug(f"remote_devices: {remote_devices}")
+    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
+    allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE]
+
     new_devs = []
     for jm_dev in remote_devices:
         if not jm_dev.jm_bdev:
@@ -797,6 +801,14 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
                 break
 
         if not org_dev or org_dev in new_devs or org_dev_node and org_dev_node.get_id() == this_node.get_id():
+            continue
+
+        if org_dev_node.status not in allowed_node_statuses:
+            logger.warning(f"Skipping node:{org_dev_node.get_id()} with status: {org_dev_node.status}")
+            continue
+
+        if org_dev.status not in allowed_dev_statuses:
+            logger.warning(f"Skipping device:{org_dev.get_id()} with status: {org_dev.status}")
             continue
 
         remote_device = RemoteJMDevice()
