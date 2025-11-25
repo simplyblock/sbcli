@@ -820,11 +820,11 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         if not org_dev or org_dev in new_devs or org_dev_node and org_dev_node.get_id() == this_node.get_id():
             continue
 
-        if org_dev_node.status not in allowed_node_statuses:
+        if org_dev_node is not None and org_dev_node.status not in allowed_node_statuses:
             logger.warning(f"Skipping node:{org_dev_node.get_id()} with status: {org_dev_node.status}")
             continue
 
-        if org_dev.status not in allowed_dev_statuses:
+        if org_dev is not None and org_dev.status not in allowed_dev_statuses:
             logger.warning(f"Skipping device:{org_dev.get_id()} with status: {org_dev.status}")
             continue
 
