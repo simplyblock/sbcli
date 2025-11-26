@@ -52,12 +52,16 @@ class PromClient:
             ind = s[-1]
             v = int(s[:-1])
             if ind == 'd':
-                history_in_days = v * (60 * 60 * 24)
+                history_in_days = v
             if ind == 'h':
-                history_in_hours = v * (60 * 60)
+                history_in_hours = v
             if ind == 'm':
-                history_in_minutes = v * 60
+                history_in_minutes = v
 
+        history_in_hours += int(history_in_minutes/60)
+        history_in_minutes = history_in_minutes % 60
+        history_in_days += int(history_in_hours/24)
+        history_in_hours = history_in_hours % 24
         return history_in_days, history_in_hours, history_in_minutes
 
     def get_metrics(self, key_prefix, metrics_lst, params, history=None):
