@@ -428,9 +428,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     return nvme
 
 
-def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent, partition_size=0):
-    ctrl_id = nvme.nvme_controller[-1]
-    nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev, f"/dev/nbd{ctrl_id}")
+def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent, partition_size, nbd_index):
+    nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev, f"/dev/nbd{nbd_index}")
     time.sleep(3)
     if not nbd_device:
         logger.error("Failed to start nbd dev")
@@ -486,7 +485,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
                 t = threading.Thread(
                     target=_create_device_partitions,
                     args=(snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
-                          snode.jm_percent, snode.partition_size,))
+                          snode.jm_percent, snode.partition_size, index+1,))
                 thread_list.append(t)
                 t.start()
 
