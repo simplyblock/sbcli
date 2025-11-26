@@ -22,7 +22,6 @@ import time
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
@@ -41,15 +40,27 @@ while True:
 
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
 
-            lvol_list = db.get_lvols_by_node_id(snode.get_id())
-
-            if not lvol_list:
+            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 continue
 
-            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+            node_info = snode.snode_api().info()
+            ram_utilization= 0
+            lvol_utilization = 0
+            lvol_count = 0
 
-                rpc_client = RPCClient(
-                    snode.mgmt_ip, snode.rpc_port,
-                    snode.rpc_username, snode.rpc_password, timeout=3, retry=2)
+            # check for memory
+            if "memory_details" in node_info and node_info['memory_details']:
+                memory_details = node_info['memory_details']
+                logger.info("Node Memory info")
+                logger.info(f"Total: {utils.humanbytes(memory_details['total'])}")
+                logger.info(f"Free: {utils.humanbytes(memory_details['free'])}")
+                ram_utilization = int(memory_details['free']/memory_details['total']*100)
+
+            lvol_list = db.get_lvols_by_node_id(snode.get_id())
+            lvol_count = len(lvol_list)
+            for lvol in lvol_list:
+                records = db.get_lvol_stats(lvol, 1)
+                if records:
+                    lvol_utilization += records[0].size_used
 
     time.sleep(constants.LVOL_SCHEDULER_INTERVAL_SEC)
