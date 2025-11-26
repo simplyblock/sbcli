@@ -31,6 +31,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevi
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
@@ -2509,20 +2510,11 @@ def resume_storage_node(node_id):
 def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
     try:
-        this_node = db_controller.get_storage_node_by_id(node_id)
+        node = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
         logger.error("Storage node Not found")
         return
 
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            logger.error(f"Error parsing history string: {history}")
-            return False
-    else:
-        records_number = 20
-
-    records = db_controller.get_node_capacity(this_node, records_number)
     cap_stats_keys = [
         "date",
         "size_total",
@@ -2532,6 +2524,8 @@ def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
         "size_util",
         "size_prov_util",
     ]
+    prom_client = PromClient(node.cluster_id)
+    records = prom_client.get_node_metrics(node_id, cap_stats_keys, history)
     new_records = utils.process_records(records, records_count, keys=cap_stats_keys)
 
     if not parse_sizes:
@@ -2558,17 +2552,6 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
     except KeyError:
         logger.error("node not found")
         return False
-
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            logger.error(f"Error parsing history string: {history}")
-            return False
-    else:
-        records_number = 20
-
-    records = db_controller.get_node_stats(node, records_number)
-
     io_stats_keys = [
         "date",
         "read_bytes",
@@ -2606,6 +2589,8 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
                 "write_latency_ticks",
             ]
         )
+    prom_client = PromClient(node.cluster_id)
+    records = prom_client.get_node_metrics(node_id, io_stats_keys, history)
     # combine records
     new_records = utils.process_records(records, records_count, keys=io_stats_keys)
 
