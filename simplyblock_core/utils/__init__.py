@@ -12,8 +12,9 @@ import uuid
 import time
 import socket
 from typing import Union, Any, Optional, Tuple
+from docker import DockerClient
 from kubernetes import client, config
-from kubernetes.client import ApiException
+from kubernetes.client import ApiException, AppsV1Api
 import docker
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
@@ -2081,3 +2082,23 @@ def patch_prometheus_configmap(username: str, password: str):
     except Exception as e:
         logger.error(f"Unexpected error while patching ConfigMap: {e}")
         return False
+
+
+def create_docker_service(cluster_docker: DockerClient, service_name: str, service_file: str, service_image: str):
+    logger.info(f"Creating service: {service_name}")
+    cluster_docker.services.create(
+        image=service_image,
+        command=service_file,
+        name=service_name,
+        mounts=["/etc/foundationdb:/etc/foundationdb"],
+        env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
+        networks=["host"],
+        constraints=["node.role == manager"]
+    )
+
+
+def create_k8s_service(k8s_apps_client: AppsV1Api, namespace: str, deployment_name: str,
+                       container_name: str, service_file: str, container_image: str):
+    # TODO(Geoffrey): Add implementation to create a service on k8s to support cluster update from older version
+    logger.info(f"Creating deployment: {deployment_name}")
+    pass
