@@ -289,7 +289,7 @@ while True:
             spdk_process = False
             if node_api_check:
                 # 3- check spdk_process
-                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip, snode.rpc_port)
+                spdk_process = health_controller._check_spdk_process_up(snode.mgmt_ip, snode.rpc_port, snode.cluster_id)
             logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {spdk_process}")
 
                 # 4- check rpc
