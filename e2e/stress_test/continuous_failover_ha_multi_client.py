@@ -61,7 +61,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         # self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt",
         #                      "interface_partial_network_interrupt",
         #                      "partial_nw"]
-        self.outage_types = ["interface_full_network_interrupt"]
+        self.outage_types = ["graceful_shutdown", "container_stop", "interface_full_network_interrupt"]
         # self.outage_types = ["partial_nw"]
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
@@ -592,10 +592,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         else:
                             self.logger.info("Max retries reached. Failed to restart node.")
                             raise  # Rethrow the last exception
-            else:
                 self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
                 # Log the restart event
                 self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=0)
+            else:
+                self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+                # Log the restart event
+                self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=2)
 
         elif "network_interrupt" in outage_type:
             self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
