@@ -1,4 +1,22 @@
 # coding=utf-8
+"""
+Filename: lvol_scheduler.py
+Author: Hamdy Khader
+Email: hamdy@simplyblock.io
+Description:
+LVol scheduler service will collect, calculate and store the required metric parameters for lvol scheduler algorithm
+to make the following decisions:
+    - Which node should be used for hosting the next lvol?
+    - Is lvol transfer required because of high RAM consumption ? if so then which lvol/s to which node?
+
+Here we have the metric parameters used (per node):
+    ram_utilization
+        a timely reading of random memory utilization from file /etc/meminfo of the node
+    lvol_utilization
+        sum of the consumed data size (bytes) for all lvol on the node
+    lvol_count
+        count of lvols on the node
+"""
 import time
 
 from simplyblock_core import constants, db_controller, utils
