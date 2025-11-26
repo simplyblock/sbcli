@@ -1,5 +1,17 @@
 # coding=utf-8
-
+# coding=utf-8
+"""
+Filename: cap_monitor.py
+Author: Hamdy Khader
+Email: hamdy@simplyblock.io
+Description:
+Capacity monitor service is responsible for monitoring cluster's provisioned size and utilized size metrics
+then compare them with cluster db values as follows and send a log to cluster logs,
+    cap_crit: cluster absolute capacity critical limit, e.g. 90%
+    cap_warn: cluster absolute capacity warning limit, e.g. 80%
+    prov_cap_crit: cluster provisioned capacity critical limit, e.g. 200%
+    prov_cap_warn: cluster provisioned capacity warning limit, e.g. 150%
+"""
 import time
 from datetime import datetime, timezone
 
