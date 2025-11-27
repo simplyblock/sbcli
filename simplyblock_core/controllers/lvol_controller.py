@@ -1782,9 +1782,17 @@ def replication_start(lvol_id):
         logger.error(e)
         return False
 
-    logger.info("Setting LVol do_replicate: True")
     lvol.do_replicate = True
+    if not lvol.replication_node_id:
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        if not cluster.snapshot_replication_target_cluster:
+            logger.error(f"Cluster: {snode.cluster_id} not replicated")
+            return False
+        random_nodes = _get_next_3_nodes(cluster.snapshot_replication_target_cluster, lvol.size)
+        lvol.replication_node_id = random_nodes[0].get_id()
     lvol.write_to_db()
+    logger.info("Setting LVol do_replicate: True")
 
     for snap in db_controller.get_snapshots():
         if snap.lvol.uuid == lvol.uuid:
@@ -1792,6 +1800,8 @@ def replication_start(lvol_id):
                 task = tasks_controller.add_snapshot_replication_task(snap)
                 if task:
                     snapshot_events.replication_task_created(snap)
+    return True
+
 
 def replication_stop(lvol_id, delete=False):
     db_controller = DBController()
