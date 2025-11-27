@@ -159,9 +159,11 @@ class DBController(metaclass=Singleton):
                 hostnames.append(lv.hostname)
         return hostnames
 
-    def get_snapshots(self) -> List[SnapShot]:
-        ret = SnapShot().read_from_db(self.kv_store)
-        return ret
+    def get_snapshots(self, cluster_id=None) -> List[SnapShot]:
+        snaps = SnapShot().read_from_db(self.kv_store)
+        if cluster_id:
+            snaps = [n for n in snaps if n.cluster_id == cluster_id]
+        return sorted(snaps, key=lambda x: x.create_dt)
 
     def get_snapshot_by_id(self, id) -> SnapShot:
         ret = SnapShot().read_from_db(self.kv_store, id)

@@ -226,8 +226,8 @@ def add(lvol_id, snapshot_name):
     return snap.uuid, False
 
 
-def list(all=False):
-    snaps = db_controller.get_snapshots()
+def list(all=False, cluster_id=None):
+    snaps = db_controller.get_snapshots(cluster_id)
     data = []
     for snap in snaps:
         logger.debug(snap)

@@ -111,7 +111,6 @@ while True:
             node_bdev_names = []
             node_lvols_nqns = {}
             sec_node_bdev_names = {}
-            sec_node_lvols_nqns = {}
             sec_node = None
 
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
@@ -141,11 +140,6 @@ while True:
                     if ret:
                         for bdev in ret:
                             sec_node_bdev_names[bdev['name']] = bdev
-
-                    ret = sec_rpc_client.subsystem_list()
-                    if ret:
-                        for sub in ret:
-                            sec_node_lvols_nqns[sub['nqn']] = sub
 
             if snode.lvstore_status == "ready":
 

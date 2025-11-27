@@ -1875,6 +1875,11 @@ commands:
             dest: all
             type: bool
             action: store_true
+          - name: "--cluster-id"
+            help: "Filter snapshots by cluster UUID"
+            dest: cluster_id
+            type: str
+            required: false
       - name: delete
         help: "Deletes a snapshot"
         arguments:
@@ -1887,6 +1892,13 @@ commands:
             dest: force
             type: bool
             action: store_true
+      - name: check
+        help: "Check a snapshot health"
+        arguments:
+          - name: "snapshot_id"
+            help: "Snapshot id"
+            dest: snapshot_id
+            type: str
       - name: clone
         help: "Provisions a new logical volume from an existing snapshot"
         arguments:

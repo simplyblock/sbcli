@@ -762,6 +762,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__add(subparser)
         self.init_snapshot__list(subparser)
         self.init_snapshot__delete(subparser)
+        self.init_snapshot__check(subparser)
         self.init_snapshot__clone(subparser)
         self.init_snapshot__replication_status(subparser)
         self.init_snapshot__delete_replication_only(subparser)
@@ -775,11 +776,16 @@ class CLIWrapper(CLIWrapperBase):
     def init_snapshot__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all snapshots')
         argument = subcommand.add_argument('--all', help='List soft deleted snapshots', dest='all', action='store_true')
+        argument = subcommand.add_argument('--cluster-id', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
 
     def init_snapshot__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a snapshot')
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         argument = subcommand.add_argument('--force', help='Force remove', dest='force', action='store_true')
+
+    def init_snapshot__check(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'check', 'Check a snapshot health')
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
 
     def init_snapshot__clone(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a new logical volume from an existing snapshot')
@@ -1142,6 +1148,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__list(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.snapshot__delete(sub_command, args)
+                elif sub_command in ['check']:
+                    ret = self.snapshot__check(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
                 elif sub_command in ['replication-status']:
