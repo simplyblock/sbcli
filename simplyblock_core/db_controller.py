@@ -163,7 +163,7 @@ class DBController(metaclass=Singleton):
         snaps = SnapShot().read_from_db(self.kv_store)
         if cluster_id:
             snaps = [n for n in snaps if n.cluster_id == cluster_id]
-        return sorted(snaps, key=lambda x: x.create_dt)
+        return sorted(snaps, key=lambda x: x.created_at)
 
     def get_snapshot_by_id(self, id) -> SnapShot:
         ret = SnapShot().read_from_db(self.kv_store, id)

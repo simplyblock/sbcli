@@ -647,8 +647,8 @@ class CLIWrapperBase:
     def snapshot__clone(self, sub_command, args):
         new_size = args.resize
 
-        success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
-        return details
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+        return clone_id if not error else error
 
     def snapshot__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)
