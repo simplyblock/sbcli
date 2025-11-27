@@ -68,11 +68,14 @@ class SNodeClient:
         if ret_code == 422:
             raise SNodeClientException(f"Request validation failed: '{response.text}'")
 
-        logger.error("Unknown http status: %s", ret_code)
-        return None, None
+        raise SNodeClientException(f"Unknown http status: {ret_code}")
 
     def is_live(self):
-        return self._request("GET", "check")
+        try:
+            return self._request("GET", "check")
+        except SNodeClientException:
+            logger.warning("Failed to call snode/check, trying snode/info")
+            return self.info()
 
     def info(self):
         return self._request("GET", "info")
