@@ -220,9 +220,10 @@ def add(lvol_id, snapshot_name):
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
-    task = tasks_controller.add_snapshot_replication_task(snap)
-    if task:
-        snapshot_events.replication_task_created(snap)
+    if lvol.do_replicate:
+        task = tasks_controller.add_snapshot_replication_task(snap)
+        if task:
+            snapshot_events.replication_task_created(snap)
     return snap.uuid, False
 
 
