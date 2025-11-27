@@ -7,9 +7,9 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
+
 logger = utils.get_logger(__name__)
-
-
+db = db_controller.DBController()
 last_object_record: dict[str, DeviceStatObject] = {}
 
 
@@ -149,9 +149,36 @@ def add_cluster_stats(cl, records):
     return stat_obj
 
 
+def add_lvol_scheduler_values(node: StorageNode):
+    node_used_size = 0
+    lvols_subsystems = []
+    for lvol in db.get_lvols_by_node_id(node.get_id()):
+        records = db.get_lvol_stats(lvol, 1)
+        if records:
+            node_used_size += records[0].size_used
+        if lvol.nqn not in lvols_subsystems:
+            lvols_subsystems.append(lvol.nqn)
+    for snap in db.get_snapshots_by_node_id(node.get_id()):
+        node_used_size += snap.used_size
 
-# get DB controller
-db = db_controller.DBController()
+    lvol_count_util = int(len(lvols_subsystems) / node.max_lvol * 100)
+    node_size_util = int(node_used_size / node.max_prov * 100)
+
+    if lvol_count_util <= 0 or node_size_util <= 0:
+        return False
+    db_node = db.get_storage_node_by_id(node.get_id())
+    db_node.lvol_count_util = lvol_count_util
+    db_node.node_size_util = node_size_util
+    db_node.write_to_db()
+
+    # Once a node has > 90% of storage utilization, the largest lvol will be live migrated to another node
+    # (the one with small storage utilization)
+    if db_node.node_size_util > 90:
+        pass # todo: migration lvols to free space
+
+    return True
+
+
 
 logger.info("Starting capacity and stats collector...")
 while True:
@@ -198,6 +225,10 @@ while True:
 
             node_record = add_node_stats(node, devices_records)
             node_records.append(node_record)
+
+            ret = add_lvol_scheduler_values(node)
+            if not ret:
+                logger.warning("Failed to add lvol scheduler values")
 
         add_cluster_stats(cl, node_records)
 

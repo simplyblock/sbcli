@@ -1197,13 +1197,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_file="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
                 service_image=service_image)
 
-        if "app_LVolScheduler" not in service_names:
-            utils.create_docker_service(
-                cluster_docker=cluster_docker,
-                service_name="app_LVolScheduler",
-                service_file="python simplyblock_core/services/lvol_scheduler.py",
-                service_image=service_image)
-
         logger.info("Done updating mgmt cluster")
 
     elif cluster.mode == "kubernetes":
@@ -1250,15 +1243,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 deployment_name=f"{namespace}-snapshot-monitor",
                 container_name="snapshot-monitor",
                 service_file="simplyblock_core/services/snapshot_monitor.py",
-                container_image=service_image)
-
-        if f"{namespace}-lvol-scheduler" not in deployment_names:
-            utils.create_k8s_service(
-                k8s_apps_client=apps_v1,
-                namespace=namespace,
-                deployment_name=f"{namespace}-lvol-scheduler",
-                container_name="lvol-scheduler",
-                service_file="simplyblock_core/services/lvol_scheduler.py",
                 container_image=service_image)
 
         # Update DaemonSets

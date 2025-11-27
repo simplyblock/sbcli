@@ -1103,57 +1103,6 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simplyblock-lvol-scheduler
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-lvol-scheduler
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-lvol-scheduler
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      containers:
-        - name: lvol-scheduler
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/lvol_scheduler.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
   name: simplyblock-tasks-runner-sync-lvol-del
   namespace: {{ .Release.Namespace }}
 spec:
