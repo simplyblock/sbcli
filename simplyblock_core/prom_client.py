@@ -72,11 +72,11 @@ class PromClient:
                 start_time = datetime.now() - timedelta(days=days, hours=hours, minutes=minutes)
             except Exception:
                 raise PromClientException(f"Error parsing history string: {history}")
-
+        end_time = datetime.now()
         data_out: list[dict] = []
         for key in metrics_lst:
             metrics = self.client.get_metric_range_data(
-                f"{key_prefix}_{key}", label_config=params, start_time=start_time)
+                f"{key_prefix}_{key}", label_config=params, start_time=start_time, end_time=end_time)
             for m in metrics:
                 mt_name = key
                 mt_values = m["values"]
