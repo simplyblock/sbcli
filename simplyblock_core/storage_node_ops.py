@@ -807,7 +807,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
                 remote_devices.append(jm_dev)
 
     logger.debug(f"remote_devices: {remote_devices}")
-    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
+    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_RESTARTING]
     allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE]
 
     new_devs = []
