@@ -1277,6 +1277,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
 
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         old_status = snode.status
+        snode.health_check = False
         snode.status =  StorageNode.STATUS_ONLINE
         snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
         snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
