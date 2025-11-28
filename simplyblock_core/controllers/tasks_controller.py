@@ -167,6 +167,8 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             if t.function_name == JobSchedule.FN_DEV_MIG:
                 continue
             data.append(t.get_clean_dict())
+            if len(data) > limit:
+                return json.dumps(data, indent=2)
         return json.dumps(data, indent=2)
 
     for task in tasks:
@@ -176,7 +178,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             retry = f"{task.retry}/{task.max_retry}"
         else:
             retry = f"{task.retry}"
-
+        logger.debug(task)
         upd = task.updated_at
         if upd:
             try:
@@ -202,6 +204,8 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             "Result": task.function_result,
             "Updated At": upd or "",
         })
+        if len(data) > limit:
+            return utils.print_table(data)
     return utils.print_table(data)
 
 
@@ -244,6 +248,7 @@ def get_subtasks(master_task_id):
             except Exception as e:
                 logger.error(e)
 
+        logger.debug(sub_task)
         data.append({
             "Task ID": sub_task.uuid,
             "Node ID / Device ID": f"{sub_task.node_id}\n{sub_task.device_id}",
