@@ -133,46 +133,56 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     db_controller = DBController()
-    snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-    online_nodes = []
     node_stats = {}
-    for node in snodes:
+    all_online_nodes = []
+    nodes_between_25_75 = []
+    nodes_above_75 = []
+
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.is_secondary_node:  # pass
             continue
 
         if node.status == node.STATUS_ONLINE:
 
-            lvol_count = len(db_controller.get_lvols_by_node_id(node.get_id()))
-            if lvol_count >= node.max_lvol:
-                continue
+            """
+            if sum of lvols (+snapshots, including namespace lvols) per node is utilized < [0.25 * max-size] AND
+            number of lvols (snapshots dont count extra and namspaces on same subsystem count only once) < [0.25 * max-lvol]
+            
+            --> simply round-robin schedule lvols (no randomization, no weights)
+            BUT: if storage utilization > 25% on one or more nodes, those nodes are excluded from round robin
+            
+            
+            
+            
+            
+            Once all nodes have > 25% of storage utilization, we weight
+            (relative-number-of-lvol-compared-to-total-number + relative-utilization-compared-to-total-utilzation) 
+            --> and based on the weight just a random location
+            
+            Once a node has > 75% uof storage utilization, it is excluded to add new lvols
+                (unless all nodes exceed this limit, than it is weighted again)
 
-            # Validate Eligible nodes for adding lvol
-            # snode_api = SNodeClient(node.api_endpoint)
-            # result, _ = snode_api.info()
-            # memory_free = result["memory_details"]["free"]
-            # huge_free = result["memory_details"]["huge_free"]
-            # total_node_capacity = db_controller.get_snode_size(node.get_id())
-            # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, node.max_lvol, lvol_size,  total_node_capacity, len(node.lvols))
-            # if error:
-            #     logger.warning(error)
-            #     continue
-            #
-            online_nodes.append(node)
-            # node_stat_list = db_controller.get_node_stats(node, limit=1000)
-            # combined_record = utils.sum_records(node_stat_list)
+
+            """
+            all_online_nodes.append(node)
+
+            if node.node_size_util < 25:
+                continue
+            elif node.node_size_util >= 75:
+                nodes_above_75.append(node)
+            else:
+                nodes_between_25_75.append(node)
+
             node_st = {
-                "lvol": lvol_count+1,
-                # "cpu": 1 + (node.cpu * node.cpu_hz),
-                # "r_io": combined_record.read_io_ps,
-                # "w_io": combined_record.write_io_ps,
-                # "r_b": combined_record.read_bytes_ps,
-                # "w_b": combined_record.write_bytes_ps
+                "node_size_util": node.node_size_util ,
+                "lvol_count_util": node.lvol_count_util ,
             }
 
             node_stats[node.get_id()] = node_st
 
-    if len(online_nodes) <= 1:
-        return online_nodes
+    if len(node_stats) <= 1:
+        return all_online_nodes
+
     cluster_stats = utils.dict_agg([node_stats[k] for k in node_stats])
 
     nodes_weight = utils.get_weights(node_stats, cluster_stats)
@@ -230,7 +240,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             ret.append(node)
         return ret
     else:
-        return online_nodes
+        return all_online_nodes
 
 def is_hex(s: str) -> bool:
     """
