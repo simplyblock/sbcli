@@ -61,17 +61,17 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
         if last_record:
             time_diff = (now - last_record.date)
             if time_diff > 0:
-                data['read_bytes_ps'] = int((data['read_bytes'] - last_record['read_bytes']) / time_diff)
-                data['read_io_ps'] = int((data['read_io'] - last_record['read_io']) / time_diff)
-                data['read_latency_ps'] = int((data['read_latency_ticks'] - last_record['read_latency_ticks']) / time_diff)
+                data['read_bytes_ps'] = abs(int((data['read_bytes'] - last_record['read_bytes']) / time_diff))
+                data['read_io_ps'] = abs(int((data['read_io'] - last_record['read_io']) / time_diff))
+                data['read_latency_ps'] = abs(int((data['read_latency_ticks'] - last_record['read_latency_ticks']) / time_diff))
 
-                data['write_bytes_ps'] = int((data['write_bytes'] - last_record['write_bytes']) / time_diff)
-                data['write_io_ps'] = int((data['write_io'] - last_record['write_io']) / time_diff)
-                data['write_latency_ps'] = int((data['write_latency_ticks'] - last_record['write_latency_ticks']) / time_diff)
+                data['write_bytes_ps'] = abs(int((data['write_bytes'] - last_record['write_bytes']) / time_diff))
+                data['write_io_ps'] = abs(int((data['write_io'] - last_record['write_io']) / time_diff))
+                data['write_latency_ps'] = abs(int((data['write_latency_ticks'] - last_record['write_latency_ticks']) / time_diff))
 
-                data['unmap_bytes_ps'] = int((data['unmap_bytes'] - last_record['unmap_bytes']) / time_diff)
-                data['unmap_io_ps'] = int((data['unmap_io'] - last_record['unmap_io']) / time_diff)
-                data['unmap_latency_ps'] = int((data['unmap_latency_ticks'] - last_record['unmap_latency_ticks']) / time_diff)
+                data['unmap_bytes_ps'] = abs(int((data['unmap_bytes'] - last_record['unmap_bytes']) / time_diff))
+                data['unmap_io_ps'] = abs(int((data['unmap_io'] - last_record['unmap_io']) / time_diff))
+                data['unmap_latency_ps'] = abs(int((data['unmap_latency_ticks'] - last_record['unmap_latency_ticks']) / time_diff))
 
         else:
             logger.warning("last record not found")
