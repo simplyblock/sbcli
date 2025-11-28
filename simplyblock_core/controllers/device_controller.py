@@ -6,6 +6,7 @@ from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -440,7 +441,7 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
     else:
         records_number = 20
 
-    records = db_controller.get_device_capacity(device, records_number)
+    # records = db_controller.get_device_capacity(device, records_number)
     cap_stats_keys = [
         "date",
         "size_total",
@@ -448,6 +449,8 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
         "size_free",
         "size_util",
     ]
+    prom_client = PromClient(device.cluster_id)
+    records = prom_client.get_device_metrics(device_id, cap_stats_keys, history)
     records_list = utils.process_records(records, records_count, keys=cap_stats_keys)
 
     if not parse_sizes:
@@ -474,15 +477,6 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
         logger.error("device not found")
         return False
 
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            logger.error(f"Error parsing history string: {history}")
-            return False
-    else:
-        records_number = 20
-
-    records_list = db_controller.get_device_stats(device, records_number)
     io_stats_keys = [
         "date",
         "read_bytes",
@@ -496,8 +490,10 @@ def get_device_iostats(device_id, history, records_count=20, parse_sizes=True):
         "write_io_ps",
         "write_latency_ps",
     ]
+    prom_client = PromClient(device.cluster_id)
+    records = prom_client.get_device_metrics(device_id, io_stats_keys, history)
     # combine records
-    new_records = utils.process_records(records_list, records_count, keys=io_stats_keys)
+    new_records = utils.process_records(records, records_count, keys=io_stats_keys)
 
     if not parse_sizes:
         return new_records
