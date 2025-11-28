@@ -1531,7 +1531,7 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
             logger.error(f"Error parsing history string: {history}")
             return False
     else:
-        records_number = 20
+        records_number = records_count
 
     records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
     cap_stats_keys = [
@@ -1574,7 +1574,7 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
             logger.error(f"Error parsing history string: {history}")
             return False
     else:
-        records_number = 20
+        records_number = records_count
 
     records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
     io_stats_keys = [

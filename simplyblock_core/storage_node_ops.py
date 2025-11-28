@@ -2512,7 +2512,7 @@ def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
             logger.error(f"Error parsing history string: {history}")
             return False
     else:
-        records_number = 20
+        records_number = records_count
 
     records = db_controller.get_node_capacity(this_node, records_number)
     cap_stats_keys = [
@@ -2557,7 +2557,7 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
             logger.error(f"Error parsing history string: {history}")
             return False
     else:
-        records_number = 20
+        records_number = records_count
 
     records = db_controller.get_node_stats(node, records_number)
 

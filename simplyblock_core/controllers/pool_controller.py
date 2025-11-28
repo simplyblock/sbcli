@@ -327,7 +327,7 @@ def get_io_stats(pool_id, history, records_count=20):
             logger.error(f"Error parsing history string: {history}")
             return False
     else:
-        records_number = 20
+        records_number = records_count
 
     out = db_controller.get_pool_stats(pool, records_number)
     new_records = utils.process_records(out, records_count)

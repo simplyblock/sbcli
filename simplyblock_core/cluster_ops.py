@@ -1007,7 +1007,7 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
         if not records_number:
             raise ValueError(f"Error parsing history string: {history}")
     else:
-        records_number = 20
+        records_number = records_count
 
     records = db_controller.get_cluster_capacity(cluster, records_number)
 
@@ -1031,7 +1031,7 @@ def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes
         if not records_number:
             raise ValueError(f"Error parsing history string: {history_string}")
     else:
-        records_number = 20
+        records_number = records_count
 
     records = db_controller.get_cluster_stats(cluster, records_number)
 
@@ -1135,6 +1135,7 @@ def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
         if record.event in ["device_status", "node_status"]:
             msg = msg+f" ({record.count})"
 
+        logger.debug(record)
         out.append({
             "Date": record.get_date_string(),
             "NodeId": record.node_id,
