@@ -167,7 +167,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             if t.function_name == JobSchedule.FN_DEV_MIG:
                 continue
             data.append(t.get_clean_dict())
-            if len(data) > limit:
+            if len(data) > limit > 0:
                 return json.dumps(data, indent=2)
         return json.dumps(data, indent=2)
 
@@ -204,7 +204,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             "Result": task.function_result,
             "Updated At": upd or "",
         })
-        if len(data) > limit:
+        if len(data) > limit > 0:
             return utils.print_table(data)
     return utils.print_table(data)
 
