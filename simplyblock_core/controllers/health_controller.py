@@ -128,11 +128,11 @@ def _check_node_api(ip):
     return False
 
 
-def _check_spdk_process_up(ip, rpc_port):
+def _check_spdk_process_up(ip, rpc_port, cluster_id):
     try:
         snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
         logger.debug(f"Node API={ip}:5000")
-        is_up, _ = snode_api.spdk_process_is_up(rpc_port)
+        is_up, _ = snode_api.spdk_process_is_up(rpc_port, cluster_id)
         logger.debug(f"SPDK is {is_up}")
         return is_up
     except Exception as e:

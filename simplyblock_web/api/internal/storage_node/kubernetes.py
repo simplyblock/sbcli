@@ -423,9 +423,35 @@ def spdk_process_start(body: SPDKParams):
             logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
 
         elif core_isolate and openshift:
+            batch_v1 = core_utils.get_k8s_batch_client()
+            try:
+                batch_v1.read_namespaced_job(
+                    name=node_prepration_core_name,
+                    namespace=namespace
+                )
+                logger.info(f"Existing Job '{node_prepration_core_name}' found — deleting it first...")
+
+                batch_v1.delete_namespaced_job(
+                    name=node_prepration_core_name,
+                    namespace=namespace,
+                    body=V1DeleteOptions(
+                        propagation_policy='Foreground',
+                        grace_period_seconds=0
+                    )
+                )
+
+                node_utils_k8s.wait_for_job_deletion(node_prepration_core_name, namespace)
+
+                logger.info(f"Old Job '{node_prepration_core_name}' fully deleted.")
+
+            except ApiException as e:
+                if e.status == 404:
+                    logger.info(f"No pre-existing Job '{node_prepration_core_name}' found. Proceeding.")
+                else:
+                    raise
+                
             core_template = env.get_template('oc_storage_core_isolation.yaml.j2')
             core_yaml = yaml.safe_load(core_template.render(values))
-            batch_v1 = core_utils.get_k8s_batch_client()
             core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
             msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
             logger.info(msg)
@@ -466,6 +492,9 @@ def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
+        if not query.cluster_id:
+            return utils.get_response(False, "param required: cluster_id")
+
         first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
         pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
         resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
@@ -529,6 +558,9 @@ def _is_pod_present(rpc_port, cluster_id):
     })}}},
 })
 def spdk_process_is_up(query: utils.RPCPortParams):
+    if not query.cluster_id:
+        return utils.get_response(False, "param required: cluster_id")
+
     first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
     if _is_pod_up(query.rpc_port, first_six_cluster_id):
         return utils.get_response(True)

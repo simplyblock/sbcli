@@ -73,7 +73,7 @@ class SNodeClient:
         return None, None
 
     def is_live(self):
-        return self._request("GET", "/check")
+        return self._request("GET", "check")
 
     def info(self):
         return self._request("GET", "info")
@@ -154,8 +154,8 @@ class SNodeClient:
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_spdk", params)
 
-    def spdk_process_is_up(self, rpc_port):
-        params = {"rpc_port": rpc_port}
+    def spdk_process_is_up(self, rpc_port, cluster_id):
+        params = {"rpc_port": rpc_port, "cluster_id": cluster_id}
         return self._request("GET", "spdk_process_is_up", params)
 
     def get_file_content(self, file_name):
