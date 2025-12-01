@@ -267,11 +267,13 @@ def delete(snapshot_uuid, force_delete=False):
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid and lvol.status != LVol.STATUS_IN_DELETION:
             clones.append(lvol)
 
+    transaction = db_controller.create_transaction()
+
     if len(clones) >= 1:
         logger.warning("Soft delete snapshot with clones")
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.deleted = True
-        snap.write_to_db(db_controller.kv_store)
+        snap.write_to_transaction(transaction)
         return True
 
     logger.info(f"Removing snapshot: {snapshot_uuid}")
@@ -292,7 +294,7 @@ def delete(snapshot_uuid, force_delete=False):
             snap = db_controller.get_snapshot_by_id(snapshot_uuid)
             snap.status = SnapShot.STATUS_IN_DELETION
             snap.deletion_status = snode.get_id()
-            snap.write_to_db(db_controller.kv_store)
+            snap.write_to_transaction(transaction)
         else:
             msg = f"Host node is not online {snode.get_id()}"
             logger.error(msg)
@@ -348,7 +350,12 @@ def delete(snapshot_uuid, force_delete=False):
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.deletion_status = primary_node.get_id()
         snap.status = SnapShot.STATUS_IN_DELETION
-        snap.write_to_db(db_controller.kv_store)
+        snap.write_to_transaction(transaction)
+
+    ret = db_controller.commit_transaction(transaction)
+    if not ret:
+        logger.error("Failed to commit db transaction")
+        return False
 
     try:
         base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
@@ -577,16 +584,22 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 lvol.remove(db_controller.kv_store)
                 return False, error
 
+    transaction = db_controller.create_transaction()
+
     lvol.status = LVol.STATUS_ONLINE
-    lvol.write_to_db(db_controller.kv_store)
+    lvol.write_to_transaction(transaction)
 
     if snap.snap_ref_id:
         ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
         ref_snap.ref_count += 1
-        ref_snap.write_to_db(db_controller.kv_store)
+        ref_snap.write_to_transaction(transaction)
     else:
         snap.ref_count += 1
-        snap.write_to_db(db_controller.kv_store)
+        snap.write_to_transaction(transaction)
+
+    ret = db_controller.commit_transaction(transaction)
+    if not ret:
+        return False, f"Failed to commit db transaction"
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
