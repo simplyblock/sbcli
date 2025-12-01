@@ -48,6 +48,19 @@ class DBController(metaclass=Singleton):
         except Exception as e:
             print(e)
 
+    def create_transaction(self):
+        return self.kv_store.create_transaction()
+
+    def commit_transaction(self, transaction) -> bool:
+        while True:
+            try:
+                transaction.commit().wait()
+                break
+            except Exception as e:
+                print(e)
+                return False
+        return True
+
     def get_storage_nodes(self) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)

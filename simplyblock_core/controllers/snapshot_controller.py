@@ -204,7 +204,9 @@ def add(lvol_id, snapshot_name):
     snap.vuid = snap_vuid
     snap.status = SnapShot.STATUS_ONLINE
 
-    snap.write_to_db(db_controller.kv_store)
+    transaction = db_controller.create_transaction()
+
+    snap.write_to_transaction(transaction)
 
     if lvol.cloned_from_snap:
         original_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
@@ -213,9 +215,13 @@ def add(lvol_id, snapshot_name):
                 original_snap = db_controller.get_snapshot_by_id(original_snap.snap_ref_id)
 
             original_snap.ref_count += 1
-            original_snap.write_to_db(db_controller.kv_store)
+            original_snap.write_to_transaction(transaction)
             snap.snap_ref_id = original_snap.get_id()
-            snap.write_to_db(db_controller.kv_store)
+            snap.write_to_transaction(transaction)
+
+    ret = db_controller.commit_transaction(transaction)
+    if not ret:
+        return False, f"Failed to commit db transaction"
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
