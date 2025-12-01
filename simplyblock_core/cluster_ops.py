@@ -458,7 +458,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
 
     default_cluster = clusters[0]
-    cluster.mode = default_cluster.mode
     cluster.db_connection = default_cluster.db_connection
     cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
@@ -1132,6 +1131,7 @@ def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
         if record.event in ["device_status", "node_status"]:
             msg = msg+f" ({record.count})"
 
+        logger.debug(record)
         out.append({
             "Date": record.get_date_string(),
             "NodeId": record.node_id,
@@ -1154,10 +1154,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
-        sbcli=constants.SIMPLY_BLOCK_CLI_NAME
-        subprocess.check_call(f"pip install {sbcli} --upgrade".split(' '))
-        logger.info(f"{sbcli} upgraded")
-
         cluster_docker = utils.get_docker_client(cluster_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
@@ -1171,7 +1167,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         for service in cluster_docker.services.list():
             if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
             "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
-                if service.name == "app_CachingNodeMonitor":
+                if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
                     logger.info(f"Removing service {service.name}")
                     service.remove()
                 else:
@@ -1281,7 +1277,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.info(f"Restarting node: {node.get_id()} with SPDK image: {spdk_image}")
             else:
                 logger.info(f"Restarting node: {node.get_id()}")
-            storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
+            try:
+                storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
+            except Exception as e:
+                logger.debug(e)
+                logger.error(f"Failed to restart node: {node.get_id()}")
+                return
 
     logger.info("Done")
 

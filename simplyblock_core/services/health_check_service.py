@@ -45,6 +45,7 @@ def set_device_health_check(cluster_id, device, health_check_status):
 
 def check_node(snode, logger):
 
+    snode = db.get_storage_node_by_id(snode.get_id())
     logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
@@ -139,7 +140,7 @@ def check_node(snode, logger):
         for remote_device in snode.remote_devices:
             org_dev = db.get_storage_device_by_id(remote_device.get_id())
             org_node = db.get_storage_node_by_id(remote_device.node_id)
-            if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status == StorageNode.STATUS_ONLINE:
+            if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                 if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
                     connected_devices.append(remote_device.get_id())
                     continue
@@ -242,11 +243,14 @@ def check_node(snode, logger):
                     ports.append(second_node_1.lvol_subsys_port)
 
             for port in ports:
-                lvol_port_check = health_controller._check_port_on_node(snode, port)
-                logger.info(
-                    f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
-                if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
-                    tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
+                try:
+                    lvol_port_check = health_controller.check_port_on_node(snode, port)
+                    logger.info(
+                        f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
+                    if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
+                        tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
+                except Exception:
+                    logger.error("Check node port failed, connection error")
 
         health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
     set_node_health_check(snode, bool(health_check_status))
@@ -260,7 +264,10 @@ def loop_for_node(snode):
     logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
     logger.addHandler(logger_handler)
     while True:
-        check_node(snode, logger)
+        try:
+            check_node(snode, logger)
+        except Exception as e:
+            logger.error(e)
         time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
 
 

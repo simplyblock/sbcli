@@ -72,13 +72,15 @@ def get_next_cluster_status(cluster_id):
                 continue
             online_nodes += 1
             # check for jm rep tasks:
-            ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
-            if ret:
+            try:
+                ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
                 for jm in ret:
                     if ret[jm] is False: # jm is not ready (has active replication task)
                         jm_replication_tasks = True
                         logger.warning("Replication task found!")
                         break
+            except Exception:
+                logger.warning("Failed to get replication task!")
         elif node.status == StorageNode.STATUS_REMOVED:
             pass
         else:
@@ -131,7 +133,7 @@ def update_cluster_status(cluster_id):
     for task in db.get_job_tasks(cluster_id):
         if task.status != JobSchedule.STATUS_DONE and task.function_name in [
             JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
-            if task.retry == 0:
+            if "migration" not in task.function_params:
                 first_iter_task_pending += 1
 
     cluster = db.get_cluster_by_id(cluster_id)
@@ -286,18 +288,14 @@ def node_port_check_fun(snode):
                     ports.append(n.lvol_subsys_port)
         if not snode.is_secondary_node:
             ports.append(snode.lvol_subsys_port)
-        ports = [snode.nvmf_port]
-        if snode.lvstore_stack_secondary_1:
-            for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
-                if n.lvstore_status == "ready":
-                    ports.append(n.lvol_subsys_port)
-        if not snode.is_secondary_node:
-            ports.append(snode.lvol_subsys_port)
 
         for port in ports:
-            ret = health_controller._check_port_on_node(snode, port)
-            logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
-            node_port_check &= ret
+            try:
+                ret = health_controller.check_port_on_node(snode, port)
+                logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
+                node_port_check &= ret
+            except Exception:
+                logger.error("Check node port failed, connection error")
 
         node_data_nic_ping_check = False
         for data_nic in snode.data_nics:
@@ -324,6 +322,7 @@ def check_node(snode):
         return False
 
     logger.info(f"Checking node {snode.hostname}")
+
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)
@@ -358,7 +357,6 @@ def check_node(snode):
             return False
     except Exception as e:
         logger.debug(e)
-        set_node_unreachable(snode)
         return False
 
     # 4- check node rpc interface
@@ -419,5 +417,8 @@ while True:
                 t.start()
                 threads_maps[node_id] = t
 
-        time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
-        update_cluster_status(cluster_id)
+        try:
+            update_cluster_status(cluster_id)
+        except Exception:
+            logger.error("Error while updating cluster status")
+    time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
