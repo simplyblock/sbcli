@@ -100,11 +100,13 @@ def add_device_mig_task(device_id_list, cluster_id):
 
     device = db.get_storage_device_by_id(device_id_list[0])
     tasks = db.get_job_tasks(cluster_id)
+    master_task = None
     for task in tasks:
         if task.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART :
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                logger.info(f"Task found, skip adding new task: {task.get_id()}")
-                return False
+                logger.info("Master task found, skip adding new master task")
+                master_task = task
+                break
 
     for node in db.get_storage_nodes_by_cluster_id(cluster_id):
         if node.status == StorageNode.STATUS_REMOVED:
@@ -117,16 +119,19 @@ def add_device_mig_task(device_id_list, cluster_id):
                 if task_id:
                     sub_tasks.append(task_id)
     if sub_tasks:
-        task_obj = JobSchedule()
-        task_obj.uuid = str(uuid.uuid4())
-        task_obj.cluster_id = cluster_id
-        task_obj.date = int(time.time())
-        task_obj.function_name = JobSchedule.FN_BALANCING_AFTER_NODE_RESTART
-        task_obj.sub_tasks = sub_tasks
-        task_obj.status = JobSchedule.STATUS_NEW
-        task_obj.write_to_db(db.kv_store)
-        tasks_events.task_create(task_obj)
-
+        if master_task:
+            master_task.sub_tasks.extend(sub_tasks)
+            master_task.write_to_db()
+        else:
+            task_obj = JobSchedule()
+            task_obj.uuid = str(uuid.uuid4())
+            task_obj.cluster_id = cluster_id
+            task_obj.date = int(time.time())
+            task_obj.function_name = JobSchedule.FN_BALANCING_AFTER_NODE_RESTART
+            task_obj.sub_tasks = sub_tasks
+            task_obj.status = JobSchedule.STATUS_NEW
+            task_obj.write_to_db(db.kv_store)
+            tasks_events.task_create(task_obj)
         return True
 
 
@@ -155,13 +160,15 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
         return False
 
     data = []
-    tasks = db.get_job_tasks(cluster_id, reverse=True, limit=limit)
+    tasks = db.get_job_tasks(cluster_id, reverse=True)
     tasks.reverse()
     if is_json is True:
         for t in tasks:
             if t.function_name == JobSchedule.FN_DEV_MIG:
                 continue
             data.append(t.get_clean_dict())
+            if len(data)+1 > limit > 0:
+                return json.dumps(data, indent=2)
         return json.dumps(data, indent=2)
 
     for task in tasks:
@@ -171,7 +178,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             retry = f"{task.retry}/{task.max_retry}"
         else:
             retry = f"{task.retry}"
-
+        logger.debug(task)
         upd = task.updated_at
         if upd:
             try:
@@ -197,6 +204,8 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             "Result": task.function_result,
             "Updated At": upd or "",
         })
+        if len(data)+1 > limit > 0:
+            return utils.print_table(data)
     return utils.print_table(data)
 
 
@@ -239,6 +248,7 @@ def get_subtasks(master_task_id):
             except Exception as e:
                 logger.error(e)
 
+        logger.debug(sub_task)
         data.append({
             "Task ID": sub_task.uuid,
             "Node ID / Device ID": f"{sub_task.node_id}\n{sub_task.device_id}",
@@ -308,7 +318,8 @@ def add_new_device_mig_task(device_id):
 
 
 def add_node_add_task(cluster_id, function_params):
-    return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "", function_params=function_params)
+    return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
+                     function_params=function_params, max_retry=11)
 
 
 def get_active_node_tasks(cluster_id, node_id):
@@ -339,7 +350,7 @@ def get_new_device_mig_task(cluster_id, node_id, distr_name, dev_id=None):
 def get_device_mig_task(cluster_id, node_id, device_id, distr_name):
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
-        if task.function_name == JobSchedule.FN_DEV_MIG and task.node_id == node_id and task.device_id == device_id:
+        if task.function_name == JobSchedule.FN_DEV_MIG and task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False \
                     and "distr_name" in task.function_params and task.function_params["distr_name"] == distr_name:
                 return task.uuid

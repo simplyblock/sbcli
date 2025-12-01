@@ -88,7 +88,11 @@ while True:
                             jm_vuid = node.jm_vuid
                             if "jm_vuid" in task.function_params:
                                 jm_vuid = task.function_params["jm_vuid"]
-                            ret, err = rpc_client.jc_compression_start(jm_vuid=jm_vuid)
+                            try:
+                                ret, err = rpc_client.jc_compression_start(jm_vuid=jm_vuid)
+                            except Exception as e:
+                                logger.error(e)
+                                continue
                             if ret:
                                 task.function_result = f"JC {node.jm_vuid} compression resumed on node"
                                 task.status = JobSchedule.STATUS_DONE

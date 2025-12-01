@@ -731,7 +731,7 @@ def first_six_chars(s: str) -> str:
     If the string is shorter than six characters, returns the entire string.
     """
     return s[:6]
-    
+
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:
