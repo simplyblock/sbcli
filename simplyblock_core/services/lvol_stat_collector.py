@@ -154,6 +154,11 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
     stat_obj.write_to_db(db.kv_store)
     last_object_record[lvol.get_id()] = stat_obj
 
+    all_stats = db.get_lvol_stats(lvol, limit=0)
+    if len(all_stats) > 10:
+        for st in all_stats[10:]:
+            st.remove(db.kv_store)
+
     return stat_obj
 
 
@@ -173,6 +178,12 @@ def add_pool_stats(pool, records):
 
     stat_obj = PoolStatObject(data=data)
     stat_obj.write_to_db(db.kv_store)
+
+    all_stats = db.get_pool_stats(pool, limit=0)
+    if len(all_stats) > 10:
+        for st in all_stats[10:]:
+            st.remove(db.kv_store)
+
     return stat_obj
 
 
