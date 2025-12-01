@@ -133,7 +133,7 @@ def update_cluster_status(cluster_id):
     for task in db.get_job_tasks(cluster_id):
         if task.status != JobSchedule.STATUS_DONE and task.function_name in [
             JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
-            if task.retry == 0:
+            if "migration" not in task.function_params:
                 first_iter_task_pending += 1
 
     cluster = db.get_cluster_by_id(cluster_id)

@@ -439,7 +439,7 @@ def get_device_capacity(device_id, history, records_count=20, parse_sizes=True):
         if not records_number:
             return False
     else:
-        records_number = 20
+        records_number = records_count
 
     # records = db_controller.get_device_capacity(device, records_number)
     cap_stats_keys = [
