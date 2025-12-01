@@ -754,14 +754,21 @@ def _connect_to_remote_devs(
         node_bdev_names = [b['name'] for b in node_bdevs]
 
     for dev in devices_to_connect:
+        remote_bdev = RemoteDevice()
+        remote_bdev.uuid = dev.uuid
+        remote_bdev.alceml_name = dev.alceml_name
+        remote_bdev.node_id = dev.node_id
+        remote_bdev.size = dev.size
+        remote_bdev.status = NVMeDevice.STATUS_ONLINE
+        remote_bdev.nvmf_multipath = dev.nvmf_multipath
         for bdev in node_bdev_names:
             if bdev.startswith(f"remote_{dev.alceml_bdev}"):
-                dev.remote_bdev = bdev
+                remote_bdev.remote_bdev = bdev
                 break
-        if not dev.remote_bdev:
+        if not remote_bdev.remote_bdev:
             logger.error(f"Failed to connect to remote device {dev.alceml_name}")
             continue
-        remote_devices.append(dev)
+        remote_devices.append(remote_bdev)
 
     return remote_devices
 
