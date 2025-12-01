@@ -1311,6 +1311,67 @@ def get_core_indexes(core_to_index, list_of_cores):
     return [core_to_index[core] for core in list_of_cores if core in core_to_index]
 
 
+def build_unisolated_stride(num_unisolated: int, all_cores: List[int]) -> List[int]:
+    total = len(all_cores)
+    if total % 2 != 0:
+        raise ValueError("len(all_cores) must be even (base half + sibling half).")
+    if not (0 <= num_unisolated <= total):
+        raise ValueError("num_unisolated must be between 0 and len(all_cores).")
+
+    half = total // 2
+    jump = max(1, half // 4)          # your rule
+    shift = max(1, jump // 2)         # your rule
+
+    # ensure shift will cycle through all starts modulo jump
+    # (if not coprime, bump it until it is)
+    while math.gcd(shift, jump) != 1:
+        shift += 1
+        if shift >= jump:
+            shift = 1
+
+    # sibling mapping by position
+    sibling_of = {}
+    for i in range(half):
+        a = all_cores[i]
+        b = all_cores[i + half]
+        sibling_of[a] = b
+        sibling_of[b] = a
+
+    out: List[int] = []
+    chosen = set()
+
+    def add(cpu: int):
+        if len(out) >= num_unisolated:
+            return
+        if cpu in chosen:
+            return
+        out.append(cpu)
+        chosen.add(cpu)
+
+    def add_pair(base_cpu: int):
+        add(base_cpu)
+        if len(out) < num_unisolated:
+            add(sibling_of[base_cpu])
+
+    # passes: start = 0, then start = (start + shift) % jump, etc.
+    start = 0
+    seen_starts = set()
+
+    while len(out) < num_unisolated and len(seen_starts) < jump:
+        seen_starts.add(start)
+
+        # walk the base half using this start+stride
+        for i in range(start, half, jump):
+            if len(out) >= num_unisolated:
+                break
+            base_cpu = all_cores[i]
+            add_pair(base_cpu)
+
+        start = (start + shift) % jump
+
+    return out
+
+
 def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage=0):
     node_distribution: dict = {}
     # Iterate over each NUMA node
@@ -1320,18 +1381,8 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, co
         all_cores = sorted(cores_by_numa[numa_node])
         total_cores = len(all_cores)
         num_unisolated = calculate_unisolated_cores(all_cores, cores_percentage)
+        unisolated = build_unisolated_stride(num_unisolated, all_cores)
 
-        unisolated = []
-        half = total_cores // 2
-        for i in range(num_unisolated):
-            if i % 2 == 0:
-                index = i // 2
-            else:
-                index = (i - 1) // 2
-            if i % 2 == 0:
-                unisolated.append(all_cores[index])
-            else:
-                unisolated.append(all_cores[half + index])
 
         available_cores = [c for c in all_cores if c not in unisolated]
         q1 = len(available_cores) // 4
