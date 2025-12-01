@@ -49,7 +49,7 @@ class DBController(metaclass=Singleton):
             print(e)
 
     def create_transaction(self):
-        return self.kv_store.create_transaction()
+        return self.kv_store.create_transaction()  # type: ignore[func-returns-value]
 
     def commit_transaction(self, transaction) -> bool:
         while True:

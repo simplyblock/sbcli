@@ -221,7 +221,7 @@ def add(lvol_id, snapshot_name):
 
     ret = db_controller.commit_transaction(transaction)
     if not ret:
-        return False, f"Failed to commit db transaction"
+        return False, "Failed to commit db transaction"
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
@@ -599,7 +599,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     ret = db_controller.commit_transaction(transaction)
     if not ret:
-        return False, f"Failed to commit db transaction"
+        return False, "Failed to commit db transaction"
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
