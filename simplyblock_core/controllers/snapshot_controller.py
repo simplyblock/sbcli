@@ -8,13 +8,15 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.snapshot import SnapShot, SnapshotRef
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
 import threading
 from collections import defaultdict
+
+from simplyblock_core.services.lvol_stat_collector import rpc_client
 
 # A dictionary to hold locks per node
 node_locks = defaultdict(threading.Lock)
@@ -46,14 +48,14 @@ def add(lvol_id, snapshot_name):
 
   node_lock = get_node_lock(lvol.node_id)
   with node_lock:
-
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    if pool.status == Pool.STATUS_INACTIVE:
+    try:
+      pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+      if pool.status == Pool.STATUS_INACTIVE:
         msg = "Pool is disabled"
         logger.error(msg)
         return False, msg
 
-    if lvol.cloned_from_snap:
+      if lvol.cloned_from_snap:
         snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
         ref_count = snap.ref_count
         if snap.snap_ref_id:
@@ -65,55 +67,57 @@ def add(lvol_id, snapshot_name):
             logger.error(msg)
             return False, msg
 
-    for sn in db_controller.get_snapshots():
+      for sn in db_controller.get_snapshots():
         if sn.cluster_id == pool.cluster_id:
             if sn.snap_name == snapshot_name:
                 return False, f"Snapshot name must be unique: {snapshot_name}"
 
-    logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-
-    rec = db_controller.get_lvol_stats(lvol, 1)
-    if rec:
+      logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
+      snode = db_controller.get_storage_node_by_id(lvol.node_id)
+      rec = db_controller.get_lvol_stats(lvol, 1)
+      if rec:
         size = rec[0].size_used
-    else:
+      else:
         size = lvol.size
 
-    if 0 < pool.lvol_max_size < size:
+      if 0 < pool.lvol_max_size < size:
         msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
         logger.error(msg)
         return False, msg
 
-    if pool.pool_max_size > 0:
+      if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             msg =  f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
 
-    if pool.pool_max_size > 0:
+      if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + lvol.size > pool.pool_max_size:
             msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
 
-    cluster = db_controller.get_cluster_by_id(pool.cluster_id)
-    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+      cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+      if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    snap_vuid = utils.get_random_snapshot_vuid()
-    snap_bdev_name = f"SNAP_{snap_vuid}"
-    size = lvol.size
-    blobid = 0
-    snap_uuid = ""
-    used_size = 0
-    node_id = lvol.node_id
+      snap_vuid = utils.get_random_snapshot_vuid()
+      snap_bdev_name = f"SNAP_{snap_vuid}"
+      size = lvol.size
+      blobid = 0
+      snap_uuid = ""
+      used_size = 0
+      node_id = lvol.node_id
 
-    if lvol.ha_type == "single":
+
+
+      if lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
             rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
             logger.info("Creating Snapshot bdev")
+
             ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
             if not ret:
                 return False, f"Failed to create snapshot on node: {snode.get_id()}"
@@ -130,7 +134,7 @@ def add(lvol_id, snapshot_name):
             logger.error(msg)
             return False, msg
 
-    if lvol.ha_type == "ha":
+      if lvol.ha_type == "ha":
         primary_node = None
         secondary_node = None
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
@@ -210,40 +214,71 @@ def add(lvol_id, snapshot_name):
                     logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 return False, msg
 
-    snap = SnapShot()
-    snap.uuid = str(uuid.uuid4())
-    snap.snap_uuid = snap_uuid
-    snap.size = size
-    snap.used_size = used_size
-    snap.blobid = blobid
-    snap.pool_uuid = pool.get_id()
-    snap.cluster_id = pool.cluster_id
-    snap.snap_name = snapshot_name
-    snap.snap_bdev = f"{lvol.lvs_name}/{snap_bdev_name}"
-    snap.created_at = int(time.time())
-    snap.lvol = lvol
-    snap.fabric = lvol.fabric
-    snap.vuid = snap_vuid
-    snap.node_id = node_id
-    snap.status = SnapShot.STATUS_ONLINE
+      snap = SnapShot()
+      snap.uuid = str(uuid.uuid4())
+      snap.snap_uuid = snap_uuid
+      snap.size = size
+      snap.used_size = used_size
+      snap.blobid = blobid
+      snap.pool_uuid = pool.get_id()
+      snap.cluster_id = pool.cluster_id
+      snap.snap_name = snapshot_name
+      snap.snap_bdev = f"{lvol.lvs_name}/{snap_bdev_name}"
+      snap.created_at = int(time.time())
+      snap.lvol = lvol
+      snap.fabric = lvol.fabric
+      snap.vuid = snap_vuid
+      snap.node_id = node_id
+      snap.status = SnapShot.STATUS_ONLINE
+      snap.predecessor = lvol.last_snapshot_uuid
+      snap.successor.append(SnapshotRef.TYPE_LVOL,lvol.uuid)
+      tr = db_controller.kv_store.create_transaction()
+      snap.write_to_db(db_controller.kv_store,tr)
+      pred = db_controller.get_snapshot_by_id(lvol.last_snapshot_uuid)
+      for p in pred.successor:
+        if p.next == lvol.uuid:
+            p.next = snap.uuid
 
-    snap.write_to_db(db_controller.kv_store)
+      pred.write_to_db(db_controller.kv_store,tr)
 
-    if lvol.cloned_from_snap:
+      lvol.last_snapshot_uuid = snap.uuid
+      lvol.write_to_db(db_controller.kv_store,tr)
+
+      if lvol.cloned_from_snap:
         original_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
         if original_snap:
             if original_snap.snap_ref_id:
                 original_snap = db_controller.get_snapshot_by_id(original_snap.snap_ref_id)
 
             original_snap.ref_count += 1
-            original_snap.write_to_db(db_controller.kv_store)
+            original_snap.write_to_db(db_controller.kv_store,tr)
             snap.snap_ref_id = original_snap.get_id()
-            snap.write_to_db(db_controller.kv_store)
+            snap.write_to_db(db_controller.kv_store,tr)
+
+      tr.commit().wait()
+
+    #still should move to asynchronous delete just in case, if fdb fails AND
+    #at the same time primary goes down we could have inconsistency
+    #also, if the webapi container dies exactly during execution, this can be a problem
+
+    except Exception as e:
+       try:
+         rpc_client = RPCClient(
+           primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
+         rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
+       except:
+           raise logger.error(f"exception creating creating snapshot: {snap.uuid}")
+       try:
+         sec_rpc_client = RPCClient(
+           secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username, secondary_node.rpc_password)
+         sec_rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
+       except:
+           raise logger.error(f"exception creating creating snapshot: {snap.uuid}")
+       raise logger.error(f"exception creating creating snapshot: {snap.uuid}")
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
     return snap.uuid, False
-
 
 def list(all=False):
     snaps = db_controller.get_snapshots()
@@ -383,16 +418,21 @@ def delete(snapshot_uuid, force_delete=False):
 
 
 def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None):
-    try:
+
+
+
+  try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
-    except KeyError as e:
+  except KeyError as e:
         logger.error(e)
         return False, str(e)
 
-    if snap.frozen:
+  if snap.frozen:
         logger.warning(f"lvol in migration. cannot create clone {snap.uuid}")
         return False
 
+  node_lock = get_node_lock(snap.lvol.node_id)
+  with node_lock:
     try:
         pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
     except KeyError:
@@ -406,90 +446,97 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, msg
 
     try:
-        snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
+         snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
     except KeyError:
         msg = 'Storage node not found'
         logger.exception(msg)
         return False, msg
 
-    cluster = db_controller.get_cluster_by_id(pool.cluster_id)
-    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+    try:
+      cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+      if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    ref_count = snap.ref_count
-    if snap.snap_ref_id:
+      ref_count = snap.ref_count
+      if snap.snap_ref_id:
         ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
         ref_count = ref_snap.ref_count
 
-    if ref_count >= constants.MAX_SNAP_COUNT:
+      if ref_count >= constants.MAX_SNAP_COUNT:
         msg = f"Can not create more than {constants.MAX_SNAP_COUNT} clones from this snapshot"
         logger.error(msg)
         return False, msg
 
-    for lvol in db_controller.get_lvols():
+      for lvol in db_controller.get_lvols():
         if lvol.pool_uuid == pool.get_id():
             if lvol.lvol_name == clone_name:
                 msg=f"LVol name must be unique: {clone_name}"
                 logger.error(msg)
                 return False, msg
 
-    size = snap.size
-    if 0 < pool.lvol_max_size < size:
+      size = snap.size
+      if 0 < pool.lvol_max_size < size:
         msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
         logger.error(msg)
         return False, msg
 
-    if pool.pool_max_size > 0:
+      if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
             msg =  f"Invalid LVol size: {utils.humanbytes(size)}. Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
 
-    lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
-    if lvol_count >= snode.max_lvol:
+      lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
+      if lvol_count >= snode.max_lvol:
         error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
         logger.error(error)
         return False, error
 
-    if pool.pool_max_size > 0:
+      if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + snap.lvol.size > pool.pool_max_size:
             msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
 
-    lvol = LVol()
-    lvol.uuid = str(uuid.uuid4())
-    lvol.lvol_name = clone_name
-    lvol.size = snap.lvol.size
-    lvol.max_size = snap.lvol.max_size
-    lvol.base_bdev = snap.lvol.base_bdev
-    lvol.lvol_bdev = f"CLN_{utils.get_random_vuid()}"
-    lvol.lvs_name = snap.lvol.lvs_name
-    lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-    lvol.hostname = snode.hostname
-    lvol.node_id = snode.get_id()
-    lvol.nodes = snap.lvol.nodes
-    lvol.mode = 'read-write'
-    lvol.cloned_from_snap = snapshot_id
-    lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-    lvol.pool_uuid = pool.get_id()
-    lvol.ha_type = snap.lvol.ha_type
-    lvol.lvol_type = 'lvol'
-    lvol.guid = utils.generate_hex_string(16)
-    lvol.vuid = snap.lvol.vuid
-    lvol.snapshot_name = snap.snap_bdev
-    lvol.subsys_port = snap.lvol.subsys_port
-    lvol.fabric = snap.fabric
+      lvol = LVol()
+      lvol.uuid = str(uuid.uuid4())
+      lvol.lvol_name = clone_name
+      lvol.size = snap.lvol.size
+      lvol.max_size = snap.lvol.max_size
+      lvol.base_bdev = snap.lvol.base_bdev
+      lvol.lvol_bdev = f"CLN_{utils.get_random_vuid()}"
+      lvol.lvs_name = snap.lvol.lvs_name
+      lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+      lvol.hostname = snode.hostname
+      lvol.node_id = snode.get_id()
+      lvol.nodes = snap.lvol.nodes
+      lvol.mode = 'read-write'
+      lvol.cloned_from_snap = snapshot_id
+      lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+      lvol.pool_uuid = pool.get_id()
+      lvol.ha_type = snap.lvol.ha_type
+      lvol.lvol_type = 'lvol'
+      lvol.guid = utils.generate_hex_string(16)
+      lvol.vuid = snap.lvol.vuid
+      lvol.snapshot_name = snap.snap_bdev
+      lvol.subsys_port = snap.lvol.subsys_port
+      lvol.fabric = snap.fabric
+      lvol.last_snapshot_uuid=snap.snap_uuid
 
-    if pvc_name:
+      su = SnapshotRef()
+      su.type = SnapshotRef.TYPE_CLONE
+      su.next = lvol.uuid
+      snap.successor.append(su)
+
+      if pvc_name:
         lvol.pvc_name = pvc_name
-    if pvc_namespace:
+      if pvc_namespace:
         lvol.namespace = pvc_namespace
 
-    lvol.status = LVol.STATUS_IN_CREATION
-    lvol.bdev_stack = [
+      lvol.status = LVol.STATUS_IN_CREATION
+      lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
             "name": lvol.top_bdev,
@@ -498,9 +545,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 "clone_name": lvol.lvol_bdev
             }
         }
-    ]
+      ]
 
-    if snap.lvol.crypto_bdev:
+      if snap.lvol.crypto_bdev:
         lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
         lvol.bdev_stack.append({
             "type": "crypto",
@@ -517,7 +564,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         lvol.crypto_key1 = snap.lvol.crypto_key1
         lvol.crypto_key2 = snap.lvol.crypto_key2
 
-    if new_size:
+      if new_size:
         if snap.lvol.size >= new_size:
             msg = f"New size {new_size} must be higher than the original size {snap.lvol.size}"
             logger.error(msg)
@@ -529,17 +576,21 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             return False, msg
         lvol.size = new_size
 
-    lvol.write_to_db(db_controller.kv_store)
+      tr = db_controller.kv_store.create_transaction()
+      lvol.write_to_db(db_controller.kv_store,tr)
+      snap.write_to_db(db_controller.kv_store,tr)
 
-    if lvol.ha_type == "single":
+      if lvol.ha_type == "single":
         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
         if error:
+            msg = f"Could not add lvol on node {lvol.uuid}"
+            logger.error(msg)
             return False, error
         lvol.nodes = [snode.get_id()]
         lvol.lvol_uuid = lvol_bdev['uuid']
         lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-    if lvol.ha_type == "ha":
+      if lvol.ha_type == "ha":
         host_node = snode
         lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
         primary_node = None
@@ -552,7 +603,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = "Secondary node is in down status, can not clone snapshot"
                     logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
                     return False, msg
 
                 if sec_node.status == StorageNode.STATUS_ONLINE:
@@ -588,8 +638,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         if primary_node:
             lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
             if error:
-                logger.error(error)
-                lvol.remove(db_controller.kv_store)
+                msg = f"Cannot add lvol to node: {lvol.uuid}"
+                logger.error(msg)
                 return False, error
 
             lvol.lvol_uuid = lvol_bdev['uuid']
@@ -598,20 +648,24 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         if secondary_node:
             lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, secondary_node, is_primary=False)
             if error:
+                msg = f"Cannot add lvol to secondary node: {lvol.uuid}"
                 logger.error(error)
-                lvol.remove(db_controller.kv_store)
                 return False, error
 
-    lvol.status = LVol.STATUS_ONLINE
-    lvol.write_to_db(db_controller.kv_store)
+      lvol.status = LVol.STATUS_ONLINE
+      lvol.write_to_db(db_controller.kv_store)
 
-    if snap.snap_ref_id:
+      if snap.snap_ref_id:
         ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
         ref_snap.ref_count += 1
         ref_snap.write_to_db(db_controller.kv_store)
-    else:
+      else:
         snap.ref_count += 1
         snap.write_to_db(db_controller.kv_store)
+
+      tr.commit.wait()
+    except:
+       raise f"could not create clone: {lvol.uuid}"
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)

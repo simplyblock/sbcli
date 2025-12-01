@@ -1,11 +1,10 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional
-import uuid
-import asyncio
+from typing import List
 import storage_node
 from base_model import *
+from simplyblock_core.rpc_client import RPCClient
 
 
 # ---------------------------------------------------------------------------
@@ -13,34 +12,34 @@ from base_model import *
 # ---------------------------------------------------------------------------
 
 class MigrationState(str, Enum):
-    NEW = "new"
-    PREPARING = "preparing"
-    RUNNING = "running"
-    SNAPS_MIGRATED = "migrated"
-    TARGET_LVOL_CREATED = "target_lvol_created"
-    HUBLVOL_CONNECTED = "hublvol_connecte"
-    TRANSFERRED_TO_TARGET = "transferred_to_target"
-    RECONNECT_DONE = "reconnect_done"
-    CLEANUP = "cleanup"
-    FAILED = "failed"
-    FAILED_AND_CLEANED = "failed_and_cleaned"
-    DONE = "done"
+    NEW = 0
+    PREPARING = 1
+    RUNNING = 2
+    SNAPS_MIGRATED = 3
+    TARGET_LVOL_CREATED = 4
+    HUBLVOL_CONNECTED = 5
+    TRANSFERRED_TO_TARGET = 6
+    RECONNECT_DONE = 6
+    CLEANUP = 7
+    FAILED = 8
+    FAILED_AND_CLEANED = 9
+    DONE = 10
 
 class ObjectMigrationState(str, Enum):
-    NEW = "new"
-    LVOL_CREATED = "lvolcreated"
-    MIG_FLAG_SET = "migflagset"
-    NAMESPACE_CREATED = "nscreated"
-    NQN_CREATED = "nqncreated"
-    LVOL_CONNECTED = "lvolconnected"
-    LVOL_EXPORTED = "lvol_exported"
-    TRANSFER = "transferring"
-    RETRANSFER = "retransfer"
-    TRANSFERRED = "transferred"
-    CONVERTED = "converted"
-    CLEANING = "cleaning"
-    FAILED = "failed"
-    DONE = "done"
+    NEW = 1
+    LVOL_CREATED = 2
+    MIG_FLAG_SET = 3
+    NAMESPACE_CREATED = 4
+    NQN_CREATED = 5
+    LVOL_CONNECTED = 6
+    LVOL_EXPORTED = 7
+    TRANSFER = 8
+    RETRANSFER = 9
+    TRANSFERRED = 10
+    CONVERTED = 11
+    CLEANING = 12
+    FAILED = 13
+    DONE = 14
 
 # ---------------------------------------------------------------------------
 # DATA MODELS
@@ -101,6 +100,10 @@ class MigrationObject(BaseModel):
     node_sec: storage_node.StorageNode = None
     target_node_pri: storage_node.StorageNode = None
     target_node_sec: storage_node.StorageNode = None
+    rpc_client1: RPCClient = None
+    rpc_client2: RPCClient = None
+    rpc_client3: RPCClient = None
+    rpc_client4: RPCClient = None
 
     # Global snapshot objects (shared across streams)
     snapshots: List[Snapshot] = None

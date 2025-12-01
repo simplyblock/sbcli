@@ -2,6 +2,9 @@ import logging
 from logging import exception
 from time import sleep
 
+from jc.parsers.asn1crypto.core import Boolean
+
+from ..cluster_ops import db_controller
 from ..models.lvol_migration import *
 from dataclasses import dataclass
 from typing import Optional
@@ -22,6 +25,11 @@ import uuid
 # ---------------------------------------------------------------------------
 # Migration Service
 # ---------------------------------------------------------------------------
+
+def generate_nqn():
+    random_uuid = str(uuid.uuid4())
+    nqn = f"nqn.2024-01.io.simplyblock:tmp:{random_uuid}"
+    return nqn
 
 class MigrationQueueObjectType:
     SNAPSHOT = "snapshot"
@@ -53,6 +61,7 @@ class MigrationQueue:
         self.objects.clear()
 
 
+
 class MigrationService:
     """Service containing core migration logic."""
 
@@ -66,6 +75,102 @@ class MigrationService:
 # ---------------------------------------------------------------------------
 
 
+def get_lvol_by_name(lvol_name):
+    return LVol
+
+
+def snap_assign(lvol: LogicalVolumeRef, snap: SnapShot, target_lvs: str):
+    s = Snapshot()
+    s.retry = 0
+    s.status = ObjectMigrationState.NEW
+    s.bdev_name = snap.snap_bdev.split("/", 1)[1]
+    s.lvs_name = lvol.lvs_name
+    s.lvol_size = snap.size
+    s.target_lvs_name = lvol.target_lvs_name
+    s.target_lvs_name = target_lvs
+    s.uuid = snap.uuid
+    s.source_uuid = snap.snap_uuid
+    return s
+
+
+def snap_init(uuid: str, lvol: LogicalVolumeRef, target_lvs: str):
+    s = Snapshot()
+    s.retry = 0
+    s.status = ObjectMigrationState.NEW
+    s.bdev_name = "MIG_SNAP"
+    s.lvs_name = lvol.lvs_name
+    s.lvol_size = lvol.size
+    s.target_lvs_name = lvol.target_lvs_name
+    s.target_lvs_name = target_lvs
+    s.uuid = uuid
+    s.source_uuid = uuid
+    return s
+
+
+def check_nodes_online(n1: StorageNode, n2: StorageNode, n3: StorageNode, n4: StorageNode):
+    if (n1.status == StorageNode.STATUS_ONLINE and
+            n2.status == StorageNode.STATUS_ONLINE and
+            n3.status == StorageNode.STATUS_ONLINE and
+            n4.status == StorageNode.STATUS_ONLINE):
+        return True
+    return False
+
+
+def delete_hub_lvol_controller():
+    return -1
+
+
+def lvol_assign(lvol:LVol, target_lvs: str):
+    m=MigrationObject()
+    m.main_logical_volume.state = ObjectMigrationState.NEW
+
+    #unique identifier:
+    m.main_logical_volume.retry=0
+    m.main_logical_volume.uuid = lvol.uuid
+    m.main_logical_volume.bdev_name = lvol.lvol_bdev
+    m.main_logical_volume.lvs_name = lvol.lvs_name
+    m.main_logical_volume.target_lvs_name = target_lvs
+    m.main_logical_volume.nqn = lvol.nqn
+    m.main_logical_volume.source_uuid = lvol.lvol_uuid
+    m.main_logical_volume.node_id = lvol.hostname
+    if lvol.crypto_bdev != "":
+       m.main_logical_volume.crypto_bdev_name = lvol.crypto_bdev
+    m.main_logical_volume.mapid = 0
+    m.main_logical_volume.size = lvol.size
+    m.main_logical_volume.ndcs = lvol.ndcs
+    m.main_logical_volume.npcs = lvol.npcs
+    m.main_logical_volume.priority_class = lvol.lvol_priority_class
+    m.main_logical_volume.namespace_id = lvol.namespace
+    m.main_logical_volume.cloned = lvol.cloned_from_snap
+    return m.main_logical_volume
+
+
+def get_transfer_state(lvolname: str, node_id: str):
+    offset=0
+    return -1,offset
+
+
+def create_snapshot(lvol: LogicalVolumeRef):
+        return -1,""
+
+
+def migrations_list():
+    db_controller = DBController()
+    migrations = db_controller.get_migrations()
+    data = []
+    for m in migrations:
+        logger.debug(m)
+        data.append({
+            "UUID": m.uuid,
+            "Lvol UUID": m.main_logical_volume.uuid,
+            "Primary (source):": m.node_pri,
+            "Primary (target):": m.target_node_pri,
+            "DateTime:": m.create_dt,
+            "Status": m.status,
+        })
+    return utils.print_table(data)
+
+
 class MigrationController:
     """Controller orchestrates LVOL migrations."""
 
@@ -77,68 +182,15 @@ class MigrationController:
         self.db_controller = DBController()
         self.prev_time = datetime.now()
 
-    def lvol_assign(self, lvol:LVol, target_lvs: str):
-        m=MigrationObject()
-        m.main_logical_volume.state = ObjectMigrationState.NEW
-
-        #unique identifier:
-        m.main_logical_volume.retry=0
-        m.main_logical_volume.uuid = lvol.uuid
-        m.main_logical_volume.bdev_name = lvol.lvol_bdev
-        m.main_logical_volume.lvs_name = lvol.lvs_name
-        m.main_logical_volume.target_lvs_name = target_lvs
-        m.main_logical_volume.nqn = lvol.nqn
-        m.main_logical_volume.source_uuid = lvol.lvol_uuid
-        m.main_logical_volume.node_id = lvol.hostname
-        if lvol.crypto_bdev != "":
-           m.main_logical_volume.crypto_bdev_name = lvol.crypto_bdev
-        m.main_logical_volume.mapid = 0
-        m.main_logical_volume.size = lvol.size
-        m.main_logical_volume.ndcs = lvol.ndcs
-        m.main_logical_volume.npcs = lvol.npcs
-        m.main_logical_volume.priority_class = lvol.lvol_priority_class
-        m.main_logical_volume.namespace_id = lvol.namespace
-        m.main_logical_volume.cloned = lvol.cloned_from_snap
-        return m.main_logical_volume
-
-    def snap_assign(self, lvol: LogicalVolumeRef, snap: SnapShot, target_lvs: str):
-        s = Snapshot()
-        s.retry = 0
-        s.status = ObjectMigrationState.NEW
-        s.bdev_name = snap.snap_bdev.split("/", 1)[1]
-        s.lvs_name = lvol.lvs_name
-        s.lvol_size = snap.size
-        s.target_lvs_name = lvol.target_lvs_name
-        s.target_lvs_name = target_lvs
-        s.uuid = snap.uuid
-        s.source_uuid = snap.snap_uuid
-        return s
-
-    def snap_init(self, uuid: str, lvol: LogicalVolumeRef, target_lvs: str):
-        s = Snapshot()
-        s.retry = 0
-        s.status = ObjectMigrationState.NEW
-        s.bdev_name = "MIG_SNAP"
-        s.lvs_name = lvol.lvs_name
-        s.lvol_size = lvol.size
-        s.target_lvs_name = lvol.target_lvs_name
-        s.target_lvs_name = target_lvs
-        s.uuid = uuid
-        s.source_uuid = uuid
-        return s
-
-
-    @property
-    def connect_client(node:StorageNode):
+    def connect_client(self, node:StorageNode):
         return RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
 
-    def check_nodes_online(self, n1: StorageNode, n2: StorageNode, n3: StorageNode, n4: StorageNode):
-        if (n1.status == StorageNode.STATUS_ONLINE and
-                n2.status == StorageNode.STATUS_ONLINE and
-                n3.status == StorageNode.STATUS_ONLINE and
-                n4.status == StorageNode.STATUS_ONLINE):
-            return True
-        return False
+    def connect_clients(self):
+        self.m.rpc_client1 = self.connect_client(self.m.node_pri)
+        self.m.rpc_client2 = self.connect_client(self.m.node_sec)
+        self.m.rpc_client3 = self.connect_client(self.m.target_node_pri)
+        self.m.rpc_client4 = self.connect_client(self.m.target_node_sec)
+        return
 
     def unfreeze_objects(self):
         db_controller = DBController()
@@ -154,9 +206,9 @@ class MigrationController:
     def create_lvol(self, snap: Snapshot):
             name = snap.target_lvs_name + "/" + snap.bdev_name
             if snap.status == ObjectMigrationState.NEW:
-                snap_uuid=self.get_lvol_by_name(name)
+                snap_uuid= get_lvol_by_name(name)
                 if not snap_uuid:
-                   snap_uuid = self.rpc_client2.create_lvol(name, snap.size, snap.target_lvs_name,
+                   snap_uuid = self.m.rpc_client2.create_lvol(name, snap.size, snap.target_lvs_name,
                                                          self.m.main_logical_volume.priority_class,
                                                          self.m.main_logical_volume.ndcs,
                                                          self.m.main_logical_volume.npcs)
@@ -171,30 +223,70 @@ class MigrationController:
     def set_mig_status(self, snap: Snapshot):
             name = snap.target_lvs_name + "/" + snap.bdev_name
             if snap.status == ObjectMigrationState.LVOL_CREATED:
-                if not self.rpc_client2.lvol_set_migration_flag(name):
-                    raise (f"issue creating an target object during migration of snapshot {snap.uuid} ")
+                if not self.m.rpc_client2.lvol_set_migration_flag(name):
+                    raise f'issue creating an target object during migration of snapshot {snap.uuid} '
                 else:
                     snap.status = ObjectMigrationState.MIG_FLAG_SET
                     self.m.write_to_db(self.db_controller.kv_store)
             return True
 
-    def get_transfer_state(self, lvolname: str, node_id: str):
-
-        return
+    def check_online_and_leader(self, node: StorageNode):
+        if node.uuid==self.m.node_pri.uuid:
+            client=self.m.rpc_client1
+        elif node.uuid==self.m.target_node_pri.uuid:
+            client=self.m.rpc_client3
+        elif node.uuid==self.m.node_sec.uuid:
+            client=self.m.rpc_client2
+        elif node.uuid==self.m.target_node_sec.uuid:
+            client = self.m.rpc_client4
+        else:
+            raise f"migration: invalid node, cannot cleanup: {self.m.uuid}"
+        if node.status!=StorageNode.STATUS_ONLINE:
+            raise f"migration: node not online, cannot cleanup: {self.m.uuid}"
+        return client
 
     def export_lvol(self, s: Snapshot):
-        # create subsystem
-        # create listener
-        # create namespace
+        client = self.check_online_and_leader(self.m.node_pri)
+        nqn=generate_nqn()
+        client.subsystem_create(nqn,"tmp-mig", "sb-internal", 1, 1)
+        client.nvmf_subsystem_add_ns(s.temporary_nqn,s.lvs_name+"/"+s.bdev_name)
+        if self.m.target_node_pri.active_rdma:
+            fabric="RDMA"
+        else:
+            fabric="TCP"
+        client.nvmf_subsystem_add_listener(s.temporary_nqn, fabric,self.m.target_node_pri.nvmf_port,
+                    self.m.target_node_pri.hostname, "optimized")
         return
 
-    def delete_tmp_nqn(self, s: Snapshot):
+    #delete subystem only, if there is only zero or one namespaces left;
+    #if one namespace is left, it must match the volume
+    def delete_nqn_and_namespace(self, node: StorageNode, nqn:str, lvol: LVol):
+        client=self.check_online_and_leader(node)
+        data=client.subsystem_list(nqn)
+        for subsystem in data['result']:
+            # Check if the subsystem has namespaces
+            namespaces = subsystem.get('namespaces')
+            if len(namespaces)==1:
+               for ns in namespaces:
+                   if ns['nsid']==lvol.namespace:
+                       client.subsystem_delete(nqn)
+            if len(namespaces)==0:
+                client.subsystem_delete(nqn)
         return
 
-    def get_lvol_by_name(self, lvol_name):
-        return
 
     def connect_lvol(self, s: Snapshot):
+
+        return
+
+    def delete_lvol_from_node(self, node: StorageNode, oid: str, deleteType: Boolean):
+        client=self.check_online_and_leader(node)
+        lvol=db_controller.get_lvol_by_id(oid)
+        if lvol:
+           client.delete_lvol(lvol.lvs_name+"/"+lvol.lvol_name, deleteType)
+        else:
+           snap=db_controller.get_snapshot_by_id(oid)
+           client.delete_lvol(snap.lvol.lvs_name + "/" + snap.lvol.lvol_name, deleteType)
         return
 
     def transfer_data(self, snap: Snapshot, offset: int):
@@ -202,12 +294,11 @@ class MigrationController:
             return
 
     def convert_lvol(self, s: Snapshot):
+            client=self.check_online_and_leader(self.m.target_node_pri)
+            client.
             return
 
     def convert_to_snap(self, s1, s2: Snapshot):
-            return
-
-    def create_snapshot(self, lvol: LogicalVolumeRef):
             return
 
     def time_difference(self):
@@ -236,10 +327,36 @@ class MigrationController:
         real_snapshots = db_controller.get_snapshots()
         self.unfreeze_objects()
         #Migration was not successful
-        if not status:
-              return
-        else:
-              return
+        try:
+          if self.m.status >= MigrationState.HUBLVOL_CONNECTED:
+              ret= delete_hub_lvol_controller()
+          if not status:
+              pri_node=self.m.node_pri
+              sec_node=self.m.node_sec
+          else:
+              pri_node = self.m.target_node_pri
+              sec_node = self.m.target_node_sec
+
+          if (self.m.status >= MigrationState.TARGET_LVOL_CREATED and not status) or self.m.status == MigrationState.DONE:
+              self.delete_nqn_and_namespace(pri_node, self.m.main_logical_volume.uuid)
+              self.delete_nqn_and_namespace(sec_node, self.m.main_logical_volume.uuid)
+              self.delete_lvol_from_node(pri_node, self.m.main_logical_volume.uuid)
+              self.unregister_lvol_from_node(sec_node, self.m.main_logical_volume.uuid)
+
+          snaps = self.m.snapshots
+          snaps.reverse()
+          for sn in snaps:
+                     if sn.uuid:
+                        rsn = db_controller.get_snapshot_by_id(sn.uuid)
+                        if len(rsn.successor)==1:
+                            self.delete_lvol_from_node(pri_node, sn.uuid)
+                            self.delete_nqn_and_namespace(pri_node,sn.uuid)
+                            self.delete_lvol_from_node(sec_node, sn.uuid)
+                        else:
+                            break
+        except:
+            raise f"cleanup of migration not successful, will try later {self.m.uuid}"
+        return True
 
     def migrate_final_lvol(self):
       try:
@@ -254,9 +371,8 @@ class MigrationController:
         elif self.m.status == MigrationState.RECONNECT_DONE:
            self.cleanup_migration(True)
       except:
-        raise (f"cannot transfer to target: {self.m.main_logical_volume.uuid}")
+        raise f"cannot transfer to target: {self.m.main_logical_volume.uuid}"
       return True
-
 
     def migrate_snaps(self):
         if self.m.status==MigrationState.RUNNING:
@@ -279,11 +395,13 @@ class MigrationController:
               elif s.status==ObjectMigrationState.TRANSFERRED:
                    self.convert_to_snap(s,p)
               elif s.status == ObjectMigrationState.CONVERTED:
-                   self.delete_tmp_nqn(s)
+                   self.delete_nqn_and_namespace(self.m.target_node_pri,s.uuid)
+              elif s.status == ObjectMigrationState.CLEANING:
+                   self.delete_lvol_from_node(self.m.target_node_sec, s.uuid)
               p=s
             if self.m.rerun < 3 or self.time_difference()>5:
-                snap_uuid=self.create_snapshot(self.m.main_logical_volume)
-                sn=self.snap_init(snap_uuid,self.m.main_logical_volume,self.m.target_node_pri.lvstore)
+                ret, snap_uuid=create_snapshot(self.m.main_logical_volume)
+                sn= snap_init(snap_uuid, self.m.main_logical_volume, self.m.target_node_pri.lvstore)
                 self.m.snapshots.append(sn)
                 self.prev_time=datetime.now()
                 self.migrate_snaps()
@@ -310,24 +428,25 @@ class MigrationController:
         else:
             self.m = m
 
-        # update lvol: frozen means it cannot be deleted or resized. new snapshots cannot be taken.
+        # update lvol: frozen means it cannot be deleself.m.main_logical_volume ted or resized. new snapshots cannot be taken.
         try:
             lvol1=self.db_controller.get_lvol_by_id(lvol.uuid)
             lvol1.frozen = True
             lvol1.write_to_db(self.db_controller.kv_store)
 
             # copy now all data from the lvol to the migration lvol (temporary object for lvol during migration)
-            self.m.main_logical_volume = self.lvol_assign(lvol)
 
-            # get all 4 storage node objects: primary, secondary source and target
-            self.m.node_pri = StorageNode(self.db_controller.get_storage_node_by_id(self.m.main_logical_volume.node_id))
+            self.m.node_pri = StorageNode(self.db_controller.get_storage_node_by_id(lvol1.node_id))
             self.m.node_sec = self.db_controller.get_storage_node_by_id(self.m.node_pri.secondary_node_id)
             self.m.target_node_pri = target_node
             self.m.target_node_sec = self.db_controller.get_storage_node_by_id(self.m.target_node_pri.secondary_node_id)
 
+            self.m.main_logical_volume = lvol_assign(lvol1,self.m.node_pri.lvstore)
+
+            # get all 4 storage node objects: primary, secondary source and target
+
             # create rpc clients for both primaries:
-            self.rpc_client1 = self.connect_client
-            self.rpc_client2 = self.connect_client
+            self.connect_clients()
 
             # now we create a chain of snapshots from all snapshots taken from this lvol
             snapshots = self.db_controller.get_snapshots()
@@ -339,12 +458,12 @@ class MigrationController:
                     s.frozen = True
                     # need to reset that one on node restart
                     s.write_to_db(self.db_controller.kv_store)
-                    sr = self.snap_assign(self.m.main_logical_volume, s,  self.db_controller.get(self.m.target_node_pri.lvstore))
+                    sr = snap_assign(self.m.main_logical_volume, s,  self.m.target_node_pri.lvstore)
                     self.m.snapshots.append(sr)
         except:
             return False
 
-        if self.check_nodes_online(self.m.node_pri, self.m.node_sec, self.m.target_node_pri, self.m.target_node_sec):
+        if check_nodes_online(self.m.node_pri, self.m.node_sec, self.m.target_node_pri, self.m.target_node_sec):
             self.m.status = MigrationState.RUNNING
             self.m.write_to_db(self.db_controller.kv_store)
             self.migrate_snaps()
@@ -361,30 +480,30 @@ class MigrationController:
             migrations=self.db_controller.get_migrations()
             for m in migrations:
               if m.status!=MigrationState.DONE and m.status!=MigrationState.FAILED:
-                 if self.check_nodes_online(m.node_pri,self.db_controller.get_storage_node_by_id(m.node_pri.secondary_node_id),
+                 if check_nodes_online(m.node_pri,self.db_controller.get_storage_node_by_id(m.node_pri.secondary_node_id),
                                             m.target_node_pri,m.target_node_sec):
-                     if (m.status==MigrationState.NEW):
+                     if m.status==MigrationState.NEW:
                          self.lvol_migrate(m.main_logical_volume,m.node_pri,m)
-                     elif (m.status==MigrationState.RUNNING):
+                     elif m.status==MigrationState.RUNNING:
                          for q in m.completion_poll_queue:
                              m.completion_poll_queue.remove(q)
-                             if (q.status==ObjectMigrationState.TRANSFER):
+                             if q.status==ObjectMigrationState.TRANSFER:
                                  if q.retry>5:
-                                     raise (f"could not transfer snapshot. max retries. name: {q.lvs_name+"/"+q.bdev_name}. uuid: {q.uuid}")
+                                     raise f"could not transfer snapshot. max retries. name: {q.lvs_name + "/" + q.bdev_name}. uuid: {q.uuid}"
                                  q.retry+=1
-                                 result=self.get_transfer_state(q.target_lvs_name+"/"+q.bdev_name)
-                                 if not result.status:
-                                    self.transfer_data(q,result.offset)
+                                 result, offset = get_transfer_state(q.target_lvs_name + "/" + q.bdev_name, self.m.node_pri.uuid)
+                                 if not result:
+                                    self.transfer_data(q,offset)
                                     m.completion_poll_queue.append(q)
                                  else:
                                     q.status=ObjectMigrationState.TRANSFERRED
-                             self.migrate_snaps
-                     elif (m.status in (MigrationState.SNAPS_MIGRATED, MigrationState.HUBLVOL_CONNECTED, MigrationState.TARGET_LVOL_CREATED, MigrationState.TRANSFERRED_TO_TARGET, MigrationState.RECONNECT_DONE)):
+                             self.migrate_snaps()
+                     elif m.status in (MigrationState.SNAPS_MIGRATED, MigrationState.HUBLVOL_CONNECTED, MigrationState.TARGET_LVOL_CREATED, MigrationState.TRANSFERRED_TO_TARGET, MigrationState.RECONNECT_DONE):
                           self.migrate_final_lvol()
           except:
-              logger.error(f"migration controller exception. Migration failed: {m.uuid} ")
-              m.status=MigrationState.FAILED
-              self.cleanup_migration(m, False)
+              logger.error(f"migration controller exception. Migration failed: {self.m.uuid} ")
+              self.m.status=MigrationState.FAILED
+              self.cleanup_migration(False)
               return False
           return True
 
@@ -409,23 +528,7 @@ class MigrationController:
         #any snaps in queue?
         #poll for completion, trigger restart or if completed change the state
         #stop
-      return
-
-    def migrations_list(self):
-        db_controller = DBController()
-        migrations = db_controller.get_migrations()
-        data = []
-        for m in migrations:
-            logger.debug(m)
-            data.append({
-                "UUID": m.uuid,
-                "Lvol UUID": m.main_logical_volume.uuid,
-                "Primary (source):": m.node_pri,
-                "Primary (target):": m.target_node_pri,
-                "DateTime:": m.create_dt,
-                "Status": m.status,
-            })
-        return utils.print_table(data)
+      return None
 
     def start_service(self, on_restart=False):
         """

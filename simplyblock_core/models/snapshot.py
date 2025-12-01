@@ -2,9 +2,20 @@
 
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.lvol_model import LVol
+from typing import List
+
+
+class SnapshotRef():
+
+    TYPE_LVOL = "lvol"
+    TYPE_CLONE = "clone"
+    TYPE_SNAP = "snap"
+    type: str
+    next: str
 
 
 class SnapShot(BaseModel):
+
 
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
@@ -31,3 +42,5 @@ class SnapShot(BaseModel):
     fabric: str = "tcp"
     frozen: bool = False
     node_id : str = ""
+    successor : List[SnapshotRef] = []
+    predecessor: str = ""
