@@ -136,7 +136,7 @@ class ServerHandler(BaseHTTPRequestHandler):
                 else:
                     self.do_HEAD_no_content()
 
-            except Exception:
+            except ValueError:
                 self.do_INTERNALERROR()
         self.server_session.remove(req_time)
 
