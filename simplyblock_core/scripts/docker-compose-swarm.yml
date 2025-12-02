@@ -363,7 +363,6 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-
 networks:
   monitoring-net:
     external: true
