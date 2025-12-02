@@ -14,7 +14,10 @@ import socket
 from typing import Union, Any, Optional, Tuple
 from docker import DockerClient
 from kubernetes import client, config
-from kubernetes.client import ApiException, AppsV1Api
+from kubernetes.client import ApiException, AppsV1Api, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
+    V1PodTemplateSpec, V1PodSpec, V1Container, V1EnvVar, V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, \
+    V1LabelSelector, V1ResourceRequirements
+
 import docker
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
@@ -2096,9 +2099,74 @@ def create_docker_service(cluster_docker: DockerClient, service_name: str, servi
         constraints=["node.role == manager"]
     )
 
-
-def create_k8s_service(k8s_apps_client: AppsV1Api, namespace: str, deployment_name: str,
+def create_k8s_service(namespace: str, deployment_name: str,
                        container_name: str, service_file: str, container_image: str):
-    # TODO(Geoffrey): Add implementation to create a service on k8s to support cluster update from older version
-    logger.info(f"Creating deployment: {deployment_name}")
-    pass
+
+    logger.info(f"Creating deployment: {deployment_name} in namespace {namespace}")
+    load_kube_config_with_fallback()
+    apps_v1 = client.AppsV1Api()
+
+    env_list = [
+        V1EnvVar(
+            name="SIMPLYBLOCK_LOG_LEVEL",
+            value_from={"config_map_key_ref": {"name": "simplyblock-config", "key": "LOG_LEVEL"}}
+        )
+    ]
+
+    volume_mounts = [
+        V1VolumeMount(
+            name="fdb-cluster-file",
+            mount_path="/etc/foundationdb/fdb.cluster",
+            sub_path="fdb.cluster"
+        )
+    ]
+
+    volumes = [
+        V1Volume(
+            name="fdb-cluster-file",
+            config_map=V1ConfigMapVolumeSource(
+                name="simplyblock-fdb-cluster-config",
+                items=[{"key": "cluster-file", "path": "fdb.cluster"}]
+            )
+        )
+    ]
+
+    container = V1Container(
+        name=container_name,
+        image=container_image,
+        command=["python", service_file], 
+        env=env_list,
+        volume_mounts=volume_mounts,
+        resources=V1ResourceRequirements(
+            requests={"cpu": "200m", "memory": "256Mi"},
+            limits={"cpu": "400m", "memory": "1Gi"}
+        )
+    )
+
+    pod_spec = V1PodSpec(
+        containers=[container],
+        volumes=volumes,
+        host_network=True,
+        dns_policy="ClusterFirstWithHostNet"
+    )
+
+    pod_template = V1PodTemplateSpec(
+        metadata=V1ObjectMeta(labels={"app": deployment_name}),
+        spec=pod_spec
+    )
+
+    deployment_spec = V1DeploymentSpec(
+        replicas=1,
+        selector=V1LabelSelector(match_labels={"app": deployment_name}),
+        template=pod_template
+    )
+
+    deployment = V1Deployment(
+        api_version="apps/v1",
+        kind="Deployment",
+        metadata=V1ObjectMeta(name=deployment_name, namespace=namespace),
+        spec=deployment_spec
+    )
+
+    apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
+    logger.info(f"Deployment {deployment_name} created successfully.")

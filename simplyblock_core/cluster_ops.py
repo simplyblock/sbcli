@@ -1225,18 +1225,16 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
 
         if f"{namespace}-tasks-runner-sync-lvol-del" not in deployment_names:
             utils.create_k8s_service(
-                k8s_apps_client=apps_v1,
                 namespace=namespace,
-                deployment_name=f"{namespace}-tasks-runner-sync-lvol-del",
+                deployment_name=f"simplyblock-tasks-runner-sync-lvol-del",
                 container_name="tasks-runner-sync-lvol-del",
                 service_file="simplyblock_core/services/tasks_runner_sync_lvol_del.py",
                 container_image=service_image)
 
         if f"{namespace}-snapshot-monitor" not in deployment_names:
             utils.create_k8s_service(
-                k8s_apps_client=apps_v1,
                 namespace=namespace,
-                deployment_name=f"{namespace}-snapshot-monitor",
+                deployment_name=f"simplyblock-snapshot-monitor",
                 container_name="snapshot-monitor",
                 service_file="simplyblock_core/services/snapshot_monitor.py",
                 container_image=service_image)
