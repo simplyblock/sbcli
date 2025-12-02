@@ -135,58 +135,74 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     db_controller = DBController()
     node_stats = {}
-    all_online_nodes = []
+    nodes_below_25 = []
     nodes_between_25_75 = []
     nodes_above_75 = []
 
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.is_secondary_node:  # pass
             continue
-
         if node.status == node.STATUS_ONLINE:
-
-            """
-            if sum of lvols (+snapshots, including namespace lvols) per node is utilized < [0.25 * max-size] AND
-            number of lvols (snapshots dont count extra and namspaces on same subsystem count only once) < [0.25 * max-lvol]
-            
-            --> simply round-robin schedule lvols (no randomization, no weights)
-            BUT: if storage utilization > 25% on one or more nodes, those nodes are excluded from round robin
-            
-            
-            
-            
-            
-            Once all nodes have > 25% of storage utilization, we weight
-            (relative-number-of-lvol-compared-to-total-number + relative-utilization-compared-to-total-utilzation) 
-            --> and based on the weight just a random location
-            
-            Once a node has > 75% uof storage utilization, it is excluded to add new lvols
-                (unless all nodes exceed this limit, than it is weighted again)
-
-
-            """
-            all_online_nodes.append(node)
-
             if node.node_size_util < 25:
-                continue
+                nodes_below_25.append(node)
             elif node.node_size_util >= 75:
                 nodes_above_75.append(node)
             else:
                 nodes_between_25_75.append(node)
 
-            node_st = {
-                "node_size_util": node.node_size_util ,
-                "lvol_count_util": node.lvol_count_util ,
-            }
-
-            node_stats[node.get_id()] = node_st
-
     if len(node_stats) <= 1:
-        return all_online_nodes
+        return nodes_below_25+nodes_between_25_75+nodes_above_75
 
+    if len(nodes_below_25) > len(nodes_between_25_75):
+        """
+        if sum of lvols (+snapshots, including namespace lvols) per node is utilized < [0.25 * max-size] AND
+        number of lvols (snapshots dont count extra and namspaces on same subsystem count only once) < [0.25 * max-lvol]
+
+        --> simply round-robin schedule lvols (no randomization, no weights)
+        BUT: if storage utilization > 25% on one or more nodes, those nodes are excluded from round robin
+
+        """
+
+        for node in nodes_below_25:
+            node_stats[node.get_id()] = node.lvol_count_util
+
+        sorted_keys = list(node_stats.keys())
+        sorted_keys.sort()
+        sorted_nodes = []
+        for k in sorted_keys:
+            for node in nodes_below_25:
+                if  node.lvol_count_util == k:
+                    sorted_nodes.append(node)
+
+        return sorted_nodes
+
+    elif len(nodes_between_25_75) > len(nodes_above_75):
+        """
+        Once all nodes have > 25% of storage utilization, we weight
+        (relative-number-of-lvol-compared-to-total-number + relative-utilization-compared-to-total-utilzation) 
+        --> and based on the weight just a random location
+        """
+        for node in nodes_between_25_75:
+            node_stats[node.get_id()] = {
+                "lvol_count_util": node.lvol_count_util,
+                "node_size_util": node.node_size_util}
+
+    elif len(nodes_below_25) == 0 and len(nodes_between_25_75) == 0 and len(nodes_above_75) > 0 :
+        """
+        Once a node has > 75% uof storage utilization, it is excluded to add new lvols
+            (unless all nodes exceed this limit, than it is weighted again)
+        """
+        for node in nodes_above_75:
+            node_stats[node.get_id()] = {
+                "lvol_count_util": node.lvol_count_util,
+                "node_size_util": node.node_size_util}
+
+
+    keys_weights = {
+        "lvol_count_util": 50,
+        "node_size_util": 50}
     cluster_stats = utils.dict_agg([node_stats[k] for k in node_stats])
-
-    nodes_weight = utils.get_weights(node_stats, cluster_stats)
+    nodes_weight = utils.get_weights(node_stats, cluster_stats, keys_weights)
 
     node_start_end = {}
     n_start = 0

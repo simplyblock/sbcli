@@ -61,15 +61,6 @@ DEVICE_OVERLOAD_CAPACITY_THRESHOLD = 50
 
 CLUSTER_NQN = "nqn.2023-02.io.simplyblock"
 
-weights = {
-    "lvol": 100,
-    # "cpu": 10,
-    # "r_io": 10,
-    # "w_io": 10,
-    # "r_b": 10,
-    # "w_b": 10
-}
-
 
 HEALTH_CHECK_INTERVAL_SEC = 30
 
