@@ -122,5 +122,5 @@ def update(cluster: Cluster, pool: StoragePool, parameters: UpdatableStoragePool
 
 @instance_api.get('/iostats', name='clusters:storage-pools:iostats')
 def iostats(cluster: Cluster, pool: StoragePool, limit: int = 20):
-    records = db.get_pool_stats(pool, limit)
-    return core_utils.process_records(records, 20)
+    data = pool_controller.get_io_stats(pool.get_id(), history="")
+    return core_utils.process_records(data, 20)

@@ -83,6 +83,11 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
     stat_obj.write_to_db(db.kv_store)
     last_object_record[device.get_id()] = stat_obj
 
+    all_stats = db.get_device_stats(device, limit=0)
+    if len(all_stats) > 10:
+        for st in all_stats[10:]:
+            st.remove(db.kv_store)
+
     return stat_obj
 
 
@@ -117,6 +122,11 @@ def add_node_stats(node, records):
     stat_obj = NodeStatObject(data=data)
     stat_obj.write_to_db(db.kv_store)
 
+    all_stats = db.get_node_stats(node, limit=0)
+    if len(all_stats) > 10:
+        for st in all_stats[10:]:
+            st.remove(db.kv_store)
+
     return stat_obj
 
 
@@ -145,6 +155,11 @@ def add_cluster_stats(cl, records):
 
     stat_obj = ClusterStatObject(data=data)
     stat_obj.write_to_db(db.kv_store)
+
+    all_stats = db.get_cluster_stats(cl, limit=0)
+    if len(all_stats) > 10:
+        for st in all_stats[10:]:
+            st.remove(db.kv_store)
 
     return stat_obj
 
