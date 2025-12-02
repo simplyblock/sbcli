@@ -14,7 +14,7 @@ import socket
 from typing import Union, Any, Optional, Tuple
 from docker import DockerClient
 from kubernetes import client, config
-from kubernetes.client import ApiException, AppsV1Api, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
+from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
     V1PodTemplateSpec, V1PodSpec, V1Container, V1EnvVar, V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, \
     V1LabelSelector, V1ResourceRequirements
 
