@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import sys
+import threading
 import time
 
 from http.server import HTTPServer
@@ -29,8 +30,10 @@ def get_env_var(name, default=None, is_required=False):
         raise Exception("env value is required: %s" % name)
     return os.environ.get(name, default)
 
-
+unix_sockets = []
 def rpc_call(req):
+    logger.info(f"active threads: {threading.active_count()}")
+    logger.info(f"active unix sockets: {len(unix_sockets)}")
     req_data = json.loads(req.decode('ascii'))
     req_time = time.time_ns()
     params = ""
@@ -38,6 +41,7 @@ def rpc_call(req):
         params = str(req_data['params'])
     logger.info(f"Request:{req_time} function: {str(req_data['method'])}, params: {params}")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    unix_sockets.append(sock)
     sock.settimeout(TIMEOUT)
     sock.connect(rpc_sock)
     sock.sendall(req)
@@ -62,6 +66,7 @@ def rpc_call(req):
         break
 
     sock.close()
+    unix_sockets.remove(sock)
 
     if not response and len(buf) > 0:
         raise ValueError('Invalid response')
@@ -72,9 +77,8 @@ def rpc_call(req):
 
 
 class ServerHandler(BaseHTTPRequestHandler):
-
+    server_session = []
     key = ""
-
     def do_HEAD(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
@@ -97,6 +101,9 @@ class ServerHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        req_time = time.time_ns()
+        self.server_session.append(req_time)
+        logger.info(f"active server session: {len(self.server_session)}")
         if self.headers['Authorization'] != 'Basic ' + self.key:
             self.do_AUTHHEAD()
         else:
@@ -128,8 +135,9 @@ class ServerHandler(BaseHTTPRequestHandler):
                 else:
                     self.do_HEAD_no_content()
 
-            except ValueError:
+            except Exception:
                 self.do_INTERNALERROR()
+        self.server_session.remove(req_time)
 
 
 def run_server(host, port, user, password, is_threading_enabled=False):
