@@ -1193,6 +1193,13 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_file="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
                 service_image=service_image)
 
+        if "app_TasksRunnerJCCompResume" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerJCCompResume",
+                service_file="python simplyblock_core/services/tasks_runner_jc_comp.py",
+                service_image=service_image)
+
         logger.info("Done updating mgmt cluster")
 
     elif cluster.mode == "kubernetes":
@@ -1223,18 +1230,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         body={"spec": {"template": deploy.spec.template}}
                     )
 
-        if f"{namespace}-tasks-runner-sync-lvol-del" not in deployment_names:
+        if "simplyblock-tasks-runner-sync-lvol-del" not in deployment_names:
             utils.create_k8s_service(
                 namespace=namespace,
-                deployment_name=f"simplyblock-tasks-runner-sync-lvol-del",
+                deployment_name="simplyblock-tasks-runner-sync-lvol-del",
                 container_name="tasks-runner-sync-lvol-del",
                 service_file="simplyblock_core/services/tasks_runner_sync_lvol_del.py",
                 container_image=service_image)
 
-        if f"{namespace}-snapshot-monitor" not in deployment_names:
+        if "simplyblock-snapshot-monitor" not in deployment_names:
             utils.create_k8s_service(
                 namespace=namespace,
-                deployment_name=f"simplyblock-snapshot-monitor",
+                deployment_name="simplyblock-snapshot-monitor",
                 container_name="snapshot-monitor",
                 service_file="simplyblock_core/services/snapshot_monitor.py",
                 container_image=service_image)

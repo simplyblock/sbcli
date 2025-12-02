@@ -2096,7 +2096,10 @@ def create_docker_service(cluster_docker: DockerClient, service_name: str, servi
         mounts=["/etc/foundationdb:/etc/foundationdb"],
         env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
         networks=["host"],
-        constraints=["node.role == manager"]
+        constraints=["node.role == manager"],
+        labels={
+            "com.docker.stack.image": service_image,
+            "com.docker.stack.namespace": "app"}
     )
 
 def create_k8s_service(namespace: str, deployment_name: str,
