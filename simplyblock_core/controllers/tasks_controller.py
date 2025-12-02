@@ -425,6 +425,6 @@ def get_snapshot_replication_task(cluster_id, snapshot_id):
     return False
 
 
-def add_snapshot_replication_task(snapshot):
-    return _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, snapshot.cluster_id, snapshot.lvol.node_id, "",
-                     function_params={"snapshot_id": snapshot.get_id()})
+def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to_source=False):
+    return _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, cluster_id, node_id, "",
+                     function_params={"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source})

@@ -16,6 +16,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
@@ -1797,7 +1798,7 @@ def replication_start(lvol_id):
     for snap in db_controller.get_snapshots():
         if snap.lvol.uuid == lvol.uuid:
             if not snap.target_replicated_snap_uuid:
-                task = tasks_controller.add_snapshot_replication_task(snap)
+                task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
                 if task:
                     snapshot_events.replication_task_created(snap)
     return True

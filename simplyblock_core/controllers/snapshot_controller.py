@@ -221,9 +221,18 @@ def add(lvol_id, snapshot_name):
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
     if lvol.do_replicate:
-        task = tasks_controller.add_snapshot_replication_task(snap)
+        task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
         if task:
             snapshot_events.replication_task_created(snap)
+    if lvol.cloned_from_snap:
+        lvol_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+        if lvol_snap.source_replicated_snap_uuid:
+            org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
+            if org_snap and org_snap.status == SnapShot.STATUS_ONLINE:
+                task = tasks_controller.add_snapshot_replication_task(
+                    snap.cluster_id, org_snap.lvol.node_id, snap.get_id(), replicate_to_source=True)
+                if task:
+                    logger.info("Created snapshot replication task on original node")
     return snap.uuid, False
 
 
