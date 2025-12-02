@@ -1184,7 +1184,10 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 mounts=["/etc/foundationdb:/etc/foundationdb"],
                 env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
                 networks=["host"],
-                constraints=["node.role == manager"]
+                constraints=["node.role == manager"],
+                labels={
+                    "com.docker.stack.image": service_image,
+                    "com.docker.stack.namespace": "app"}
             )
 
         if "app_TasksRunnerLVolSyncDelete" not in service_names:
@@ -1196,7 +1199,25 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 mounts=["/etc/foundationdb:/etc/foundationdb"],
                 env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
                 networks=["host"],
-                constraints=["node.role == manager"]
+                constraints=["node.role == manager"],
+                labels={
+                    "com.docker.stack.image": service_image,
+                    "com.docker.stack.namespace": "app"}
+            )
+
+        if "app_TasksRunnerJCCompResume" not in service_names:
+            logger.info("Creating JC compression service")
+            cluster_docker.services.create(
+                image=service_image,
+                command="python simplyblock_core/services/tasks_runner_jc_comp.py",
+                name="app_TasksRunnerJCCompResume",
+                mounts=["/etc/foundationdb:/etc/foundationdb"],
+                env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
+                networks=["host"],
+                constraints=["node.role == manager"],
+                labels={
+                    "com.docker.stack.image": service_image,
+                    "com.docker.stack.namespace": "app"}
             )
         logger.info("Done updating mgmt cluster")
 
