@@ -229,7 +229,7 @@ def dict_agg(data, mean=False, keys=None):
     return out
 
 
-def get_weights(node_stats, cluster_stats):
+def get_weights(node_stats, cluster_stats, keys_weights):
     """"
     node_st = {
             "lvol": len(node.lvols),
@@ -241,8 +241,8 @@ def get_weights(node_stats, cluster_stats):
     """
 
     def _normalize_w(key, v):
-        if key in constants.weights:
-            return round(((v * constants.weights[key]) / 100), 2)
+        if key in keys_weights:
+            return round(((v * keys_weights[key]) / 100), 2)
         else:
             return v
 
