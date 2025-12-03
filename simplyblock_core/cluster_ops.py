@@ -439,7 +439,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
                 cluster_ip=None, grafana_secret=None) -> str:
 
+
     default_cluster = None
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
     clusters = db_controller.get_clusters()
     if clusters:
         default_cluster = clusters[0]
@@ -450,6 +452,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
     logger.info("Adding new cluster")
+
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
@@ -469,14 +472,14 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
         cluster.db_connection = fdb_cluster_string
-        if grafana_secret:
-            cluster.grafana_secret = grafana_secret
+        if monitoring_secret:
+            cluster.grafana_secret = monitoring_secret
         else:
-            raise Exception("grafana_secret is required")
-        if cluster_ip:
-            cluster.grafana_endpoint = f"http://{cluster_ip}/grafana"
-        else:
-            raise Exception("cluster_ip is required")
+            raise Exception("monitoring_secret is required")
+        cluster.grafana_endpoint = "http://simplyblock-grafana"
+        if not cluster_ip:
+            cluster_ip = "0.0.0.0"
+
         # add mgmt node object
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
 
