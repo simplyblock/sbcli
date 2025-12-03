@@ -106,8 +106,6 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
         logger.info(f"Node IP: {dev_ip}")
 
-        hostname = utils.get_node_name_by_ip(dev_ip)
-        utils.label_node_as_mgmt_plane(hostname)
         db_connection = cluster_data['db_connection']
         db_controller = DBController()
         nodes = db_controller.get_mgmt_nodes()
@@ -225,10 +223,9 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
 def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     db_controller = DBController()
+    hostname = ""
     if mode == "docker":
         hostname = utils.get_hostname()
-    elif mode == "kubernetes":
-        hostname = utils.get_node_name_by_ip(mgmt_ip)
     try:
         node = db_controller.get_mgmt_node_by_hostname(hostname)
         if node:
