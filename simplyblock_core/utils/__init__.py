@@ -1349,7 +1349,7 @@ def build_unisolated_stride(
 
     core_set = set(cores)
 
-    half = None
+    half: int = 0
     if hyper_thread:
         if total % 2 != 0:
             raise ValueError(f"hyper_thread=True but total logical CPUs ({total}) is not even")
@@ -1363,10 +1363,10 @@ def build_unisolated_stride(
     # Per-pool index (within each pool)
     idx = [0] * len(pools)
 
-    out = []
+    out: List[int] = []
     used = set()
 
-    def add_cpu(cpu: int):
+    def add_cpu(cpu: int) -> None:
         if cpu in core_set and cpu not in used and len(out) < num_unisolated:
             out.append(cpu)
             used.add(cpu)
@@ -1419,7 +1419,6 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, co
         if numa_node not in cores_by_numa:
             continue
         all_cores = sorted(cores_by_numa[numa_node])
-        total_cores = len(all_cores)
         num_unisolated = calculate_unisolated_cores(all_cores, cores_percentage)
         unisolated = build_unisolated_stride(all_cores,num_unisolated,constants.CLIENT_QPAIR_COUNT)
 
@@ -1605,7 +1604,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
 
     for nvme, val in nvmes.items():
         pci = val["pci_address"]
-        numa = val["numa_node"]
+        numa = int(val["numa_node"])
         pci_utils.unbind_driver(pci)
         if numa in sockets_to_use:
             system_info[numa]["nvmes"].append(pci)
