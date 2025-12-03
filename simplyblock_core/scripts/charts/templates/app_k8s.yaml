@@ -93,6 +93,17 @@ spec:
             configMapKeyRef:
               name: simplyblock-config
               key: LOG_LEVEL
+        - name: LVOL_NVMF_PORT_START
+          value: "{{ .Values.ports.lvolNvmfPortStart }}"
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: MONITORING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: simplyblock-grafana-secrets
+              key: MONITORING_SECRET
         - name: FLASK_DEBUG
           value: "False"
         - name: FLASK_ENV
