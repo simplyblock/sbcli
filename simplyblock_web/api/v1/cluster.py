@@ -101,7 +101,7 @@ def create_first_cluster():
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
             cluster_ip=cluster_ip, grafana_secret=grafana_secret)
         if cluster_id:
-            return utils.get_response(db.get_cluster_by_id(cluster_id))
+            return utils.get_response(db.get_cluster_by_id(cluster_id).to_dict())
         else:
             return utils.get_response(False, "Failed to create cluster", 400)
     except Exception as e:
