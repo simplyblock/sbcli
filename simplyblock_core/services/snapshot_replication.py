@@ -19,23 +19,29 @@ def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
     snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
-    if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"] :
-        remote_node_uuid = db.get_storage_node_by_id(snapshot.lvol.replication_node_id)
-        cluster = db.get_cluster_by_id(remote_node_uuid.cluster_id)
-        remote_pool_uuid = None
-        if cluster.snapshot_replication_target_pool:
-            remote_pool_uuid = cluster.snapshot_replication_target_pool
-        else:
-            for bool in db.get_pools(remote_node_uuid.cluster_id):
-                if bool.status == Pool.STATUS_ACTIVE:
-                    remote_pool_uuid = bool.uuid
-                    break
-        if not remote_pool_uuid:
-            logger.error(f"Unable to find pool on remote cluster: {remote_node_uuid.cluster_id}")
-            return
+    replicate_to_source = task.function_params["replicate_to_source"]
+    if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
+        if replicate_to_source:
+            org_snap = db.get_snapshot_by_id(snapshot.lvol.source_replicated_snap_uuid)
+            remote_node_uuid = db.get_storage_node_by_id(org_snap.lvol.node_id)
+            remote_pool_uuid = org_snap.lvol.pool_uuid
+        else:  # replicate to target
+            remote_node_uuid = db.get_storage_node_by_id(snapshot.lvol.replication_node_id)
+            cluster = db.get_cluster_by_id(remote_node_uuid.cluster_id)
+            remote_pool_uuid = None
+            if cluster.snapshot_replication_target_pool:
+                remote_pool_uuid = cluster.snapshot_replication_target_pool
+            else:
+                for bool in db.get_pools(remote_node_uuid.cluster_id):
+                    if bool.status == Pool.STATUS_ACTIVE:
+                        remote_pool_uuid = bool.uuid
+                        break
+            if not remote_pool_uuid:
+                logger.error(f"Unable to find pool on remote cluster: {remote_node_uuid.cluster_id}")
+                return
 
         lv_id, err = lvol_controller.add_lvol_ha(
-            f"REP_{snapshot.snap_name}", snapshot.size, snapshot.lvol.replication_node_id, snapshot.lvol.ha_type,
+            f"REP_{snapshot.snap_name}", snapshot.size, remote_node_uuid.get_id(), snapshot.lvol.ha_type,
             remote_pool_uuid)
         if lv_id:
             task.function_params["remote_lvol_id"] = lv_id
@@ -118,10 +124,17 @@ def process_snap_replicate_finish(task, snapshot):
     snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
 
+    replicate_to_source = task.function_params["replicate_to_source"]
+    if replicate_to_source:
+        org_snap = db.get_snapshot_by_id(snapshot.source_replicated_snap_uuid)
+        snapshot_lvol_id =  org_snap.lvol.get_id()
+    else:
+        snapshot_lvol_id =  snapshot.lvol.get_id()
+
     # chain snaps on primary
     snaps = db.get_snapshots(remote_snode.cluster_id)
     for sn in snaps:
-        if sn.lvol.get_id() == snapshot.lvol.get_id():
+        if sn.lvol.get_id() == snapshot_lvol_id:
             try:
                 target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
                 logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
@@ -137,7 +150,7 @@ def process_snap_replicate_finish(task, snapshot):
     # chain snaps on secondary
     if sec_node.status == StorageNode.STATUS_ONLINE:
         for sn in snaps:
-            if sn.lvol.get_id() == snapshot.lvol.get_id():
+            if sn.lvol.get_id() == snapshot_lvol_id:
                 try:
                     target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
                     logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")

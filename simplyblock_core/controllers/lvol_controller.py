@@ -1797,7 +1797,7 @@ def replication_start(lvol_id):
     for snap in db_controller.get_snapshots():
         if snap.lvol.uuid == lvol.uuid:
             if not snap.target_replicated_snap_uuid:
-                task = tasks_controller.add_snapshot_replication_task(snap)
+                task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
                 if task:
                     snapshot_events.replication_task_created(snap)
     return True
