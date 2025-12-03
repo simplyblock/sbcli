@@ -160,14 +160,14 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
         return False
 
     data = []
-    tasks = db.get_job_tasks(cluster_id, reverse=True, limit=limit)
+    tasks = db.get_job_tasks(cluster_id, reverse=True)
     tasks.reverse()
     if is_json is True:
         for t in tasks:
             if t.function_name == JobSchedule.FN_DEV_MIG:
                 continue
             data.append(t.get_clean_dict())
-            if len(data) > limit:
+            if len(data)+1 > limit > 0:
                 return json.dumps(data, indent=2)
         return json.dumps(data, indent=2)
 
@@ -204,7 +204,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             "Result": task.function_result,
             "Updated At": upd or "",
         })
-        if len(data) > limit:
+        if len(data)+1 > limit > 0:
             return utils.print_table(data)
     return utils.print_table(data)
 

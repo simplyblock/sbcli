@@ -12,6 +12,7 @@ from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient
 
 logger = lg.getLogger()
@@ -321,15 +322,18 @@ def get_io_stats(pool_id, history, records_count=20):
         logger.error(f"Pool not found {pool_id}")
         return False
 
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            logger.error(f"Error parsing history string: {history}")
-            return False
-    else:
-        records_number = records_count
+    io_stats_keys = [
+        "date",
+        "read_bytes_ps",
+        "read_io_ps",
+        "read_latency_ps",
+        "write_bytes_ps",
+        "write_io_ps",
+        "write_latency_ps",
+    ]
 
-    out = db_controller.get_pool_stats(pool, records_number)
+    prom_client = PromClient(pool.cluster_id)
+    out = prom_client.get_pool_metrics(pool_id, io_stats_keys, history)
     new_records = utils.process_records(out, records_count)
 
     return utils.print_table([
