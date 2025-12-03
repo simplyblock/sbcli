@@ -473,7 +473,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
             cluster.grafana_secret = monitoring_secret
         else:
             raise Exception("monitoring_secret is required")
-        cluster.grafana_endpoint = "http://simplyblock-grafana"
+        cluster.grafana_endpoint = "http://simplyblock-grafana:3000"
         if not cluster_ip:
             cluster_ip = "0.0.0.0"
 
