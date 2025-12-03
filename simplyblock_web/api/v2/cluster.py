@@ -24,7 +24,7 @@ class _UpdateParams(BaseModel):
 
 
 class ClusterParams(BaseModel):
-    name: str | None = None
+    name: str = ""
     blk_size: Literal[512, 4096] = 512
     page_size_in_blocks: int = Field(2097152, gt=0)
     cap_warn: util.Percent = 0
@@ -43,9 +43,8 @@ class ClusterParams(BaseModel):
     strict_node_anti_affinity: bool = False
     is_single_node: bool = False
     fabric: str = "tcp"
-    cluster_ip: str | None = None
-    grafana_secret: str | None = None
-
+    cluster_ip: str = ""
+    grafana_secret: str = ""
 
 @api.get('/', name='clusters:list')
 def list() -> List[ClusterDTO]:
