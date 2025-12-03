@@ -30,6 +30,7 @@ def get_env_var(name, default=None, is_required=False):
     return os.environ.get(name, default)
 
 
+unix_sockets: list[socket] = []  # type: ignore[valid-type]
 def rpc_call(req):
     req_data = json.loads(req.decode('ascii'))
     params = ""
@@ -72,6 +73,7 @@ def rpc_call(req):
 
 class ServerHandler(BaseHTTPRequestHandler):
 
+    server_session: list[int] = []
     key = ""
 
     def do_HEAD(self):

@@ -1325,6 +1325,103 @@ def get_core_indexes(core_to_index, list_of_cores):
     return [core_to_index[core] for core in list_of_cores if core in core_to_index]
 
 
+def build_unisolated_stride(
+    all_cores: List[int],
+    num_unisolated: int,
+    client_qpair_count: int,
+    pool_stride: int = 2,
+) -> List[int]:
+    """
+    Build a list of 'unisolated' CPUs by picking from per-qpair pools.
+
+    Pools are contiguous slices of all_cores:
+      total=30, q=3 -> [0..9], [10..19], [20..29]
+
+    Selection:
+      round-robin across pools, and within each pool advance by pool_stride
+      e.g. stride=2 -> 0,2,4,... then 10,12,14,... then 20,22,24,...
+
+    If hyper_thread=True, append sibling right after each core:
+      sibling = cpu +/- (total//2)
+    """
+    hyper_thread = is_hyperthreading_enabled_via_siblings()
+    if num_unisolated <= 0:
+        return []
+    if client_qpair_count <= 0:
+        raise ValueError("client_qpair_count must be > 0")
+    if pool_stride <= 0:
+        raise ValueError("pool_stride must be > 0")
+
+    cores = sorted(all_cores)
+    total = len(cores)
+    if total == 0:
+        return []
+
+    core_set = set(cores)
+
+    half: int = 0
+    if hyper_thread:
+        if total % 2 != 0:
+            raise ValueError(f"hyper_thread=True but total logical CPUs ({total}) is not even")
+        half = total // 2
+
+    # Build pools
+    pool_size = math.ceil(total / client_qpair_count)
+    pools = [cores[i * pool_size : min((i + 1) * pool_size, total)] for i in range(client_qpair_count)]
+    pools = [p for p in pools if p]  # drop empties
+
+    # Per-pool index (within each pool)
+    idx = [0] * len(pools)
+
+    out: List[int] = []
+    used = set()
+
+    def add_cpu(cpu: int) -> None:
+        if cpu in core_set and cpu not in used and len(out) < num_unisolated:
+            out.append(cpu)
+            used.add(cpu)
+
+    while len(out) < num_unisolated:
+        progress = False
+
+        for pi, pool in enumerate(pools):
+            if len(out) >= num_unisolated:
+                break
+
+            # find next candidate in this pool using stride
+            j = idx[pi]
+            while j < len(pool) and pool[j] in used:
+                j += pool_stride
+            if j >= len(pool):
+                continue
+
+            cpu = pool[j]
+            idx[pi] = j + pool_stride
+
+            add_cpu(cpu)
+            progress = True
+
+            if hyper_thread and len(out) < num_unisolated:
+                sib = cpu + half if cpu < half else cpu - half
+                add_cpu(sib)
+
+        if progress:
+            continue
+
+        # Fallback: fill any remaining from whatever is unused (should rarely happen)
+        for cpu in cores:
+            if len(out) >= num_unisolated:
+                break
+            if cpu not in used:
+                add_cpu(cpu)
+                if hyper_thread and len(out) < num_unisolated:
+                    sib = cpu + half if cpu < half else cpu - half
+                    add_cpu(sib)
+        break
+
+    return out[:num_unisolated]
+
+
 def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage=0):
     node_distribution: dict = {}
     # Iterate over each NUMA node
@@ -1332,20 +1429,9 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, co
         if numa_node not in cores_by_numa:
             continue
         all_cores = sorted(cores_by_numa[numa_node])
-        total_cores = len(all_cores)
         num_unisolated = calculate_unisolated_cores(all_cores, cores_percentage)
+        unisolated = build_unisolated_stride(all_cores,num_unisolated,constants.CLIENT_QPAIR_COUNT)
 
-        unisolated = []
-        half = total_cores // 2
-        for i in range(num_unisolated):
-            if i % 2 == 0:
-                index = i // 2
-            else:
-                index = (i - 1) // 2
-            if i % 2 == 0:
-                unisolated.append(all_cores[index])
-            else:
-                unisolated.append(all_cores[half + index])
 
         available_cores = [c for c in all_cores if c not in unisolated]
         q1 = len(available_cores) // 4
@@ -1528,7 +1614,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
 
     for nvme, val in nvmes.items():
         pci = val["pci_address"]
-        numa = val["numa_node"]
+        numa = int(val["numa_node"])
         pci_utils.unbind_driver(pci)
         if numa in sockets_to_use:
             system_info[numa]["nvmes"].append(pci)
