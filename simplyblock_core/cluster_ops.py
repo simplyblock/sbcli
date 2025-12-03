@@ -282,9 +282,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dev_ip:
             raise ValueError("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
 
-        current_node = utils.get_node_name_by_ip(dev_ip)
-        utils.label_node_as_mgmt_plane(current_node)
-
     if not cli_pass:
         cli_pass = utils.generate_string(10)
 
