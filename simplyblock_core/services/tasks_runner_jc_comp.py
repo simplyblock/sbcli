@@ -57,6 +57,7 @@ while True:
                         if node.status != StorageNode.STATUS_ONLINE:
                             msg = f"Node is {node.status}, retry task"
                             logger.info(msg)
+                            task.retry += 1
                             task.function_result = msg
                             task.status = JobSchedule.STATUS_SUSPENDED
                             task.write_to_db(db.kv_store)
@@ -79,6 +80,7 @@ while True:
                                     logger.info(msg)
                                     task.function_result = msg
                                     task.status = JobSchedule.STATUS_SUSPENDED
+                                    task.retry += 1
                                     task.write_to_db(db.kv_store)
                                     continue
 

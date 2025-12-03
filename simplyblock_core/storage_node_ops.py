@@ -31,6 +31,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
@@ -413,8 +414,8 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     return nvme
 
 
-def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent, partition_size=0):
-    nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev)
+def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent, partition_size, nbd_index):
+    nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev, f"/dev/nbd{nbd_index}")
     time.sleep(3)
     if not nbd_device:
         logger.error("Failed to start nbd dev")
@@ -447,79 +448,84 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
 
 def _prepare_cluster_devices_partitions(snode, devices):
     db_controller = DBController()
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
-
     new_devices = []
-    jm_devices = []
-    dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-    bdevs_names = [d['name'] for d in rpc_client.get_bdevs()]
+    devices_to_partition = []
+    thread_list = []
     for index, nvme in enumerate(devices):
         if nvme.status == "not_found":
             continue
-
         if nvme.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
             logger.debug(f"Device is skipped: {nvme.get_id()}, status: {nvme.status}")
             new_devices.append(nvme)
             continue
-
         if nvme.is_partition:
+            t = threading.Thread(target=_create_storage_device_stack, args=(snode.rpc_client(), nvme, snode, False,))
+            thread_list.append(t)
+            new_devices.append(nvme)
+            t.start()
+        else:
+            devices_to_partition.append(nvme)
+            partitioned_devices = _search_for_partitions(snode.rpc_client(), nvme)
+            if len(partitioned_devices) != (1 + snode.num_partitions_per_dev):
+                logger.info(f"Creating partitions for {nvme.nvme_bdev}")
+                t = threading.Thread(
+                    target=_create_device_partitions,
+                    args=(snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
+                          snode.jm_percent, snode.partition_size, index+1,))
+                thread_list.append(t)
+                t.start()
+
+    for thread in thread_list:
+        thread.join()
+
+    thread_list = []
+    for nvme in devices_to_partition:
+        partitioned_devices = _search_for_partitions(snode.rpc_client(), nvme)
+        if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
+            logger.info("Device partitions created")
+            # remove 1st partition for jm
+            partitioned_devices.pop(0)
+            for dev in partitioned_devices:
+                t = threading.Thread(target=_create_storage_device_stack,
+                                     args=(snode.rpc_client(), dev, snode, False,))
+                thread_list.append(t)
+                new_devices.append(dev)
+                t.start()
+        else:
+            logger.error("Failed to create partitions")
+            return False
+
+    for thread in thread_list:
+        thread.join()
+
+    # assign device order
+    dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
+    for nvme in new_devices:
+        if nvme.status == NVMeDevice.STATUS_ONLINE:
+            if nvme.cluster_device_order < 0:
+                nvme.cluster_device_order = dev_order
+                dev_order += 1
+        device_events.device_create(nvme)
+
+    # create jm device
+    jm_devices = []
+    bdevs_names = [d['name'] for d in snode.rpc_client().get_bdevs()]
+    for nvme in new_devices:
+        if nvme.status == NVMeDevice.STATUS_ONLINE:
             dev_part = f"{nvme.nvme_bdev[:-2]}p1"
             if dev_part in bdevs_names:
                 if dev_part not in jm_devices:
                     jm_devices.append(dev_part)
 
-            new_device = _create_storage_device_stack(rpc_client, nvme, snode, after_restart=False)
-            if not new_device:
-                logger.error("failed to create dev stack")
-                return False
-            new_devices.append(new_device)
-            if new_device.status == NVMeDevice.STATUS_ONLINE:
-                device_events.device_create(new_device)
-
-        else:
-            # look for partitions
-            partitioned_devices = _search_for_partitions(rpc_client, nvme)
-            logger.debug("partitioned_devices")
-            logger.debug(partitioned_devices)
-            if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
-                logger.info("Partitioned devices found")
-            else:
-                logger.info(f"Creating partitions for {nvme.nvme_bdev}")
-                _create_device_partitions(rpc_client, nvme, snode, snode.num_partitions_per_dev, snode.jm_percent,
-                                          snode.partition_size)
-                partitioned_devices = _search_for_partitions(rpc_client, nvme)
-                if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
-                    logger.info("Device partitions created")
-                else:
-                    logger.error("Failed to create partitions")
-                    return False
-
-            jm_devices.append(partitioned_devices.pop(0).nvme_bdev)
-
-            for dev in partitioned_devices:
-                ret = _create_storage_device_stack(rpc_client, dev, snode, after_restart=False)
-                if not ret:
-                    logger.error("failed to create dev stack")
-                    return False
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    if dev.cluster_device_order < 0:
-                        dev.cluster_device_order = dev_order
-                        dev_order += 1
-                    device_events.device_create(dev)
-                new_devices.append(dev)
-
-    snode.nvme_devices = new_devices
-
     if jm_devices:
-        jm_device = _create_jm_stack_on_raid(rpc_client, jm_devices, snode, after_restart=False)
+        jm_device = _create_jm_stack_on_raid(snode.rpc_client(), jm_devices, snode, after_restart=False)
         if not jm_device:
             logger.error("Failed to create JM device")
             return False
 
         snode.jm_device = jm_device
 
+    snode.nvme_devices = new_devices
     return True
 
 
@@ -701,6 +707,8 @@ def _connect_to_remote_devs(
         allowed_node_statuses.append(StorageNode.STATUS_RESTARTING)
         allowed_dev_statuses.append(NVMeDevice.STATUS_UNAVAILABLE)
 
+    devices_to_connect = []
+    connect_threads = []
     nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     # connect to remote devs
     for node_index, node in enumerate(nodes):
@@ -715,12 +723,29 @@ def _connect_to_remote_devs(
 
             if not dev.alceml_bdev:
                 raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
+            devices_to_connect.append(dev)
+            t = threading.Thread(
+                target=connect_device,
+                args=(f"remote_{dev.alceml_bdev}", dev, this_node, node_bdev_names, reattach,))
+            connect_threads.append(t)
+            t.start()
 
-            dev.remote_bdev = connect_device(
-                    f"remote_{dev.alceml_bdev}", dev, this_node,
-                    bdev_names=node_bdev_names, reattach=reattach,
-            )
-            remote_devices.append(dev)
+    for t in connect_threads:
+        t.join()
+
+    node_bdevs = rpc_client.get_bdevs()
+    if node_bdevs:
+        node_bdev_names = [b['name'] for b in node_bdevs]
+
+    for dev in devices_to_connect:
+        for bdev in node_bdev_names:
+            if bdev.startswith(f"remote_{dev.alceml_bdev}"):
+                dev.remote_bdev = bdev
+                break
+        if not dev.remote_bdev:
+            logger.error(f"Failed to connect to remote device {dev.alceml_name}")
+            continue
+        remote_devices.append(dev)
 
     return remote_devices
 
@@ -1995,7 +2020,7 @@ def restart_storage_node(
                     logger.error('Failed to connect to remote devices')
                     return False
                 node.write_to_db(kv_store)
-                    
+
 
             logger.info("Sending device status event")
             snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -2150,21 +2175,6 @@ def list_storage_devices(node_id, is_json):
             "Status": snode.jm_device.status,
             "IO Err": snode.jm_device.io_error,
             "Health": snode.jm_device.health_check
-        })
-
-    for jm_id in snode.jm_ids:
-        try:
-            jm_device = db_controller.get_jm_device_by_id(jm_id)
-        except KeyError:
-            continue
-
-        jm_devices.append({
-            "UUID": jm_device.uuid,
-            "Name": jm_device.device_name,
-            "Size": utils.humanbytes(jm_device.size),
-            "Status": jm_device.status,
-            "IO Err": jm_device.io_error,
-            "Health": jm_device.health_check
         })
 
     for device in snode.remote_devices:
@@ -2480,20 +2490,11 @@ def resume_storage_node(node_id):
 def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
     try:
-        this_node = db_controller.get_storage_node_by_id(node_id)
+        node = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
         logger.error("Storage node Not found")
         return
 
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            logger.error(f"Error parsing history string: {history}")
-            return False
-    else:
-        records_number = 20
-
-    records = db_controller.get_node_capacity(this_node, records_number)
     cap_stats_keys = [
         "date",
         "size_total",
@@ -2503,6 +2504,8 @@ def get_node_capacity(node_id, history, records_count=20, parse_sizes=True):
         "size_util",
         "size_prov_util",
     ]
+    prom_client = PromClient(node.cluster_id)
+    records = prom_client.get_node_metrics(node_id, cap_stats_keys, history)
     new_records = utils.process_records(records, records_count, keys=cap_stats_keys)
 
     if not parse_sizes:
@@ -2529,17 +2532,6 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
     except KeyError:
         logger.error("node not found")
         return False
-
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            logger.error(f"Error parsing history string: {history}")
-            return False
-    else:
-        records_number = 20
-
-    records = db_controller.get_node_stats(node, records_number)
-
     io_stats_keys = [
         "date",
         "read_bytes",
@@ -2577,6 +2569,8 @@ def get_node_iostats_history(node_id, history, records_count=20, parse_sizes=Tru
                 "write_latency_ticks",
             ]
         )
+    prom_client = PromClient(node.cluster_id)
+    records = prom_client.get_node_metrics(node_id, io_stats_keys, history)
     # combine records
     new_records = utils.process_records(records, records_count, keys=io_stats_keys)
 
@@ -3619,6 +3613,15 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
 
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
+    def _create_distr(snode, name, params):
+        try:
+            rpc_client.bdev_distrib_create(**params)
+        except Exception:
+            logger.error("Failed to create bdev distrib")
+        ret = distr_controller.send_cluster_map_to_distr(snode, name)
+        if not ret:
+            logger.error("Failed to send cluster map")
+
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
@@ -3635,11 +3638,11 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     else:
         node_bdev_names = []
 
+    thread_list = []
     for bdev in stack:
         type = bdev['type']
         name = bdev['name']
         params = bdev['params']
-
         if name in node_bdev_names:
             continue
 
@@ -3655,23 +3658,21 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 snode.distrib_cpu_index = (snode.distrib_cpu_index + 1) % len(snode.distrib_cpu_cores)
 
             params['full_page_unmap'] = cluster.full_page_unmap
-            ret = rpc_client.bdev_distrib_create(**params)
-            if ret:
-                ret = distr_controller.send_cluster_map_to_distr(snode, name)
-                if not ret:
-                    return False, "Failed to send cluster map"
-                # time.sleep(1)
+            t = threading.Thread(target=_create_distr, args=(snode, name, params,))
+            thread_list.append(t)
+            t.start()
+            ret = True
 
         elif type == "bdev_lvstore" and lvstore_stack and not primary_node:
-            ret = rpc_client.create_lvstore(**params)
-            # if ret and snode.jm_vuid > 0:
-            #     rpc_client.bdev_lvol_set_lvs_ops(snode.lvstore, snode.jm_vuid, snode.lvol_subsys_port)
+                ret = rpc_client.create_lvstore(**params)
 
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_create(**params)
 
         elif type == "bdev_raid":
-
+            if thread_list:
+                for t in thread_list:
+                    t.join()
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
@@ -3689,6 +3690,9 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
                 _remove_bdev_stack(created_bdevs[::-1], rpc_client)
             return False, f"Failed to create BDev: {name}"
 
+    if thread_list:
+        for t in thread_list:
+            t.join()
     return True, None
 
 

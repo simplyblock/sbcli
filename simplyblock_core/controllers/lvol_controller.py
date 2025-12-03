@@ -17,6 +17,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient
 
 logger = lg.getLogger()
@@ -1529,19 +1530,11 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_uuid)
+        pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     except KeyError as e:
         logger.error(e)
         return False
 
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            logger.error(f"Error parsing history string: {history}")
-            return False
-    else:
-        records_number = 20
-
-    records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
     cap_stats_keys = [
         "date",
         "size_total",
@@ -1551,6 +1544,8 @@ def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):
         "size_prov",
         "size_prov_util"
     ]
+    prom_client = PromClient(pool.cluster_id)
+    records_list = prom_client.get_lvol_metrics(lvol_uuid, cap_stats_keys, history)
     new_records = utils.process_records(records_list, records_count, keys=cap_stats_keys)
 
     if not parse_sizes:
@@ -1572,19 +1567,11 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_uuid)
+        pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     except KeyError as e:
         logger.error(e)
         return False
 
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            logger.error(f"Error parsing history string: {history}")
-            return False
-    else:
-        records_number = 20
-
-    records_list = db_controller.get_lvol_stats(lvol, limit=records_number)
     io_stats_keys = [
         "date",
         "read_bytes",
@@ -1595,7 +1582,6 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
         "write_bytes_ps",
         "write_io_ps",
         "write_latency_ps",
-        "connected_clients",
     ]
     if with_sizes:
         io_stats_keys.extend(
@@ -1620,6 +1606,8 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
                 "write_latency_ticks",
             ]
         )
+    prom_client = PromClient(pool.cluster_id)
+    records_list = prom_client.get_lvol_metrics(lvol_uuid, io_stats_keys, history)
     # combine records
     new_records = utils.process_records(records_list, records_count, keys=io_stats_keys)
 
@@ -1638,7 +1626,6 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
             "Write speed": utils.humanbytes(record['write_bytes_ps']),
             "Write IOPS": record['write_io_ps'],
             "Write lat": record['write_latency_ps'],
-            "Con": record['connected_clients'],
         })
     return out
 
