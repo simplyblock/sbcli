@@ -401,7 +401,7 @@ class SshUtils:
 
         command = (
             f"sudo fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
-            f"{time_based} --runtime={runtime} --rw={rw} --max_latency=30s --bs={bs} --size={size} --rwmixread={rwmixread} "
+            f"{time_based} --runtime={runtime} --rw={rw} --max_latency=20s --bs={bs} --size={size} --rwmixread={rwmixread} "
             f"{verify_md5} --verify_dump=1 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_avg_msec_opt} {iolog_opt} "
             f"{output_format}{output_file}"
@@ -708,6 +708,25 @@ class SshUtils:
     def add_snapshot(self, node, lvol_id, snapshot_name):
         cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
         output, error = self.exec_command(node=node, command=cmd)
+
+        # ---- Wait up to 10 minutes for the snapshot to appear ----
+        start = time.time()
+        deadline = start + 600  # 10 minutes
+        wait_interval = 10       # seconds between checks
+        snapshot_id = ""
+
+        while time.time() < deadline:
+            snapshot_id = self.get_snapshot_id(node=node, snapshot_name=snapshot_name)
+            if snapshot_id:
+                if hasattr(self, "logger"):
+                    self.logger.info(f"Snapshot '{snapshot_name}' is visible with ID: {snapshot_id}")
+                break
+            time.sleep(wait_interval)
+
+        if not snapshot_id:
+            if hasattr(self, "logger"):
+                self.logger.error(f"Timed out waiting for snapshot '{snapshot_name}' to appear within 10 minutes.")
+
         return output, error
     
     def add_clone(self, node, snapshot_id, clone_name):
@@ -1435,6 +1454,7 @@ class SshUtils:
         find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$'"
         container_name_output, _ = self.exec_command(storage_node_ip, find_container_cmd)
         container_name = container_name_output.strip()
+        container_name = False
 
         if not container_name:
             self.logger.warning(f"No SPDK container found on {storage_node_ip}")
