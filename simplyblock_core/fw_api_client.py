@@ -6,6 +6,8 @@ import logging
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
+from simplyblock_core import constants
+
 logger = logging.getLogger()
 
 
@@ -18,7 +20,7 @@ class FirewallClient:
 
     def __init__(self, node, timeout=300, retry=5):
         self.node = node
-        self.ip_address = f"{node.mgmt_ip}:5001"
+        self.ip_address = f"{node.mgmt_ip}:{constants.FW_PORT}"
         self.url = 'http://%s/' % self.ip_address
         self.timeout = timeout
         self.session = requests.session()
