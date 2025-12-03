@@ -191,6 +191,7 @@ def spdk_process_start(body: SPDKParams):
             f"PCI_ALLOWED={ssd_pcie_list}",
             f"TOTAL_HP={total_mem_mib}",
             f"NSOCKET={body.socket}",
+            f"FW_PORT={constants.FW_PORT}",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )

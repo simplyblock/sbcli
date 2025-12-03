@@ -226,3 +226,4 @@ qos_class_meta_and_migration_weight_percent = 25
 
 MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
+FW_PORT = 50001
