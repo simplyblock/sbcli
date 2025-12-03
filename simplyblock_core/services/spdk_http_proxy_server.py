@@ -30,7 +30,7 @@ def get_env_var(name, default=None, is_required=False):
         raise Exception("env value is required: %s" % name)
     return os.environ.get(name, default)
 
-unix_sockets: list[socket] = []
+unix_sockets: list[socket] = []  # type: ignore[valid-type]
 def rpc_call(req):
     logger.info(f"active threads: {threading.active_count()}")
     logger.info(f"active unix sockets: {len(unix_sockets)}")
