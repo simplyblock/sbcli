@@ -27,7 +27,3 @@ RUN if [ -d /usr/share/terminfo ]; then \
        rm -f /usr/share/terminfo/n/ncr260vt300wpp || true ; \
     fi
 
-RUN useradd -u 1001 -r -g 0 -d /app -s /sbin/nologin simplyblock && \
-    chown -R 1001:0 /app
-
-USER 1001
