@@ -479,13 +479,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
         # add mgmt node object
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
-
-    logger.info("Creating user...")
-    logger.info(f"grafana endpoint: {cluster.grafana_endpoint}")
-    logger.info(f"grafana secret: {cluster.grafana_secret}")
-                    
+                   
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
-    logger.info("Done Creating user...")
                     
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
