@@ -21,9 +21,9 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-nodes:list')
-def list(cluster: Cluster) -> List[StorageNodeDTO]:
+def list(cluster: Cluster) -> List[dict]:
     return [
-        StorageNodeDTO.from_model(storage_node)
+        storage_node.to_dict()
         for storage_node
         in db.get_storage_nodes_by_cluster_id(cluster.get_id())
     ]
@@ -46,7 +46,7 @@ class StorageNodeParams(BaseModel):
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
-def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Response:
+def add(request: Request, cluster: Cluster, parameters: StorageNodeParams):
     task_id_or_false = tasks_controller.add_node_add_task(
         cluster.get_id(),
         {
