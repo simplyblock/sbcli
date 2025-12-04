@@ -68,9 +68,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Re
     )
     if not task_id_or_false:
         raise ValueError('Failed to create add-node task')
-
-    task_url = request.app.url_path_for('clusters:storage-nodes:detail', cluster_id=cluster.get_id(), task_id=task_id_or_false)
-    return Response(status_code=201, headers={'Location': task_url})
+    return task_id_or_false
 
 
 instance_api = APIRouter(prefix='/{storage_node_id}')
