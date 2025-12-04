@@ -35,7 +35,7 @@ class StorageNodeParams(BaseModel):
     max_snapshots: int = Field(500)
     ha_jm: bool = Field(True)
     test_device: bool = Field(False)
-    spdk_image: Optional[str]
+    spdk_image: Optional[str] = Field("")
     spdk_debug: bool = Field(False)
     data_nics: List[str] = Field([])
     namespace: str = Field('default')
