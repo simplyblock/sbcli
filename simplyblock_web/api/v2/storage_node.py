@@ -37,7 +37,6 @@ class StorageNodeParams(BaseModel):
     test_device: bool = Field(False)
     spdk_image: Optional[str]
     spdk_debug: bool = Field(False)
-    full_page_unmap: bool = Field(False)
     data_nics: List[str] = Field([])
     namespace: str = Field('default')
     jm_percent: util.Percent = Field(3)
@@ -65,7 +64,6 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Re
             'enable_test_device': parameters.test_device,
             'namespace': parameters.namespace,
             'enable_ha_jm': parameters.ha_jm,
-            'full_page_unmap': parameters.full_page_unmap,
         }
     )
     if not task_id_or_false:
