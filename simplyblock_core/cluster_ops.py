@@ -473,15 +473,15 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
             cluster.grafana_secret = monitoring_secret
         else:
             raise Exception("monitoring_secret is required")
-        cluster.grafana_endpoint = "http://simplyblock-grafana"
+        cluster.grafana_endpoint = "http://simplyblock-grafana:3000"
         if not cluster_ip:
             cluster_ip = "0.0.0.0"
 
         # add mgmt node object
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
-
+                   
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
-
+                    
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
     cluster.distr_bs = distr_bs
