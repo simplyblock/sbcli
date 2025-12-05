@@ -3,10 +3,11 @@ import logging as lg
 import time
 import uuid
 
-from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller
 
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
@@ -219,11 +220,24 @@ def add(lvol_id, snapshot_name):
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
+    if lvol.do_replicate:
+        task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
+        if task:
+            snapshot_events.replication_task_created(snap)
+    if lvol.cloned_from_snap:
+        lvol_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+        if lvol_snap.source_replicated_snap_uuid:
+            org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
+            if org_snap and org_snap.status == SnapShot.STATUS_ONLINE:
+                task = tasks_controller.add_snapshot_replication_task(
+                    snap.cluster_id, org_snap.lvol.node_id, snap.get_id(), replicate_to_source=True)
+                if task:
+                    logger.info("Created snapshot replication task on original node")
     return snap.uuid, False
 
 
-def list(all=False):
-    snaps = db_controller.get_snapshots()
+def list(all=False, cluster_id=None):
+    snaps = db_controller.get_snapshots(cluster_id)
     data = []
     for snap in snaps:
         logger.debug(snap)
@@ -248,6 +262,10 @@ def delete(snapshot_uuid, force_delete=False):
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
     except KeyError:
         logger.error(f"Snapshot not found {snapshot_uuid}")
+        return False
+
+    if snap.status == SnapShot.STATUS_IN_REPLICATION:
+        logger.error("Snapshot is in replication")
         return False
 
     try:
@@ -350,6 +368,9 @@ def delete(snapshot_uuid, force_delete=False):
             lvol_controller.delete_lvol(base_lvol.get_id())
     except KeyError:
         pass
+
+    if snap.target_replicated_snap_uuid:
+        delete_replicated(snap.uuid)
 
     logger.info("Done")
     return True
@@ -587,3 +608,61 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if new_size:
         lvol_controller.resize_lvol(lvol.get_id(), new_size)
     return lvol.uuid, False
+
+
+def list_replication_tasks(cluster_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+
+    data = []
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+
+            duration = ""
+            try:
+                if task.status == JobSchedule.STATUS_RUNNING:
+                    duration = utils.strfdelta_seconds(int(time.time()) - task.function_params["start_time"])
+                elif "end_time" in task.function_params:
+                    duration = utils.strfdelta_seconds(
+                        task.function_params["end_time"] - task.function_params["start_time"])
+            except Exception as e:
+                logger.error(e)
+            offset = 0
+            if "offset" in task.function_params:
+                offset = task.function_params["offset"]
+            data.append({
+                "Task ID": task.uuid,
+                "Snapshot ID": snap.uuid,
+                "Size": utils.humanbytes(snap.used_size),
+                "Duration": duration,
+                "Offset": offset,
+                "Status": task.status,
+                "Replicated on node": snap.lvol.node_id,
+            })
+    return utils.print_table(data)
+
+
+def delete_replicated(snapshot_id):
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_id)
+    except KeyError:
+        logger.error(f"Snapshot not found {snapshot_id}")
+        return False
+
+    try:
+        target_replicated_snap = db_controller.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+        logger.info("Deleting replicated snapshot %s", target_replicated_snap.uuid)
+        ret = delete(target_replicated_snap.uuid)
+        if not ret:
+            logger.error("Failed to delete snapshot %s", target_replicated_snap.uuid)
+            return False
+
+    except KeyError:
+        logger.error(f"Snapshot not found {snap.target_replicated_snap_uuid}")
+        return False
+
+    return True
