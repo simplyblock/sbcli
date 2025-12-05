@@ -21,11 +21,16 @@ EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_writ
 
 def remove_remote_device_from_node(node_id, device_id):
     node = db.get_storage_node_by_id(node_id)
+    transaction = db.create_transaction()
     for remote_dev in node.remote_devices:
         if remote_dev.get_id() == device_id:
             node.remote_devices.remove(remote_dev)
             node.write_to_db()
             break
+    ret = db.commit_transaction(transaction)
+    if not ret:
+        logger.error("Failed to commit db transaction")
+        return False
 
 
 def process_device_event(event, logger):

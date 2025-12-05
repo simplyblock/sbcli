@@ -119,9 +119,10 @@ def add_device_mig_task(device_id_list, cluster_id):
                 if task_id:
                     sub_tasks.append(task_id)
     if sub_tasks:
+        transaction = db.create_transaction()
         if master_task:
             master_task.sub_tasks.extend(sub_tasks)
-            master_task.write_to_db()
+            master_task.write_to_transaction(transaction)
         else:
             task_obj = JobSchedule()
             task_obj.uuid = str(uuid.uuid4())
@@ -130,8 +131,13 @@ def add_device_mig_task(device_id_list, cluster_id):
             task_obj.function_name = JobSchedule.FN_BALANCING_AFTER_NODE_RESTART
             task_obj.sub_tasks = sub_tasks
             task_obj.status = JobSchedule.STATUS_NEW
-            task_obj.write_to_db(db.kv_store)
+            task_obj.write_to_transaction(transaction)
             tasks_events.task_create(task_obj)
+        ret = db.commit_transaction(transaction)
+        if not ret:
+            logger.error("Failed to commit transaction")
+            return False
+
         return True
 
 

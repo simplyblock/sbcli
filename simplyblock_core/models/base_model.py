@@ -169,6 +169,17 @@ class BaseModel(object):
         else:
             return -1
 
+    def write_to_transaction(self, transaction=None):
+        if not transaction:
+            raise Exception("transaction must be provided")
+        try:
+            prefix = self.get_db_id()
+            st = json.dumps(self.to_dict())
+            transaction.set(prefix.encode(), st.encode())
+            return True
+        except Exception as e:
+            raise Exception(f"Error writing to transaction! {e}")
+
     def __repr__(self):
         """For `print` and `pprint`"""
         return self.to_str()
