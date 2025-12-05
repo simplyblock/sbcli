@@ -151,16 +151,18 @@ class SnapshotDTO(BaseModel):
 
 
 class StorageNodeDTO(BaseModel):
-    id: UUID
+    uuid: UUID
     status: str
-    ip: IPv4Address
+    mgmt_ip: IPv4Address
+    health_check: bool
 
     @staticmethod
     def from_model(model: StorageNode):
         return StorageNodeDTO(
-            id=UUID(model.get_id()),
+            uuid=UUID(model.get_id()),
             status=model.status,
-            ip=IPv4Address(model.mgmt_ip),
+            mgmt_ip=IPv4Address(model.mgmt_ip),
+            health_check=model.health_check,
         )
 
 

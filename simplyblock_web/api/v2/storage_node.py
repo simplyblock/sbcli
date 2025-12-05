@@ -21,9 +21,9 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-nodes:list')
-def list(cluster: Cluster) -> List[dict]:
+def list(cluster: Cluster) -> List[StorageNodeDTO]:
     return [
-        storage_node.to_dict()
+        StorageNodeDTO.from_model(storage_node)
         for storage_node
         in db.get_storage_nodes_by_cluster_id(cluster.get_id())
     ]
