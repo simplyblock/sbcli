@@ -112,10 +112,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
         if not nodes:
             logger.error("No mgmt nodes was found in the cluster!")
             return False
-        for node in nodes:
-            if node.hostname == hostname:
-                logger.error("Node already exists in the cluster")
-                return False
+
 
     logger.info("Adding management node object")
     node_id = add_mgmt_node(dev_ip, mode, cluster_id)
