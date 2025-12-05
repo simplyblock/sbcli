@@ -68,8 +68,8 @@ def send_dev_status_event(device, status, target_node=None):
                 skipped_nodes.append(node)
 
     for node in snodes:
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-            continue
+        # if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+        #     continue
         node_found_same_host = False
         for n in skipped_nodes:
             if node.mgmt_ip == n.mgmt_ip:
