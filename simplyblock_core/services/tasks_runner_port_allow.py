@@ -221,8 +221,8 @@ def exec_port_allow_task(task):
                 task.function_result = msg
                 task.status = JobSchedule.STATUS_SUSPENDED
                 task.write_to_db(db.kv_store)
-            else:
-                sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+                return
+            sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
 
     except Exception as e:
         logger.error(e)

@@ -148,4 +148,3 @@ def node_ports_changed(node, caused_by=ec.CAUSED_BY_MONITOR):
             node_mgmt_ip=node.mgmt_ip,
             updates={"nvmf_port": node.nvmf_port, "rpc_port": node.rpc_port, "lvol_port": node.lvol_subsys_port},
         )
-        

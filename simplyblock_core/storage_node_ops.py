@@ -3219,6 +3219,12 @@ def recreate_lvstore(snode, force=False):
 
             time.sleep(0.5)
             ### 4- set leadership to false
+            ret = sec_node.wait_for_jm_rep_tasks_to_finish(snode.jm_vuid)
+            if not ret:
+                msg = f"JM replication task found for jm {snode.jm_vuid}"
+                logger.error(msg)
+                storage_events.jm_repl_tasks_found(sec_node, snode.jm_vuid)
+
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             ### 4-1 check for inflight IO. retry every 100ms up to 10 seconds
