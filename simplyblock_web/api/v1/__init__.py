@@ -50,7 +50,6 @@ def health_fdb():
     if not os.path.exists(fdb_cluster_file):
         return jsonify({
             "fdb_connected": False,
-            "cluster_uuid": None,
             "message": "FDB cluster file not found"
         }), 503
 
@@ -60,17 +59,14 @@ def health_fdb():
             if not cluster_data:
                 return jsonify({
                     "fdb_connected": False,
-                    "cluster_uuid": None,
                     "message": "FDB cluster file is empty"
                 }), 503
     except Exception as e:
         return jsonify({
             "fdb_connected": False,
-            "cluster_uuid": None,
             "message": f"Failed to read FDB cluster file: {str(e)}"
         }), 503
 
     return jsonify({
         "fdb_connected": True,
-        "cluster_uuid": cluster_data
     }), 200
