@@ -127,18 +127,19 @@ def task_runner_device(task):
 
 
 def task_runner_node(task):
-    node = db.get_storage_node_by_id(task.node_id)
+    try:
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        task.function_result = "node not found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
+
     if task.retry >= task.max_retry:
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
-        return True
-
-    if not node:
-        task.function_result = "node not found"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
         return True
 
     if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
