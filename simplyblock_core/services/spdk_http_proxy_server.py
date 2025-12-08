@@ -65,6 +65,7 @@ def get_env_var(name, default=None, is_required=False):
 
 unix_sockets: list[socket] = []  # type: ignore[valid-type]
 def rpc_call(req):
+    global recv_from_spdk_time_diff
     logger.info(f"active threads: {threading.active_count()}")
     logger.info(f"active unix sockets: {len(unix_sockets)}")
     req_data = json.loads(req.decode('ascii'))
@@ -138,6 +139,7 @@ class ServerHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        global read_line_time_diff
         req_time = time.time_ns()
         self.server_session.append(req_time)
         logger.info(f"incoming request at: {req_time}")
