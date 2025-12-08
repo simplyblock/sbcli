@@ -1,9 +1,12 @@
 import logging
+import os
 
+from flask import jsonify
 from flask import Flask
 
 from simplyblock_web.auth_middleware import token_required
 from simplyblock_web import utils
+from simplyblock_core import constants
 
 from . import cluster
 from . import mgmt_node
@@ -39,3 +42,35 @@ def before_request():
 @api.route('/', methods=['GET'])
 def status():
     return utils.get_response("Live")
+
+@api.route('/health/fdb', methods=['GET'])
+def health_fdb():
+    fdb_cluster_file = constants.KVD_DB_FILE_PATH
+
+    if not os.path.exists(fdb_cluster_file):
+        return jsonify({
+            "fdb_connected": False,
+            "cluster_uuid": None,
+            "message": "FDB cluster file not found"
+        }), 503
+
+    try:
+        with open(fdb_cluster_file, 'r') as f:
+            cluster_data = f.read().strip()
+            if not cluster_data:
+                return jsonify({
+                    "fdb_connected": False,
+                    "cluster_uuid": None,
+                    "message": "FDB cluster file is empty"
+                }), 503
+    except Exception as e:
+        return jsonify({
+            "fdb_connected": False,
+            "cluster_uuid": None,
+            "message": f"Failed to read FDB cluster file: {str(e)}"
+        }), 503
+
+    return jsonify({
+        "fdb_connected": True,
+        "cluster_uuid": cluster_data
+    }), 200
