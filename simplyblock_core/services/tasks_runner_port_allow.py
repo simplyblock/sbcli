@@ -214,6 +214,14 @@ def exec_port_allow_task(task):
 
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = sec_node.rpc_client()
+            ret = sec_node.wait_for_jm_rep_tasks_to_finish(node.jm_vuid)
+            if not ret:
+                msg = "JM replication task found on secondary"
+                logger.warning(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return
             sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
 
     except Exception as e:
