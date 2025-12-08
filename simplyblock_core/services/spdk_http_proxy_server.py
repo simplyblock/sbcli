@@ -23,6 +23,7 @@ logger.setLevel(logging.INFO)
 read_line_time_diff: dict = {}
 recv_from_spdk_time_diff: dict = {}
 def print_stats():
+    global read_line_time_diff, recv_from_spdk_time_diff
     while True:
         try:
             time.sleep(3)
