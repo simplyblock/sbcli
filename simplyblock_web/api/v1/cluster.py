@@ -73,7 +73,7 @@ def create_first_cluster():
             return utils.get_response_error("blk_size can be 512 or 4096", 400)
         else:
             blk_size = cl_data['blk_size']
-    page_size_in_blocks = cl_data.get('distr_ndcs', 2097152)
+    page_size_in_blocks = cl_data.get('page_size_in_blocks', 2097152)
     distr_ndcs = cl_data.get('distr_ndcs', 1)
     distr_npcs = cl_data.get('distr_npcs', 1)
     distr_bs = cl_data.get('distr_bs', 4096)
