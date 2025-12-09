@@ -117,10 +117,12 @@ class CLIWrapperBase:
                 "Options --pci-allowed, --pci-blocked, and "
                 "(--device-model with --size-range) are mutually exclusive; choose only one."
             )
+        cores_percentage = int(args.cores_percentage)
 
-
-        return storage_ops.generate_automated_deployment_config(args.max_lvol, max_prov, sockets_to_use,
-                                                                args.nodes_per_socket, pci_allowed, pci_blocked, force=args.force, device_model=args.device_model, size_range=args.size_range)
+        return storage_ops.generate_automated_deployment_config(
+            args.max_lvol, max_prov, sockets_to_use,args.nodes_per_socket,
+            pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
+            size_range=args.size_range, cores_percentage=cores_percentage)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()

@@ -122,8 +122,8 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--cores-percentage',
-        help='The percentage of cores to be used for spdk (0-100)',
-        type=range_type(0, 100),
+        help='The percentage of cores to be used for spdk (0-99)',
+        type=range_type(0, 99),
         dest='cores_percentage',
         required=False,
         default=0

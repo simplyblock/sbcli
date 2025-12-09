@@ -60,6 +60,16 @@ commands:
             dest: sockets_to_use
             type: str
             default: "0"
+          - name: "--cores-percentage"
+            help: "The percentage of cores to be used for spdk (0-99)"
+            description: >
+              The percentage of cores to be used for spdk (0-99)
+            dest: cores_percentage
+            type:
+              range:
+                min: 0
+                max: 99
+            default: 0
           - name: "--pci-allowed"
             help: "Comma separated list of PCI addresses of Nvme devices to use for storage devices."
             description: >
