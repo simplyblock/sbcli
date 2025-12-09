@@ -5,7 +5,7 @@ import logging
 import sys
 import traceback
 
-from simplyblock_cli.clibase import CLIWrapperBase, range_type, regex_type, size_type
+from simplyblock_cli.clibase import CLIWrapperBase, range_type, size_type
 from simplyblock_core import utils
 
 class CLIWrapper(CLIWrapperBase):
@@ -91,6 +91,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=False)
         argument = subcommand.add_argument('--nodes-per-socket', help='number of each node to be added per each socket.', type=int, default=1, dest='nodes_per_socket')
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes', type=str, default='0', dest='sockets_to_use')
+        argument = subcommand.add_argument('--cores-percentage', help='The percentage of cores to be used for spdk (0-99)', type=range_type(0, 99), default=0, dest='cores_percentage')
         argument = subcommand.add_argument('--pci-allowed', help='Comma separated list of PCI addresses of Nvme devices to use for storage devices.', type=str, default='', dest='pci_allowed', required=False)
         argument = subcommand.add_argument('--pci-blocked', help='Comma separated list of PCI addresses of Nvme devices to not use for storage devices', type=str, default='', dest='pci_blocked', required=False)
         argument = subcommand.add_argument('--device-model', help='NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together', type=str, default='', dest='device_model', required=False)
