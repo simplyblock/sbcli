@@ -631,6 +631,9 @@ def list_replication_tasks(cluster_id):
                         task.function_params["end_time"] - task.function_params["start_time"])
             except Exception as e:
                 logger.error(e)
+            status = task.status
+            if task.canceled:
+                status = "cancelled"
             offset = 0
             if "offset" in task.function_params:
                 offset = task.function_params["offset"]
@@ -640,7 +643,7 @@ def list_replication_tasks(cluster_id):
                 "Size": utils.humanbytes(snap.used_size),
                 "Duration": duration,
                 "Offset": offset,
-                "Status": task.status,
+                "Status": status,
                 "Replicated on node": snap.lvol.node_id,
             })
     return utils.print_table(data)
