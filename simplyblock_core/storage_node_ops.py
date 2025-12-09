@@ -2253,7 +2253,8 @@ def shutdown_storage_node(node_id, force=False):
         if force is False:
             return False
         for task in tasks:
-            if task.function_name != JobSchedule.FN_NODE_RESTART:
+            if task.function_name not in [
+                JobSchedule.FN_NODE_RESTART, JobSchedule.FN_SNAPSHOT_REPLICATION, JobSchedule.FN_LVOL_SYNC_DEL]:
                 tasks_controller.cancel_task(task.uuid)
 
     logger.info("Shutting down node")
