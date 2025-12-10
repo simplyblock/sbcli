@@ -123,6 +123,11 @@ spec:
                 items:
                   type: string
                 type: array
+            required:
+            - clusterImage
+            - clusterName
+            - maxLVol
+            - workerNodes
             type: object
           status:
             description: status defines the observed state of StorageNode

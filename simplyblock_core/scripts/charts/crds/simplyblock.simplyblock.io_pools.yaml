@@ -62,6 +62,7 @@ spec:
                 format: int32
                 type: integer
             required:
+            - clusterName
             - name
             type: object
           status:
