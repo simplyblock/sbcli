@@ -319,6 +319,21 @@ spec:
             {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
             {{- toYaml . | nindent 6 }}
             {{- end }}
+        - name: fluent-bit
+          image: fluent/fluent-bit:1.8.11
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+            - name: config
+              mountPath: /fluent-bit/etc/
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "200Mi"
+            limits:
+              cpu: "200m"
+              memory: "400Mi"
+
       volumes:
         - name: fdb-cluster-file
           configMap:
@@ -326,6 +341,12 @@ spec:
             items:
               - key: cluster-file
                 path: fdb.cluster
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: config
+          configMap:
+            name: simplyblock-fluent-bit-config
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -494,6 +515,21 @@ spec:
             {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
             {{- toYaml . | nindent 6 }}
             {{- end }}
+        - name: fluent-bit
+          image: fluent/fluent-bit:1.8.11
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+            - name: config
+              mountPath: /fluent-bit/etc/
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "200Mi"
+            limits:
+              cpu: "200m"
+              memory: "400Mi"
+
       volumes:
         - name: fdb-cluster-file
           configMap:
@@ -501,52 +537,9 @@ spec:
             items:
               - key: cluster-file
                 path: fdb.cluster
-
----
-
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: simplyblock-fluent-bit
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: simplyblock-fluent-bit
-spec:
-  selector:
-    matchLabels:
-      app: simplyblock-fluent-bit
-  template:
-    metadata:
-      labels:
-        app: simplyblock-fluent-bit
-    spec:      
-      containers:
-        - name: fluent-bit
-          image: fluent/fluent-bit:1.8.11
-          securityContext:
-            privileged: true
-          volumeMounts:
-            - name: varlog
-              mountPath: /var/log
-            - name: varlibdockercontainers
-              mountPath: /var/lib/docker/containers
-              readOnly: true
-            - name: config
-              mountPath: /fluent-bit/etc/
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "400Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
         - name: varlog
           hostPath:
             path: /var/log
-        - name: varlibdockercontainers
-          hostPath:
-            path: /var/lib/docker/containers
         - name: config
           configMap:
             name: simplyblock-fluent-bit-config
