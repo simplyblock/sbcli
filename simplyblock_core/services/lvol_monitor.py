@@ -35,6 +35,7 @@ def create_lvol_for_deletion(bdev_uuid, bdev_alias, snode):
     lvol.base_bdev = lvol.top_bdev
     lvol.lvol_uuid = bdev_uuid
     lvol.status = LVol.STATUS_IN_DELETION
+    lvol.deleted = True
     lvol.bdev_stack = [{
         "type": "bdev_lvol",
         "name": lvol.lvol_bdev,
@@ -54,6 +55,7 @@ def create_snapshot_for_deletion(bdev_uuid, bdev_alias, snode):
     snap.snap_name = bdev_uuid
     snap.snap_bdev = bdev_alias
     snap.status = SnapShot.STATUS_IN_DELETION
+    snap.deleted = True
     snap.write_to_db()
 
 
