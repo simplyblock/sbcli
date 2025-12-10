@@ -63,11 +63,12 @@ spec:
               path: fdb.cluster
 ---
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: simplyblock-webappapi
   namespace: {{ .Release.Namespace }}
 spec:
+  replicas: 2
   selector:
     matchLabels:
       app: simplyblock-webappapi
@@ -79,7 +80,15 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-webappapi
-    spec:       
+    spec:
+      serviceAccountName: simplyblock-control-sa
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: simplyblock-admin-control
+              topologyKey: kubernetes.io/hostname       
       containers:
       - name: webappapi
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -130,13 +139,13 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simplyblock-storage-node-monitor
+  name: simplyblock-monitoring
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: simplyblock-storage-node-monitor
+      app: simplyblock-monitoring
   template:
     metadata:
       annotations:
@@ -144,1023 +153,147 @@ spec:
         reloader.stakater.com/auto: "true"
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
-        app: simplyblock-storage-node-monitor
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet 
-      containers:
-      - name: storage-node-monitor
-        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["python", "simplyblock_core/services/storage_node_monitor.py"]
-        env:
-        - name: SIMPLYBLOCK_LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: LOG_LEVEL
-        volumeMounts:
-        - name: fdb-cluster-file
-          mountPath: /etc/foundationdb/fdb.cluster
-          subPath: fdb.cluster
-        resources:
-          requests:
-            cpu: "200m"
-            memory: "256Mi"
-          limits:
-            cpu: "400m"
-            memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-      
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-mgmt-node-monitor
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-mgmt-node-monitor
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-mgmt-node-monitor
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet 
-      containers:
-        - name: mgmt-node-monitor
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/mgmt_node_monitor.py"]
-          env:
-          - name: BACKEND_TYPE
-            value: "k8s"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-lvol-stats-collector
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-lvol-stats-collector
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-lvol-stats-collector
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet 
-      containers:
-        - name: lvol-stats-collector
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/lvol_stat_collector.py"]
-          env:
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-main-distr-event-collector
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-main-distr-event-collector
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-main-distr-event-collector
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-        - name: main-distr-event-collector
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/main_distr_event_collector.py"]
-          env:
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-capacity-and-stats-collector
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-capacity-and-stats-collector
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-capacity-and-stats-collector
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-      - name: capacity-and-stats-collector
-        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["python", "simplyblock_core/services/capacity_and_stats_collector.py"]
-        env:
-        - name: SIMPLYBLOCK_LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: LOG_LEVEL
-        volumeMounts:
-        - name: fdb-cluster-file
-          mountPath: /etc/foundationdb/fdb.cluster
-          subPath: fdb.cluster
-        resources:
-          requests:
-            cpu: "200m"
-            memory: "256Mi"
-          limits:
-            cpu: "400m"
-            memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-capacity-monitor
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-capacity-monitor
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-capacity-monitor
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-      - name: capacity-monitor
-        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["python", "simplyblock_core/services/cap_monitor.py"]
-        env:
-        - name: SIMPLYBLOCK_LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: LOG_LEVEL
-        volumeMounts:
-        - name: fdb-cluster-file
-          mountPath: /etc/foundationdb/fdb.cluster
-          subPath: fdb.cluster
-        resources:
-          requests:
-            cpu: "200m"
-            memory: "256Mi"
-          limits:
-            cpu: "400m"
-            memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-health-check
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-health-check
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-health-check
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-      - name: health-check
-        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["python", "simplyblock_core/services/health_check_service.py"]
-        env:
-        - name: SIMPLYBLOCK_LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: LOG_LEVEL
-        volumeMounts:
-        - name: fdb-cluster-file
-          mountPath: /etc/foundationdb/fdb.cluster
-          subPath: fdb.cluster
-        resources:
-          requests:
-            cpu: "200m"
-            memory: "256Mi"
-          limits:
-            cpu: "400m"
-            memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-device-monitor
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-device-monitor
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-device-monitor
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-      - name: device-monitor
-        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["python", "simplyblock_core/services/device_monitor.py"]
-        env:
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
-        volumeMounts:
-        - name: fdb-cluster-file
-          mountPath: /etc/foundationdb/fdb.cluster
-          subPath: fdb.cluster
-        resources:
-          requests:
-            cpu: "200m"
-            memory: "256Mi"
-          limits:
-            cpu: "400m"
-            memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-lvol-monitor
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-lvol-monitor
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-lvol-monitor
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-      - name: lvol-monitor
-        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["python", "simplyblock_core/services/lvol_monitor.py"]
-        env:
-        - name: SIMPLYBLOCK_LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: LOG_LEVEL
-        volumeMounts:
-        - name: fdb-cluster-file
-          mountPath: /etc/foundationdb/fdb.cluster
-          subPath: fdb.cluster
-        resources:
-          requests:
-            cpu: "200m"
-            memory: "256Mi"
-          limits:
-            cpu: "400m"
-            memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-snapshot-monitor
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-snapshot-monitor
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-snapshot-monitor
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet      
-      containers:
-      - name: snapshot-monitor
-        image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["python", "simplyblock_core/services/snapshot_monitor.py"]
-        env:
-        - name: SIMPLYBLOCK_LOG_LEVEL
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-config
-              key: LOG_LEVEL
-        volumeMounts:
-        - name: fdb-cluster-file
-          mountPath: /etc/foundationdb/fdb.cluster
-          subPath: fdb.cluster
-        resources:
-          requests:
-            cpu: "200m"
-            memory: "256Mi"
-          limits:
-            cpu: "400m"
-            memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-cleanupfdb
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-cleanupfdb
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-cleanupfdb
-    spec:      
-      containers:
-        - name: cleanupfdb
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/workers/cleanup_foundationdb.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-            - name: LOG_DELETION_INTERVAL
-              value: "${LOG_DELETION_INTERVAL}"
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-restart
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-restart
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-restart
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet      
-      containers:
-        - name: tasks-runner-restart
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/tasks_runner_restart.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-migration
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-migration
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-migration
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-        - name: tasks-runner-migration
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/tasks_runner_migration.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-failed-migration
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-failed-migration
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-failed-migration
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-        - name: tasks-runner-failed-migration
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/tasks_runner_failed_migration.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-cluster-status
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-cluster-status
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-cluster-status
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-        - name: tasks-runner-cluster-status
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/tasks_cluster_status.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-new-device-migration
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-new-device-migration
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-new-device-migration
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-        - name: tasks-runner-new-device-migration
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/tasks_runner_new_dev_migration.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-node-add-runner
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-node-add-runner
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-node-add-runner
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-        - name: tasks-node-addrunner
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/tasks_runner_node_add.py"]
-          env:
-            - name: LVOL_NVMF_PORT_START
-              value: "{{ .Values.ports.lvolNvmfPortStart }}"
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-port-allow
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-port-allow
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-port-allow
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-        - name: tasks-runner-port-allow
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/tasks_runner_port_allow.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-jc-comp-resume
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-jc-comp-resume
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-jc-comp-resume
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
-      containers:
-        - name: tasks-runner-jc-comp-resume
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/services/tasks_runner_jc_comp.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-sync-lvol-del
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-sync-lvol-del
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-sync-lvol-del
+        app: simplyblock-monitoring
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
+        - name: storage-node-monitor
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/storage_node_monitor.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: mgmt-node-monitor
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/mgmt_node_monitor.py"]
+          env:
+            - name: BACKEND_TYPE
+              value: "k8s"
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: lvol-stats-collector
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/lvol_stat_collector.py"]
+
+        - name: main-distr-event-collector
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/main_distr_event_collector.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: capacity-and-stats-collector
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/capacity_and_stats_collector.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: capacity-monitor
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/cap_monitor.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: health-check
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/health_check_service.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: device-monitor
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/device_monitor.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: lvol-monitor
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/lvol_monitor.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: snapshot-monitor
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/snapshot_monitor.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+      volumes:
+        - name: fdb-cluster-file
+          configMap:
+            name: simplyblock-fdb-cluster-config
+            items:
+              - key: cluster-file
+                path: fdb.cluster
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks
+  template:
+    metadata:
+      annotations:
+        log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
+      labels:
+        app: simplyblock-tasks
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: tasks-node-add-runner
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_node_add.py"]
+          env:
+            - name: LVOL_NVMF_PORT_START
+              value: "{{ .Values.ports.lvolNvmfPortStart }}"
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: tasks-runner-restart
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_restart.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: tasks-runner-migration
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_migration.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: tasks-runner-failed-migration
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_failed_migration.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: tasks-runner-cluster-status
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/tasks_cluster_status.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: tasks-runner-new-device-migration
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_new_dev_migration.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: tasks-runner-port-allow
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_port_allow.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
+        - name: tasks-runner-jc-comp-resume
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_jc_comp.py"]
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+
         - name: tasks-runner-sync-lvol-del
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_sync_lvol_del.py"]
-          env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
+          {{- include "simplyblock.commonContainer" . | nindent 4 }}
       volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
+        - name: fdb-cluster-file
+          configMap:
+            name: simplyblock-fdb-cluster-config
+            items:
+              - key: cluster-file
+                path: fdb.cluster
+
 ---
 
 apiVersion: apps/v1
