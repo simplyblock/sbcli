@@ -6,6 +6,10 @@ metadata:
   labels:
     app: spdk-app-{{ RPC_PORT }}
     role: simplyblock-storage-node
+  {% if MODE == "kubernetes" %}
+  annotations:
+    log-collector/enabled: "true"
+  {% endif %}
 spec:
   restartPolicy: Never
   serviceAccountName: simplyblock-storage-node-sa
@@ -53,6 +57,11 @@ spec:
     - name: dockercontainerlogdirectory
       hostPath:
         path: /var/log/pods
+    {% if MODE == "kubernetes" %}
+    - name: config
+      configMap:
+        name: simplyblock-fluent-bit-config
+    {% endif %}
 
   initContainers:
     - name: copy-script
@@ -129,6 +138,7 @@ spec:
           value: "True"
         - name: TIMEOUT
           value: "300"
+    {% if MODE == "docker" %}
     - name: fluentd
       image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
       imagePullPolicy: "Always"
@@ -155,3 +165,19 @@ spec:
         - name: dockercontainerlogdirectory
           mountPath: /var/log/pods
           readOnly: true
+  {% elif MODE == "kubernetes" %}
+    - name: fluent-bit
+      image: fluent/fluent-bit:1.8.11
+      volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: config
+          mountPath: /fluent-bit/etc/
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "200Mi"
+        limits:
+          cpu: "400m"
+          memory: "2Gi"
+  {% endif %}
