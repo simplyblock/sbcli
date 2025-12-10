@@ -134,7 +134,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     db_controller = DBController()
-    node_stats = {}
+    node_stats: dict[str: dict] = {}
     nodes_below_25 = []
     nodes_between_25_75 = []
     nodes_above_75 = []
@@ -150,7 +150,11 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             else:
                 nodes_between_25_75.append(node)
 
-    if len(node_stats) <= 1:
+    logger.info(f"nodes_below_25: {nodes_below_25}")
+    logger.info(f"nodes_between_25_75: {nodes_between_25_75}")
+    logger.info(f"nodes_above_75: {nodes_above_75}")
+
+    if len(nodes_below_25+nodes_between_25_75+nodes_above_75) <= 1:
         return nodes_below_25+nodes_between_25_75+nodes_above_75
 
     if len(nodes_below_25) > len(nodes_between_25_75):
@@ -217,19 +221,14 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     for node_id in node_start_end:
         node_start_end[node_id]['%'] = int(node_start_end[node_id]['weight'] * 100 / n_start)
 
-    ############# log
-    print("Node stats")
-    utils.print_table_dict({**node_stats, "Cluster": cluster_stats})
-    print("Node weights")
-    utils.print_table_dict({**nodes_weight, "weights": {"lvol": n_start, "total": n_start}})
-    print("Node selection range")
-    utils.print_table_dict(node_start_end)
-    #############
+    logger.info(f"Node stats: \n {utils.print_table_dict({**node_stats, 'Cluster': cluster_stats})}")
+    logger.info(f"Node weights: \n {utils.print_table_dict({**nodes_weight, 'weights': {'lvol': n_start, 'total': n_start}})}")
+    logger.info(f"Node selection range: \n {utils.print_table_dict(node_start_end)}")
 
     selected_node_ids: List[str] = []
     while len(selected_node_ids) < min(len(node_stats), 3):
         r_index = random.randint(0, n_start)
-        print(f"Random is {r_index}/{n_start}")
+        logger.info(f"Random is {r_index}/{n_start}")
         for node_id in node_start_end:
             if node_start_end[node_id]['start'] <= r_index <= node_start_end[node_id]['end']:
                 if node_id not in selected_node_ids:
@@ -250,14 +249,11 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
                     break
 
     ret = []
-    if selected_node_ids:
-        for node_id in selected_node_ids:
-            node = db_controller.get_storage_node_by_id(node_id)
-            print(f"Selected node: {node_id}, {node.hostname}")
-            ret.append(node)
-        return ret
-    else:
-        return all_online_nodes
+    for node_id in selected_node_ids:
+        node = db_controller.get_storage_node_by_id(node_id)
+        logger.info(f"Selected node: {node_id}, {node.hostname}")
+        ret.append(node)
+    return ret
 
 def is_hex(s: str) -> bool:
     """

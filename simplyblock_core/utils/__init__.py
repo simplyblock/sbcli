@@ -282,7 +282,7 @@ def print_table_dict(node_stats):
         data = {"node_id": node_id}
         data.update(node_stats[node_id])
         d.append(data)
-    print(print_table(d))
+    return str(print_table(d))
 
 
 def generate_rpc_user_and_pass():
