@@ -8,12 +8,54 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.controllers import health_controller, lvol_events, tasks_controller, lvol_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
 utils.init_sentry_sdk(__name__)
+
+
+def create_lvol_for_deletion(bdev_uuid, bdev_alias, snode):
+    lvol = LVol()
+    lvol.lvol_name = bdev_uuid
+    lvol.pool_uuid = db.get_pools(snode.cluster_id)[0].uuid
+    lvol.ha_type = "ha"
+    lvol.uuid = bdev_uuid
+    lvol.lvol_bdev = bdev_alias.split("/")[1]
+    lvol.nqn = bdev_uuid
+    lvol.nodes = [snode.get_id(), snode.secondary_node_id]
+    lvol.lvol_type = 'lvol'
+    lvol.hostname = snode.hostname
+    lvol.node_id = snode.get_id()
+    lvol.lvs_name = snode.lvstore
+    lvol.subsys_port = snode.lvol_subsys_port
+    lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    lvol.base_bdev = lvol.top_bdev
+    lvol.lvol_uuid = bdev_uuid
+    lvol.status = LVol.STATUS_IN_DELETION
+    lvol.bdev_stack = [{
+        "type": "bdev_lvol",
+        "name": lvol.lvol_bdev,
+        "params": {
+            "name": lvol.lvol_bdev,
+            "lvs_name": lvol.lvs_name,
+            "lvol_priority_class": 0}}]
+    lvol.write_to_db()
+
+
+def create_snapshot_for_deletion(bdev_uuid, bdev_alias, snode):
+    snap = SnapShot()
+    snap.uuid = bdev_uuid
+    snap.snap_uuid = bdev_uuid
+    snap.pool_uuid = db.get_pools(snode.cluster_id)[0].uuid
+    snap.cluster_id = snode.cluster_id
+    snap.snap_name = bdev_uuid
+    snap.snap_bdev = bdev_alias
+    snap.status = SnapShot.STATUS_IN_DELETION
+    snap.write_to_db()
+
 
 def set_lvol_status(lvol, status):
     if lvol.status != status:
@@ -160,6 +202,7 @@ def process_lvol_delete_try_again(lvol):
 
 
 def check_node(snode):
+    node_bdevs = []
     node_bdev_names = []
     node_lvols_nqns = {}
     sec_node_bdev_names = {}
@@ -193,8 +236,10 @@ def check_node(snode):
             if ret:
                 for sub in ret:
                     sec_node_lvols_nqns[sub['nqn']] = sub
-
+    known_bdev_names = []
     for lvol in db.get_lvols_by_node_id(snode.get_id()):
+        if lvol.lvol_uuid:
+            known_bdev_names.append(lvol.lvol_uuid)
 
         if lvol.status == LVol.STATUS_IN_CREATION:
             continue
@@ -330,12 +375,30 @@ def check_node(snode):
             if passed:
                 set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
-    if snode.lvstore_status == "ready":
+    for snap in db.get_snapshots_by_node_id(snode.get_id()):
+        if snap.snap_uuid:
+            known_bdev_names.append(snap.snap_uuid)
 
-        for snap in db.get_snapshots_by_node_id(snode.get_id()):
-            present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
+        present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
+        if snode.lvstore_status == "ready":
             set_snapshot_health_check(snap, present)
 
+    if node_bdevs:
+        for bdev in node_bdevs:
+            if bdev["product_name"] == "Logical Volume":
+                bdev_uuid = bdev["uuid"]
+                bdev_alias = bdev["aliases"][0]
+                is_snapshot = bdev["driver_specific"]["lvol"]["snapshot"]
+                if bdev_uuid not in known_bdev_names:
+                    try:
+                        if is_snapshot:
+                            logger.info(f"Snapshot: {bdev_uuid} not found in fdb, will be deleted")
+                            create_snapshot_for_deletion(bdev_uuid, bdev_alias, snode)
+                        else:
+                            logger.info(f"LVol: {bdev_uuid} not found in fdb, will be deleted")
+                            create_lvol_for_deletion(bdev_uuid, bdev_alias, snode)
+                    except Exception as e:
+                        logger.exception(e)
 
 
 # get DB controller
