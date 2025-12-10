@@ -19,7 +19,7 @@ grafana:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "main"
+    tag: "improved_user_experience"
     pullPolicy: "Always"
 
 ports:

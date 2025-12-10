@@ -31,7 +31,7 @@ metadata:
   namespace: simplyblock
 spec:
   clusterName: demo-cluster
-  clusterImage: public.ecr.aws/simply-block/simplyblock:main
+  clusterImage: public.ecr.aws/simply-block/simplyblock:improved_user_experience
 ##  spdkImage: simplyblock/spdk:R25.10-Hotfix-28b85c82
   mgmtIfc: eth0
   maxLVol: 10
