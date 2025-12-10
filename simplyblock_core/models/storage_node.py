@@ -1,5 +1,5 @@
 # coding=utf-8
-
+import time
 from typing import List
 from uuid import uuid4
 
@@ -309,3 +309,23 @@ class StorageNode(BaseNodeObject):
             alceml_worker_cpu_mask=alceml_worker_cpu_mask,
             **kwargs,
         )
+
+    def wait_for_jm_rep_tasks_to_finish(self, jm_vuid):
+        retry = 10
+        while retry > 0:
+            try:
+                jm_replication_tasks = False
+                ret = self.rpc_client().jc_get_jm_status(jm_vuid)
+                for jm in ret:
+                    if ret[jm] is False:  # jm is not ready (has active replication task)
+                        jm_replication_tasks = True
+                        break
+                if jm_replication_tasks:
+                    logger.warning(f"Replication task found on node: {self.get_id()}, jm_vuid: {jm_vuid}, retry...")
+                    retry -= 1
+                    time.sleep(20)
+                else:
+                    return True
+            except Exception:
+                logger.warning("Failed to get replication task!")
+        return False

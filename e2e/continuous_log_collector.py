@@ -22,7 +22,7 @@ class ContinuousLogCollector:
 
     def get_log_directory(self):
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        return os.path.join(Path.home(), "container-logs", f"manual-logs-{timestamp}")
+        return os.path.join('/mnt/nfs_share/', f"snapshot-repliction-from-replicated-clone-{timestamp}")
 
     def collect_logs(self, test_name):
         all_nodes = set()
@@ -75,4 +75,4 @@ class ContinuousLogCollector:
 
 if __name__ == "__main__":
     collector = ContinuousLogCollector()
-    collector.collect_logs(test_name="Manual")
+    collector.collect_logs(test_name="snapshot-repliction-from-replicated-clone")

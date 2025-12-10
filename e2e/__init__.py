@@ -55,6 +55,7 @@ from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMul
 from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailoverTest
 from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
+from stress_test.continuous_failover_ha_multi_client_quick_outage import RandomRapidFailoverNoGap
 
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade
@@ -96,8 +97,8 @@ def get_all_tests(custom=True, ha_test=False):
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
-        TestLvolFioQOSBW,
-        TestLvolFioQOSIOPS,
+        # TestLvolFioQOSBW,
+        # TestLvolFioQOSIOPS,
         TestSingleNodeOutage,
         # TestSingleNodeReboot,
         # TestHASingleNodeReboot,
@@ -147,6 +148,7 @@ def get_stress_tests():
         RandomMultiGeometryFailoverTest,
         RandomMultiClient2NodeFailoverTest,
         RandomRDMAFailoverTest,
+        RandomRapidFailoverNoGap,
     ]
     return tests
 

@@ -34,6 +34,10 @@ def token_required(f: F) -> Callable[..., ResponseType]:
         # Skip authentication for Swagger UI
         if request.method == "GET" and request.path.startswith("/swagger"):
             return cast(ResponseType, f(*args, **kwargs))
+        if request.method == "POST" and request.path.startswith("/cluster/create_first"):
+            return cast(ResponseType, f(*args, **kwargs))
+        if request.method == "GET" and request.path.startswith("/health/fdb"):
+            return cast(ResponseType, f(*args, **kwargs))            
 
         cluster_id: str = ""
         cluster_secret: str = ""

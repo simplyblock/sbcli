@@ -282,9 +282,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dev_ip:
             raise ValueError("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
 
-        current_node = utils.get_node_name_by_ip(dev_ip)
-        utils.label_node_as_mgmt_plane(current_node)
-
     if not cli_pass:
         cli_pass = utils.generate_string(10)
 
@@ -436,18 +433,23 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp") -> str:
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
+                cluster_ip=None, grafana_secret=None) -> str:
 
+
+    default_cluster = None
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
     clusters = db_controller.get_clusters()
-    if not clusters:
-        raise ValueError("No previous clusters found!")
+    if clusters:
+        default_cluster = clusters[0]
+    else:
+        logger.info("No previous clusters found")
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
-    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
-    
     logger.info("Adding new cluster")
+
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
@@ -456,15 +458,30 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.secret = utils.generate_string(20)
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
+    if default_cluster:
+        cluster.mode = default_cluster.mode
+        cluster.db_connection = default_cluster.db_connection
+        cluster.grafana_secret = grafana_secret if grafana_secret else default_cluster.grafana_secret
+        cluster.grafana_endpoint = default_cluster.grafana_endpoint
+    else:
+        # creating first cluster on k8s
+        cluster.mode = "kubernetes"
+        logger.info("Retrieving foundationdb connection string...")
+        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
+        cluster.db_connection = fdb_cluster_string
+        if monitoring_secret:
+            cluster.grafana_secret = monitoring_secret
+        else:
+            raise Exception("monitoring_secret is required")
+        cluster.grafana_endpoint = "http://simplyblock-grafana:3000"
+        if not cluster_ip:
+            cluster_ip = "0.0.0.0"
 
-    default_cluster = clusters[0]
-    cluster.mode = default_cluster.mode
-    cluster.db_connection = default_cluster.db_connection
-    cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
-    cluster.grafana_endpoint = default_cluster.grafana_endpoint
-
+        # add mgmt node object
+        mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
+                   
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
-
+                    
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
     cluster.distr_bs = distr_bs
@@ -491,7 +508,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
-    qos_controller.add_class("Default", 100, cluster.get_id())
 
     return cluster.get_id()
 

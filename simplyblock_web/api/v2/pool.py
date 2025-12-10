@@ -54,9 +54,8 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
 
     if not id_or_false:
         raise ValueError('Failed to create pool')
-
-    entity_url = request.app.url_path_for('clusters:storage-pools:detail', cluster_id=cluster.get_id(), pool_id=id_or_false)
-    return Response(status_code=201, headers={'Location': entity_url})
+    pool = db.get_pool_by_id(id_or_false)
+    return pool.to_dict()
 
 
 instance_api = APIRouter(prefix='/{pool_id}')

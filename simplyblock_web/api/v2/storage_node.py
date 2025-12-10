@@ -35,9 +35,8 @@ class StorageNodeParams(BaseModel):
     max_snapshots: int = Field(500)
     ha_jm: bool = Field(True)
     test_device: bool = Field(False)
-    spdk_image: Optional[str]
+    spdk_image: Optional[str] = Field("")
     spdk_debug: bool = Field(False)
-    full_page_unmap: bool = Field(False)
     data_nics: List[str] = Field([])
     namespace: str = Field('default')
     jm_percent: util.Percent = Field(3)
@@ -47,7 +46,7 @@ class StorageNodeParams(BaseModel):
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
-def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Response:
+def add(request: Request, cluster: Cluster, parameters: StorageNodeParams):
     task_id_or_false = tasks_controller.add_node_add_task(
         cluster.get_id(),
         {
@@ -65,14 +64,11 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Re
             'enable_test_device': parameters.test_device,
             'namespace': parameters.namespace,
             'enable_ha_jm': parameters.ha_jm,
-            'full_page_unmap': parameters.full_page_unmap,
         }
     )
     if not task_id_or_false:
         raise ValueError('Failed to create add-node task')
-
-    task_url = request.app.url_path_for('clusters:storage-nodes:detail', cluster_id=cluster.get_id(), task_id=task_id_or_false)
-    return Response(status_code=201, headers={'Location': task_url})
+    return task_id_or_false
 
 
 instance_api = APIRouter(prefix='/{storage_node_id}')
