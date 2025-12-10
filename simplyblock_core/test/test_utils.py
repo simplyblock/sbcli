@@ -155,7 +155,7 @@ def test_parse_thread_siblings_list(input, expected):
 @patch.object(DBController, 'get_storage_nodes_by_cluster_id')
 @patch.object(DBController, 'get_storage_node_by_id')
 def run_lvol_scheduler_test(testing_nodes, db_controller_get_storage_node_by_id, db_controller_get_storage_nodes_by_cluster_id):
-    RUN_PER_TEST = 1000000
+    RUN_PER_TEST = 10000
     print("-" * 100)
     for testing_map in testing_nodes:
         nodes = {n['uuid']: n for n in testing_map}

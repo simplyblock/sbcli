@@ -134,7 +134,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     db_controller = DBController()
-    node_stats: dict[str: dict] = {}
+    node_stats: dict = {}
     nodes_below_25 = []
     nodes_between_25_75 = []
     nodes_above_75 = []
