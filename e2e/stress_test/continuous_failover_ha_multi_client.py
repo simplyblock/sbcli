@@ -329,7 +329,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         for node in self.sn_nodes_with_sec:
             # self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
             #                          storage_node_id=node)
-            self.logger.info(f"Skipping lvstore dump!!")
+            self.logger.info("Skipping lvstore dump!!")
         for node in self.sn_nodes_with_sec:
             cur_node_details = self.sbcli_utils.get_storage_node_details(node)
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
@@ -663,7 +663,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         for node in self.sn_nodes_with_sec:
             # self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
             #                          storage_node_id=node)
-            self.logger.info(f"Skipping lvstore dump!!")
+            self.logger.info("Skipping lvstore dump!!")
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage."""
