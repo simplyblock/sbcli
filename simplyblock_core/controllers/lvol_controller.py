@@ -150,14 +150,14 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             else:
                 nodes_between_25_75.append(node)
 
-    logger.info(f"nodes_below_25: {nodes_below_25}")
-    logger.info(f"nodes_between_25_75: {nodes_between_25_75}")
-    logger.info(f"nodes_above_75: {nodes_above_75}")
+    logger.info(f"nodes_below_25: {len(nodes_below_25)}")
+    logger.info(f"nodes_between_25_75: {len(nodes_between_25_75)}")
+    logger.info(f"nodes_above_75: {len(nodes_above_75)}")
 
     if len(nodes_below_25+nodes_between_25_75+nodes_above_75) <= 1:
         return nodes_below_25+nodes_between_25_75+nodes_above_75
 
-    if len(nodes_below_25) > len(nodes_between_25_75):
+    if len(nodes_below_25) > len(nodes_between_25_75) and len(nodes_below_25) > len(nodes_above_75):
         """
         if sum of lvols (+snapshots, including namespace lvols) per node is utilized < [0.25 * max-size] AND
         number of lvols (snapshots dont count extra and namspaces on same subsystem count only once) < [0.25 * max-lvol]
@@ -170,14 +170,14 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
         for node in nodes_below_25:
             node_stats[node.get_id()] = node.lvol_count_util
 
-        sorted_keys = list(node_stats.keys())
+        sorted_keys = list(node_stats.values())
         sorted_keys.sort()
         sorted_nodes = []
         for k in sorted_keys:
             for node in nodes_below_25:
                 if  node.lvol_count_util == k:
-                    sorted_nodes.append(node)
-
+                    if node not in sorted_nodes:
+                        sorted_nodes.append(node)
         return sorted_nodes
 
     elif len(nodes_between_25_75) > len(nodes_above_75):
@@ -191,7 +191,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
                 "lvol_count_util": node.lvol_count_util,
                 "node_size_util": node.node_size_util}
 
-    elif len(nodes_below_25) == 0 and len(nodes_between_25_75) == 0 and len(nodes_above_75) > 0 :
+    elif len(nodes_below_25) < len(nodes_above_75) and len(nodes_between_25_75) < len(nodes_above_75) :
         """
         Once a node has > 75% uof storage utilization, it is excluded to add new lvols
             (unless all nodes exceed this limit, than it is weighted again)
@@ -222,7 +222,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
         node_start_end[node_id]['%'] = int(node_start_end[node_id]['weight'] * 100 / n_start)
 
     logger.info(f"Node stats: \n {utils.print_table_dict({**node_stats, 'Cluster': cluster_stats})}")
-    logger.info(f"Node weights: \n {utils.print_table_dict({**nodes_weight, 'weights': {'lvol': n_start, 'total': n_start}})}")
+    logger.info(f"Node weights: \n {utils.print_table_dict({**nodes_weight})}")
     logger.info(f"Node selection range: \n {utils.print_table_dict(node_start_end)}")
 
     selected_node_ids: List[str] = []

@@ -255,8 +255,6 @@ def get_weights(node_stats, cluster_stats, keys_weights):
         return w
 
     out: dict = {}
-    heavy_node_w = 0
-    heavy_node_id = None
     for node_id in node_stats:
         out[node_id] = {}
         total = 0
@@ -266,12 +264,6 @@ def get_weights(node_stats, cluster_stats, keys_weights):
             out[node_id][key] = w
             total += w
         out[node_id]['total'] = int(total)
-        if total > heavy_node_w:
-            heavy_node_w = total
-            heavy_node_id = node_id
-
-    if heavy_node_id:
-        out[heavy_node_id]['total'] *= 5
 
     return out
 
