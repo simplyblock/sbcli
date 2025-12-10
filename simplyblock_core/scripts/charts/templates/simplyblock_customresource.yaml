@@ -1,0 +1,65 @@
+apiVersion: simplyblock.simplyblock.io/v1alpha1
+kind: SimplyBlockStorageCluster
+metadata:
+  name: demo-simplyblock-cluster
+  namespace: simplyblock
+spec:
+  clusterName: "demo-cluster"
+  mgmtIfc: "eth0"                     
+  fabric: "tcp"                            
+  haType: "ha"                    
+  isSingleNode: false
+  enableNodeAffinity: false
+  strictNodeAntiAffinity: false
+
+---
+apiVersion: simplyblock.simplyblock.io/v1alpha1
+kind: Pool
+metadata:
+  name: demo-pool
+  namespace: simplyblock
+spec:
+  name: demo-pool               
+  clusterName: demo-cluster
+  capacityLimit: "100Gi"      
+
+---
+apiVersion: simplyblock.simplyblock.io/v1alpha1
+kind: StorageNode
+metadata:
+  name: demo-node
+  namespace: simplyblock
+spec:
+  clusterName: demo-cluster
+  clusterImage: public.ecr.aws/simply-block/simplyblock:main
+##  spdkImage: simplyblock/spdk:R25.10-Hotfix-28b85c82
+  mgmtIfc: eth0
+  maxLVol: 10
+  maxSnapshots: 128
+  statsHistoryInSeconds: 300
+
+  maxSize: 150G
+  partitions: 0
+  corePercentage: 65
+  spdkDebug: false
+  includeStats: true
+  testDevice: false
+  coreIsolation: false
+  fullPageUnmap: true
+
+  workerNodes:
+    - "vm02.simplyblock3.localdomain"
+    - "vm03.simplyblock3.localdomain"
+    - "vm04.simplyblock3.localdomain"
+
+---
+apiVersion: simplyblock.simplyblock.io/v1alpha1
+kind: SimplyBlockDevice
+metadata:
+  name: demo-devices
+  namespace: simplyblock
+spec:
+  clusterName: demo-cluster
+  #nodeUUID: d482e889-7960-4e26-9d21-51fc5959d4a1
+  includeStats: false
+  statsHistoryInSeconds: 300
