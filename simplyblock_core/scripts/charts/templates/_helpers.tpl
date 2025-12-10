@@ -5,15 +5,17 @@ env:
       configMapKeyRef:
         name: simplyblock-config
         key: LOG_LEVEL
+
 volumeMounts:
   - name: fdb-cluster-file
     mountPath: /etc/foundationdb/fdb.cluster
     subPath: fdb.cluster
+
 resources:
-    requests:
+  requests:
     cpu: "50m"
     memory: "100Mi"
-    limits:
+  limits:
     cpu: "300m"
     memory: "1Gi"
 {{- end }}

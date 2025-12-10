@@ -161,7 +161,18 @@ spec:
         - name: storage-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/storage_node_monitor.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: mgmt-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -169,46 +180,145 @@ spec:
           env:
             - name: BACKEND_TYPE
               value: "k8s"
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: lvol-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/lvol_stat_collector.py"]
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: main-distr-event-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/main_distr_event_collector.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: capacity-and-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/capacity_and_stats_collector.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: capacity-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/cap_monitor.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: health-check
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/health_check_service.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: device-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/device_monitor.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: lvol-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/lvol_monitor.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: snapshot-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/snapshot_monitor.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
       volumes:
         - name: fdb-cluster-file
           configMap:
@@ -245,47 +355,145 @@ spec:
           env:
             - name: LVOL_NVMF_PORT_START
               value: "{{ .Values.ports.lvolNvmfPortStart }}"
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: tasks-runner-restart
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_restart.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: tasks-runner-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_migration.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: tasks-runner-failed-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_failed_migration.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: tasks-runner-cluster-status
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_cluster_status.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: tasks-runner-new-device-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_new_dev_migration.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: tasks-runner-port-allow
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_port_allow.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: tasks-runner-jc-comp-resume
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_jc_comp.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
 
         - name: tasks-runner-sync-lvol-del
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_sync_lvol_del.py"]
-          {{- include "simplyblock.commonContainer" . | nindent 4 }}
+          env:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).env }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          volumeMounts:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).volumeMounts }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
+          resources:
+            {{- with (include "simplyblock.commonContainer" . | fromYaml).resources }}
+            {{- toYaml . | nindent 6 }}
+            {{- end }}
       volumes:
         - name: fdb-cluster-file
           configMap:
