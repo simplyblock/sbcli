@@ -16,6 +16,7 @@ spec:
   nodeSelector:
     kubernetes.io/hostname: {{ HOSTNAME }}
   hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
   tolerations:
     - effect: NoSchedule
       operator: Exists
