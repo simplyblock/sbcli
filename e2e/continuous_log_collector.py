@@ -1,6 +1,5 @@
 import os
 from datetime import datetime
-from pathlib import Path
 from utils.ssh_utils import SshUtils, RunnerK8sLog
 from logger_config import setup_logger
 

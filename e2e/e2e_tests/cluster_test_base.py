@@ -405,7 +405,7 @@ class TestClusterBase:
             self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
             node+=1
-        all_nodes = self.storage_nodes + self.mgmt_nodes + self.client_machines:
+        all_nodes = self.storage_nodes + self.mgmt_nodes + self.client_machines
         for node in all_nodes:
             base_path = os.path.join(self.docker_logs_path, node)
             cmd = f"journalctl -k --no-tail >& {base_path}/jounalctl_{node}-final.txt"
