@@ -148,7 +148,7 @@ def error_handler(exception: Exception):
 
 
 class RPCPortParams(BaseModel):
-    rpc_port: int = Field(constants.RPC_HTTP_PROXY_PORT, ge=0, le=65536)
+    rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=0, le=65536)
 
 
 class DeviceParams(BaseModel):

@@ -129,7 +129,7 @@ def scan_devices():
 
 class SPDKParams(BaseModel):
     server_ip: str = Field(pattern=utils.IP_PATTERN)
-    rpc_port: int = Field(constants.RPC_HTTP_PROXY_PORT, ge=1, le=65536)
+    rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=1, le=65536)
     rpc_username: str
     rpc_password: str
     ssd_pcie: Optional[List[str]] = Field(None)

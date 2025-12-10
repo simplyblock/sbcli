@@ -817,7 +817,7 @@ def get_next_rpc_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = 8080
+    port = constants.RPC_PORT_RANGE_START
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.rpc_port > 0:
