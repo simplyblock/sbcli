@@ -80,7 +80,7 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
 
 
 def _add_graylog_input(cluster_ip, password):
-    base_url = f"http://{cluster_ip}/graylog/api"
+    base_url = f"{cluster_ip}/api"
     input_url = f"{base_url}/system/inputs"
 
     retries = 30
@@ -161,7 +161,7 @@ def _add_graylog_input(cluster_ip, password):
 
 def _set_max_result_window(cluster_ip, max_window=100000):
 
-    url_existing_indices = f"http://{cluster_ip}/opensearch/_all/_settings"
+    url_existing_indices = f"{cluster_ip}/_all/_settings"
 
     retries = 30
     reachable=False
@@ -355,9 +355,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if ingress_host_source == "hostip":
             dns_name = dev_ip
 
-        _set_max_result_window(dns_name)
+        
+        _set_max_result_window(f"http://{dns_name}/opensearch")
 
-        _add_graylog_input(dns_name, monitoring_secret)
+        _add_graylog_input(f"http://{dns_name}/graylog", monitoring_secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
         if mode == "kubernetes":
@@ -439,6 +440,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     default_cluster = None
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
     clusters = db_controller.get_clusters()
     if clusters:
         default_cluster = clusters[0]
@@ -473,14 +475,23 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
             cluster.grafana_secret = monitoring_secret
         else:
             raise Exception("monitoring_secret is required")
-        cluster.grafana_endpoint = "http://simplyblock-grafana:3000"
+        cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
         if not cluster_ip:
             cluster_ip = "0.0.0.0"
 
         # add mgmt node object
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
-                   
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        if enable_monitoring != "true":
+            graylog_endpoint = constants.GRAFANA_K8S_ENDPOINT
+            os_endpoint = constants.OS_K8S_ENDPOINT          
+            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+
+            _set_max_result_window(os_endpoint)
+
+            _add_graylog_input(graylog_endpoint, monitoring_secret)
+
+    if cluster.mode  == "kubernetes":
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
                     
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs

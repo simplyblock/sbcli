@@ -104,6 +104,8 @@ spec:
               key: LOG_LEVEL
         - name: LVOL_NVMF_PORT_START
           value: "{{ .Values.ports.lvolNvmfPortStart }}"
+        - name: ENABLE_MONITORING
+          value: "{{ .Values.monitoring.enabled }}"
         - name: K8S_NAMESPACE
           valueFrom:
             fieldRef:
