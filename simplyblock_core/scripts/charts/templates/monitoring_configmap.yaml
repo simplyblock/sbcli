@@ -60,7 +60,7 @@ data:
     datasources:
     - name: Thanos
       type: prometheus
-      url: http://simplyblock-thanos-query:9091
+      url: http://simplyblock-thanos:9091
       isDefault: true
       access: proxy
       uid: PBFA97CFB590B2093

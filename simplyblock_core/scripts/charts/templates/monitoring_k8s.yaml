@@ -105,18 +105,18 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simplyblock-thanos-store
+  name: simplyblock-thanos
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: simplyblock-thanos-store
+      app: simplyblock-thanos
   template:
     metadata:
       labels:
-        app: simplyblock-thanos-store
-    spec:      
+        app: simplyblock-thanos
+    spec:
       containers:
         - name: thanos-store
           image: thanosio/thanos:v0.31.0
@@ -128,7 +128,7 @@ spec:
           volumeMounts:
             - name: objstore-config
               mountPath: /etc/thanos
-            - name: thanos-data
+            - name: data
               mountPath: /data
           resources:
             requests:
@@ -137,37 +137,17 @@ spec:
             limits:
               cpu: "250m"
               memory: "1Gi"
-      volumes:
-        - name: objstore-config
-          configMap:
-            name: simplyblock-objstore-config
-        - name: thanos-data
-          emptyDir: {}
-          
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-thanos-query
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-thanos-query
-  template:
-    metadata:
-      labels:
-        app: simplyblock-thanos-query
-    spec:      
-      containers:
+
         - name: thanos-query
           image: thanosio/thanos:v0.31.0
           args:
             - query
             - --http-address=0.0.0.0:9091
-            - --store=simplyblock-thanos-store:10901
+            - --store=simplyblock-thanos:10901 
             - --store=simplyblock-prometheus:10901
+          ports:
+            - containerPort: 9091
+              name: http
           resources:
             requests:
               cpu: "100m"
@@ -176,24 +156,6 @@ spec:
               cpu: "250m"
               memory: "1Gi"
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-thanos-compactor
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-thanos-compactor
-  template:
-    metadata:
-      labels:
-        app: simplyblock-thanos-compactor
-    spec:
-      
-      containers:
         - name: thanos-compactor
           image: thanosio/thanos:v0.31.0
           args:
@@ -208,7 +170,7 @@ spec:
           volumeMounts:
             - name: objstore-config
               mountPath: /etc/thanos
-            - name: compactor-data
+            - name: data
               mountPath: /data
           resources:
             requests:
@@ -217,11 +179,13 @@ spec:
             limits:
               cpu: "250m"
               memory: "1Gi"
+
       volumes:
         - name: objstore-config
           configMap:
             name: simplyblock-objstore-config
-        - name: compactor-data
+
+        - name: data
           emptyDir: {}
 
 ---
