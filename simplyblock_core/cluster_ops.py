@@ -317,8 +317,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         cluster.grafana_endpoint = grafana_endpoint
     elif ingress_host_source == "hostip":
         cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
+        graylog_endpoint = f"http://{dev_ip}/graylog"
+        os_endpoint = f"http://{dev_ip}/opensearch"
     else:
         cluster.grafana_endpoint = f"http://{dns_name}/grafana"
+        graylog_endpoint = f"http://{dns_name}/graylog"
+        os_endpoint = f"http://{dns_name}/opensearch"
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
@@ -356,9 +360,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             dns_name = dev_ip
 
         
-        _set_max_result_window(f"http://{dns_name}/opensearch")
+        _set_max_result_window(os_endpoint)
 
-        _add_graylog_input(f"http://{dns_name}/graylog", monitoring_secret)
+        _add_graylog_input(graylog_endpoint, monitoring_secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
         if mode == "kubernetes":
