@@ -188,65 +188,7 @@ spec:
         - name: data
           emptyDir: {}
 
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: simplyblock-node-exporter
-  namespace: {{ .Release.Namespace }}
-spec:
-  selector:
-    matchLabels:
-      app: simplyblock-node-exporter
-  template:
-    metadata:
-      labels:
-        app: simplyblock-node-exporter
-    spec:      
-      containers:
-        - name: node-exporter
-          image: prom/node-exporter:v1.7.0
-          args:
-            - '--path.procfs=/host/proc'
-            - '--path.sysfs=/host/sys'
-            - '--path.rootfs=/host/root'
-            - '--collector.filesystem.ignored-mount-points=^(/rootfs|/host|)/(sys|proc|dev|host|etc|var/lib/docker/.+|var/lib/kubelet/pods/.+)($|/)'
-            - '--collector.filesystem.ignored-fs-types=^(sys|proc|auto|cgroup|devpts|ns|au|fuse.lxc|mqueue)(fs|)$'
-            - '--no-collector.ipvs'
-            - '--web.listen-address=:9200'
-          ports:
-            - containerPort: 9200
-              protocol: TCP
-          volumeMounts:
-            - name: proc
-              mountPath: /host/proc
-              readOnly: true
-              mountPropagation: HostToContainer
-            - name: sys
-              mountPath: /host/sys
-              mountPropagation: HostToContainer
-              readOnly: true
-            - name: root
-              mountPath: /host/root
-              mountPropagation: HostToContainer
-              readOnly: true
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "250m"
-              memory: "1Gi"
-      volumes:
-        - name: proc
-          hostPath:
-            path: /proc
-        - name: sys
-          hostPath:
-            path: /sys
-        - name: root
-          hostPath:
-            path: /
+
 
 ---
 apiVersion: apps/v1
@@ -309,9 +251,6 @@ spec:
             - name: dashboard-pools
               mountPath: /var/lib/grafana/dashboards/pools.json
               subPath: pools.json
-            - name: dashboard-node-exporter
-              mountPath: /var/lib/grafana/dashboards/node-exporter.json
-              subPath: node-exporter.json
             - name: grafana-data
               mountPath: /var/lib/grafana
       volumes:
@@ -339,9 +278,6 @@ spec:
         - name: dashboard-pools
           configMap:
             name: simplyblock-grafana-dashboard-pools
-        - name: dashboard-node-exporter
-          configMap:
-            name: simplyblock-grafana-dashboard-node-exporter
         - name: grafana-data
           emptyDir: {}
 {{- end }}
