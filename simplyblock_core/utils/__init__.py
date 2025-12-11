@@ -473,15 +473,26 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         vcpus = reserve_n(alceml_count)
         assigned["alceml_cpu_cores"] = vcpus
     dp = int(len(remaining) / 2)
-    vcpus = reserve_n(dp)
-    assigned["distrib_cpu_cores"] = vcpus
-    vcpus = reserve_n(dp)
-    assigned["poller_cpu_cores"] = vcpus
+    if 12 > dp >= 8:
+        vcpus = reserve_n(8)
+        assigned["distrib_cpu_cores"] = vcpus
+        vcpus = reserve_n(len(remaining) - 8)
+        assigned["poller_cpu_cores"] = vcpus
+    elif dp >= 12:
+        vcpus = reserve_n(16)
+        assigned["distrib_cpu_cores"] = vcpus
+        vcpus = reserve_n(len(remaining) - 16)
+        assigned["poller_cpu_cores"] = vcpus
+    else:
+        vcpus = reserve_n(dp)
+        assigned["distrib_cpu_cores"] = vcpus
+        vcpus = reserve_n(dp)
+        assigned["poller_cpu_cores"] = vcpus
     if len(remaining) > 0:
         if len(assigned["poller_cpu_cores"]) == 0:
             assigned["distrib_cpu_cores"] = assigned["poller_cpu_cores"] = reserve_n(1)
         else:
-            assigned["distrib_cpu_cores"] = assigned["distrib_cpu_cores"] + reserve_n(1)
+            assigned["poller_cpu_cores"] = assigned["poller_cpu_cores"] + reserve_n(1)
     # Return the individual threads as separate values
     return (
         assigned.get("app_thread_core", []),
@@ -1531,8 +1542,10 @@ def regenerate_config(new_config, old_config, force=False):
         number_of_distribs = 2
         number_of_distribs_cores = len(old_config["nodes"][i]["distribution"]["distrib_cpu_cores"])
         number_of_poller_cores = len(old_config["nodes"][i]["distribution"]["poller_cpu_cores"])
-        if number_of_distribs_cores > 2:
+        if 8 >= number_of_distribs_cores > 2:
             number_of_distribs = number_of_distribs_cores
+        else:
+            number_of_distribs = 8
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
         old_config["nodes"][i]["nic_ports"] = new_config["nodes"][i]["nic_ports"]
