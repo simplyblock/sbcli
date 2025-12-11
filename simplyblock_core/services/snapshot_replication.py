@@ -123,41 +123,43 @@ def process_snap_replicate_finish(task, snapshot):
     snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
     snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
-
     replicate_to_source = task.function_params["replicate_to_source"]
+    target_prev_snap = None
     if replicate_to_source:
         org_snap = db.get_snapshot_by_id(snapshot.source_replicated_snap_uuid)
-        snapshot_lvol_id =  org_snap.lvol.get_id()
+        snaps = db.get_snapshots(org_snap.cluster_id)
+        for sn in snaps:
+            if sn.lvol.get_id() == org_snap.lvol.get_id():
+                try:
+                    target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
+                    break
+                except KeyError:
+                    logger.info(f"Snapshot {sn.target_replicated_snap_uuid} not found")
+
     else:
-        snapshot_lvol_id =  snapshot.lvol.get_id()
+        snaps = db.get_snapshots(snapshot.cluster_id)
+        for sn in snaps:
+            if sn.lvol.get_id() == snapshot.lvol.get_id():
+                try:
+                    target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
+                    break
+                except KeyError:
+                    logger.info(f"Snapshot {sn.target_replicated_snap_uuid} not found")
 
     # chain snaps on primary
-    snaps = db.get_snapshots(remote_snode.cluster_id)
-    for sn in snaps:
-        if sn.lvol.get_id() == snapshot_lvol_id:
-            try:
-                target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
-                logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
-                remote_snode.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
-                break
-            except KeyError:
-                logger.info(f"Snapshot {sn.target_replicated_snap_uuid} not found")
+    if target_prev_snap:
+        logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap.snap_bdev}")
+        remote_snode.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
 
     # convert to snapshot on primary
     remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
 
-    sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
     # chain snaps on secondary
+    sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        for sn in snaps:
-            if sn.lvol.get_id() == snapshot_lvol_id:
-                try:
-                    target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
-                    logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
-                    sec_node.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
-                    break
-                except KeyError:
-                    logger.info(f"Snapshot {sn.target_replicated_snap_uuid} not found")
+        if target_prev_snap:
+            logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
+            sec_node.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
 
         # convert to snapshot on secondary
         sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
