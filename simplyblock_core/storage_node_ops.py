@@ -447,9 +447,15 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
         return False
     time.sleep(3)
     rpc_client.nbd_stop_disk(nbd_device)
-    time.sleep(1)
+    for i in range(10):
+        if not rpc_client.nbd_get_disks(nbd_device):
+            break
+        time.sleep(1)
     rpc_client.bdev_nvme_detach_controller(nvme.nvme_controller)
-    time.sleep(1)
+    for i in range(10):
+        if not rpc_client.bdev_nvme_controller_list(nvme.nvme_controller):
+            break
+        time.sleep(1)
     try:
         rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
     except RPCException as e:
@@ -1543,7 +1549,6 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                     pci_address.append(dev.pcie_address)
     except Exception as e:
         logger.exception(e)
-        return False
 
     set_node_status(node_id, StorageNode.STATUS_REMOVED)
 

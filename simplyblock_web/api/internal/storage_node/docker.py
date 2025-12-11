@@ -518,8 +518,10 @@ def bind_device_to_nvme(body: utils.DeviceParams):
 def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
     bind_device_to_nvme(body)
     device_name = pci_utils.nvme_device_name(body.device_pci)
-    subprocess.check_call(['parted', '-fs', f'/dev/{device_name}', 'mklabel' 'gpt'])
-    return utils.get_response(True)
+    cmd = f"parted -fs /dev/{device_name} mklabel gpt"
+    out, err, ret_code = shell_utils.run_command(cmd)
+    logger.info(f"out: {out}, err: {err}, ret_code: {ret_code}")
+    return utils.get_response(ret_code==0, error=err)
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
