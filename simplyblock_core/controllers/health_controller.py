@@ -459,7 +459,8 @@ def _check_node_lvstore(
                                             except Exception as e:
                                                 logger.error(f"Failed to connect to {dev.get_id()}: {e}")
                                         else:
-                                            distr_controller.send_dev_status_event(dev, dev.status, node)
+                                            if dev_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                                                distr_controller.send_dev_status_event(dev, dev.status, node)
 
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])
