@@ -29,7 +29,7 @@ kind: StorageNode
 metadata:
   name: demo-node
   namespace: simplyblock
-spec:
+spec:  
   clusterName: demo-cluster
   clusterImage: public.ecr.aws/simply-block/simplyblock:improved_user_experience
 ##  spdkImage: simplyblock/spdk:R25.10-Hotfix-28b85c82

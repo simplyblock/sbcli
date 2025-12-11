@@ -122,9 +122,16 @@ spec:
           image: thanosio/thanos:v0.31.0
           args:
             - store
+            - --grpc-address=0.0.0.0:10901
+            - --http-address=0.0.0.0:10902
             - --objstore.config-file=/etc/thanos/objstore.yml
             - --index-cache-size=500MB
             - --chunk-pool-size=500MB
+          ports:
+            - name: grpc
+              containerPort: 10901
+            - name: http
+              containerPort: 10902
           volumeMounts:
             - name: objstore-config
               mountPath: /etc/thanos
@@ -142,12 +149,15 @@ spec:
           image: thanosio/thanos:v0.31.0
           args:
             - query
+            - --grpc-address=0.0.0.0:10911
             - --http-address=0.0.0.0:9091
-            - --store=simplyblock-thanos:10901 
+            - --store=simplyblock-thanos:10901
             - --store=simplyblock-prometheus:10901
           ports:
             - containerPort: 9091
               name: http
+            - containerPort: 10911
+              name: grpc
           resources:
             requests:
               cpu: "100m"
@@ -160,6 +170,7 @@ spec:
           image: thanosio/thanos:v0.31.0
           args:
             - compact
+            - --http-address=0.0.0.0:10922
             - --data-dir=/data
             - --objstore.config-file=/etc/thanos/objstore.yml
             - --retention.resolution-raw=30d
@@ -167,6 +178,9 @@ spec:
             - --retention.resolution-1h=90d
             - --compact.concurrency=1
             - --wait
+          ports:
+            - containerPort: 10922
+              name: http
           volumeMounts:
             - name: objstore-config
               mountPath: /etc/thanos
@@ -187,8 +201,6 @@ spec:
 
         - name: data
           emptyDir: {}
-
-
 
 ---
 apiVersion: apps/v1
