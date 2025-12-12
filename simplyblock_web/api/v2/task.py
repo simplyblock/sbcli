@@ -24,22 +24,6 @@ def list(cluster: Cluster) -> List[TaskDTO]:
             continue
         data.append(t)
     return [TaskDTO.from_model(task) for task in data]
-    
-    # raw = tasks_controller.list_tasks(cluster.get_id(), is_json=True, limit=0)
-    # parsed = json.loads(raw)
-
-    # return [
-    #     TaskDTO.from_model(
-    #         JobSchedule(**{k: v for k, v in task.items() if k not in ("id", "uuid", "status", "deleted")})
-    #     )
-    #     for task in parsed
-    # ]
-
-    # return [
-    #     TaskDTO.from_model(JobSchedule(**task))
-    #     for task
-    #     in tasks_controller.list_tasks(cluster.get_id(), is_json=True, limit=0)
-    # ]
 
 instance_api = APIRouter(prefix='/{task_id}')
 

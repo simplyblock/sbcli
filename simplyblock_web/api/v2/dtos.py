@@ -179,7 +179,7 @@ class TaskDTO(BaseModel):
     @staticmethod
     def from_model(model: JobSchedule):
         return TaskDTO(
-            id=UUID(model.get_id()),
+            id=UUID(model.uuid),
             status=model.status,
             canceled=model.canceled,
             function_name=model.function_name,
