@@ -1,3 +1,4 @@
+import json
 from typing import Annotated, List
 from uuid import UUID
 
@@ -16,13 +17,13 @@ db = DBController()
 
 @api.get('/', name='clusters:tasks:list')
 def list(cluster: Cluster) -> List[TaskDTO]:
-    return [
-        TaskDTO.from_model(task)
-        for task
-        in tasks_controller.list_tasks(cluster.get_id())
-        if task.cluster_id == cluster.get_id()
-    ]
-
+    cluster_tasks = db.get_job_tasks(cluster.get_id(), limit=0)
+    data=[]
+    for t in cluster_tasks:
+        if t.function_name == JobSchedule.FN_DEV_MIG:
+            continue
+        data.append(t)
+    return [TaskDTO.from_model(task) for task in data]
 
 instance_api = APIRouter(prefix='/{task_id}')
 
@@ -40,5 +41,3 @@ Task = Annotated[JobSchedule, Depends(_lookup_task)]
 @instance_api.get('/', name='clusters:tasks:detail')
 def get(cluster: Cluster, task: Task) -> TaskDTO:
     return TaskDTO.from_model(task)
-
-api.include_router(instance_api)

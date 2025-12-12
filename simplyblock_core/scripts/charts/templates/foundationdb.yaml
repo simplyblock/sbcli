@@ -246,7 +246,6 @@ spec:
     general:
       customParameters:
       - knob_disable_posix_kernel_aio=1
-      - listen_address=0.0.0.0:4501
       podTemplate:
         spec:
           containers:

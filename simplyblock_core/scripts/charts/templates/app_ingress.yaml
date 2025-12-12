@@ -1,4 +1,5 @@
-{{- if (not .Values.ingress.useDNS) }}
+{{- if .Values.ingress.enabled }}
+  {{- if not .Values.ingress.useDNS }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -17,7 +18,7 @@ spec:
                 port:
                   number: 5000
 ---
-{{- else if .Values.ingress.useDNS }}
+  {{- else if .Values.ingress.useDNS }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -45,4 +46,5 @@ spec:
                 name: simplyblock-webappapi
                 port:
                   number: 5000
+  {{- end }}
 {{- end }}
