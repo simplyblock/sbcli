@@ -486,7 +486,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         # add mgmt node object
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
         if enable_monitoring == "true":
-            graylog_endpoint = constants.GRAFANA_K8S_ENDPOINT
+            graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
             os_endpoint = constants.OS_K8S_ENDPOINT          
             _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
