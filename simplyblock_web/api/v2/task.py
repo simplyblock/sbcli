@@ -40,3 +40,5 @@ Task = Annotated[JobSchedule, Depends(_lookup_task)]
 @instance_api.get('/', name='clusters:tasks:detail')
 def get(cluster: Cluster, task: Task) -> TaskDTO:
     return TaskDTO.from_model(task)
+
+api.include_router(instance_api)
