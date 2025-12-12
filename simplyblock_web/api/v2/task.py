@@ -17,7 +17,7 @@ db = DBController()
 @api.get('/', name='clusters:tasks:list')
 def list(cluster: Cluster) -> List[TaskDTO]:
     return [
-        TaskDTO.from_model(task)
+        TaskDTO.from_model(JobSchedule(**task))
         for task
         in tasks_controller.list_tasks(cluster.get_id(), is_json=True, limit=0)
     ]
