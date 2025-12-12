@@ -1,3 +1,4 @@
+import json
 from typing import Annotated, List
 from uuid import UUID
 
@@ -16,12 +17,16 @@ db = DBController()
 
 @api.get('/', name='clusters:tasks:list')
 def list(cluster: Cluster) -> List[TaskDTO]:
-    return [
-        TaskDTO.from_model(JobSchedule(**task))
-        for task
-        in tasks_controller.list_tasks(cluster.get_id(), is_json=True, limit=0)
-    ]
 
+    raw = tasks_controller.list_tasks(cluster.get_id(), is_json=True, limit=0)
+    parsed = json.loads(raw)
+
+    return [TaskDTO.from_model(JobSchedule(**task)) for task in parsed]
+    # return [
+    #     TaskDTO.from_model(JobSchedule(**task))
+    #     for task
+    #     in tasks_controller.list_tasks(cluster.get_id(), is_json=True, limit=0)
+    # ]
 
 instance_api = APIRouter(prefix='/{task_id}')
 
