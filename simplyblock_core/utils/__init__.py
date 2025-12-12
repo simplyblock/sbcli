@@ -843,6 +843,22 @@ def get_next_rpc_port(cluster_id):
     return 0
 
 
+def get_next_fw_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = constants.FW_PORT_START
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.firewall_port > 0:
+            used_ports.append(node.firewall_port)
+    next_port = port
+    while True:
+        if next_port not in used_ports:
+            return next_port
+        next_port += 1
+
+
 def get_next_dev_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
