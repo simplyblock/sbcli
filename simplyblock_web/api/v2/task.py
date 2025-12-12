@@ -17,16 +17,23 @@ db = DBController()
 
 @api.get('/', name='clusters:tasks:list')
 def list(cluster: Cluster) -> List[TaskDTO]:
+    cluster_tasks = db.get_job_tasks(cluster.get_id(), limit=0)
+    data=[]
+    for t in cluster_tasks:
+        if t.function_name == JobSchedule.FN_DEV_MIG:
+            continue
+        data.append(t)
+    return [TaskDTO.from_model(task) for task in data]
+    
+    # raw = tasks_controller.list_tasks(cluster.get_id(), is_json=True, limit=0)
+    # parsed = json.loads(raw)
 
-    raw = tasks_controller.list_tasks(cluster.get_id(), is_json=True, limit=0)
-    parsed = json.loads(raw)
-
-    return [
-        TaskDTO.from_model(
-            JobSchedule(**{k: v for k, v in task.items() if k not in ("id", "uuid", "status", "deleted")})
-        )
-        for task in parsed
-    ]
+    # return [
+    #     TaskDTO.from_model(
+    #         JobSchedule(**{k: v for k, v in task.items() if k not in ("id", "uuid", "status", "deleted")})
+    #     )
+    #     for task in parsed
+    # ]
 
     # return [
     #     TaskDTO.from_model(JobSchedule(**task))
