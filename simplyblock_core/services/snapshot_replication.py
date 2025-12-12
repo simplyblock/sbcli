@@ -23,7 +23,7 @@ def process_snap_replicate_start(task, snapshot):
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
         if replicate_to_source:
             org_snap = db.get_snapshot_by_id(snapshot.source_replicated_snap_uuid)
-            remote_node_uuid = db.get_storage_node_by_id(org_snap.lvol.node_id)
+            remote_node_uuid = db.get_storage_node_by_id(task.node_id)
             remote_pool_uuid = org_snap.lvol.pool_uuid
         else:  # replicate to target
             remote_node_uuid = db.get_storage_node_by_id(snapshot.lvol.replication_node_id)
