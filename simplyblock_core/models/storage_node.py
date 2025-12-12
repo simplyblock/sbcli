@@ -103,6 +103,7 @@ class StorageNode(BaseNodeObject):
     active_tcp: bool = True
     active_rdma: bool = False
     socket: int = 0
+    firewall_port: int = 50001
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
