@@ -634,9 +634,8 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             snode.lvstore_status = "failed"
             snode.write_to_db()
             logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-            if not force:
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to activate cluster")
+            set_cluster_status(cl_id, ols_status)
+            raise ValueError("Failed to activate cluster")
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
@@ -658,10 +657,8 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             snode.lvstore_status = "failed"
             snode.write_to_db()
             logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-            if not force:
-                logger.error("Failed to activate cluster")
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to activate cluster")
+            set_cluster_status(cl_id, ols_status)
+            raise ValueError("Failed to activate cluster")
 
     # reorder qos classes ids
     qos_classes = db_controller.get_qos(cl_id)
