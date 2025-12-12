@@ -10,6 +10,7 @@ from . import management_node
 from . import pool
 from . import snapshot
 from . import storage_node
+from . import task
 
 from simplyblock_core.db_controller import DBController
 
@@ -37,6 +38,7 @@ storage_node.instance_api.include_router(device.api)
 storage_node.api.include_router(storage_node.instance_api)
 
 cluster.instance_api.include_router(storage_node.api)
+cluster.instance_api.include_router(task.api)
 
 
 volume.api.include_router(volume.instance_api)
