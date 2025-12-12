@@ -269,6 +269,7 @@ class SPDKParams(BaseModel):
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
+    firewall_port: Optional[int] = Field(constants.FW_PORT_START)
 
 
 @api.post('/spdk_process_start', responses={
@@ -356,7 +357,7 @@ def spdk_process_start(body: SPDKParams):
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
-            'FW_PORT': constants.FW_PORT
+            'FW_PORT': body.firewall_port
         }
 
         if ubuntu_host:
