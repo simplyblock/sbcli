@@ -20,7 +20,6 @@ def list(cluster: Cluster) -> List[TaskDTO]:
         TaskDTO.from_model(task)
         for task
         in tasks_controller.list_tasks(cluster.get_id())
-        if task.cluster_id == cluster.get_id()
     ]
 
 
