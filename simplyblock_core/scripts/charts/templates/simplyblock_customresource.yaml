@@ -63,3 +63,13 @@ spec:
   #nodeUUID: d482e889-7960-4e26-9d21-51fc5959d4a1
   includeStats: false
   statsHistoryInSeconds: 300
+
+---
+apiVersion: simplyblock.simplyblock.io/v1alpha1
+kind: SimplyBlockTask
+metadata:
+  name: demo-task
+  namespace: simplyblock
+spec:
+  clusterName: exademomple-cluster
+  

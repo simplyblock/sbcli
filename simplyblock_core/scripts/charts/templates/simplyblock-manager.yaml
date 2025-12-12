@@ -139,6 +139,7 @@ rules:
   - simplyblockstorageclusters
   - storagenodes
   - simplyblockdevices
+  - simplyblocktasks
   verbs:
   - create
   - delete
@@ -154,6 +155,7 @@ rules:
   - simplyblockstorageclusters/finalizers
   - storagenodes/finalizers
   - simplyblockdevices/finalizers
+  - simplyblocktasks/finalizers
   verbs:
   - update
   - delete
@@ -164,6 +166,7 @@ rules:
   - simplyblockstorageclusters/status
   - storagenodes/status
   - simplyblockdevices/status
+  - simplyblocktasks/status
   verbs:
   - get
   - patch
