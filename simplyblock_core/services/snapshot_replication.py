@@ -206,9 +206,9 @@ def task_runner(task: JobSchedule):
         task.write_to_db(db.kv_store)
         return True
 
-    snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
-
-    if not snode:
+    try:
+        snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
+    except KeyError:
         task.function_result = "node not found"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
@@ -217,6 +217,7 @@ def task_runner(task: JobSchedule):
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
         task.write_to_db(db.kv_store)
         return False
 
