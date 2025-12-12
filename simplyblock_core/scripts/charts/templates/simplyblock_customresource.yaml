@@ -71,5 +71,4 @@ metadata:
   name: demo-task
   namespace: simplyblock
 spec:
-  clusterName: exademomple-cluster
-  
+  clusterName: demo-cluster
