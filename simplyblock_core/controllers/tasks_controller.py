@@ -77,7 +77,8 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             return False
 
     elif function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
-        task_id = get_snapshot_replication_task(cluster_id, function_params['snapshot_id'])
+        task_id = get_snapshot_replication_task(
+            cluster_id, function_params['snapshot_id'], function_params['replicate_to_source'])
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -416,15 +417,17 @@ def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
                     return task.uuid
     return False
 
-def get_snapshot_replication_task(cluster_id, snapshot_id):
+def get_snapshot_replication_task(cluster_id, snapshot_id, replicate_to_source):
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.function_params["snapshot_id"] == snapshot_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                return task.uuid
+                if task.function_params["replicate_to_source"] == replicate_to_source:
+                    return task.uuid
     return False
 
 
 def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to_source=False):
     return _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, cluster_id, node_id, "",
-                     function_params={"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source})
+                     function_params={"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source},
+                     send_to_cluster_log=False)

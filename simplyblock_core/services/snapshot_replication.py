@@ -22,7 +22,7 @@ def process_snap_replicate_start(task, snapshot):
     replicate_to_source = task.function_params["replicate_to_source"]
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
         if replicate_to_source:
-            org_snap = db.get_snapshot_by_id(snapshot.lvol.source_replicated_snap_uuid)
+            org_snap = db.get_snapshot_by_id(snapshot.source_replicated_snap_uuid)
             remote_node_uuid = db.get_storage_node_by_id(org_snap.lvol.node_id)
             remote_pool_uuid = org_snap.lvol.pool_uuid
         else:  # replicate to target
@@ -113,11 +113,6 @@ def process_snap_replicate_start(task, snapshot):
 
 def process_snap_replicate_finish(task, snapshot):
 
-    task.function_result = "Done"
-    task.status = JobSchedule.STATUS_DONE
-    task.function_params["end_time"] = int(time.time())
-    task.write_to_db()
-
     # detach remote lvol
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
     snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
@@ -126,18 +121,13 @@ def process_snap_replicate_finish(task, snapshot):
     replicate_to_source = task.function_params["replicate_to_source"]
     target_prev_snap = None
     if replicate_to_source:
-        org_snap = db.get_snapshot_by_id(snapshot.source_replicated_snap_uuid)
-        snaps = db.get_snapshots(org_snap.cluster_id)
-        for sn in snaps:
-            if sn.lvol.get_id() == org_snap.lvol.get_id():
-                try:
-                    target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
-                    break
-                except KeyError:
-                    logger.info(f"Snapshot {sn.target_replicated_snap_uuid} not found")
-
+        org_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
+        try:
+            target_prev_snap = db.get_snapshot_by_id(org_snap.source_replicated_snap_uuid)
+        except KeyError:
+            logger.info(f"Snapshot {org_snap.source_replicated_snap_uuid} not found")
     else:
-        snaps = db.get_snapshots(snapshot.cluster_id)
+        snaps = db.get_snapshots(remote_snode.cluster_id)
         for sn in snaps:
             if sn.lvol.get_id() == snapshot.lvol.get_id():
                 try:
@@ -149,20 +139,32 @@ def process_snap_replicate_finish(task, snapshot):
     # chain snaps on primary
     if target_prev_snap:
         logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap.snap_bdev}")
-        remote_snode.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
+        ret = remote_snode.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
+        if not ret:
+            logger.error("Failed to chain replicated snapshot on primary node")
+            return False
 
     # convert to snapshot on primary
-    remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+    ret = remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+    if not ret:
+        logger.error("Failed to convert to snapshot on primary node")
+        return False
 
     # chain snaps on secondary
     sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
     if sec_node.status == StorageNode.STATUS_ONLINE:
         if target_prev_snap:
-            logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {sn.snap_bdev}")
-            sec_node.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
+            logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap.snap_bdev}")
+            ret = sec_node.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
+            if not ret:
+                logger.error("Failed to chain replicated snapshot on secondary node")
+                return False
 
         # convert to snapshot on secondary
-        sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+        ret = sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+        if not ret:
+            logger.error("Failed to convert to snapshot on secondary node")
+            return False
 
     new_snapshot_uuid = str(uuid.uuid4())
 
@@ -195,7 +197,7 @@ def process_snap_replicate_finish(task, snapshot):
     remote_lv.remove(db.kv_store)
     snapshot_events.replication_task_finished(snapshot)
 
-    return True
+    return new_snapshot_uuid
 
 
 def task_runner(task: JobSchedule):
@@ -269,7 +271,17 @@ def task_runner(task: JobSchedule):
             task.write_to_db()
             return False
         if status == "Done":
-            process_snap_replicate_finish(task, snapshot)
+            new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+            if new_snapshot_uuid:
+                task.function_result = new_snapshot_uuid
+                task.status = JobSchedule.STATUS_DONE
+                task.function_params["end_time"] = int(time.time())
+                task.write_to_db()
+            else:
+                task.function_result = f"complete repl failed, retrying"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
             return True
 
 
