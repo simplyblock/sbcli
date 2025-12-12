@@ -22,10 +22,12 @@ def list(cluster: Cluster) -> List[TaskDTO]:
     parsed = json.loads(raw)
 
     return [
-        TaskDTO.from_model(JobSchedule(**{k: v for k, v in task.items() if k != "id"}))
+        TaskDTO.from_model(
+            JobSchedule(**{k: v for k, v in task.items() if k not in ("id", "uuid")})
+        )
         for task in parsed
     ]
-    
+
     # return [
     #     TaskDTO.from_model(JobSchedule(**task))
     #     for task
