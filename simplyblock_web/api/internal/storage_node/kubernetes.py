@@ -268,6 +268,8 @@ class SPDKParams(BaseModel):
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
+    socket: Optional[int] = Field(None, ge=0)
+    firewall_port: Optional[int] = Field(constants.FW_PORT_START)
     cluster_id: str
 
 
@@ -358,7 +360,7 @@ def spdk_process_start(body: SPDKParams):
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
-            'FW_PORT': constants.FW_PORT
+            'FW_PORT': body.firewall_port
         }
 
         if ubuntu_host:

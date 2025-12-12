@@ -144,6 +144,7 @@ class SPDKParams(BaseModel):
     cluster_mode: str
     cluster_id: str
     socket: Optional[int] = Field(None, ge=0)
+    firewall_port: int = Field(constants.FW_PORT_START)
 
 
 @api.post('/spdk_process_start', responses={
@@ -192,7 +193,7 @@ def spdk_process_start(body: SPDKParams):
             f"PCI_ALLOWED={ssd_pcie_list}",
             f"TOTAL_HP={total_mem_mib}",
             f"NSOCKET={body.socket}",
-            f"FW_PORT={constants.FW_PORT}",
+            f"FW_PORT={body.firewall_port}",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
