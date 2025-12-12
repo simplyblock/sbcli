@@ -23,7 +23,7 @@ def list(cluster: Cluster) -> List[TaskDTO]:
 
     return [
         TaskDTO.from_model(
-            JobSchedule(**{k: v for k, v in task.items() if k not in ("id", "uuid")})
+            JobSchedule(**{k: v for k, v in task.items() if k not in ("id", "uuid", "status")})
         )
         for task in parsed
     ]
