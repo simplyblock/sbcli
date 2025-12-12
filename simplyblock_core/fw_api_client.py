@@ -6,7 +6,6 @@ import logging
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
-from simplyblock_core import constants
 
 logger = logging.getLogger()
 
