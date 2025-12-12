@@ -644,7 +644,8 @@ def list_replication_tasks(cluster_id):
                 "Duration": duration,
                 "Offset": offset,
                 "Status": status,
-                "Replicated on node": snap.lvol.node_id,
+                "Result": task.function_result,
+                "Cluster ID": task.cluster_id,
             })
     return utils.print_table(data)
 
