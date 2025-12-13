@@ -2891,7 +2891,8 @@ class RunnerK8sLog:
             print("K8s log monitor thread stopped.")
 
 def _rid(n=6):
-    import string, random
+    import string
+    import random
     letters = string.ascii_uppercase
     digits = string.digits
     return random.choice(letters) + ''.join(random.choices(letters + digits, k=n-1))
