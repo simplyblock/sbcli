@@ -69,7 +69,9 @@ def device_set_state(device_id, state):
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
-            node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
+            remote_devices = storage_node_ops._connect_to_remote_devs(node)
+            node = db_controller.get_storage_node_by_id(node.get_id())
+            node.remote_devices = remote_devices
             node.write_to_db()
 
     distr_controller.send_dev_status_event(device, device.status)
