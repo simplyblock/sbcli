@@ -193,7 +193,6 @@ def process_snap_replicate_finish(task, snapshot):
 
     new_snapshot.write_to_db()
 
-
     # delete lvol object
     remote_lv.bdev_stack = []
     remote_lv.write_to_db()
@@ -282,7 +281,7 @@ def task_runner(task: JobSchedule):
                 task.function_params["end_time"] = int(time.time())
                 task.write_to_db()
             else:
-                task.function_result = f"complete repl failed, retrying"
+                task.function_result = "complete repl failed, retrying"
                 task.status = JobSchedule.STATUS_SUSPENDED
                 task.retry += 1
                 task.write_to_db()

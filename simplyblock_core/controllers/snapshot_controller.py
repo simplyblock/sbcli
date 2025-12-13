@@ -226,6 +226,7 @@ def add(lvol_id, snapshot_name):
                 snap.prev_snap_uuid = sn.get_id()
                 sn.write_to_db()
                 snap.write_to_db()
+                break
 
     snapshot_events.snapshot_create(snap)
     if lvol.do_replicate:
