@@ -3188,6 +3188,13 @@ def recreate_lvstore(snode, force=False):
             port_type = "tcp"
             if sec_node.active_rdma:
                 port_type = "udp"
+
+            ret = sec_node.wait_for_jm_rep_tasks_to_finish(snode.jm_vuid)
+            if not ret:
+                msg = f"JM replication task found for jm {snode.jm_vuid}"
+                logger.error(msg)
+                storage_events.jm_repl_tasks_found(sec_node, snode.jm_vuid)
+
             fw_api.firewall_set_port(snode.lvol_subsys_port, port_type, "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
 
