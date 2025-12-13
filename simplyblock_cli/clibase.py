@@ -656,6 +656,9 @@ class CLIWrapperBase:
     def snapshot__delete_replication_only(self, sub_command, args):
         return snapshot_controller.delete_replicated(args.snapshot_id)
 
+    def snapshot__get(self, sub_command, args):
+        return snapshot_controller.get(args.snapshot_id)
+
     def qos__add(self, sub_command, args):
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)
 

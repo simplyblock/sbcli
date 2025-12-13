@@ -124,17 +124,16 @@ def process_snap_replicate_finish(task, snapshot):
         org_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
         try:
             target_prev_snap = db.get_snapshot_by_id(org_snap.source_replicated_snap_uuid)
-        except KeyError:
-            logger.info(f"Snapshot {org_snap.source_replicated_snap_uuid} not found")
+        except KeyError as e:
+            logger.error(e)
     else:
-        snaps = db.get_snapshots(remote_snode.cluster_id)
-        for sn in snaps:
-            if sn.lvol.get_id() == snapshot.lvol.get_id():
-                try:
-                    target_prev_snap = db.get_snapshot_by_id(sn.target_replicated_snap_uuid)
-                    break
-                except KeyError:
-                    logger.info(f"Snapshot {sn.target_replicated_snap_uuid} not found")
+        if snapshot.prev_snap_uuid:
+            try:
+                prev_snap = db.get_snapshot_by_id(snapshot.prev_snap_uuid)
+                if prev_snap.target_replicated_snap_uuid:
+                    target_prev_snap = db.get_snapshot_by_id(prev_snap.target_replicated_snap_uuid)
+            except KeyError as e:
+                logger.error(e)
 
     # chain snaps on primary
     if target_prev_snap:
@@ -187,6 +186,11 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot.created_at = int(time.time())
     new_snapshot.source_replicated_snap_uuid = snapshot.uuid
     new_snapshot.status = SnapShot.STATUS_ONLINE
+    if target_prev_snap:
+        new_snapshot.prev_snap_uuid = target_prev_snap.get_id()
+        target_prev_snap.next_snap_uuid = new_snapshot_uuid
+        target_prev_snap.write_to_db()
+
     new_snapshot.write_to_db()
 
 

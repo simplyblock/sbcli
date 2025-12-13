@@ -32,3 +32,5 @@ class SnapShot(BaseModel):
     fabric: str = "tcp"
     target_replicated_snap_uuid: str = ""
     source_replicated_snap_uuid: str = ""
+    next_snap_uuid: str = ""
+    prev_snap_uuid: str = ""

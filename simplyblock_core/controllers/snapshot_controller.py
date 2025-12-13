@@ -1,4 +1,5 @@
 # coding=utf-8
+import json
 import logging as lg
 import time
 import uuid
@@ -218,7 +219,14 @@ def add(lvol_id, snapshot_name):
             snap.snap_ref_id = original_snap.get_id()
             snap.write_to_db(db_controller.kv_store)
 
-    logger.info("Done")
+    for sn in db_controller.get_snapshots(cluster.get_id()):
+        if sn.lvol.get_id() == lvol_id:
+            if not sn.next_snap_uuid:
+                sn.next_snap_uuid = snap.get_id()
+                snap.prev_snap_uuid = sn.get_id()
+                sn.write_to_db()
+                snap.write_to_db()
+
     snapshot_events.snapshot_create(snap)
     if lvol.do_replicate:
         task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
@@ -634,6 +642,10 @@ def list_replication_tasks(cluster_id):
             status = task.status
             if task.canceled:
                 status = "cancelled"
+            replicate_to = "target"
+            if "replicate_to_source" in task.function_params:
+                if task.function_params["replicate_to_source"] is True:
+                    replicate_to = "source"
             offset = 0
             if "offset" in task.function_params:
                 offset = task.function_params["offset"]
@@ -644,6 +656,7 @@ def list_replication_tasks(cluster_id):
                 "Duration": duration,
                 "Offset": offset,
                 "Status": status,
+                "Replicate to": replicate_to,
                 "Result": task.function_result,
                 "Cluster ID": task.cluster_id,
             })
@@ -670,3 +683,13 @@ def delete_replicated(snapshot_id):
         return False
 
     return True
+
+
+def get(snapshot_uuid):
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+    except KeyError:
+        logger.error(f"Snapshot not found {snapshot_uuid}")
+        return False
+
+    return json.dumps(snap.get_clean_dict(), indent=2)

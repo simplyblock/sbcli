@@ -766,6 +766,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__clone(subparser)
         self.init_snapshot__replication_status(subparser)
         self.init_snapshot__delete_replication_only(subparser)
+        self.init_snapshot__get(subparser)
 
 
     def init_snapshot__add(self, subparser):
@@ -799,6 +800,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_snapshot__delete_replication_only(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete-replication-only', 'Delete replicated version of a snapshot')
+        subcommand.add_argument('snapshot_id', help='Snapshot UUID', type=str)
+
+    def init_snapshot__get(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get', 'Gets a snapshot information')
         subcommand.add_argument('snapshot_id', help='Snapshot UUID', type=str)
 
 
@@ -1156,6 +1161,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__replication_status(sub_command, args)
                 elif sub_command in ['delete-replication-only']:
                     ret = self.snapshot__delete_replication_only(sub_command, args)
+                elif sub_command in ['get']:
+                    ret = self.snapshot__get(sub_command, args)
                 else:
                     self.parser.print_help()
 

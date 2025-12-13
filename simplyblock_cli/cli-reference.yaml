@@ -1929,6 +1929,13 @@ commands:
             help: "Snapshot UUID"
             dest: snapshot_id
             type: str
+      - name: get
+        help: "Gets a snapshot information"
+        arguments:
+          - name: "snapshot_id"
+            help: "Snapshot UUID"
+            dest: snapshot_id
+            type: str
   - name: "qos"
     help: "qos commands"
     weight: 700
