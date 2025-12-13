@@ -196,8 +196,9 @@ def check_node(snode, logger):
 
             if not node_remote_devices_check and cluster.status in [
                 Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+                remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(snode)
                 snode = db.get_storage_node_by_id(snode.get_id())
-                snode.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(snode)
+                snode.remote_jm_devices = remote_jm_devices
                 snode.write_to_db()
 
         lvstore_check = True

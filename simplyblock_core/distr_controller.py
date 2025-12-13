@@ -2,6 +2,7 @@
 import datetime
 import logging
 import re
+import threading
 
 from simplyblock_core import utils
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -26,6 +27,7 @@ def send_node_status_event(node, node_status, target_node=None):
     events = {"events": [node_status_event]}
     logger.debug(node_status_event)
     skipped_nodes = []
+    connect_threads = []
     if target_node:
         snodes = [target_node]
     else:
@@ -45,11 +47,14 @@ def send_node_status_event(node, node_status, target_node=None):
         if node_found_same_host:
             continue
         logger.info(f"Sending to: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=3, retry=1)
-        try:
-            rpc_client.distr_status_events_update(events)
-        except Exception:
-            logger.warning("Failed to send event update")
+        t = threading.Thread(
+            target=_send_event_to_node,
+            args=(node, events,))
+        connect_threads.append(t)
+        t.start()
+
+    for t in connect_threads:
+        t.join()
 
 
 def send_dev_status_event(device, status, target_node=None):
@@ -58,7 +63,7 @@ def send_dev_status_event(device, status, target_node=None):
     db_controller = DBController()
     storage_ID = device.cluster_device_order
     skipped_nodes = []
-
+    connect_threads = []
     if target_node:
         snodes = [db_controller.get_storage_node_by_id(target_node.get_id())]
     else:
@@ -68,8 +73,9 @@ def send_dev_status_event(device, status, target_node=None):
                 skipped_nodes.append(node)
 
     for node in snodes:
-        # if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        #     continue
+        if node.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+            logger.info(f"skipping node: {node.get_id()} with status: {node.status}")
+            continue
         node_found_same_host = False
         for n in skipped_nodes:
             if node.mgmt_ip == n.mgmt_ip:
@@ -96,10 +102,14 @@ def send_dev_status_event(device, status, target_node=None):
             "storage_ID": storage_ID,
             "status": dev_status}]}
         logger.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
-        try:
-            node.rpc_client(timeout=3, retry=1).distr_status_events_update(events)
-        except Exception:
-            logger.warning("Failed to send event update")
+        t = threading.Thread(
+            target=_send_event_to_node,
+            args=(node,events,))
+        connect_threads.append(t)
+        t.start()
+
+    for t in connect_threads:
+        t.join()
 
 
 def disconnect_device(device):
@@ -356,3 +366,11 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
             logger.error("Failed to send cluster map")
             return False
     return True
+
+
+def _send_event_to_node(node, events):
+    try:
+        node.rpc_client(timeout=1, retry=0).distr_status_events_update(events)
+    except Exception as e:
+        logger.warning("Failed to send event update")
+        logger.error(e)
