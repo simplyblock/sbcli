@@ -306,7 +306,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                 if err:
                     nqn = self.sbcli_utils.get_lvol_details(lvol_id=self.clone_mount_details[clone_name]["ID"])[0]["nqn"]
                     self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
-                    self.logger.info(f"[LFNG] connect clone error → cleanup")
+                    self.logger.info("[LFNG] connect clone error → cleanup")
                     self.sbcli_utils.delete_lvol(lvol_name=clone_name, max_attempt=20, skip_error=True)
                     sleep_n_sec(3)
                     del self.clone_mount_details[clone_name]
@@ -431,7 +431,6 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         return outage_type
 
     def restart_nodes_after_failover(self, outage_type):
-        node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
 
         self.logger.info(f"[LFNG] Recover outage={outage_type} node={self.current_outage_node}")
 

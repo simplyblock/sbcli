@@ -55,7 +55,7 @@ jobs:
       run: pip install .
 
     - name: Run tests
-      run: pytest --import-mode=importlib -v
+      run: pytest --import-mode=importlib --tb=short --capture=no
 
 
   lint:
