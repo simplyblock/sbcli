@@ -1880,6 +1880,11 @@ commands:
             dest: cluster_id
             type: str
             required: false
+          - name: "--with-details"
+            help: "List snapshots with replicate and chaining details"
+            dest: with_details
+            type: bool
+            action: store_true
       - name: delete
         help: "Deletes a snapshot"
         arguments:

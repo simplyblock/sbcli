@@ -247,14 +247,14 @@ def add(lvol_id, snapshot_name):
     return snap.uuid, False
 
 
-def list(all=False, cluster_id=None):
+def list(all=False, cluster_id=None, with_details=False):
     snaps = db_controller.get_snapshots(cluster_id)
     data = []
     for snap in snaps:
         logger.debug(snap)
         if snap.deleted is True and all is False:
             continue
-        data.append({
+        d = {
             "UUID": snap.uuid,
             "Name": snap.snap_name,
             "Size": utils.humanbytes(snap.used_size),
@@ -264,7 +264,13 @@ def list(all=False, cluster_id=None):
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
             "Health": snap.health_check,
             "Status": snap.status,
-        })
+        }
+        if with_details:
+            d["Replication target snap"] = snap.target_replicated_snap_uuid
+            d["Replication source snap"] = snap.source_replicated_snap_uuid
+            d["Rrev snap"] = snap.prev_snap_uuid
+            d["Next snap"] = snap.next_snap_uuid
+        data.append(d)
     return utils.print_table(data)
 
 

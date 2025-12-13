@@ -636,7 +636,7 @@ class CLIWrapperBase:
         return snapshot_id if not error else error
 
     def snapshot__list(self, sub_command, args):
-        return snapshot_controller.list(args.all, args.cluster_id)
+        return snapshot_controller.list(args.all, args.cluster_id, args.with_details)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)
