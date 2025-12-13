@@ -1025,11 +1025,11 @@ def delete_lvol(id_or_name, force_delete=False):
                 if not force_delete:
                     return False
 
+    transaction = db_controller.create_transaction()
     lvol = db_controller.get_lvol_by_id(lvol.get_id())
-    # set status
     old_status = lvol.status
     lvol.status = LVol.STATUS_IN_DELETION
-    lvol.write_to_db()
+    lvol.write_to_transaction(transaction)
     lvol_events.lvol_status_change(lvol, lvol.status, old_status)
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
@@ -1039,14 +1039,19 @@ def delete_lvol(id_or_name, force_delete=False):
             if snap.snap_ref_id:
                 ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
                 ref_snap.ref_count -= 1
-                ref_snap.write_to_db(db_controller.kv_store)
+                ref_snap.write_to_transaction(transaction)
             else:
                 snap.ref_count -= 1
-                snap.write_to_db(db_controller.kv_store)
+                snap.write_to_transaction(transaction)
             if snap.deleted is True:
                 snapshot_controller.delete(snap.get_id())
         except KeyError:
             pass # already deleted
+
+    ret = db_controller.commit_transaction(transaction)
+    if not ret:
+        logger.error("Failed to commit db transaction")
+        return False
 
     logger.info("Done")
     return True
@@ -1085,8 +1090,16 @@ def connect_lvol_to_pool(uuid):
             logger.error("RPC failed bdev_set_qos_limit")
             return False
 
-    lvol.write_to_db(db_controller.kv_store)
-    pool.write_to_db(db_controller.kv_store)
+    transaction = db_controller.create_transaction()
+
+    lvol.write_to_transaction(transaction)
+    pool.write_to_transaction(transaction)
+
+    ret = db_controller.commit_transaction(transaction)
+    if not ret:
+        logger.error("Failed to commit db transaction")
+        return False
+
     logger.info("Done")
     return True
 
@@ -1195,14 +1208,10 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
 
     data = []
 
-    snap_dict : dict[str, int] = {}
     for lvol in lvols:
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
-        cloned_snapped = lvol.cloned_from_snap
-        if cloned_snapped:
-            snap_dict[cloned_snapped] = snap_dict.get(cloned_snapped, 0) + 1
         size_used = 0
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
@@ -1229,11 +1238,6 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Mode": mode
         }
         data.append(lvol_data)
-
-    for snap, count in snap_dict.items():
-        ref_snap = db_controller.get_snapshot_by_id(snap)
-        ref_snap.ref_count = count
-        ref_snap.write_to_db(db_controller.kv_store)
 
     if is_json:
         return json.dumps(data, indent=2)
@@ -1624,52 +1628,6 @@ def get_io_stats(lvol_uuid, history, records_count=20, parse_sizes=True, with_si
 
 def migrate(lvol_id, node_id):
 
-    # lvol = db_controller.get_lvol_by_id(lvol_id)
-    # if not lvol:
-    #     logger.error(f"lvol not found: {lvol_id}")
-    #     return False
-    #
-    # old_node_id = lvol.node_id
-    # old_node = db_controller.get_storage_node_by_id(old_node_id)
-    # nodes = _get_next_3_nodes(old_node.cluster_id)
-    # if not nodes:
-    #     logger.error(f"No nodes found with enough resources to create the LVol")
-    #     return False
-    #
-    # if node_id:
-    #     nodes[0] = db_controller.get_storage_node_by_id(node_id)
-    #
-    # host_node = nodes[0]
-    # lvol.hostname = host_node.hostname
-    # lvol.node_id = host_node.get_id()
-    #
-    # if lvol.ha_type == 'single':
-    #     ret = add_lvol_on_node(lvol, host_node)
-    #     if not ret:
-    #         return ret
-    #
-    # elif lvol.ha_type == "ha":
-    #     three_nodes = nodes[:3]
-    #     nodes_ids = []
-    #     nodes_ips = []
-    #     for node in three_nodes:
-    #         nodes_ids.append(node.get_id())
-    #         port = 10000 + int(random.random() * 60000)
-    #         nodes_ips.append(f"{node.mgmt_ip}:{port}")
-    #
-    #     ha_address = ",".join(nodes_ips)
-    #     for index, node in enumerate(three_nodes):
-    #         ret = add_lvol_on_node(lvol, node, ha_address)
-    #         if not ret:
-    #             return ret
-    #     lvol.nodes = nodes_ids
-    #
-    # # host_node.lvols.append(lvol.uuid)
-    # # host_node.write_to_db(db_controller.kv_store)
-    # lvol.write_to_db(db_controller.kv_store)
-    #
-    # lvol_events.lvol_migrate(lvol, old_node_id, lvol.node_id)
-
     return True
 
 
@@ -1709,9 +1667,6 @@ def move(lvol_id, node_id, force=False):
                 for nodes_id in lvol.nodes:
                     delete_lvol_from_node(lvol_id, nodes_id, clear_data=False)
 
-            # remove from storage node
-            # src_node.lvols.remove(lvol_id)
-            # src_node.write_to_db(db_controller.kv_store)
         return True
     else:
         logger.error("Failed to migrate lvol")

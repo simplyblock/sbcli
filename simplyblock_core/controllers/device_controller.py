@@ -64,13 +64,18 @@ def device_set_state(device_id, state):
         device_events.device_status_change(device, device.status, device.previous_status)
 
     if state == NVMeDevice.STATUS_ONLINE:
+        transaction = db_controller.create_transaction()
         logger.info("Make other nodes connect to the node devices")
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
         for node in snodes:
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             node.remote_devices = storage_node_ops._connect_to_remote_devs(node)
-            node.write_to_db()
+            node.write_to_transaction(transaction)
+        ret = db_controller.commit_transaction(transaction)
+        if not ret:
+            logger.error("Failed to commit db transaction")
+            return False
 
     distr_controller.send_dev_status_event(device, device.status)
 
@@ -639,11 +644,18 @@ def add_device(device_id, add_migration_task=True):
 
     logger.info("Make other nodes connect to the node devices")
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    transaction = db_controller.create_transaction()
     for node in snodes:
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
         node.remote_devices = storage_node_ops._connect_to_remote_devs(node, force_connect_restarting_nodes=True)
-        node.write_to_db()
+        node.write_to_transaction(transaction)
+
+    ret = db_controller.commit_transaction(transaction)
+    if not ret:
+        logger.error("Failed to commit transaction")
+        return False
+
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node in snodes:
@@ -681,26 +693,20 @@ def set_jm_device_state(device_id, state):
         snode.write_to_db(db_controller.kv_store)
 
     if snode.enable_ha_jm and state == NVMeDevice.STATUS_ONLINE:
-        # rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5)
-        # jm_bdev = f"jm_{snode.get_id()}"
-        # subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
-        #
-        # for iface in snode.data_nics:
-        #     if iface.ip4_address:
-        #         ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-        #             subsystem_nqn, iface.ip4_address, "4420", True)
-        #         break
-
         # make other nodes connect to the new devices
         snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        transaction = db_controller.create_transaction()
         for node_index, node in enumerate(snodes):
             if node.status != StorageNode.STATUS_ONLINE:
                 continue
             logger.info(f"Connecting to node: {node.get_id()}")
             node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
-            node.write_to_db(db_controller.kv_store)
+            node.write_to_transaction(transaction)
             logger.info(f"connected to devices count: {len(node.remote_jm_devices)}")
-
+        ret = db_controller.commit_transaction(transaction)
+        if not ret:
+            logger.error("Failed to commit db transaction")
+            return False
     return True
 
 
