@@ -767,6 +767,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__replication_status(subparser)
         self.init_snapshot__delete_replication_only(subparser)
         self.init_snapshot__get(subparser)
+        if self.developer_mode:
+            self.init_snapshot__set(subparser)
 
 
     def init_snapshot__add(self, subparser):
@@ -805,6 +807,12 @@ class CLIWrapper(CLIWrapperBase):
     def init_snapshot__get(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get', 'Gets a snapshot information')
         subcommand.add_argument('snapshot_id', help='Snapshot UUID', type=str)
+
+    def init_snapshot__set(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set', 'set snapshot db value')
+        subcommand.add_argument('snapshot_id', help='snapshot id', type=str)
+        subcommand.add_argument('attr_name', help='attr_name', type=str)
+        subcommand.add_argument('attr_value', help='attr_value', type=str)
 
 
     def init_qos(self):
@@ -1163,6 +1171,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete_replication_only(sub_command, args)
                 elif sub_command in ['get']:
                     ret = self.snapshot__get(sub_command, args)
+                elif sub_command in ['set']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.snapshot__set(sub_command, args)
                 else:
                     self.parser.print_help()
 

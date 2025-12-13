@@ -220,6 +220,8 @@ def add(lvol_id, snapshot_name):
             snap.write_to_db(db_controller.kv_store)
 
     for sn in db_controller.get_snapshots(cluster.get_id()):
+        if sn.get_id() == snap.get_id():
+            continue
         if sn.lvol.get_id() == lvol_id:
             if not sn.next_snap_uuid:
                 sn.next_snap_uuid = snap.get_id()
@@ -694,3 +696,21 @@ def get(snapshot_uuid):
         return False
 
     return json.dumps(snap.get_clean_dict(), indent=2)
+
+
+def set(snapshot_uuid, attr, value) -> bool:
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+    except KeyError:
+        logger.error(f"Snapshot not found {snapshot_uuid}")
+        return False
+
+    if attr not in snap.get_attrs_map():
+        raise KeyError('Attribute not found')
+
+    value = snap.get_attrs_map()[attr]['type'](value)
+    logger.info(f"Setting {attr} to {value}")
+    setattr(snap, attr, value)
+    snap.write_to_db()
+    return True
+

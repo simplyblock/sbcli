@@ -1936,6 +1936,22 @@ commands:
             help: "Snapshot UUID"
             dest: snapshot_id
             type: str
+      - name: set
+        help: "set snapshot db value"
+        private: true
+        arguments:
+          - name: "snapshot_id"
+            help: "snapshot id"
+            dest: snapshot_id
+            type: str
+          - name: "attr_name"
+            help: "attr_name"
+            dest: attr_name
+            type: str
+          - name: "attr_value"
+            help: "attr_value"
+            dest: attr_value
+            type: str
   - name: "qos"
     help: "qos commands"
     weight: 700
