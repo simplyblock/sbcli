@@ -155,7 +155,11 @@ class StorageNodeDTO(BaseModel):
     status: str
     hostname: str
     cpu: int
-    memory: int
+    spdk_mem: int
+    lvols: int
+    rpc_port: int
+    lvol_subsys_port: int
+    nvmf_port: int
     mgmt_ip: IPv4Address
     health_check: bool
 
@@ -166,7 +170,11 @@ class StorageNodeDTO(BaseModel):
             status=model.status,
             hostname=model.hostname,
             cpu=model.cpu,
-            memory=model.memory,
+            spdk_mem=model.spdk_mem,
+            lvols=model.lvols,
+            rpc_port=model.rpc_port,
+            lvol_subsys_port=model.lvol_subsys_port,
+            nvmf_port=model.nvmf_port,
             mgmt_ip=IPv4Address(model.mgmt_ip),
             health_check=model.health_check,
         )
