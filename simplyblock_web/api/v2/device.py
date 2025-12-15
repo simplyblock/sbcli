@@ -18,10 +18,14 @@ db = DBController()
 
 @api.get('/', name='clusters:storage_nodes:devices:list')
 def list(cluster: Cluster, storage_node: StorageNode) -> List[DeviceDTO]:
-    return [
-        DeviceDTO.from_model(device)
-        for device in storage_node.nvme_devices
-    ]
+    data = []
+    for device in storage_node.nvme_devices:
+        stat_obj = None
+        ret = db.get_device_stats(device, 1)
+        if ret:
+            stat_obj = ret[0]
+        data.append(DeviceDTO.from_model(device, stat_obj))
+    return data
 
 instance_api = APIRouter(prefix='/{device_id}')
 
@@ -38,7 +42,11 @@ Device = Annotated[NVMeDevice, Depends(_lookup_device)]
 
 @instance_api.get('/', name='clusters:storage_nodes:devices:detail')
 def get(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceDTO:
-    return DeviceDTO.from_model(device)
+    stat_obj = None
+    ret = db.get_device_stats(device, 1)
+    if ret:
+        stat_obj = ret[0]
+    return DeviceDTO.from_model(device, stat_obj)
 
 
 @instance_api.delete('/', name='clusters:storage_nodes:devices:delete', status_code=204, responses={204: {"content": None}})

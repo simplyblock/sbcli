@@ -12,10 +12,31 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.models.stats import NodeStatObject
+from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.storage_node import StorageNode
 
 from . import util
+
+
+class CapacityStatDTO(BaseModel):
+    date: int
+    size_total: int
+    size_prov: int
+    size_used: int
+    size_free: int
+    size_util: int
+
+    @staticmethod
+    def from_model(model: StatsObject):
+        return CapacityStatDTO(
+            date=model.date,
+            size_total=model.size_total,
+            size_prov=model.size_prov,
+            size_used=model.size_used,
+            size_free=model.size_free,
+            size_util=model.size_util,
+        )
+
 
 
 class ClusterDTO(BaseModel):
@@ -34,9 +55,10 @@ class ClusterDTO(BaseModel):
     node_affinity: bool
     anti_affinity: bool
     secret: str
+    capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: Cluster):
+    def from_model(model: Cluster, stat_obj: Optional[StatsObject]=None):
         return ClusterDTO(
             id=UUID(model.get_id()),
             name=model.cluster_name,
@@ -53,6 +75,7 @@ class ClusterDTO(BaseModel):
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
             secret=model.secret,
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
         )
 
 
@@ -66,9 +89,10 @@ class DeviceDTO(BaseModel):
     nvmf_ips: List[IPv4Address]
     nvmf_nqn: str = ""
     nvmf_port: int = 0
+    capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: NVMeDevice):
+    def from_model(model: NVMeDevice, stat_obj: Optional[StatsObject]=None):
         return DeviceDTO(
             id=UUID(model.get_id()),
             status=model.status,
@@ -79,6 +103,7 @@ class DeviceDTO(BaseModel):
             nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(',')],
             nvmf_nqn=model.nvmf_nqn,
             nvmf_port=model.nvmf_port,
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
         )
 
 
@@ -108,9 +133,10 @@ class StoragePoolDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
+    capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: Pool):
+    def from_model(model: Pool, stat_obj: Optional[StatsObject]=None):
         return StoragePoolDTO(
             id=UUID(model.get_id()),
             name=model.pool_name,
@@ -121,6 +147,7 @@ class StoragePoolDTO(BaseModel):
             max_rw_mbytes=model.max_rw_mbytes_per_sec,
             max_r_mbytes=model.max_r_mbytes_per_sec,
             max_w_mbytes=model.max_w_mbytes_per_sec,
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
         )
 
 
@@ -151,26 +178,6 @@ class SnapshotDTO(BaseModel):
         )
 
 
-class CapacityStatDTO(BaseModel):
-    date: int
-    size_total: int
-    size_prov: int
-    size_used: int
-    size_free: int
-    size_util: int
-
-    @staticmethod
-    def from_model(model: NodeStatObject):
-        return CapacityStatDTO(
-            date=model.date,
-            size_total=model.size_total,
-            size_prov=model.size_prov,
-            size_used=model.size_used,
-            size_free=model.size_free,
-            size_util=model.size_util,
-        )
-
-
 class StorageNodeDTO(BaseModel):
     uuid: UUID
     status: str
@@ -180,14 +187,14 @@ class StorageNodeDTO(BaseModel):
     capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: StorageNode, node_stat_obj: Optional[NodeStatObject]=None):
+    def from_model(model: StorageNode, stat_obj: Optional[StatsObject]=None):
         return StorageNodeDTO(
             uuid=UUID(model.get_id()),
             status=model.status,
             mgmt_ip=IPv4Address(model.mgmt_ip),
             health_check=model.health_check,
             online_devices=f"{len(model.nvme_devices)}/{len([d for d in model.nvme_devices if d.status=='online'])}",
-            capacity=CapacityStatDTO.from_model(node_stat_obj if node_stat_obj else NodeStatObject()),
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
         )
 
 
@@ -231,9 +238,10 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
+    capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: LVol, request: Request, cluster_id: str):
+    def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None):
         return VolumeDTO(
             id=UUID(model.get_id()),
             name=model.lvol_name,
@@ -266,4 +274,5 @@ class VolumeDTO(BaseModel):
             max_rw_mbytes=model.rw_mbytes_per_sec,
             max_r_mbytes=model.r_mbytes_per_sec,
             max_w_mbytes=model.w_mbytes_per_sec,
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
         )
