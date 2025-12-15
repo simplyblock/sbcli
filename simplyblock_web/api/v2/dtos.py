@@ -153,6 +153,9 @@ class SnapshotDTO(BaseModel):
 class StorageNodeDTO(BaseModel):
     uuid: UUID
     status: str
+    hostname: str
+    cpu: int
+    memory: int
     mgmt_ip: IPv4Address
     health_check: bool
 
@@ -161,6 +164,9 @@ class StorageNodeDTO(BaseModel):
         return StorageNodeDTO(
             uuid=UUID(model.get_id()),
             status=model.status,
+            hostname=model.hostname,
+            cpu=model.cpu,
+            memory=model.memory,
             mgmt_ip=IPv4Address(model.mgmt_ip),
             health_check=model.health_check,
         )
