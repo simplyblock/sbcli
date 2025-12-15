@@ -22,11 +22,14 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-nodes:list')
 def list(cluster: Cluster) -> List[StorageNodeDTO]:
-    return [
-        StorageNodeDTO.from_model(storage_node)
-        for storage_node
-        in db.get_storage_nodes_by_cluster_id(cluster.get_id())
-    ]
+    data = []
+    for storage_node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        node_stat_obj = None
+        ret = db.get_node_capacity(storage_node, 1)
+        if ret:
+            node_stat_obj = ret[0]
+        data.append(StorageNodeDTO.from_model(storage_node, node_stat_obj))
+    return data
 
 
 class StorageNodeParams(BaseModel):
@@ -86,7 +89,11 @@ StorageNode = Annotated[StorageNodeModel, Depends(_lookup_storage_node)]
 
 @instance_api.get('/', name='clusters:storage-nodes:detail')
 def get(cluster: Cluster, storage_node: StorageNode):
-    return StorageNodeDTO.from_model(storage_node)
+    node_stat_obj = None
+    ret = db.get_node_capacity(storage_node, 1)
+    if ret:
+        node_stat_obj = ret[0]
+    return StorageNodeDTO.from_model(storage_node, node_stat_obj)
 
 
 @instance_api.delete('/', name='clusters:storage-nodes:delete')

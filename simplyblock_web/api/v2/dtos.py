@@ -12,6 +12,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.stats import NodeStatObject
 from simplyblock_core.models.storage_node import StorageNode
 
 from . import util
@@ -150,21 +151,43 @@ class SnapshotDTO(BaseModel):
         )
 
 
+class CapacityStatDTO(BaseModel):
+    date: int
+    size_total: int
+    size_prov: int
+    size_used: int
+    size_free: int
+    size_util: int
+
+    @staticmethod
+    def from_model(model: NodeStatObject):
+        return CapacityStatDTO(
+            date=model.date,
+            size_total=model.size_total,
+            size_prov=model.size_prov,
+            size_used=model.size_used,
+            size_free=model.size_free,
+            size_util=model.size_util,
+        )
+
+
 class StorageNodeDTO(BaseModel):
     uuid: UUID
     status: str
     mgmt_ip: IPv4Address
     health_check: bool
     online_devices: str
+    capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: StorageNode):
+    def from_model(model: StorageNode, node_stat_obj: NodeStatObject):
         return StorageNodeDTO(
             uuid=UUID(model.get_id()),
             status=model.status,
             mgmt_ip=IPv4Address(model.mgmt_ip),
             health_check=model.health_check,
             online_devices=f"{len(model.nvme_devices)}/{len([d for d in model.nvme_devices if d.status=='online'])}",
+            capacity=CapacityStatDTO.from_model(node_stat_obj) if node_stat_obj else NodeStatObject(),
         )
 
 
