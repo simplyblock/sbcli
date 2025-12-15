@@ -32,9 +32,9 @@ def list(cluster: Cluster) -> List[StorageNodeDTO]:
 class StorageNodeParams(BaseModel):
     node_address: Annotated[str, Field(web_utils.IP_PATTERN)]
     interface_name: str
-    max_snapshots: int = Field(500)
-    ha_jm: bool = Field(True)
-    test_device: bool = Field(False)
+    max_snapshots: Optional[int] = Field(500)
+    ha_jm: Optional[bool] = Field(True)
+    test_device: Optional[bool] = Field(False)
     spdk_image: Optional[str] = Field("")
     spdk_debug: bool = Field(False)
     data_nics: List[str] = Field([])
