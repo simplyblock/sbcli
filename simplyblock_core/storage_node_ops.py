@@ -1108,8 +1108,6 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         snode.active_tcp=active_tcp
         snode.active_rdma=active_rdma
 
-        if 'cpu_count' in node_info:
-            snode.cpu = node_info['cpu_count']
         if 'cpu_hz' in node_info:
             snode.cpu_hz = node_info['cpu_hz']
         if 'memory' in node_info:
@@ -1117,6 +1115,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         if 'hugepages' in node_info:
             snode.hugepages = node_info['hugepages']
 
+        snode.cpu = len(utils.hexa_to_cpu_list(spdk_cpu_mask))
         snode.l_cores = l_cores or ""
         snode.spdk_cpu_mask = spdk_cpu_mask or ""
         snode.spdk_mem = minimum_hp_memory

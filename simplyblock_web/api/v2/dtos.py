@@ -162,6 +162,7 @@ class StorageNodeDTO(BaseModel):
     nvmf_port: int
     mgmt_ip: IPv4Address
     health_check: bool
+    online_devices: str
 
     @staticmethod
     def from_model(model: StorageNode):
@@ -177,6 +178,7 @@ class StorageNodeDTO(BaseModel):
             nvmf_port=model.nvmf_port,
             mgmt_ip=IPv4Address(model.mgmt_ip),
             health_check=model.health_check,
+            online_devices=f"{len(model.nvme_devices)}/{len([d for d in model.nvme_devices if d.status=='online'])}",
         )
 
 
