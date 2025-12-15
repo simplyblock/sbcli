@@ -20,12 +20,15 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-pools:list')
 def list(cluster: Cluster) -> List[StoragePoolDTO]:
-    return [
-        StoragePoolDTO.from_model(pool)
-        for pool
-        in db.get_pools()
-        if pool.cluster_id == cluster.get_id()
-    ]
+    data = []
+    for pool in db.get_pools():
+        if pool.cluster_id == cluster.get_id():
+            stat_obj = None
+            ret = db.get_pool_stats(pool, 1)
+            if ret:
+                stat_obj = ret[0]
+            data.append(StoragePoolDTO.from_model(pool, stat_obj))
+    return data
 
 
 class StoragePoolParams(BaseModel):
@@ -73,7 +76,11 @@ StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
 
 @instance_api.get('/', name='clusters:storage-pools:detail')
 def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
-    return StoragePoolDTO.from_model(pool)
+    stat_obj = None
+    ret = db.get_pool_stats(pool, 1)
+    if ret:
+        stat_obj = ret[0]
+    return StoragePoolDTO.from_model(pool, stat_obj)
 
 
 @instance_api.delete('/', name='clusters:storage-pools:delete', status_code=204, responses={204: {"content": None}})

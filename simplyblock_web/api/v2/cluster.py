@@ -48,12 +48,14 @@ class ClusterParams(BaseModel):
 
 @api.get('/', name='clusters:list')
 def list() -> List[ClusterDTO]:
-    return [
-        ClusterDTO.from_model(cluster)
-        for cluster
-        in db.get_clusters()
-    ]
-
+    data = []
+    for cluster in db.get_clusters():
+        stat_obj = None
+        ret = db.get_cluster_capacity(cluster, 1)
+        if ret:
+            stat_obj = ret[0]
+        data.append(ClusterDTO.from_model(cluster, stat_obj))
+    return data
 
 @api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
 def add(request: Request, parameters: ClusterParams):
@@ -80,7 +82,11 @@ Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
 
 @instance_api.get('/', name='clusters:detail')
 def get(cluster: Cluster) -> ClusterDTO:
-    return ClusterDTO.from_model(cluster)
+    stat_obj = None
+    ret = db.get_cluster_capacity(cluster, 1)
+    if ret:
+        stat_obj = ret[0]
+    return ClusterDTO.from_model(cluster, stat_obj)
 
 
 class UpdatableClusterParameters(BaseModel):
