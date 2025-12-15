@@ -180,14 +180,14 @@ class StorageNodeDTO(BaseModel):
     capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: StorageNode, node_stat_obj: NodeStatObject):
+    def from_model(model: StorageNode, node_stat_obj: Optional[NodeStatObject]=None):
         return StorageNodeDTO(
             uuid=UUID(model.get_id()),
             status=model.status,
             mgmt_ip=IPv4Address(model.mgmt_ip),
             health_check=model.health_check,
             online_devices=f"{len(model.nvme_devices)}/{len([d for d in model.nvme_devices if d.status=='online'])}",
-            capacity=CapacityStatDTO.from_model(node_stat_obj) if node_stat_obj else NodeStatObject(),
+            capacity=CapacityStatDTO.from_model(node_stat_obj if node_stat_obj else NodeStatObject()),
         )
 
 
