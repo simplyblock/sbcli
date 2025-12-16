@@ -477,6 +477,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cluster.db_connection = fdb_cluster_string
         if monitoring_secret:
             cluster.grafana_secret = monitoring_secret
+        elif enable_monitoring != "true":
+            cluster.grafana_secret = ""
         else:
             raise Exception("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
