@@ -1771,14 +1771,27 @@ def replication_start(lvol_id):
 
     lvol.do_replicate = True
     if not lvol.replication_node_id:
+        excluded_nodes = []
+        if lvol.cloned_from_snap:
+            lvol_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            if lvol_snap.source_replicated_snap_uuid:
+                org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
+                excluded_nodes.append(org_snap.lvol.node_id)
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         if not cluster.snapshot_replication_target_cluster:
             logger.error(f"Cluster: {snode.cluster_id} not replicated")
             return False
         random_nodes = _get_next_3_nodes(cluster.snapshot_replication_target_cluster, lvol.size)
-        lvol.replication_node_id = random_nodes[0].get_id()
-    lvol.write_to_db()
+        for r_node in random_nodes:
+            if r_node.get_id() not in excluded_nodes:
+                logger.info(f"Replicating on node: {r_node.get_id()}")
+                lvol.replication_node_id = r_node.get_id()
+                lvol.write_to_db()
+                break
+        if not lvol.replication_node_id:
+            logger.error(f"Replication node not found for lvol: {lvol.get_id()}")
+            return False
     logger.info("Setting LVol do_replicate: True")
 
     for snap in db_controller.get_snapshots():
