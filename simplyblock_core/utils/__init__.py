@@ -198,16 +198,8 @@ def get_k8s_node_ip():
         logger.error("No mgmt nodes was found in the cluster!")
         return False
 
-    mgmt_ips = [node.mgmt_ip for node in nodes]
-
-    for ip in mgmt_ips:
-        try:
-            with socket.create_connection((ip, 10250), timeout=2):
-                return ip
-        except Exception as e:
-            print(e)
-            raise e
-    return False
+    for node in nodes:
+        return node.mgmt_ip
 
 
 def dict_agg(data, mean=False, keys=None):

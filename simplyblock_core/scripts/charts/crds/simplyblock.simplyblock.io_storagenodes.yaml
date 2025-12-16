@@ -39,6 +39,13 @@ spec:
           spec:
             description: spec defines the desired state of StorageNode
             properties:
+              action:
+                enum:
+                - shutdown
+                - restart
+                - suspend
+                - resume
+                type: string
               addPcieToAllowList:
                 description: restart params
                 items:
@@ -63,15 +70,11 @@ spec:
                 type: string
               force:
                 type: boolean
-              fullPageUnmap:
-                type: boolean
               haJM:
                 type: boolean
               haJmCount:
                 format: int32
                 type: integer
-              includeStats:
-                type: boolean
               jmPercent:
                 format: int32
                 type: integer
@@ -80,12 +83,12 @@ spec:
                 type: integer
               maxSize:
                 type: string
-              maxSnapshots:
-                format: int32
-                type: integer
               mgmtIfc:
                 type: string
               nodeAddr:
+                type: string
+              nodeUUID:
+                description: NodeUUID is required when action is specified
                 type: string
               nodesPerSocket:
                 format: int32
@@ -112,11 +115,6 @@ spec:
                 type: boolean
               spdkImage:
                 type: string
-              statsHistoryInSeconds:
-                format: int32
-                type: integer
-              testDevice:
-                type: boolean
               useSeparateJournalDevice:
                 type: boolean
               workerNodes:
@@ -124,37 +122,76 @@ spec:
                   type: string
                 type: array
             required:
-            - clusterImage
             - clusterName
-            - maxLVol
-            - workerNodes
             type: object
           status:
             description: status defines the observed state of StorageNode
             properties:
+              actionStatus:
+                properties:
+                  action:
+                    type: string
+                  message:
+                    type: string
+                  nodeUUID:
+                    type: string
+                  state:
+                    type: string
+                  updatedAt:
+                    format: date-time
+                    type: string
+                type: object
               nodes:
                 items:
                   properties:
+                    cpu:
+                      format: int32
+                      type: integer
+                    devices:
+                      type: string
                     health:
                       type: string
                     hostname:
                       type: string
+                    lvol_port:
+                      format: int32
+                      type: integer
+                    memory:
+                      format: int32
+                      type: integer
                     mgmtIp:
                       type: string
-                    state:
+                    nvmf_port:
+                      format: int32
+                      type: integer
+                    rpc_port:
+                      format: int32
+                      type: integer
+                    status:
                       type: string
                     uptime:
-                      description: "\tDevices  *DeviceInfo   `json:\"devices,omitempty\"`\n\tCapacity
-                        *CapacityInfo `json:\"capacity,omitempty\"`"
+                      description: "\tCapacity *CapacityInfo `json:\"capacity,omitempty\"`"
                       type: string
                     uuid:
                       type: string
+                    volumes:
+                      format: int32
+                      type: integer
                   type: object
                 type: array
             type: object
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: nodeUUID is required when action is specified
+          rule: '!(has(self.spec.action) && self.spec.action != "" && (!has(self.spec.nodeUUID)
+            || self.spec.nodeUUID == ""))'
+        - message: clusterImage, maxLVol, and workerNodes are required when action
+            is not specified
+          rule: (has(self.spec.action) && self.spec.action != "") || (has(self.spec.clusterImage)
+            && self.spec.clusterImage != "" && has(self.spec.maxLVol) && has(self.spec.workerNodes)
+            && size(self.spec.workerNodes) > 0)
     served: true
     storage: true
     subresources:

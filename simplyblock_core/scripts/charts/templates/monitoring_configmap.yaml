@@ -24,7 +24,6 @@ data:
           username:
           password:
 
-{{- if .Values.monitoring.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -38,6 +37,7 @@ data:
     type: FILESYSTEM
     config:
       directory: /mnt/thanos
+{{- if .Values.monitoring.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap

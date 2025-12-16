@@ -46,6 +46,7 @@ spec:
               nodeUUID:
                 type: string
               statsHistoryInSeconds:
+                format: int32
                 type: integer
             required:
             - clusterName

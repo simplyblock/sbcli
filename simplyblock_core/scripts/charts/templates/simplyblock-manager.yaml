@@ -23,7 +23,7 @@ spec:
         fsGroup: 65532
       serviceAccountName: simplyblock-manager
       containers:
-        - image: simplyblock/simplyblock-manager:main
+        - image: simplyblock/simplyblock-manager:improve_cr_status
           imagePullPolicy: Always
           name: manager
           env:

@@ -71,20 +71,14 @@ spec:
                 type: string
               includeEventLog:
                 type: boolean
-              includeStats:
-                type: boolean
               inflightIOThreshold:
                 format: int32
                 type: integer
               isSingleNode:
                 type: boolean
-              logDelInterval:
-                type: string
               maxQueueSize:
                 format: int32
                 type: integer
-              metricsRetentionPeriod:
-                type: string
               mgmtIfc:
                 description: Create-only
                 type: string
@@ -101,9 +95,6 @@ spec:
                 description: Updatable
                 type: string
               qpairCount:
-                format: int32
-                type: integer
-              statsHistoryInSeconds:
                 format: int32
                 type: integer
               strictNodeAntiAffinity:
@@ -133,14 +124,8 @@ spec:
               created:
                 format: date-time
                 type: string
-              health:
-                type: boolean
               lastUpdated:
                 format: date-time
-                type: string
-              message:
-                type: string
-              mgmtIp:
                 type: string
               mgmtNodes:
                 format: int32
@@ -149,11 +134,16 @@ spec:
                 type: boolean
               secretName:
                 type: string
-              state:
+              status:
                 type: string
               storageNodes:
                 format: int32
                 type: integer
+            required:
+            - UUID
+            - clusterName
+            - rebalancing
+            - status
             type: object
         required:
         - spec
