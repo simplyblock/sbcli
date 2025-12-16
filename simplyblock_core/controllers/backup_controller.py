@@ -20,7 +20,7 @@ def __get_fdb_cont():
         return False
     node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
     for container in node_docker.containers.list():
-        if container.name.startswith("app_fdb-server"):
+        if container.name.startswith("app_fdb-server"): # type: ignore[union-attr]
             return container
 
 
