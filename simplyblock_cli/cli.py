@@ -28,6 +28,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_pool()
         self.init_snapshot()
         self.init_qos()
+        self.init_backup()
         super().__init__()
 
     def init_storage_node(self):
@@ -795,6 +796,29 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster UUID', type=str, default='')
 
 
+    def init_backup(self):
+        subparser = self.add_command('backup', 'FDB Backup operations')
+        self.init_backup__create(subparser)
+        self.init_backup__list(subparser)
+        self.init_backup__status(subparser)
+        self.init_backup__restore(subparser)
+
+
+    def init_backup__create(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'create', 'Creates an fdb backup')
+        argument = subcommand.add_argument('--tag-name', help='backup tag name', type=str, default='', dest='tag_name', required=False)
+
+    def init_backup__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'Lists all fdb backups')
+
+    def init_backup__status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'status', 'get backup status')
+
+    def init_backup__restore(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'restore', 'restore a backup')
+        subcommand.add_argument('name', help='backup class name', type=str)
+
+
     def run(self):
         args = self.parser.parse_args()
         if args.debug:
@@ -1124,6 +1148,19 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.qos__list(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.qos__delete(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['backup']:
+                sub_command = args_dict['backup']
+                if sub_command in ['create']:
+                    ret = self.backup__create(sub_command, args)
+                elif sub_command in ['list']:
+                    ret = self.backup__list(sub_command, args)
+                elif sub_command in ['status']:
+                    ret = self.backup__status(sub_command, args)
+                elif sub_command in ['restore']:
+                    ret = self.backup__restore(sub_command, args)
                 else:
                     self.parser.print_help()
 

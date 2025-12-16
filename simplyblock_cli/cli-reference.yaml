@@ -1947,3 +1947,27 @@ commands:
             type: str
             required: false
             default: ""
+  - name: "backup"
+    help: "FDB Backup operations"
+    weight: 800
+    subcommands:
+      - name: create
+        help: "Creates an fdb backup"
+        arguments:
+          - name: "--tag-name"
+            help: "backup tag name"
+            dest: tag_name
+            type: str
+            required: false
+            default: ""
+      - name: list
+        help: "Lists all fdb backups"
+      - name: status
+        help: "get backup status"
+      - name: restore
+        help: "restore a backup"
+        arguments:
+          - name: "name"
+            help: "backup class name"
+            dest: name
+            type: str
