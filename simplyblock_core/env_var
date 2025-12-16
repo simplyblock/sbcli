@@ -2,4 +2,4 @@ SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
 SIMPLY_BLOCK_VERSION=19.2.30
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:R25.10-Hotfix-vela
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.10-Hotfix-3b099337
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:R25.10-Hotfix-0fc864b4
