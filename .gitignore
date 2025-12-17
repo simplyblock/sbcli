@@ -13,3 +13,9 @@ dist
 .ruff_cache
 .env
 .tox
+
+# Ignore charts directory
+simplyblock_core/scripts/charts/charts/
+
+# Ignore Helm requirements lock file
+simplyblock_core/scripts/charts/requirements.lock

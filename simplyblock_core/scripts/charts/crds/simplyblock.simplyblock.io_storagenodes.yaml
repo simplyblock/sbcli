@@ -144,6 +144,24 @@ spec:
               nodes:
                 items:
                   properties:
+                    capacity:
+                      properties:
+                        sizeFree:
+                          format: int64
+                          type: integer
+                        sizeProv:
+                          format: int64
+                          type: integer
+                        sizeTotal:
+                          format: int64
+                          type: integer
+                        sizeUsed:
+                          format: int64
+                          type: integer
+                        sizeUtil:
+                          format: int64
+                          type: integer
+                      type: object
                     cpu:
                       format: int32
                       type: integer
@@ -170,7 +188,6 @@ spec:
                     status:
                       type: string
                     uptime:
-                      description: "\tCapacity *CapacityInfo `json:\"capacity,omitempty\"`"
                       type: string
                     uuid:
                       type: string

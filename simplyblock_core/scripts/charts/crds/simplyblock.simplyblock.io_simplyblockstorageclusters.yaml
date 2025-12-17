@@ -117,6 +117,24 @@ spec:
                 type: string
               UUID:
                 type: string
+              capacity:
+                properties:
+                  sizeFree:
+                    format: int64
+                    type: integer
+                  sizeProv:
+                    format: int64
+                    type: integer
+                  sizeTotal:
+                    format: int64
+                    type: integer
+                  sizeUsed:
+                    format: int64
+                    type: integer
+                  sizeUtil:
+                    format: int64
+                    type: integer
+                type: object
               clusterName:
                 type: string
               configured:
