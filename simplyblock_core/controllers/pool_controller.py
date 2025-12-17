@@ -23,7 +23,8 @@ def _generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id, qos_host=None):
+def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id,
+                 cr_name, cr_namespace, cr_plural, qos_host=None):
     db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
@@ -71,6 +72,9 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.max_rw_mbytes_per_sec = max_rw_mbytes
     pool.max_r_mbytes_per_sec = max_r_mbytes
     pool.max_w_mbytes_per_sec = max_w_mbytes
+    pool.cr_name = cr_name
+    pool.cr_namespace = cr_namespace
+    pool.cr_plural = cr_plural
     if pool.has_qos() and not qos_host:
         next_nodes = lvol_controller._get_next_3_nodes(cluster_id)
         if next_nodes:

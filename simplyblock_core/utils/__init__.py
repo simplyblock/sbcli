@@ -1929,6 +1929,43 @@ def load_kube_config_with_fallback():
     except Exception:
         config.load_kube_config()
 
+def patch_cr_status(
+    *,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str,
+    name: str,
+    status_patch: dict,
+):
+    """
+    Patch the status subresource of a Custom Resource.
+
+    status_patch example:
+        {"<KEY>": "<VALUE", "<KEY>": <VALUE>}
+    """
+
+    load_kube_config_with_fallback()
+
+    api = client.CustomObjectsApi()
+
+    body = {
+        "status": status_patch
+    }
+
+    try:
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body=body,
+        )
+    except ApiException as e:
+        raise RuntimeError(
+            f"Failed to patch status for {name}: {e.reason} {e.body}"
+        )
 
 def get_node_name_by_ip(target_ip: str) -> str:
     load_kube_config_with_fallback()

@@ -835,8 +835,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
-             namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3):
+             namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
+             id_device_by_nqn=False, partition_size="", ha_jm_count=3):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1086,6 +1086,9 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         snode.cloud_name = cloud_instance['cloud'] or ""
 
         snode.namespace = namespace
+        snode.cr_name = cr_name
+        snode.cr_namespace = cr_namespace
+        snode.cr_plural = cr_plural
         snode.ssd_pcie = ssd_pcie
         snode.hostname = hostname
         snode.host_nqn = subsystem_nqn

@@ -15,6 +15,9 @@ class BaseModel(object):
     id: str = ""
     uuid: str = ""
     name: str = ""
+    cr_name: str = ""
+    cr_namespace: str = ""
+    cr_plural: str = ""
     status: str = ""
     deleted: bool = False
     updated_at: str = ""
