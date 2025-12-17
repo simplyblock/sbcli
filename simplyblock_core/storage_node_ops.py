@@ -3465,12 +3465,12 @@ def get_node_jm_names(current_node, remote_node=None):
                     jm_list.append(remote_node.jm_device.jm_bdev)
                     continue
                 for jm_dev in remote_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id:
+                    if jm_dev.get_id() == jm_id and jm_dev.remote_bdev:
                         jm_list.append(jm_dev.remote_bdev)
                         break
             else:
                 for jm_dev in current_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id:
+                    if jm_dev.get_id() == jm_id and jm_dev.remote_bdev:
                         jm_list.append(jm_dev.remote_bdev)
                         break
     return jm_list[:current_node.ha_jm_count]
