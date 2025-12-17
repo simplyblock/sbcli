@@ -1,8 +1,11 @@
+import uuid
 from typing import ContextManager
 
 import pytest
 
-from simplyblock_core import utils
+from simplyblock_core import utils, storage_node_ops
+from simplyblock_core.models.nvme_device import JMDevice, RemoteJMDevice
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import helpers, parse_thread_siblings_list
 
 
@@ -146,3 +149,45 @@ def test_parse_thread_siblings_list(input, expected):
             parse_thread_siblings_list(input)
     else:
         assert parse_thread_siblings_list(input) == expected
+
+
+
+
+def test_get_node_jm_names():
+
+    node_1_jm = JMDevice()
+    node_1_jm.uuid = "node_1_jm_id"
+    node_1_jm.jm_bdev = "node_1_jm"
+
+    node_2_jm = JMDevice()
+    node_2_jm.uuid = "node_2_jm_id"
+    node_2_jm.jm_bdev = "node_2_jm"
+
+    node_3_jm = JMDevice()
+    node_3_jm.uuid = "node_3_jm_id"
+    node_3_jm.jm_bdev = "node_3_jm"
+
+    node_4_jm = JMDevice()
+    node_4_jm.uuid = "node_4_jm_id"
+    node_4_jm.jm_bdev = "node_4_jm"
+
+    node_1 = StorageNode()
+    node_1.uuid = str(uuid.uuid4())
+    node_1.enable_ha_jm = True
+    node_1.ha_jm_count = 4
+    node_1.jm_device = node_1_jm
+    node_1.jm_ids = ["node_2_jm_id", "node_3_jm_id", "node_4_jm_id"]
+
+    remote_node = StorageNode()
+    remote_node.uuid = str(uuid.uuid4())
+    remote_node.enable_ha_jm = True
+    remote_node.jm_ids = []
+    remote_node.jm_device = node_2_jm
+    remote_node.remote_jm_devices = [
+        RemoteJMDevice({"uuid": node_1_jm.uuid, "remote_bdev": f"rem_{node_1_jm.jm_bdev}"}),
+        RemoteJMDevice({"uuid": node_3_jm.uuid, "remote_bdev": f"rem_{node_3_jm.jm_bdev}"}),
+        RemoteJMDevice({"uuid": node_4_jm.uuid, "remote_bdev": f"rem_{node_4_jm.jm_bdev}"})]
+
+    jm_names = storage_node_ops.get_node_jm_names(node_1, remote_node=remote_node)
+    print(f"jm_names: {len(jm_names)}", jm_names)
+
