@@ -134,6 +134,12 @@ spec:
                   sizeUtil:
                     format: int64
                     type: integer
+                required:
+                - sizeFree
+                - sizeProv
+                - sizeTotal
+                - sizeUsed
+                - sizeUtil
                 type: object
               clusterName:
                 type: string
