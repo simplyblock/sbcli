@@ -306,6 +306,8 @@ class StorageNode(BaseNodeObject):
         )
 
     def wait_for_jm_rep_tasks_to_finish(self, jm_vuid):
+        if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
+            return True # no lvstore means no need to wait
         retry = 10
         while retry > 0:
             try:
