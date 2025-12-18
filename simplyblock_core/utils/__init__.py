@@ -1929,7 +1929,7 @@ def load_kube_config_with_fallback():
     except Exception:
         config.load_kube_config()
 
-def patch_cr_status(
+def patch_cr_cluster_status(
     *,
     group: str,
     version: str,
@@ -1966,6 +1966,72 @@ def patch_cr_status(
         raise RuntimeError(
             f"Failed to patch status for {name}: {e.reason} {e.body}"
         )
+
+def patch_cr_node_status(
+    *,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str,
+    name: str,
+    node_uuid: str,
+    updates: dict,
+):
+    """
+    Patch status.nodes[*] fields for a specific node identified by UUID.
+
+    updates example:
+        {"health": "true"}
+        {"status": "offline"}
+        {"capacity": {"sizeUsed": 1234}}
+    """
+
+    load_kube_config_with_fallback()
+    api = client.CustomObjectsApi()
+
+    try:
+        cr = api.get_namespaced_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+        )
+
+        nodes = cr.get("status", {}).get("nodes", [])
+        if not nodes:
+            raise RuntimeError("CR has no status.nodes")
+
+        found = False
+        for node in nodes:
+            if node.get("uuid") == node_uuid:
+                node.update(updates)
+                found = True
+                break
+
+        if not found:
+            raise RuntimeError(f"Node with uuid {node_uuid} not found")
+
+        body = {
+            "status": {
+                "nodes": nodes
+            }
+        }
+
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body=body,
+        )
+
+    except ApiException as e:
+        raise RuntimeError(
+            f"Failed to patch node status for {name}: {e.reason} {e.body}"
+        )
+
 
 def get_node_name_by_ip(target_ip: str) -> str:
     load_kube_config_with_fallback()

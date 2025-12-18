@@ -41,13 +41,13 @@ def cluster_status_change(cluster, new_state, old_status):
         message=f"Cluster status changed from {old_status} to {new_state}")
 
     if cluster.mode == "kubernetes":
-        utils.patch_cr_status(
-            constants.CR_GROUP,
-            constants.CR_VERSION,
-            cluster.cr_plural,
-            cluster.namespace,
-            cluster.name,
-            {"status": new_state})
+        utils.patch_cr_cluster_status(
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
+            plural=cluster.cr_plural,
+            namespace=cluster.cr_namespace,
+            name=cluster.cr_name,
+            status_patch={"status": new_state})
 
 
 def _cluster_cap_event(cluster, msg, event_level):
@@ -101,10 +101,10 @@ def cluster_rebalancing_change(cluster, new_state, old_status):
         caused_by=ec.CAUSED_BY_CLI,
         message=f"Cluster rebalancing changed from {old_status} to {new_state}")
     if cluster.mode == "kubernetes":
-        utils.patch_cr_status(
-            constants.CR_GROUP,
-            constants.CR_VERSION,
-            cluster.cr_plural,
-            cluster.namespace,
-            cluster.name,
-            {"rebalancing": new_state})
+        utils.patch_cr_cluster_status(
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
+            plural=cluster.cr_plural,
+            namespace=cluster.cr_namespace,
+            name=cluster.cr_name,
+            status_patch={"rebalancing": new_state})

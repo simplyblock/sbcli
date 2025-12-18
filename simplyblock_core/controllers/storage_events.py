@@ -3,6 +3,7 @@ import logging
 
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.models.events import EventObj
+from simplyblock_core import utils, constants
 
 logger = logging.getLogger()
 
@@ -38,6 +39,16 @@ def snode_status_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI)
         caused_by=caused_by,
         message=f"Storage node status changed from: {old_status} to: {new_state}",
         node_id=node.get_id())
+    if node.mode == "kubernetes":
+        utils.patch_cr_node_status(
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
+            plural=node.cr_plural,
+            namespace=node.cr_namespace,
+            name=node.cr_name,
+            node_uuid=node.get_id(),
+            updates={"status": new_state},
+        )
 
 
 def snode_health_check_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
@@ -49,7 +60,16 @@ def snode_health_check_change(node, new_state, old_status, caused_by=ec.CAUSED_B
         caused_by=caused_by,
         message=f"Storage node health check changed from: {old_status} to: {new_state}",
         node_id=node.get_id())
-
+    if node.mode == "kubernetes":
+        utils.patch_cr_node_status(
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
+            plural=node.cr_plural,
+            namespace=node.cr_namespace,
+            name=node.cr_name,
+            node_uuid=node.get_id(),
+            updates={"health": str(new_state)},
+        )
 
 def snode_restart_failed(node):
     ec.log_event_cluster(

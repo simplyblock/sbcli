@@ -1151,6 +1151,9 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             snode.physical_label = 0
         else:
             snode.physical_label = get_next_physical_device_order(snode)
+        
+        if cluster.mode == "kubernetes":
+            snode.mode = "kubernetes"
 
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent
@@ -1686,7 +1689,7 @@ def restart_storage_node(
         cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
 
     else:
-        cluster_ip = utils.get_k8s_node_ip()
+        cluster_ip = utils.get_k8s_node_ip()       
 
     total_mem = 0
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
