@@ -3464,21 +3464,10 @@ def get_node_jm_names(current_node, remote_node=None):
                 if remote_node.jm_device.get_id() == jm_id:
                     jm_list.append(remote_node.jm_device.jm_bdev)
                     continue
-                for jm_dev in remote_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id:
-                        if jm_dev.remote_bdev:
-                            jm_list.append(jm_dev.remote_bdev)
-                        else:
-                            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
-                        break
-            else:
-                for jm_dev in current_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id:
-                        if jm_dev.remote_bdev:
-                            jm_list.append(jm_dev.remote_bdev)
-                        else:
-                            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
-                        break
+
+            jm_dev = DBController().get_jm_device_by_id(jm_id)
+            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
+
     return jm_list[:current_node.ha_jm_count]
 
 
