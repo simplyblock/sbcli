@@ -4,6 +4,7 @@ import logging
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.events import EventObj
+from simplyblock_core import utils, constants
 
 logger = logging.getLogger()
 db_controller = DBController()
@@ -38,6 +39,15 @@ def cluster_status_change(cluster, new_state, old_status):
         db_object=cluster,
         caused_by=ec.CAUSED_BY_CLI,
         message=f"Cluster status changed from {old_status} to {new_state}")
+
+    if cluster.mode == "kubernetes":
+        utils.patch_cr_status(
+            constants.CR_GROUP,
+            constants.CR_VERSION,
+            cluster.cr_plural,
+            cluster.namespace,
+            cluster.name,
+            {"status": new_state})
 
 
 def _cluster_cap_event(cluster, msg, event_level):
