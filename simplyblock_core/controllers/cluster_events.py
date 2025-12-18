@@ -80,3 +80,13 @@ def cluster_delete(cluster):
         db_object=cluster,
         caused_by=ec.CAUSED_BY_CLI,
         message=f"Cluster deleted {cluster.get_id()}")
+
+
+def cluster_rebalancing_change(cluster, new_state, old_status):
+    ec.log_event_cluster(
+        cluster_id=cluster.get_id(),
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=cluster,
+        caused_by=ec.CAUSED_BY_CLI,
+        message=f"Cluster rebalancing changed from {old_status} to {new_state}")
