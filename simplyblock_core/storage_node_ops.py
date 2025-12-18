@@ -3444,17 +3444,23 @@ def get_node_jm_names(current_node, remote_node=None):
                 continue
 
             if remote_node:
-                if remote_node.jm_device.get_id() == jm_id and remote_node.jm_device.jm_bdev:
+                if remote_node.jm_device.get_id() == jm_id:
                     jm_list.append(remote_node.jm_device.jm_bdev)
                     continue
                 for jm_dev in remote_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id and jm_dev.remote_bdev:
-                        jm_list.append(jm_dev.remote_bdev)
+                    if jm_dev.get_id() == jm_id:
+                        if jm_dev.remote_bdev:
+                            jm_list.append(jm_dev.remote_bdev)
+                        else:
+                            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
                         break
             else:
                 for jm_dev in current_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id and jm_dev.remote_bdev:
-                        jm_list.append(jm_dev.remote_bdev)
+                    if jm_dev.get_id() == jm_id:
+                        if jm_dev.remote_bdev:
+                            jm_list.append(jm_dev.remote_bdev)
+                        else:
+                            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
                         break
     return jm_list[:current_node.ha_jm_count]
 
@@ -3641,40 +3647,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     return True
 
 
-def validate_connected_JMs(node, primary_node):
-    logger.info("validate_connected_JMs")
-    if primary_node:
-        jm_names = get_node_jm_names(primary_node, remote_node=node)
-    else:
-        jm_names = get_node_jm_names(node)
-    logger.info(f"jm_names: {jm_names}")
-    if len(jm_names) == node.ha_jm_count:
-        logger.info(f"JMs match node jm count: {node.ha_jm_count}")
-        return True
-
-    jm_ids = get_sorted_ha_jms(node)
-    logger.debug(f"online_jms: {str(jm_ids)}")
-    for i in range(node.ha_jm_count-len(jm_names)):
-        for jm_id in jm_ids:
-            if jm_id not in node.jm_ids:
-                node.jm_ids.append(jm_id)
-                break
-
-    node.remote_jm_devices = _connect_to_remote_jm_devs(node, jm_ids)
-    node.write_to_db()
-
-    if primary_node:
-        jm_names = get_node_jm_names(primary_node, remote_node=node)
-    else:
-        jm_names = get_node_jm_names(node)
-    logger.info(f"jm_names: {jm_names}")
-    if len(jm_names) == node.ha_jm_count:
-        logger.info("JMs match node jm count")
-        return True
-
-    logger.error(f"connected JMs: {len(jm_names)} did not match node jm count: {node.ha_jm_count}")
-    return False
-
 
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     def _create_distr(snode, name, params):
@@ -3685,10 +3657,6 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
         ret = distr_controller.send_cluster_map_to_distr(snode, name)
         if not ret:
             logger.error("Failed to send cluster map")
-
-    ret = validate_connected_JMs(snode, primary_node)
-    if not ret:
-        return False, "Failed to validate connected JMs"
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
     db_controller = DBController()
