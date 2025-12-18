@@ -73,15 +73,16 @@ def get_next_cluster_status(cluster_id):
                 continue
             online_nodes += 1
             # check for jm rep tasks:
-            try:
-                ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
-                for jm in ret:
-                    if ret[jm] is False: # jm is not ready (has active replication task)
-                        jm_replication_tasks = True
-                        logger.warning("Replication task found!")
-                        break
-            except Exception:
-                logger.warning("Failed to get replication task!")
+            if node.rpc_client().bdev_lvol_get_lvstores(node.lvstore):
+                try:
+                    ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
+                    for jm in ret:
+                        if ret[jm] is False: # jm is not ready (has active replication task)
+                            jm_replication_tasks = True
+                            logger.warning("Replication task found!")
+                            break
+                except Exception:
+                    logger.warning("Failed to get replication task!")
         elif node.status == StorageNode.STATUS_REMOVED:
             pass
         else:
