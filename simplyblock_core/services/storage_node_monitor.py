@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 
 
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
-from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
+from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events, \
+    cluster_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -134,10 +135,13 @@ def update_cluster_status(cluster_id):
             JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
             if task.retry == 0:
                 first_iter_task_pending += 1
-
+    is_re_balancing = first_iter_task_pending  > 0
     cluster = db.get_cluster_by_id(cluster_id)
-    cluster.is_re_balancing = first_iter_task_pending  > 0
-    cluster.write_to_db()
+    if cluster.is_re_balancing != is_re_balancing:
+        old_status = cluster.is_re_balancing
+        cluster.is_re_balancing = is_re_balancing
+        cluster.write_to_db()
+        cluster_events.cluster_rebalancing_change(cluster_id, cluster.is_re_balancing, old_status)
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
