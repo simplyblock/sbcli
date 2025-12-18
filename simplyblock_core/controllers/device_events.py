@@ -3,6 +3,8 @@ import logging
 
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core import utils, constants
 
 logger = logging.getLogger()
 
@@ -19,6 +21,22 @@ def _device_event(device, message, caused_by, event):
         message=message,
         node_id=device.get_id(),
         storage_id=device.cluster_device_order)
+
+    if snode.mode == "kubernetes":
+        total_devices = len(snode.nvme_devices)
+        online_devices = 0
+        for dev in snode.nvme_devices:
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                online_devices += 1
+        utils.patch_cr_node_status(
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
+            plural=snode.cr_plural,
+            namespace=snode.cr_namespace,
+            name=snode.cr_name,
+            node_uuid=snode.get_id(),
+            updates={"devices": f"{total_devices}/{online_devices}"},
+        )
 
 
 def device_create(device, caused_by=ec.CAUSED_BY_CLI):
