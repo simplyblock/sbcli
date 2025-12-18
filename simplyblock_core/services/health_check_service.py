@@ -1,6 +1,4 @@
 # coding=utf-8
-import logging
-import sys
 import threading
 import time
 from datetime import datetime
@@ -15,6 +13,8 @@ from simplyblock_core import constants, db_controller, distr_controller, storage
 
 
 utils.init_sentry_sdk()
+logger = utils.get_logger(__name__)
+
 
 def set_node_health_check(snode, health_check_status):
     snode = db.get_storage_node_by_id(snode.get_id())
@@ -43,7 +43,7 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     return
 
 
-def check_node(snode, logger):
+def check_node(snode):
 
     snode = db.get_storage_node_by_id(snode.get_id())
     logger.info("Node: %s, status %s", snode.get_id(), snode.status)
@@ -259,20 +259,15 @@ def check_node(snode, logger):
 
 
 def loop_for_node(snode):
-    logger = logging.getLogger()
-    logger.setLevel("INFO")
-    logger_handler = logging.StreamHandler(stream=sys.stdout)
-    logger_handler.setFormatter(logging.Formatter(f'%(asctime)s: node:{snode.mgmt_ip} %(levelname)s: %(message)s'))
-    logger.addHandler(logger_handler)
     while True:
         try:
-            check_node(snode, logger)
+            check_node(snode)
         except Exception as e:
             logger.error(e)
         time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
 
 
-# logger.info("Starting health check service")
+logger.info("Starting health check service")
 db = db_controller.DBController()
 threads_maps: dict[str, threading.Thread] = {}
 while True:
