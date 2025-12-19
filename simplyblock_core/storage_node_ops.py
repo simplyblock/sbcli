@@ -1910,7 +1910,6 @@ def restart_storage_node(
         return False
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-    snode.health_check = True
     snode.lvstore_status = ""
     snode.write_to_db(db_controller.kv_store)
 
@@ -2971,7 +2970,6 @@ def set_node_status(node_id, status, reconnect_on_online=True):
             return False
         if snode.enable_ha_jm:
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-        snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
         distr_controller.send_cluster_map_to_node(snode)
 
