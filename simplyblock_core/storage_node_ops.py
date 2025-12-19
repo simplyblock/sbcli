@@ -3603,6 +3603,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
         sec_node.write_to_db()
 
+    storage_events.node_ports_changed(snode)
     return True
 
 
