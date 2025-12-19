@@ -109,7 +109,7 @@ class RPCClient:
         if params:
             payload['params'] = params
         try:
-            logger.debug("Requesting method: %s, params: %s", method, params)
+            logger.debug("From: %s, Requesting method: %s, params: %s", self.ip_address, method, params)
             response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
         except Exception:
             raise RPCException("connection error")

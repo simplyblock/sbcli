@@ -3464,15 +3464,10 @@ def get_node_jm_names(current_node, remote_node=None):
                 if remote_node.jm_device.get_id() == jm_id:
                     jm_list.append(remote_node.jm_device.jm_bdev)
                     continue
-                for jm_dev in remote_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id:
-                        jm_list.append(jm_dev.remote_bdev)
-                        break
-            else:
-                for jm_dev in current_node.remote_jm_devices:
-                    if jm_dev.get_id() == jm_id:
-                        jm_list.append(jm_dev.remote_bdev)
-                        break
+
+            jm_dev = DBController().get_jm_device_by_id(jm_id)
+            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
+
     return jm_list[:current_node.ha_jm_count]
 
 
@@ -3655,6 +3650,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         sec_node.write_to_db()
 
     return True
+
 
 
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
