@@ -19,7 +19,7 @@ spec:
 
 ---
 apiVersion: simplyblock.simplyblock.io/v1alpha1
-kind: Pool
+kind: SimplyBlockPool
 metadata:
   name: demo-pool
   namespace: simplyblock
@@ -30,7 +30,7 @@ spec:
 
 ---
 apiVersion: simplyblock.simplyblock.io/v1alpha1
-kind: StorageNode
+kind: SimplyBlockStorageNode
 metadata:
   name: demo-node
   namespace: simplyblock

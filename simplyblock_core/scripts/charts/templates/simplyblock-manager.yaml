@@ -135,9 +135,9 @@ rules:
 - apiGroups:
   - simplyblock.simplyblock.io
   resources:
-  - pools
+  - simplyblockpools
   - simplyblockstorageclusters
-  - storagenodes
+  - simplyblockstoragenodes
   - simplyblockdevices
   - simplyblocktasks
   verbs:
@@ -151,9 +151,9 @@ rules:
 - apiGroups:
   - simplyblock.simplyblock.io
   resources:
-  - pools/finalizers
+  - simplyblockpools/finalizers
   - simplyblockstorageclusters/finalizers
-  - storagenodes/finalizers
+  - simplyblockstoragenodes/finalizers
   - simplyblockdevices/finalizers
   - simplyblocktasks/finalizers
   verbs:
@@ -162,9 +162,9 @@ rules:
 - apiGroups:
   - simplyblock.simplyblock.io
   resources:
-  - pools/status
+  - simplyblock/status
   - simplyblockstorageclusters/status
-  - storagenodes/status
+  - simplyblockstoragenodes/status
   - simplyblockdevices/status
   - simplyblocktasks/status
   verbs:
