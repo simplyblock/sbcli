@@ -50,6 +50,7 @@ def snode_status_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI)
             namespace=node.cr_namespace,
             name=node.cr_name,
             node_uuid=node.get_id(),
+            node_mgmt_ip=node.mgmt_ip,
             updates={"status": new_state},
         )
 

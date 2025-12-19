@@ -1975,6 +1975,7 @@ def patch_cr_node_status(
     namespace: str,
     name: str,
     node_uuid: str,
+    node_mgmt_ip: str,
     updates: dict,
 ):
     """
@@ -2009,8 +2010,13 @@ def patch_cr_node_status(
                 found = True
                 break
 
+            if not node.get("uuid") and node.get("mgmtIp") == node_mgmt_ip:
+                node.update(updates)
+                found = True
+                break
+
         if not found:
-            raise RuntimeError(f"Node with uuid {node_uuid} not found")
+            raise RuntimeError(f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})")
 
         body = {
             "status": {
