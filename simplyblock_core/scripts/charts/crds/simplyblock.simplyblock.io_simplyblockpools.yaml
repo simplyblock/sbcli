@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.19.0
-  name: pools.simplyblock.simplyblock.io
+  name: simplyblockpools.simplyblock.simplyblock.io
 spec:
   group: simplyblock.simplyblock.io
   names:
-    kind: Pool
-    listKind: PoolList
-    plural: pools
-    singular: pool
+    kind: SimplyBlockPool
+    listKind: SimplyBlockPoolList
+    plural: simplyblockpools
+    singular: simplyblockpool
   scope: Namespaced
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Pool is the Schema for the pools API
+        description: SimplyBlockPool is the Schema for the pools API
         properties:
           apiVersion:
             description: |-
