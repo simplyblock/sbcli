@@ -36,6 +36,7 @@ def _device_event(device, message, caused_by, event):
             namespace=snode.cr_namespace,
             name=snode.cr_name,
             node_uuid=snode.get_id(),
+            node_mgmt_ip=snode.mgmt_ip,
             updates={"devices": f"{total_devices}/{online_devices}"},
         )
 
