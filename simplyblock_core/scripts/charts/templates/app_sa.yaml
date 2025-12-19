@@ -24,6 +24,10 @@ rules:
   - apiGroups: ["simplyblock.simplyblock.io"] 
     resources: ["pools/status", "simplyblockstorageclusters/status", "storagenodes/status", "simplyblockdevices/status", "simplyblocktasks/status"]
     verbs: ["get", "patch", "update"]
+  - apiGroups: ["simplyblock.simplyblock.io"] 
+    resources: ["pools", "simplyblockstorageclusters", "storagenodes", "simplyblockdevices", "simplyblocktasks"]
+    verbs: ["get","list" ,"patch", "update", "watch"]
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
