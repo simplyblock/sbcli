@@ -181,7 +181,7 @@ spec:
                       format: int32
                       type: integer
                     memory:
-                      format: int32
+                      format: int64
                       type: integer
                     mgmtIp:
                       type: string
