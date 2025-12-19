@@ -22,7 +22,8 @@ def _device_event(device, message, caused_by, event):
         node_id=device.get_id(),
         storage_id=device.cluster_device_order)
 
-    if snode.mode == "kubernetes":
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cluster.mode == "kubernetes":
         total_devices = len(snode.nvme_devices)
         online_devices = 0
         for dev in snode.nvme_devices:
