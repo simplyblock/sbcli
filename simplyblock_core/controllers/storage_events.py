@@ -84,3 +84,15 @@ def jm_repl_tasks_found(node, jm_vuid, caused_by=ec.CAUSED_BY_MONITOR):
         event_level=EventObj.LEVEL_WARN,
         message=f"JM replication task found for jm {jm_vuid}",
         node_id=node.get_id())
+
+
+def node_ports_changed(node, caused_by=ec.CAUSED_BY_MONITOR):
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=EventObj.LEVEL_WARN,
+        message=f"Storage node ports set, LVol:{node.lvol_subsys_port} RPC:{node.rpc_port} Internal:{node.nvmf_port}",
+        node_id=node.get_id())
