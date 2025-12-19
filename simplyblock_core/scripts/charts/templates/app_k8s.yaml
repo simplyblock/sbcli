@@ -18,7 +18,7 @@ spec:
       labels:
         app: simplyblock-admin-control
     spec:
-      serviceAccountName: simplyblock-control-sa
+      serviceAccountName: simplyblock-sa
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet 
       containers:
@@ -83,7 +83,7 @@ spec:
       labels:
         app: simplyblock-webappapi
     spec:
-      serviceAccountName: simplyblock-control-sa
+      serviceAccountName: simplyblock-sa
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -161,6 +161,7 @@ spec:
       labels:
         app: simplyblock-monitoring
     spec:
+      serviceAccountName: simplyblock-sa
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
@@ -333,6 +334,7 @@ spec:
       labels:
         app: simplyblock-tasks
     spec:
+      serviceAccountName: simplyblock-sa
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
