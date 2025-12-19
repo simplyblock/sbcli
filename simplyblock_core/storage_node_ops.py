@@ -1152,9 +1152,6 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         else:
             snode.physical_label = get_next_physical_device_order(snode)
         
-        if cluster.mode == "kubernetes":
-            snode.mode = "kubernetes"
-
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent
         snode.id_device_by_nqn = id_device_by_nqn

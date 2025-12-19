@@ -269,8 +269,10 @@ def set_status(pool_id, status):
     except KeyError:
         logger.error(f"Pool not found {pool_id}")
         return False
+    old_status = pool.status
     pool.status = status
     pool.write_to_db(db_controller.kv_store)
+    pool_events.pool_status_change(pool, pool.status, old_status)
     logger.info("Done")
 
 

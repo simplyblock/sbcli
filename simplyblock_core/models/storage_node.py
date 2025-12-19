@@ -97,7 +97,6 @@ class StorageNode(BaseNodeObject):
     subsystem: str = ""
     system_uuid: str = ""
     lvstore_status: str = ""
-    mode: str = "docker"
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""

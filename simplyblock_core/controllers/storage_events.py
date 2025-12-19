@@ -3,6 +3,7 @@ import logging
 
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.models.events import EventObj
+from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils, constants
 
 logger = logging.getLogger()
@@ -31,6 +32,8 @@ def snode_delete(node):
 
 
 def snode_status_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(node.cluster_id)
     ec.log_event_cluster(
         cluster_id=node.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
@@ -39,7 +42,7 @@ def snode_status_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI)
         caused_by=caused_by,
         message=f"Storage node status changed from: {old_status} to: {new_state}",
         node_id=node.get_id())
-    if node.mode == "kubernetes":
+    if cluster.mode == "kubernetes":
         utils.patch_cr_node_status(
             group=constants.CR_GROUP,
             version=constants.CR_VERSION,
@@ -52,6 +55,8 @@ def snode_status_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI)
 
 
 def snode_health_check_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(node.cluster_id)
     ec.log_event_cluster(
         cluster_id=node.cluster_id,
         domain=ec.DOMAIN_CLUSTER,
@@ -60,7 +65,7 @@ def snode_health_check_change(node, new_state, old_status, caused_by=ec.CAUSED_B
         caused_by=caused_by,
         message=f"Storage node health check changed from: {old_status} to: {new_state}",
         node_id=node.get_id())
-    if node.mode == "kubernetes":
+    if cluster.mode == "kubernetes":
         utils.patch_cr_node_status(
             group=constants.CR_GROUP,
             version=constants.CR_VERSION,

@@ -41,7 +41,7 @@ def cluster_status_change(cluster, new_state, old_status):
         message=f"Cluster status changed from {old_status} to {new_state}")
 
     if cluster.mode == "kubernetes":
-        utils.patch_cr_cluster_status(
+        utils.patch_cr_status(
             group=constants.CR_GROUP,
             version=constants.CR_VERSION,
             plural=cluster.cr_plural,
@@ -101,7 +101,7 @@ def cluster_rebalancing_change(cluster, new_state, old_status):
         caused_by=ec.CAUSED_BY_CLI,
         message=f"Cluster rebalancing changed from {old_status} to {new_state}")
     if cluster.mode == "kubernetes":
-        utils.patch_cr_cluster_status(
+        utils.patch_cr_status(
             group=constants.CR_GROUP,
             version=constants.CR_VERSION,
             plural=cluster.cr_plural,

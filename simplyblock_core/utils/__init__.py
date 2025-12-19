@@ -1929,7 +1929,7 @@ def load_kube_config_with_fallback():
     except Exception:
         config.load_kube_config()
 
-def patch_cr_cluster_status(
+def patch_cr_status(
     *,
     group: str,
     version: str,
