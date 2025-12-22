@@ -2,6 +2,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 
+from simplyblock_core import constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
 
@@ -20,13 +21,16 @@ class PromClient:
     def __init__(self, cluster_id):
         db_controller = DBController()
         cluster_ip = None
-        for node in db_controller.get_mgmt_nodes():
-            if node.cluster_id == cluster_id and node.status == MgmtNode.STATUS_ONLINE:
-                cluster_ip = node.mgmt_ip
-                break
-        if cluster_ip is None:
-            raise PromClientException("Cluster has no online mgmt nodes")
-
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+        if cluster.mode == "docker":
+            for node in db_controller.get_mgmt_nodes():
+                if node.cluster_id == cluster_id and node.status == MgmtNode.STATUS_ONLINE:
+                    cluster_ip = node.mgmt_ip
+                    break
+            if cluster_ip is None:
+                raise PromClientException("Cluster has no online mgmt nodes")
+        else:
+            cluster_ip = constants.PROMETHEUS_STATEFULSET_NAME
         self.ip_address = f"{cluster_ip}:9090"
         self.url = 'http://%s/' % self.ip_address
         self.client = PrometheusConnect(url=self.url, disable_ssl=True)
