@@ -23,7 +23,7 @@ spec:
         fsGroup: 65532
       serviceAccountName: simplyblock-manager
       containers:
-        - image: simplyblock/simplyblock-manager:update_api_params
+        - image: simplyblock/simplyblock-manager:update_resource_name
           imagePullPolicy: Always
           name: manager
           env:
@@ -162,7 +162,7 @@ rules:
 - apiGroups:
   - simplyblock.simplyblock.io
   resources:
-  - simplyblock/status
+  - simplyblockpools/status
   - simplyblockstorageclusters/status
   - simplyblockstoragenodes/status
   - simplyblockdevices/status
