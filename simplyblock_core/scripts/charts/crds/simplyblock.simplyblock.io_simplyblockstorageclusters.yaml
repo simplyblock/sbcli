@@ -117,25 +117,6 @@ spec:
                 type: string
               UUID:
                 type: string
-              capacity:
-                properties:
-                  sizeFree:
-                    type: string
-                  sizeProv:
-                    type: string
-                  sizeTotal:
-                    type: string
-                  sizeUsed:
-                    type: string
-                  sizeUtil:
-                    type: string
-                required:
-                - sizeFree
-                - sizeProv
-                - sizeTotal
-                - sizeUsed
-                - sizeUtil
-                type: object
               clusterName:
                 type: string
               configured:
