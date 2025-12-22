@@ -84,8 +84,7 @@ spec:
                           model:
                             type: string
                           size:
-                            format: int64
-                            type: integer
+                            type: string
                           stats:
                             items:
                               properties:
