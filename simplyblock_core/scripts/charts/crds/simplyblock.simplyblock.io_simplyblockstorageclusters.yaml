@@ -120,20 +120,15 @@ spec:
               capacity:
                 properties:
                   sizeFree:
-                    format: int64
-                    type: integer
+                    type: string
                   sizeProv:
-                    format: int64
-                    type: integer
+                    type: string
                   sizeTotal:
-                    format: int64
-                    type: integer
+                    type: string
                   sizeUsed:
-                    format: int64
-                    type: integer
+                    type: string
                   sizeUtil:
-                    format: int64
-                    type: integer
+                    type: string
                 required:
                 - sizeFree
                 - sizeProv
