@@ -61,12 +61,14 @@ spec:
               fi
 
               echo "[INFO] Isolated cores to apply: $ISOLATED_CORES"
-
+              SHORT_ID=$(echo "{{ HOSTNAME }}" | rev | cut -d'-' -f1 | rev)
               cat <<EOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfigPool
               metadata:
-                name: worker-isolated-{{ HOSTNAME }}
+                name: mcp-$SHORT_ID
+                labels:
+                  machineconfiguration.openshift.io/role: role-$SHORT_ID
               spec:
                 machineConfigSelector:
                   matchExpressions:
@@ -74,7 +76,7 @@ spec:
                       operator: In
                       values:
                         - worker
-                        - worker-isolated-{{ HOSTNAME }}
+                        - role-$SHORT_ID
                 nodeSelector:
                   matchLabels:
                     kubernetes.io/hostname: {{ HOSTNAME }}
@@ -85,9 +87,9 @@ spec:
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfig
               metadata:
-                name: worker-isolated-{{ HOSTNAME }}
+                name: mc-$SHORT_ID
                 labels:
-                  machineconfiguration.openshift.io/role: worker-isolated-{{ HOSTNAME }}
+                  machineconfiguration.openshift.io/role: role-$SHORT_ID
               spec:
                 kernelArguments:
                   - "nohz_full=${ISOLATED_CORES}"
@@ -102,14 +104,16 @@ spec:
               apiVersion: machineconfiguration.openshift.io/v1
               kind: KubeletConfig
               metadata:
-                name: set-static-cpu-manager-{{ HOSTNAME }}
+                name: kcfg-$SHORT_ID
               spec:
                 machineConfigPoolSelector:
                   matchLabels:
-                    machineconfiguration.openshift.io/role: worker-isolated-{{ HOSTNAME }}
+                    machineconfiguration.openshift.io/role: role-$SHORT_ID
                 kubeletConfig:
                   cpuManagerPolicy: static
                   cpuManagerReconcilePeriod: 5s
+                  topologyManagerPolicy: single-numa-node
+                  reservedSystemCPUs: "0,1"
               EOF
 
               echo "[INFO] Init setup and CPU isolation complete."

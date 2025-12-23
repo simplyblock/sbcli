@@ -19,7 +19,7 @@ grafana:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "R25.10-Hotfix"
+    tag: "R25.10-Hotfix-os-fix"
     pullPolicy: "Always"
 
 ports:
