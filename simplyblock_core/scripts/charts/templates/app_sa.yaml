@@ -22,10 +22,10 @@ rules:
     resources: ["mongodbcommunity"]
     verbs: ["get", "list", "watch", "patch", "update"]
   - apiGroups: ["simplyblock.simplyblock.io"] 
-    resources: ["simplyblockpools/status", "simplyblockstorageclusters/status", "simplyblockstoragenodes/status", "simplyblockdevices/status", "simplyblocktasks/status"]
+    resources: ["simplyblockpools/status", "simplyblocklvols/status", "simplyblockstorageclusters/status", "simplyblockstoragenodes/status", "simplyblockdevices/status", "simplyblocktasks/status"]
     verbs: ["get", "patch", "update"]
   - apiGroups: ["simplyblock.simplyblock.io"] 
-    resources: ["simplyblockpools", "simplyblockstorageclusters", "simplyblockstoragenodes", "simplyblockdevices", "simplyblocktasks"]
+    resources: ["simplyblockpools", "simplyblocklvols", "simplyblockstorageclusters", "simplyblockstoragenodes", "simplyblockdevices", "simplyblocktasks"]
     verbs: ["get","list" ,"patch", "update", "watch"]
 
 ---

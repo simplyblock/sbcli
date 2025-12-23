@@ -30,6 +30,16 @@ spec:
 
 ---
 apiVersion: simplyblock.simplyblock.io/v1alpha1
+kind: SimplyBlockLvol
+metadata:
+  name: demo-lvol
+  namespace: simplyblock
+spec:
+  clusterName: demo-cluster
+  poolName: demo-pool
+
+---
+apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockStorageNode
 metadata:
   name: demo-node
