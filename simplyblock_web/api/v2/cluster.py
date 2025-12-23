@@ -35,7 +35,7 @@ class ClusterParams(BaseModel):
     distr_npcs: int = 1
     distr_bs: int = 4096
     distr_chunk_bs: int = 4096
-    ha_type: Literal['single', 'ha'] = 'single'
+    ha_type: Literal['single', 'ha'] = 'ha'
     qpair_count: int = 256
     max_queue_size: int = 128
     inflight_io_threshold: int = 4
@@ -43,6 +43,9 @@ class ClusterParams(BaseModel):
     strict_node_anti_affinity: bool = False
     is_single_node: bool = False
     fabric: str = "tcp"
+    cr_name: str = ""
+    cr_namespace: str = ""
+    cr_plural: str = ""
     cluster_ip: str = ""
     grafana_secret: str = ""
 

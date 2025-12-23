@@ -97,6 +97,9 @@ class StorageNode(BaseNodeObject):
     subsystem: str = ""
     system_uuid: str = ""
     lvstore_status: str = ""
+    cr_name: str = ""
+    cr_namespace: str = ""
+    cr_plural: str = ""
     nvmf_port: int = 4420
     physical_label: int = 0
     hublvol: HubLVol = None  # type: ignore[assignment]

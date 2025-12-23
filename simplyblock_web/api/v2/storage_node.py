@@ -35,9 +35,9 @@ def list(cluster: Cluster) -> List[StorageNodeDTO]:
 class StorageNodeParams(BaseModel):
     node_address: Annotated[str, Field(web_utils.IP_PATTERN)]
     interface_name: str
-    max_snapshots: int = Field(500)
-    ha_jm: bool = Field(True)
-    test_device: bool = Field(False)
+    max_snapshots: Optional[int] = Field(500)
+    ha_jm: Optional[bool] = Field(True)
+    test_device: Optional[bool] = Field(False)
     spdk_image: Optional[str] = Field("")
     spdk_debug: bool = Field(False)
     data_nics: List[str] = Field([])
@@ -46,6 +46,9 @@ class StorageNodeParams(BaseModel):
     partitions: int = Field(1)
     iobuf_small_pool_count: int = Field(0)
     iobuf_large_pool_count: int = Field(0)
+    cr_name: str
+    cr_namespace: str 
+    cr_plural: str
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -67,6 +70,9 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams):
             'enable_test_device': parameters.test_device,
             'namespace': parameters.namespace,
             'enable_ha_jm': parameters.ha_jm,
+            'cr_name': parameters.cr_name,
+            'cr_namespace': parameters.cr_namespace,
+            'cr_plural': parameters.cr_plural,
         }
     )
     if not task_id_or_false:

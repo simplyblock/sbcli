@@ -181,6 +181,13 @@ class SnapshotDTO(BaseModel):
 class StorageNodeDTO(BaseModel):
     uuid: UUID
     status: str
+    hostname: str
+    cpu: int
+    spdk_mem: int
+    lvols: int
+    rpc_port: int
+    lvol_subsys_port: int
+    nvmf_port: int
     mgmt_ip: IPv4Address
     health_check: bool
     online_devices: str
@@ -191,6 +198,13 @@ class StorageNodeDTO(BaseModel):
         return StorageNodeDTO(
             uuid=UUID(model.get_id()),
             status=model.status,
+            hostname=model.hostname,
+            cpu=model.cpu,
+            spdk_mem=model.spdk_mem,
+            lvols=model.lvols,
+            rpc_port=model.rpc_port,
+            lvol_subsys_port=model.lvol_subsys_port,
+            nvmf_port=model.nvmf_port,
             mgmt_ip=IPv4Address(model.mgmt_ip),
             health_check=model.health_check,
             online_devices=f"{len(model.nvme_devices)}/{len([d for d in model.nvme_devices if d.status=='online'])}",
@@ -211,7 +225,7 @@ class TaskDTO(BaseModel):
     @staticmethod
     def from_model(model: JobSchedule):
         return TaskDTO(
-            id=UUID(model.get_id()),
+            id=UUID(model.uuid),
             status=model.status,
             canceled=model.canceled,
             function_name=model.function_name,

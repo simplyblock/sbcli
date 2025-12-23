@@ -198,16 +198,8 @@ def get_k8s_node_ip():
         logger.error("No mgmt nodes was found in the cluster!")
         return False
 
-    mgmt_ips = [node.mgmt_ip for node in nodes]
-
-    for ip in mgmt_ips:
-        try:
-            with socket.create_connection((ip, 10250), timeout=2):
-                return ip
-        except Exception as e:
-            print(e)
-            raise e
-    return False
+    for node in nodes:
+        return node.mgmt_ip
 
 
 def dict_agg(data, mean=False, keys=None):
@@ -1936,6 +1928,115 @@ def load_kube_config_with_fallback():
         config.load_incluster_config()
     except Exception:
         config.load_kube_config()
+
+def patch_cr_status(
+    *,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str,
+    name: str,
+    status_patch: dict,
+):
+    """
+    Patch the status subresource of a Custom Resource.
+
+    status_patch example:
+        {"<KEY>": "<VALUE", "<KEY>": <VALUE>}
+    """
+
+    load_kube_config_with_fallback()
+
+    api = client.CustomObjectsApi()
+
+    body = {
+        "status": status_patch
+    }
+
+    try:
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body=body,
+        )
+    except ApiException as e:
+        raise RuntimeError(
+            f"Failed to patch status for {name}: {e.reason} {e.body}"
+        )
+
+def patch_cr_node_status(
+    *,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str,
+    name: str,
+    node_uuid: str,
+    node_mgmt_ip: str,
+    updates: dict,
+):
+    """
+    Patch status.nodes[*] fields for a specific node identified by UUID.
+
+    updates example:
+        {"health": "true"}
+        {"status": "offline"}
+        {"capacity": {"sizeUsed": 1234}}
+    """
+
+    load_kube_config_with_fallback()
+    api = client.CustomObjectsApi()
+
+    try:
+        cr = api.get_namespaced_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+        )
+
+        nodes = cr.get("status", {}).get("nodes", [])
+        if not nodes:
+            raise RuntimeError("CR has no status.nodes")
+
+        found = False
+        for node in nodes:
+            if node.get("uuid") == node_uuid:
+                node.update(updates)
+                found = True
+                break
+
+            if not node.get("uuid") and node.get("mgmtIp") == node_mgmt_ip:
+                node.update(updates)
+                found = True
+                break
+
+        if not found:
+            raise RuntimeError(f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})")
+
+        body = {
+            "status": {
+                "nodes": nodes
+            }
+        }
+
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body=body,
+        )
+
+    except ApiException as e:
+        raise RuntimeError(
+            f"Failed to patch node status for {name}: {e.reason} {e.body}"
+        )
 
 
 def get_node_name_by_ip(target_ip: str) -> str:
