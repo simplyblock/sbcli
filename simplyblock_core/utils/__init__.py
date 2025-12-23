@@ -564,12 +564,12 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
     pool_consumption = (small_pool_count * 8 + large_pool_count * 128) / 1024
     memory_consumption = (4 * cpu_count + 1.1 * pool_consumption + 22 * lvol_count) * (
-                1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
+            1024 * 1024) + constants.EXTRA_HUGE_PAGE_MEMORY
     return int(2.0 * memory_consumption)
 
 
-def calculate_minimum_sys_memory(max_prov):
-    minimum_sys_memory = (2000 * 1024) * convert_size(max_prov, 'GB') + 500 * 1024 * 1024
+def calculate_minimum_sys_memory(ssd_list):
+    minimum_sys_memory = 2147483648 + get_total_capacity_of_nvme_devices(ssd_list)
 
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
@@ -737,13 +737,15 @@ def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> in
     raw = size / (base ** exponent)
     return math.ceil(raw) if round_up else int(raw)
 
+
 def first_six_chars(s: str) -> str:
     """
     Returns the first six characters of a given string.
     If the string is shorter than six characters, returns the entire string.
     """
     return s[:6]
-    
+
+
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:
@@ -1337,6 +1339,20 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
     return nvmes
 
 
+def get_total_capacity_of_nvme_devices(pci_lst):
+    json_string = get_nvme_list_verbose()
+    data = json.loads(json_string)
+    total_capacity = 0
+    for device_entry in data.get('Devices', []):
+        for subsystem in device_entry.get('Subsystems', []):
+            for controller in subsystem.get('Controllers', []):
+                address = controller.get("Address")
+                if len(controller.get("Namespaces")) > 0 and address in pci_lst:
+                    total_capacity = controller.get("Namespaces")[0].get("PhysicalSize")
+
+    return int(total_capacity)
+
+
 def calculate_unisolated_cores(cores, cores_percentage=0):
     # calculate the number if unused system cores (UnIsolated cores)
     total = len(cores)
@@ -1356,10 +1372,10 @@ def get_core_indexes(core_to_index, list_of_cores):
 
 
 def build_unisolated_stride(
-    all_cores: List[int],
-    num_unisolated: int,
-    client_qpair_count: int,
-    pool_stride: int = 2,
+        all_cores: List[int],
+        num_unisolated: int,
+        client_qpair_count: int,
+        pool_stride: int = 2,
 ) -> List[int]:
     """
     Build a list of 'unisolated' CPUs by picking from per-qpair pools.
@@ -1397,7 +1413,7 @@ def build_unisolated_stride(
 
     # Build pools
     pool_size = math.ceil(total / client_qpair_count)
-    pools = [cores[i * pool_size : min((i + 1) * pool_size, total)] for i in range(client_qpair_count)]
+    pools = [cores[i * pool_size: min((i + 1) * pool_size, total)] for i in range(client_qpair_count)]
     pools = [p for p in pools if p]  # drop empties
 
     # Per-pool index (within each pool)
@@ -1460,8 +1476,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, co
             continue
         all_cores = sorted(cores_by_numa[numa_node])
         num_unisolated = calculate_unisolated_cores(all_cores, cores_percentage)
-        unisolated = build_unisolated_stride(all_cores,num_unisolated,constants.CLIENT_QPAIR_COUNT)
-
+        unisolated = build_unisolated_stride(all_cores, num_unisolated, constants.CLIENT_QPAIR_COUNT)
 
         available_cores = [c for c in all_cores if c not in unisolated]
         q1 = len(available_cores) // 4
@@ -1577,7 +1592,7 @@ def regenerate_config(new_config, old_config, force=False):
         old_config["nodes"][i]["small_pool_count"] = small_pool_count
         old_config["nodes"][i]["large_pool_count"] = large_pool_count
         old_config["nodes"][i]["huge_page_memory"] = minimum_hp_memory
-        minimum_sys_memory = calculate_minimum_sys_memory(old_config["nodes"][i]["max_size"])
+        minimum_sys_memory = calculate_minimum_sys_memory(old_config["nodes"][i]["ssd_pcis"])
         old_config["nodes"][i]["sys_memory"] = minimum_sys_memory
 
     memory_details = node_utils.get_memory_details()
@@ -1733,7 +1748,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["max_lvol"] = max_lvol
             node_info["max_size"] = max_prov
             node_info["huge_page_memory"] = max(minimum_hp_memory, max_prov)
-            minimum_sys_memory = calculate_minimum_sys_memory(max_prov)
+            minimum_sys_memory = calculate_minimum_sys_memory(node_info["ssd_pcis"])
             node_info["sys_memory"] = minimum_sys_memory
             all_nodes.append(node_info)
             node_index += 1
@@ -2263,9 +2278,9 @@ def create_docker_service(cluster_docker: DockerClient, service_name: str, servi
             "com.docker.stack.namespace": "app"}
     )
 
+
 def create_k8s_service(namespace: str, deployment_name: str,
                        container_name: str, service_file: str, container_image: str):
-
     logger.info(f"Creating deployment: {deployment_name} in namespace {namespace}")
     load_kube_config_with_fallback()
     apps_v1 = client.AppsV1Api()
@@ -2334,6 +2349,7 @@ def create_k8s_service(namespace: str, deployment_name: str,
 
     apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
     logger.info(f"Deployment {deployment_name} created successfully.")
+
 
 def clean_partitions(nvme_device: str):
     command = ['wipefs', '-a', nvme_device]
@@ -2607,6 +2623,7 @@ def clean_devices(config_path, format, force):
 
     except json.JSONDecodeError as e:
         logger.error(f"Error decoding JSON: {e}")
+
 
 def create_rpc_socket_mount():
     try:
