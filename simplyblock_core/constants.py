@@ -49,6 +49,7 @@ CAP_MONITOR_INTERVAL_SEC = 10
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 5
 DEV_DISCOVERY_INTERVAL_SEC = 60
+LVOL_SCHEDULER_INTERVAL_SEC = 60*15
 
 PMEM_DIR = '/tmp/pmem'
 
@@ -59,15 +60,6 @@ DEVICE_OVERLOAD_STDEV_VALUE = 50
 DEVICE_OVERLOAD_CAPACITY_THRESHOLD = 50
 
 CLUSTER_NQN = "nqn.2023-02.io.simplyblock"
-
-weights = {
-    "lvol": 100,
-    # "cpu": 10,
-    # "r_io": 10,
-    # "w_io": 10,
-    # "r_b": 10,
-    # "w_b": 10
-}
 
 
 HEALTH_CHECK_INTERVAL_SEC = 30

@@ -5,6 +5,7 @@ docker
 psutil
 py-cpuinfo
 pytest
+pytest-mock
 mock
 flask
 kubernetes
