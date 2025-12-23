@@ -105,6 +105,9 @@ class UpdatableStoragePoolParams(BaseModel):
     max_rw_mbytes: Optional[util.Unsigned] = None
     max_r_mbytes: Optional[util.Unsigned] = None
     max_w_mbytes: Optional[util.Unsigned] = None
+    lvols_cr_name: Optional[str] = None
+    lvols_cr_namespace: Optional[str] = None
+    lvols_cr_plural: Optional[str] = None
 
 
 @instance_api.put('/', name='clusters:storage-pools:update', status_code=204, responses={204: {"content": None}})

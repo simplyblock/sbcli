@@ -32,6 +32,9 @@ class Pool(BaseModel):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
+    lvols_cr_name: str = ""
+    lvols_cr_namespace: str = ""
+    lvols_cr_plural: str = ""
 
 
     def has_qos(self):

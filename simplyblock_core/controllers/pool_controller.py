@@ -125,7 +125,8 @@ def qos_exists_on_child_lvol(db_controller: DBController, pool_uuid):
     return False
 
 def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
-             max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name=""):
+             max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name="",
+             lvols_cr_name="", lvols_cr_namespace="", lvols_cr_plural=""):
     db_controller = DBController()
     try:
         pool = db_controller.get_pool_by_id(uuid)
@@ -146,6 +147,17 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
                 logger.error(msg)
                 return False, msg
         pool.pool_name = name
+
+    if lvols_cr_name and lvols_cr_name != pool.lvols_cr_name:
+        for p in db_controller.get_pools():
+            if p.lvols_cr_name == lvols_cr_name:
+                msg = f"Pool found with the same lvol cr name: {name}"
+                logger.error(msg)
+                return False, msg
+        pool.lvols_cr_name = lvols_cr_name
+        pool.lvols_cr_namespace = lvols_cr_namespace
+        pool.lvols_cr_plural = lvols_cr_plural
+
 
     # Normalize inputs
     max_rw_iops = max_rw_iops or 0
