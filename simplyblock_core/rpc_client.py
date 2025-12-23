@@ -1230,7 +1230,7 @@ class RPCClient:
     def nvmf_get_blocked_ports_rdma(self):
         return self._request("nvmf_get_blocked_ports")
 
-    def lvol_final_migration(
+    def bdev_lvol_final_migration(
             self,
             lvol_name: str,
             lvol_id: str,
@@ -1242,44 +1242,84 @@ class RPCClient:
             "lvol_name": lvol_name,
             "lvol_id": lvol_id,
             "snapshot_name": snapshot_name,
-            "b": batch,
-            "g": nqn
+            "cluster_batch": batch,
+            "gateway": nqn
         }
         return self._request("bdev_lvol_final_migration", params)
 
-    def lvol_set_migration_flag(self, lvol_name: str):
+    def bdev_lvol_set_migration_flag(self, lvol_name: str):
         params = {
             "lvol_name": lvol_name
         }
         return self._request("bdev_lvol_set_migration_flag", params)
 
-    def lvol_convert(self, lvol_name: str):
+    def bdev_lvol_convert(self, lvol_name: str):
         params = {
             "lvol_name": lvol_name
         }
         return self._request("bdev_lvol_convert", params)
 
-    def lvol_add_clone(self, clone_name: str, source_lvol_name: str):
+    def bdev_lvol_add_clone(self, clone_name: str, source_lvol_name: str):
         params = {
             "clone_name": clone_name,
-            "source_lvol_name": source_lvol_name
+            "child_name": source_lvol_name
         }
         return self._request("bdev_lvol_add_clone", params)
 
 
-def lvol_transfer(
+    def bdev_lvol_transfer(self, lvolname: str,o: int,batch: int,gw: str, op: str):
+      params = {
+          "lvol_name" : lvolname,
+          "offset" : o,
+          "cluster_batch" : batch,
+          "gateway"  :gw,
+          "operation" :  op,
+      }
+      return self._request("bdev_lvol_transfer", params)
+
+    def bdev_lvol_get_lvols(
         self,
-        lvol_name: str,
-        offset: int,
-        batch: int,
-        nqn: str,
-        O: str
-):
-    params = {
-        "n": lvol_name,
-        "o": offset,
-        "b": batch,
-        "g": nqn,
-        "O": O
-    }
-    return self._request("bdev_lvol_transfer", params)
+        lvs: str):
+      params = {
+        "lvs_uuid": lvs,
+      }
+      return self._request("bdev_lvol_get_lvols", params)
+
+    def bdev_lvol_transfer_stat(
+        self,
+        name: str):
+      params = {
+        "lvol_name": name,
+      }
+      return self._request("bdev_lvol_transfer_stat", params)
+
+    def lvol_exists(self, lvs_name, name):
+        params = {
+            "lvs_name": lvs_name,
+        }
+        ret = self._request("bdev_lvol_get_lvols", params)
+        if not ret or "error" in ret:
+            raise RuntimeError(ret["error"])
+        for lvol in ret["result"]:
+            if lvol.get("name") == name:
+                if lvol["map_id"]:
+                   return lvol["uuid"],lvol["map_id"]
+                else:
+                    return lvol["uuid"],None
+        return None, None
+
+    def nvmf_get_subsystems(
+        self):
+      params = {
+      }
+      return self._request("bdev_lvol_transfer_stat", params)
+
+    def find_subsystem_by_nqn(self, nqn_to_find):
+        subsystems = self.nvmf_get_subsystems()
+        for subsystem in subsystems:
+            if subsystem.get("nqn") == nqn_to_find:
+                listener = subsystem.get("listen_addresses", [None])[0] if subsystem.get("listen_addresses") else None
+                nsid = subsystem.get("namespaces", [None])[0].get("nsid") if subsystem.get("namespaces") else None
+                return subsystem, listener, nsid
+        return None, None, None
+

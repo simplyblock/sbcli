@@ -134,7 +134,7 @@ def restart_migration(node:StorageNode):
     for m in migs:
         if m.node_pri==node.uuid:
           if m.status!=MigrationState.DONE:
-            #TODO: continue to run that migration by enabling the migration service.
+            add_task()
     return
 
 def get_next_cluster_device_order(db_controller, cluster_id):

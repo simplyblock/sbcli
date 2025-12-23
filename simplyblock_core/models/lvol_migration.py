@@ -4,6 +4,8 @@ from enum import Enum
 from typing import List
 import storage_node
 from base_model import *
+from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.rpc_client import RPCClient
 
 
@@ -48,42 +50,21 @@ class ObjectMigrationState(str, Enum):
 @dataclass
 class LogicalVolumeRef:
     """Reference to a logical volume participating in a migration."""
-    uuid: str = ""
-    bdev_name: str = ""  # "LVS/LV"
-    lvs_name: str = ""
-    target_lvs_name: str = ""
-    source_uuid: str = ""
+    lvol: LVol = None
     target_uuid: str = ""
-    namespace_id: str = ""
-    nqn : str = ""
-    node_id: str = ""
-    sec_node_id :str =""
-    target_node_id : str = ""
-    target_sec_node_id : str = ""
-    ndcs : int = 1
-    npcs : int = 1
-    priority_class : int = 0
-    size : int = 0
     mapid: int = 0
-    cloned : str = ""
     state : ObjectMigrationState = ObjectMigrationState.NEW
     retry : int = 0
-    crypto_bdev_name: str = ""
 
 @dataclass
 class Snapshot:
-    uuid : str =""
-    bdev_name: str = "" # "LVS/LV"
-    lvs_name: str = ""
-    size: int = 0
-    target_lvs_name : str = ""
-    source_uuid : str = ""
-    target_uuid : str = ""
+    snap: SnapShot = None
+    lvol: LogicalVolumeRef = None
+    controller: str = ""
+    target_uuid: str = ""
     retry : int = 0
     # Migration metadata
     temporary_nqn: str = ""
-    temporary_namespace: str = ""
-    mapid: int = 0
     status: ObjectMigrationState = ObjectMigrationState.NEW
 
 @dataclass
@@ -95,7 +76,7 @@ class MigrationObject(BaseModel):
     status: MigrationState = MigrationState.NEW
     pre_status: MigrationState = MigrationState.NEW
 
-    main_logical_volume : LogicalVolumeRef = None
+    vol : LogicalVolumeRef = None
     node_pri : storage_node.StorageNode = None
     node_sec: storage_node.StorageNode = None
     target_node_pri: storage_node.StorageNode = None

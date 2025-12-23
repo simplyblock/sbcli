@@ -5,8 +5,48 @@ from typing import List
 from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.nvme_device import NVMeDevice
 
+import copy
 
 class LVol(BaseModel):
+    # your class-level constants and annotations...
+
+    def __copy__(self):
+        """
+        Shallow copy:
+        - BaseModel fields copied
+        - Mutable fields (list, dict, set) shallow-copied so references do NOT leak
+        """
+        new = type(self)()
+
+        for attr in self.get_attrs_map():
+            value = getattr(self, attr)
+
+            # Copy containers to avoid unintended shared references
+            if isinstance(value, (dict, list, set)):
+                value = value.copy()
+
+            setattr(new, attr, value)
+
+        return new
+
+    def __deepcopy__(self, memo):
+        """
+        Deep copy:
+        - Recursively duplicates everything
+        - Uses memo to avoid infinite recursion
+        """
+        if id(self) in memo:
+            return memo[id(self)]
+
+        new = type(self)()
+        memo[id(self)] = new
+
+        for attr in self.get_attrs_map():
+            value = getattr(self, attr)
+            setattr(new, attr, copy.deepcopy(value, memo))
+
+        return new
+
 
     STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
@@ -20,7 +60,6 @@ class LVol(BaseModel):
         STATUS_IN_CREATION: 4,
     }
 
-    base_bdev: str = ""
     bdev_stack: List = []
     blobid: int = 0
     cloned_from_snap: str = ""
