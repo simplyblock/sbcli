@@ -330,6 +330,9 @@ def spdk_process_start(body: SPDKParams):
         node_prepration_ubuntu_name += node_name[ubuntu_name_length-63:]
     else:
          node_prepration_ubuntu_name += node_name
+    cpu_topology_enabled = os.environ.get("CPU_TOPOLOGY_ENABLED", False)
+    if isinstance(cpu_topology_enabled, str):
+       cpu_topology_enabled = cpu_topology_enabled.strip().lower() in ("true")
 
     logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
@@ -360,7 +363,8 @@ def spdk_process_start(body: SPDKParams):
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
-            'FW_PORT': body.firewall_port
+            'FW_PORT': body.firewall_port,
+            'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled
         }
 
         if ubuntu_host:
