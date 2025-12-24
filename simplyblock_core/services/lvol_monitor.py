@@ -342,12 +342,5 @@ while True:
                     if passed:
                         set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
-            if snode.lvstore_status == "ready":
-
-                for snap in db.get_snapshots_by_node_id(snode.get_id()):
-                    present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
-                    set_snapshot_health_check(snap, present)
-
-
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)

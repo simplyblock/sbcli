@@ -808,6 +808,7 @@ def list() -> t.List[dict]:
             "#storage": len(st),
             "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
             "Status": status.upper(),
+            "Replicate": cl.snapshot_replication_target_cluster,
         })
     return data
 
@@ -1170,10 +1171,6 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
-        sbcli=constants.SIMPLY_BLOCK_CLI_NAME
-        subprocess.check_call(f"pip install {sbcli} --upgrade".split(' '))
-        logger.info(f"{sbcli} upgraded")
-
         cluster_docker = utils.get_docker_client(cluster_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
@@ -1371,3 +1368,30 @@ def set(cl_id, attr, value) -> None:
     logger.info(f"Setting {attr} to {value}")
     setattr(cluster, attr, value)
     cluster.write_to_db()
+
+
+def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> bool:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(source_cl_id)
+    if not cluster:
+        raise ValueError(f"Cluster not found: {source_cl_id}")
+
+    target_cluster = db_controller.get_cluster_by_id(target_cl_id)
+    if not target_cluster:
+        raise ValueError(f"Target cluster not found: {target_cl_id}")
+
+    logger.info("Updating Cluster replication target")
+    cluster.snapshot_replication_target_cluster = target_cl_id
+    if target_pool:
+        pool = db_controller.get_pool_by_id(target_pool)
+        if not pool:
+            raise ValueError(f"Pool not found: {target_pool}")
+        if pool.status != Pool.STATUS_ACTIVE:
+            raise ValueError(f"Pool not active: {target_pool}")
+        cluster.snapshot_replication_target_pool = target_pool
+
+    if timeout and timeout > 0:
+        cluster.snapshot_replication_timeout = timeout
+    cluster.write_to_db()
+    logger.info("Done")
+    return True
