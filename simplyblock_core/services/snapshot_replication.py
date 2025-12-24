@@ -169,7 +169,10 @@ def process_snap_replicate_finish(task, snapshot):
 
     if snapshot.status == SnapShot.STATUS_IN_REPLICATION:
         snapshot.status = SnapShot.STATUS_ONLINE
-        snapshot.target_replicated_snap_uuid = new_snapshot_uuid
+        if replicate_to_source:
+            snapshot.source_replicated_snap_uuid = new_snapshot_uuid
+        else:
+            snapshot.target_replicated_snap_uuid = new_snapshot_uuid
         snapshot.write_to_db()
 
     new_snapshot = SnapShot()
@@ -184,7 +187,10 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot.snap_name = snapshot.snap_name
     new_snapshot.blobid = remote_lv.blobid
     new_snapshot.created_at = int(time.time())
-    new_snapshot.source_replicated_snap_uuid = snapshot.uuid
+    if replicate_to_source:
+        new_snapshot.target_replicated_snap_uuid = snapshot.uuid
+    else:
+        new_snapshot.source_replicated_snap_uuid = snapshot.uuid
     new_snapshot.status = SnapShot.STATUS_ONLINE
     if target_prev_snap:
         new_snapshot.prev_snap_uuid = target_prev_snap.get_id()
