@@ -143,18 +143,36 @@ class BaseModel(object):
             return objects[0]
         return None
 
-    def write_to_db(self, kv_store=None):
-        if not kv_store:
+    def write_to_db(self, kv_store=None, transaction=None):
+        """
+        Write this object to FDB. Can either:
+        - use an existing transaction (transaction parameter), or
+        - use kv_store for a standalone write.
+
+        Note: If you pass a transaction, commit must be done outside this function.
+        """
+        if not kv_store and not transaction:
             from simplyblock_core.db_controller import DBController
             kv_store = DBController().kv_store
+
         try:
             prefix = self.get_db_id()
             st = json.dumps(self.to_dict())
-            kv_store.set(prefix.encode(), st.encode())
+
+            if transaction:
+                # Use the existing transaction, don't commit here
+                transaction.set(prefix.encode(), st.encode())
+            else:
+                # Create a new transaction for standalone write
+                tr = kv_store.create_transaction()
+                tr.set(prefix.encode(), st.encode())
+                tr.commit().wait()
+
             return True
+
         except Exception as e:
             print(f"Error Writing to FDB! {e}")
-            exit(1)
+            raise  # Better than exit, let caller handle
 
     def remove(self, kv_store):
         prefix = self.get_db_id()
