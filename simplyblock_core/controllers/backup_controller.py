@@ -1,6 +1,7 @@
 # coding=utf-8
 import datetime
 import logging as lg
+import re
 
 import docker
 
@@ -25,7 +26,7 @@ def __get_fdb_cont():
         if container.name.startswith("app_fdb-server"): # type: ignore[union-attr]
             return container
 
-def create_backup(tag_name):
+def create_backup():
     container = __get_fdb_cont()
     if container:
         backup_path = cluster.backup_local_path
@@ -106,13 +107,36 @@ def backup_restore(backup_name):
     container = __get_fdb_cont()
     if container:
         backup_path = cluster.get_backup_path(backup_name)
-        res = container.exec_run(cmd=f"fdbcli --exec \"writemode on; clearrange \\\"\\\" \\xff\"")
+        res = container.exec_run(cmd="fdbcli --exec \"writemode on; clearrange \\\"\\\" \\xff\"")
         cont = res.output.decode("utf-8")
         logger.info(cont.strip())
         res = container.exec_run(cmd=f"fdbrestore start -r \"{backup_path}\" --dest-cluster-file {constants.KVD_DB_FILE_PATH}")
         cont = res.output.decode("utf-8")
         logger.info(cont.strip())
         return True
+
+
+def parse_history_param(history_string):
+    if not history_string:
+        logger.error("Invalid history value")
+        return False
+    results = re.search(r'^(\d+[hmd])(\d+[hmd])?$', history_string.lower())
+    if not results:
+        logger.error(f"Error parsing history string: {history_string}")
+        return False
+    total_seconds = 0
+    for s in results.groups():
+        if not s:
+            continue
+        ind = s[-1]
+        v = int(s[:-1])
+        if ind == 'd':
+            total_seconds += v*60*60*24
+        if ind == 'h':
+            total_seconds += v*60*60
+        if ind == 'm':
+            total_seconds += v*60
+    return int(total_seconds)
 
 
 def backup_configure(backup_path, backup_frequency, bucket_name, region_name, backup_credentials):
@@ -122,7 +146,9 @@ def backup_configure(backup_path, backup_frequency, bucket_name, region_name, ba
             if not backup_path.startswith("file://"):
                 backup_path = f"file://{backup_path}"
             clusters[0].backup_local_path = backup_path
-        clusters[0].backup_frequency_seconds = backup_frequency if backup_frequency else ""
+        if backup_frequency:
+            total_seconds = parse_history_param(backup_frequency)
+            clusters[0].backup_frequency_seconds = total_seconds
         clusters[0].backup_s3_region = region_name if region_name else ""
         clusters[0].backup_s3_bucket = bucket_name if bucket_name else ""
         clusters[0].backup_s3_cred = backup_credentials if backup_credentials else ""

@@ -27,7 +27,7 @@ def process_task(task):
         task.write_to_db(db.kv_store)
         return True
 
-    if db.get_cluster_by_id(cl.get_id()).status == Cluster.STATUS_IN_ACTIVATION:
+    if db.get_cluster_by_id(task.cluster_id).status == Cluster.STATUS_IN_ACTIVATION:
         task.function_result = "Cluster is in_activation, waiting"
         task.status = JobSchedule.STATUS_NEW
         task.write_to_db(db.kv_store)
@@ -63,6 +63,6 @@ while True:
     else:
 
         b = backup_controller.create_backup()
-        time.sleep(clusters[0].backup_frequency)
+        time.sleep(clusters[0].backup_frequency_seconds)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

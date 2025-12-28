@@ -667,7 +667,7 @@ class CLIWrapperBase:
         return qos_controller.delete_class(args.name, args.cluster_id)
 
     def backup__create(self, sub_command, args):
-        return backup_controller.create_backup(args.tag_name)
+        return backup_controller.create_backup()
 
     def backup__list(self, sub_command, args):
         return backup_controller.list_backups()
