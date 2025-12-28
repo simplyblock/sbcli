@@ -31,7 +31,10 @@ def create_backup(tag_name):
         backup_path = cluster.backup_local_path
         if cluster.backup_s3_bucket and cluster.backup_s3_cred:
             folder = f"backup-{str(datetime.datetime.now())}"
-            backup_path = f"blobstore://{cluster.backup_s3_cred}@s3.{cluster.backup_s3_region}.amazonaws.com/{folder}?bucket={cluster.backup_s3_bucket}&{cluster.backup_s3_region}&sc=0"
+            folder = folder.replace(" ", "-")
+            folder = folder.replace(":", "-")
+            folder = folder.split(".")[0]
+            backup_path = f"blobstore://{cluster.backup_s3_cred}@s3.{cluster.backup_s3_region}.amazonaws.com/{folder}?bucket={cluster.backup_s3_bucket}&region={cluster.backup_s3_region}&sc=0"
 
         res = container.exec_run(cmd=f"fdbbackup start -d {backup_path}")
         cont = res.output.decode("utf-8")
@@ -52,20 +55,33 @@ def list_backups():
                 continue
 
             name = line.split("/")[-1].strip()
+            name = name.split("?")[0]
             size = 0
             restorable = 0
-            res = container.exec_run(cmd=f"fdbbackup describe -d {line}")
+            date = ""
+            version = 0
+            res = container.exec_run(cmd=f"fdbbackup describe -d {cluster.get_backup_path(name)} --version-timestamps")
             cont = res.output.decode("utf-8")
             for line in cont.splitlines():
                 if line and line.startswith("SnapshotBytes"):
                     size = line.split()[1].strip()
                 if line and line.startswith("Restorable"):
                     restorable = line.split()[1].strip()
-            date = datetime.datetime.strptime(name.replace("backup-",""), "%Y-%m-%d-%H-%M-%S.%f").strftime(
-                "%H:%M:%S, %d/%m/%Y")
+                if line and line.startswith("Snapshot:"):
+                    for param in line.split():
+                        if param.startswith("startVersion"):
+                            version = param.split("=")[1].strip()
+                        elif param.startswith("(") and param.endswith(")") and not date:# 2025/12/28.10:10:20+0000
+                            try:
+                                date = datetime.datetime.strptime(param[1:-1], "%Y/%m/%d.%H:%M:%S+0000").strftime("%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                date = name.replace("backup-","")
+            if not date:
+                date = name.replace("backup-", "")
 
             data.append({
                 "Name": name,
+                "Version": version,
                 "Size": utils.humanbytes(int(size)),
                 "Restorable": restorable,
                 "Date": date,
@@ -83,15 +99,20 @@ def backup_status():
         res = container.exec_run(cmd="fdbbackup status")
         cont = res.output.decode("utf-8")
         logger.info(f"backup status: \n{cont.strip()}")
+        return True
 
 
 def backup_restore(backup_name):
     container = __get_fdb_cont()
     if container:
-        backup_path = cluster.get_backup_path()
-        res = container.exec_run(cmd=f"fdbcli --exec \"writemode on; clearrange \"\" \xff\"; fdbrestore start -r {backup_path} --dest-cluster-file {constants.KVD_DB_FILE_PATH} -v {backup_name}")
+        backup_path = cluster.get_backup_path(backup_name)
+        res = container.exec_run(cmd=f"fdbcli --exec \"writemode on; clearrange \\\"\\\" \\xff\"")
         cont = res.output.decode("utf-8")
         logger.info(cont.strip())
+        res = container.exec_run(cmd=f"fdbrestore start -r \"{backup_path}\" --dest-cluster-file {constants.KVD_DB_FILE_PATH}")
+        cont = res.output.decode("utf-8")
+        logger.info(cont.strip())
+        return True
 
 
 def backup_configure(backup_path, backup_frequency, bucket_name, region_name, backup_credentials):

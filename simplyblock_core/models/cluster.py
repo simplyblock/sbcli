@@ -96,10 +96,10 @@ class Cluster(BaseModel):
             return True
         return False
 
-    def get_backup_path(self):
+    def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:
-            backup_path = f"blobstore://{self.backup_s3_cred}@s3.{self.backup_s3_region}.amazonaws.com/?bucket={self.backup_s3_bucket}" \
+            backup_path = f"blobstore://{self.backup_s3_cred}@s3.{self.backup_s3_region}.amazonaws.com/{path}?bucket={self.backup_s3_bucket}" \
                           + f"&region={self.backup_s3_region}&sc=0"
         else:
-            backup_path = self.backup_local_path
+            backup_path =  path.join([self.backup_local_path, path])
         return backup_path
