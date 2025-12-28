@@ -679,7 +679,7 @@ class CLIWrapperBase:
         return backup_controller.backup_restore(args.name)
 
     def backup__config(self, sub_command, args):
-        return backup_controller.backup_configure(args.backup_path, args.backup_frequency)
+        return backup_controller.backup_configure(args.backup_path, args.backup_frequency, args.bucket_name, args.region_name, args.backup_credentials)
 
     def storage_node_list_devices(self, args):
         node_id = args.node_id

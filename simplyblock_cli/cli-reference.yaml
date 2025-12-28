@@ -1975,11 +1975,22 @@ commands:
         help: "restore a backup"
         arguments:
           - name: "backup_path"
-            help: 'backup path, defaults to local: file:///etc/foundationdb/backup, can be s3 bucket blobstore link, 
-                blobstore://{API_KEY}:{API_SECRET}@s3.us-east-2.amazonaws.com/backup-fdb?bucket=fdb-backup-dir&region=us-east-2&sc=0'
+            help: 'local backup path, defaults to /etc/foundationdb/backup'
             dest: backup_path
             type: str
           - name: "backup_frequency"
             help: "backup frequency, can be 3h, 1d"
             dest: backup_frequency
+            type: str
+          - name: "--s3-bucket"
+            help: 'AWS S3 bucket name'
+            dest: bucket_name
+            type: str
+          - name: "--s3-region"
+            help: 'AWS S3 region'
+            dest: region_name
+            type: str
+          - name: "--s3-credentials"
+            help: 'AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]'
+            dest: backup_credentials
             type: str

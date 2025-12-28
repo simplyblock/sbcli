@@ -10,11 +10,10 @@ from simplyblock_core.db_controller import DBController
 
 logger = lg.getLogger()
 db_controller = DBController()
-
-backup_path = constants.KVD_DB_BACKUP_PATH
+# backup_path = constants.KVD_DB_BACKUP_PATH
 clusters = db_controller.get_clusters()
 if clusters:
-    backup_path = clusters[0].backup_path
+    cluster = clusters[0]
 
 
 def __get_fdb_cont():
@@ -29,6 +28,11 @@ def __get_fdb_cont():
 def create_backup(tag_name):
     container = __get_fdb_cont()
     if container:
+        backup_path = cluster.backup_local_path
+        if cluster.backup_s3_bucket and cluster.backup_s3_cred:
+            folder = f"backup-{str(datetime.datetime.now())}"
+            backup_path = f"blobstore://{cluster.backup_s3_cred}@s3.{cluster.backup_s3_region}.amazonaws.com/{folder}?bucket={cluster.backup_s3_bucket}&{cluster.backup_s3_region}&sc=0"
+
         res = container.exec_run(cmd=f"fdbbackup start -d {backup_path}")
         cont = res.output.decode("utf-8")
         logger.info(cont)
@@ -39,6 +43,7 @@ def list_backups():
     container = __get_fdb_cont()
     data = []
     if container:
+        backup_path = cluster.get_backup_path()
         res = container.exec_run(cmd=f"fdbbackup list -b {backup_path}")
         logger.info(f"backup list from : {backup_path}")
         cont = res.output.decode("utf-8")
@@ -83,16 +88,20 @@ def backup_status():
 def backup_restore(backup_name):
     container = __get_fdb_cont()
     if container:
+        backup_path = cluster.get_backup_path()
         res = container.exec_run(cmd=f"fdbcli --exec \"writemode on; clearrange \"\" \xff\"; fdbrestore start -r {backup_path} --dest-cluster-file {constants.KVD_DB_FILE_PATH} -v {backup_name}")
         cont = res.output.decode("utf-8")
         logger.info(cont.strip())
 
 
-def backup_configure(backup_path, backup_frequency):
+def backup_configure(backup_path, backup_frequency, bucket_name, region_name, backup_credentials):
     clusters = db_controller.get_clusters()
     if clusters:
-        clusters[0].backup_path = backup_path
+        clusters[0].backup_local_path = backup_path
         clusters[0].backup_frequency_seconds = backup_frequency
+        clusters[0].backup_s3_region = region_name
+        clusters[0].backup_s3_bucket = bucket_name
+        clusters[0].backup_s3_cred = backup_credentials
         clusters[0].write_to_db()
         return True
 

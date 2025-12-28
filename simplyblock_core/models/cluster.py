@@ -70,8 +70,11 @@ class Cluster(BaseModel):
     is_re_balancing: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
-    backup_path: str = constants.KVD_DB_BACKUP_PATH
+    backup_local_path: str = constants.KVD_DB_BACKUP_PATH
     backup_frequency_seconds: int = 3*60*60
+    backup_s3_bucket: str = ""
+    backup_s3_region: str = ""
+    backup_s3_cred: str = ""
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
@@ -93,3 +96,10 @@ class Cluster(BaseModel):
             return True
         return False
 
+    def get_backup_path(self):
+        if self.backup_s3_bucket and self.backup_s3_cred:
+            backup_path = f"blobstore://{self.backup_s3_cred}@s3.{self.backup_s3_region}.amazonaws.com/?bucket={self.backup_s3_bucket}" \
+                          + f"&region={self.backup_s3_region}&sc=0"
+        else:
+            backup_path = self.backup_local_path
+        return backup_path
