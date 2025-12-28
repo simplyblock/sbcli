@@ -2,6 +2,7 @@
 
 from typing import List
 
+from simplyblock_core import constants
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -69,6 +70,8 @@ class Cluster(BaseModel):
     is_re_balancing: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
+    backup_path: str = constants.KVD_DB_BACKUP_PATH
+    backup_frequency_seconds: int = 3*60*60
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

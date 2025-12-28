@@ -802,6 +802,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_backup__list(subparser)
         self.init_backup__status(subparser)
         self.init_backup__restore(subparser)
+        self.init_backup__config(subparser)
 
 
     def init_backup__create(self, subparser):
@@ -817,6 +818,11 @@ class CLIWrapper(CLIWrapperBase):
     def init_backup__restore(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restore', 'restore a backup')
         subcommand.add_argument('name', help='backup class name', type=str)
+
+    def init_backup__config(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'config', 'restore a backup')
+        subcommand.add_argument('backup_path', help='backup path, defaults to local: file:///etc/foundationdb/backup, can be s3 bucket blobstore link, blobstore://[API_KEY]:[API_SECRET]@s3.us-east-2.amazonaws.com/backup-2025-12-28?bucket=fdb-backup-dir&region=us-east-2&sc=0', type=str)
+        subcommand.add_argument('backup_frequency', help='backup frequency, can be 3h, 1d', type=str)
 
 
     def run(self):
@@ -1161,6 +1167,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__status(sub_command, args)
                 elif sub_command in ['restore']:
                     ret = self.backup__restore(sub_command, args)
+                elif sub_command in ['config']:
+                    ret = self.backup__config(sub_command, args)
                 else:
                     self.parser.print_help()
 

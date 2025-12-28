@@ -11,18 +11,21 @@ from simplyblock_core.db_controller import DBController
 logger = lg.getLogger()
 db_controller = DBController()
 
-backup_path = "file:///etc/foundationdb/backup"
-
+backup_path = constants.KVD_DB_BACKUP_PATH
+clusters = db_controller.get_clusters()
+if clusters:
+    backup_path = clusters[0].backup_path
+if not backup_path:
+    backup_path = constants.KVD_DB_BACKUP_PATH
 
 def __get_fdb_cont():
     snode = db_controller.get_mgmt_nodes()[0]
     if not snode:
-        return False
+        return
     node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
     for container in node_docker.containers.list():
         if container.name.startswith("app_fdb-server"): # type: ignore[union-attr]
             return container
-
 
 def create_backup(tag_name):
     container = __get_fdb_cont()
@@ -30,11 +33,8 @@ def create_backup(tag_name):
         res = container.exec_run(cmd=f"fdbbackup start -d {backup_path}")
         cont = res.output.decode("utf-8")
         logger.info(cont)
-        # logger.info(f"backup start: {backup_path}")
-
-    return True
-
-
+        return True
+    return False
 
 def list_backups():
     container = __get_fdb_cont()
@@ -84,7 +84,16 @@ def backup_status():
 def backup_restore(backup_name):
     container = __get_fdb_cont()
     if container:
-        res = container.exec_run(cmd=f"fdbrestore start -r {backup_path}/{backup_name} --dest-cluster-file {constants.KVD_DB_FILE_PATH}")
+        res = container.exec_run(cmd=f"fdbcli --exec \"writemode on; clearrange \"\" \xff\"; fdbrestore start -r {backup_path} --dest-cluster-file {constants.KVD_DB_FILE_PATH} -v {backup_name}")
         cont = res.output.decode("utf-8")
         logger.info(cont.strip())
+
+
+def backup_configure(backup_path, backup_frequency):
+    clusters = db_controller.get_clusters()
+    if clusters:
+        clusters[0].backup_path = backup_path
+        clusters[0].backup_frequency_seconds = backup_frequency
+        clusters[0].write_to_db()
+        return True
 
