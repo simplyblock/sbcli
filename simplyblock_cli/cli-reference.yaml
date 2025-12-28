@@ -1974,11 +1974,11 @@ commands:
       - name: config
         help: "restore a backup"
         arguments:
-          - name: "backup_path"
+          - name: "--backup-path"
             help: 'local backup path, defaults to /etc/foundationdb/backup'
             dest: backup_path
             type: str
-          - name: "backup_frequency"
+          - name: "--backup-frequency"
             help: "backup frequency, can be 3h, 1d"
             dest: backup_frequency
             type: str
