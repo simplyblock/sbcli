@@ -1,5 +1,5 @@
 # coding=utf-8
-
+import os.path
 from typing import List
 
 from simplyblock_core import constants
@@ -101,5 +101,5 @@ class Cluster(BaseModel):
             backup_path = f"blobstore://{self.backup_s3_cred}@s3.{self.backup_s3_region}.amazonaws.com/{path}?bucket={self.backup_s3_bucket}" \
                           + f"&region={self.backup_s3_region}&sc=0"
         else:
-            backup_path =  path.join([self.backup_local_path, path])
+            backup_path = os.path.join(self.backup_local_path, path)
         return backup_path

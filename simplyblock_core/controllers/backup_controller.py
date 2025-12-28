@@ -118,11 +118,14 @@ def backup_restore(backup_name):
 def backup_configure(backup_path, backup_frequency, bucket_name, region_name, backup_credentials):
     clusters = db_controller.get_clusters()
     if clusters:
-        clusters[0].backup_local_path = backup_path
-        clusters[0].backup_frequency_seconds = backup_frequency
-        clusters[0].backup_s3_region = region_name
-        clusters[0].backup_s3_bucket = bucket_name
-        clusters[0].backup_s3_cred = backup_credentials
+        if backup_path:
+            if not backup_path.startswith("file://"):
+                backup_path = f"file://{backup_path}"
+            clusters[0].backup_local_path = backup_path
+        clusters[0].backup_frequency_seconds = backup_frequency if backup_frequency else ""
+        clusters[0].backup_s3_region = region_name if region_name else ""
+        clusters[0].backup_s3_bucket = bucket_name if bucket_name else ""
+        clusters[0].backup_s3_cred = backup_credentials if backup_credentials else ""
         clusters[0].write_to_db()
         return True
 
