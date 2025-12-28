@@ -15,8 +15,7 @@ backup_path = constants.KVD_DB_BACKUP_PATH
 clusters = db_controller.get_clusters()
 if clusters:
     backup_path = clusters[0].backup_path
-if not backup_path:
-    backup_path = constants.KVD_DB_BACKUP_PATH
+
 
 def __get_fdb_cont():
     snode = db_controller.get_mgmt_nodes()[0]
@@ -62,7 +61,7 @@ def list_backups():
 
             data.append({
                 "Name": name,
-                "Size": utils.humanbytes(size),
+                "Size": utils.humanbytes(int(size)),
                 "Restorable": restorable,
                 "Date": date,
             })
