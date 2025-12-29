@@ -25,6 +25,7 @@ def _lvol_event(lvol, message, caused_by, event):
         pool = db_controller.get_pool_by_id(lvol.pool_uuid)
 
         if event == ec.EVENT_OBJ_CREATED:
+            logger.info("Creating lvol CR object")
             crypto_key=(
                 (lvol.crypto_key1, lvol.crypto_key2)
                 if lvol.crypto_key1 and lvol.crypto_key2
@@ -84,6 +85,7 @@ def _lvol_event(lvol, message, caused_by, event):
                 updates={"status": lvol.status, "health": lvol.health_check},
             )
         elif event == ec.EVENT_OBJ_DELETED:
+            logger.info("Deleting lvol CR object")
             utils.patch_cr_lvol_status(
                 group=constants.CR_GROUP,
                 version=constants.CR_VERSION,
