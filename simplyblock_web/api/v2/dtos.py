@@ -248,7 +248,7 @@ class VolumeDTO(BaseModel):
     size: util.Unsigned
     ndcs: int
     npcs: int
-    pool_uuid: UUID
+    pool_uuid: str
     pool_name: str
     pvc_name: str = ""
     snapshot_name: str = ""
