@@ -23,7 +23,7 @@ spec:
         fsGroup: 65532
       serviceAccountName: simplyblock-manager
       containers:
-        - image: simplyblock/simplyblock-manager:capacity_value_string
+        - image: simplyblock/simplyblock-manager:develop_lvol_controller_cr
           imagePullPolicy: Always
           name: manager
           env:

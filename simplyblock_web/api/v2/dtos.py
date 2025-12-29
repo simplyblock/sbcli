@@ -242,9 +242,16 @@ class VolumeDTO(BaseModel):
     status: str
     health_check: bool
     nqn: str
+    fabric: str
     nodes: List[util.UrlPath]
     port: util.Port
     size: util.Unsigned
+    ndcs: int
+    npcs: int
+    pool_uuid: UUID
+    pool_name: str
+    pvc_name: str = ""
+    snapshot_name: str = ""
     cloned_from: Optional[util.UrlPath]
     crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
@@ -262,6 +269,7 @@ class VolumeDTO(BaseModel):
             status=model.status,
             health_check=model.health_check,
             nqn=model.nqn,
+            fabric=model.fabric,
             nodes=[
                 str(request.url_for(
                     'clusters:storage-nodes:detail',
@@ -284,6 +292,8 @@ class VolumeDTO(BaseModel):
                 else None
             ),
             high_availability=model.ha_type == 'ha',
+            ndcs=model.ndcs,
+            npcs=model.npcs,
             max_rw_iops=model.rw_ios_per_sec,
             max_rw_mbytes=model.rw_mbytes_per_sec,
             max_r_mbytes=model.r_mbytes_per_sec,
