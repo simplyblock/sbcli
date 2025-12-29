@@ -24,7 +24,7 @@ def _lvol_event(lvol, message, caused_by, event):
     if cluster.mode == "kubernetes":
         pool = db_controller.get_pool_by_id(lvol.pool_uuid)
 
-        if ec.EVENT_OBJ_CREATED:
+        if event == ec.EVENT_OBJ_CREATED:
             crypto_key=(
                 (lvol.crypto_key1, lvol.crypto_key2)
                 if lvol.crypto_key1 and lvol.crypto_key2
@@ -73,7 +73,7 @@ def _lvol_event(lvol, message, caused_by, event):
                 },
             )
 
-        elif ec.EVENT_STATUS_CHANGE:
+        elif event == ec.EVENT_STATUS_CHANGE:
             utils.patch_cr_lvol_status(
                 group=constants.CR_GROUP,
                 version=constants.CR_VERSION,
@@ -83,7 +83,7 @@ def _lvol_event(lvol, message, caused_by, event):
                 lvol_uuid=lvol.get_id(),
                 updates={"status": lvol.status, "health": lvol.health_check},
             )
-        elif ec.EVENT_OBJ_DELETED:
+        elif event == ec.EVENT_OBJ_DELETED:
             utils.patch_cr_lvol_status(
                 group=constants.CR_GROUP,
                 version=constants.CR_VERSION,
