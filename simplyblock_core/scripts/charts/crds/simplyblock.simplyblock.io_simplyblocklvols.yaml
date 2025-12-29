@@ -123,7 +123,8 @@ spec:
                       format: int64
                       type: integer
                     subsysPort:
-                      type: string
+                      format: int64
+                      type: integer
                     updateDt:
                       format: date-time
                       type: string
