@@ -11,7 +11,8 @@ import sys
 import uuid
 import time
 import socket
-from typing import Union, Any, Optional, Tuple
+from typing import Union, Any, Optional, Tuple, Dict
+from datetime import datetime, timezone
 from docker import DockerClient
 from kubernetes import client, config
 from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
@@ -2045,10 +2046,10 @@ def patch_cr_lvol_status(
     plural: str,
     namespace: str,
     name: str,
-    lvol_uuid: str | None = None,
-    updates: dict | None = None,
+    lvol_uuid: Optional[str] = None,
+    updates: Optional[Dict[str, Any]] = None,
     remove: bool = False,
-    add: dict | None = None,
+    add: Optional[Dict[str, Any]] = None,
 ):
     """
     Patch status.lvols[*] for an LVOL CustomResource.
@@ -2077,6 +2078,8 @@ def patch_cr_lvol_status(
     load_kube_config_with_fallback()
     api = client.CustomObjectsApi()
 
+    now = datetime.now(timezone.utc).isoformat()
+
     try:
         cr = api.get_namespaced_custom_object(
             group=group,
@@ -2095,6 +2098,8 @@ def patch_cr_lvol_status(
 
         # ---- ADD ----
         if add is not None:
+            add.setdefault("createDt", now)
+            add["updateDt"] = now
             lvols.append(add)
 
         # ---- UPDATE / REMOVE ----
@@ -2111,6 +2116,7 @@ def patch_cr_lvol_status(
 
                     if updates:
                         lvol.update(updates)
+                        lvol["updateDt"] = now
 
                 new_lvols.append(lvol)
 
