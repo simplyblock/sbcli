@@ -2,12 +2,14 @@
 import datetime
 import logging as lg
 import re
+import time
+import uuid
 
 import docker
 
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
-
+from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = lg.getLogger()
 db_controller = DBController()
@@ -37,7 +39,7 @@ def create_backup():
             folder = folder.split(".")[0]
             backup_path = f"blobstore://{cluster.backup_s3_cred}@s3.{cluster.backup_s3_region}.amazonaws.com/{folder}?bucket={cluster.backup_s3_bucket}&region={cluster.backup_s3_region}&sc=0"
 
-        res = container.exec_run(cmd=f"fdbbackup start -d {backup_path}")
+        res = container.exec_run(cmd=f"fdbbackup start -d {backup_path} -w")
         cont = res.output.decode("utf-8")
         logger.info(cont)
         return True

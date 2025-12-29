@@ -1954,12 +1954,10 @@ commands:
       - name: create
         help: "Creates an fdb backup"
         arguments:
-          - name: "--tag-name"
-            help: "backup tag name"
-            dest: tag_name
+          - name: "cluster_id"
+            help: "Cluster ID to create db backup for"
+            dest: cluster_id
             type: str
-            required: false
-            default: ""
       - name: list
         help: "Lists all fdb backups"
       - name: status
@@ -1972,7 +1970,7 @@ commands:
             dest: name
             type: str
       - name: config
-        help: "restore a backup"
+        help: "Set backup configuration"
         arguments:
           - name: "--backup-path"
             help: 'local backup path, defaults to /etc/foundationdb/backup'

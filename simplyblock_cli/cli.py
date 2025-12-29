@@ -807,7 +807,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_backup__create(self, subparser):
         subcommand = self.add_sub_command(subparser, 'create', 'Creates an fdb backup')
-        argument = subcommand.add_argument('--tag-name', help='backup tag name', type=str, default='', dest='tag_name', required=False)
+        subcommand.add_argument('cluster_id', help='Cluster ID to create db backup for', type=str)
 
     def init_backup__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all fdb backups')
@@ -820,7 +820,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('name', help='backup class name', type=str)
 
     def init_backup__config(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'config', 'restore a backup')
+        subcommand = self.add_sub_command(subparser, 'config', 'Set backup configuration')
         argument = subcommand.add_argument('--backup-path', help='local backup path, defaults to /etc/foundationdb/backup', type=str, dest='backup_path')
         argument = subcommand.add_argument('--backup-frequency', help='backup frequency, can be 3h, 1d', type=str, dest='backup_frequency')
         argument = subcommand.add_argument('--s3-bucket', help='AWS S3 bucket name', type=str, dest='bucket_name')
