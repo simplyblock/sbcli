@@ -332,6 +332,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
+    cluster.full_page_unmap = False
 
     if mode == "docker":
         if not disable_monitoring:
@@ -485,6 +486,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     protocols = parse_protocols(fabric)
     cluster.fabric_tcp = protocols["tcp"]
     cluster.fabric_rdma = protocols["rdma"]
+    cluster.full_page_unmap = False
 
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
