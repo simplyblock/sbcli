@@ -781,17 +781,23 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
 
     if not node_bdev_names:
         node_bdev_names = {}
-        ret = rpc_client.get_bdevs()
-        if ret:
-            for bdev in ret:
-                node_bdev_names[bdev['name']] = bdev
+        try:
+            ret = rpc_client.get_bdevs()
+            if ret:
+                for bdev in ret:
+                    node_bdev_names[bdev['name']] = bdev
+        except Exception as e:
+            logger.error(f"Failed to connect to node's SPDK: {e}")
 
     if not node_lvols_nqns:
         node_lvols_nqns = {}
-        ret = rpc_client.subsystem_list()
-        if ret:
-            for sub in ret:
-                node_lvols_nqns[sub['nqn']] = sub
+        try:
+            ret = rpc_client.subsystem_list()
+            if ret:
+                for sub in ret:
+                    node_lvols_nqns[sub['nqn']] = sub
+        except Exception as e:
+            logger.error(f"Failed to connect to node's SPDK: {e}")
 
     passed = True
     try:

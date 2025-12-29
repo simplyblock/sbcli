@@ -308,20 +308,28 @@ def check_node(snode):
             continue
 
         passed = True
-        ret = health_controller.check_lvol_on_node(
-            lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
-        if not ret:
-            passed = False
+        try:
+            ret = health_controller.check_lvol_on_node(
+                lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
+            if not ret:
+                passed = False
+        except Exception as e:
+            logger.error(f"Failed to check lvol:{lvol.get_id()} on node: {lvol.node_id}")
+            logger.error(e)
 
         if lvol.ha_type == "ha":
             sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
             if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                ret = health_controller.check_lvol_on_node(
-                    lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
-                if not ret:
-                    passed = False
-                else:
-                    passed = True
+                try:
+                    ret = health_controller.check_lvol_on_node(
+                        lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
+                    if not ret:
+                        passed = False
+                    else:
+                        passed = True
+                except Exception as e:
+                    logger.error(f"Failed to check lvol: {lvol.get_id()} on node: {snode.secondary_node_id}")
+                    logger.error(e)
 
         if snode.lvstore_status == "ready":
 
