@@ -1904,9 +1904,11 @@ def restart_storage_node(
             active_devices.append(db_dev)
         else:
             logger.info(f"Device not found: {db_dev.get_id()}")
-            db_dev.status = NVMeDevice.STATUS_REMOVED
-            removed_devices.append(db_dev)
-            # distr_controller.send_dev_status_event(db_dev, db_dev.status)
+            if db_dev.status == NVMeDevice.STATUS_NEW:
+                snode.nvme_devices.remove(db_dev)
+            else:
+                db_dev.status = NVMeDevice.STATUS_REMOVED
+                removed_devices.append(db_dev)
 
     jm_dev_sn = ""
     if snode.jm_device and "serial_number" in snode.jm_device.device_data_dict:
