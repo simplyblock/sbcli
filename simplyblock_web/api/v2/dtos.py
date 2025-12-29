@@ -242,6 +242,7 @@ class VolumeDTO(BaseModel):
     status: str
     health_check: bool
     nqn: str
+    hostname: str
     fabric: str
     nodes: List[util.UrlPath]
     port: util.Port
@@ -273,6 +274,7 @@ class VolumeDTO(BaseModel):
             status=model.status,
             health_check=model.health_check,
             nqn=model.nqn,
+            hostname=model.hostname,
             fabric=model.fabric,
             nodes=[
                 str(request.url_for(
