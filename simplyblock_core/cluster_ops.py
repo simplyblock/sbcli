@@ -438,8 +438,8 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name, 
-                cr_namespace, cr_plural, fabric="tcp", cluster_ip=None, grafana_secret=None) -> str:
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None, 
+                cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None) -> str:
 
 
     default_cluster = None

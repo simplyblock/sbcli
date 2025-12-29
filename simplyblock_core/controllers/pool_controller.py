@@ -24,7 +24,7 @@ def _generate_string(length):
 
 
 def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id,
-                 cr_name, cr_namespace, cr_plural, qos_host=None):
+                 cr_name=None, cr_namespace=None, cr_plural=None, qos_host=None):
     db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
