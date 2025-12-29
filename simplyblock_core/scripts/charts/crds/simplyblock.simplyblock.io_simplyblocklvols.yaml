@@ -60,7 +60,8 @@ spec:
                 items:
                   properties:
                     blobID:
-                      type: string
+                      format: int64
+                      type: integer
                     clonedFromSnap:
                       type: string
                     createDt:
