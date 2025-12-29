@@ -68,8 +68,8 @@ spec:
                       type: string
                     fabric:
                       type: string
-                    haType:
-                      type: string
+                    ha:
+                      type: boolean
                     health:
                       type: boolean
                     hostname:

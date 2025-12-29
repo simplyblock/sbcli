@@ -252,9 +252,13 @@ class VolumeDTO(BaseModel):
     pool_name: str
     pvc_name: str = ""
     snapshot_name: str = ""
+    blobid: int
+    ns_id: int
     cloned_from: Optional[util.UrlPath]
     crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
+    lvol_priority_class: util.Unsigned
+    max_namespace_per_subsys: int
     max_rw_iops: util.Unsigned
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
@@ -292,8 +296,16 @@ class VolumeDTO(BaseModel):
                 else None
             ),
             high_availability=model.ha_type == 'ha',
+            pool_uuid=model.pool_uuid,
+            pool_name=model.pool_name,
+            pvc_name=model.pvc_name,
+            snapshot_name=model.snapshot_name,
             ndcs=model.ndcs,
             npcs=model.npcs,
+            blobid=model.blobid,
+            ns_id=model.ns_id,
+            lvol_priority_class=model.lvol_priority_class,
+            max_namespace_per_subsys=model.max_namespace_per_subsys,
             max_rw_iops=model.rw_ios_per_sec,
             max_rw_mbytes=model.rw_mbytes_per_sec,
             max_r_mbytes=model.r_mbytes_per_sec,
