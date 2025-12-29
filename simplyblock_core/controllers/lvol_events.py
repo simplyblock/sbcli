@@ -40,9 +40,9 @@ def _lvol_event(lvol, message, caused_by, event):
             utils.patch_cr_lvol_status(
                 group=constants.CR_GROUP,
                 version=constants.CR_VERSION,
-                plural=pool.cr_plural,
-                namespace=pool.cr_namespace,
-                name=pool.cr_name,
+                plural=pool.lvols_cr_plural,
+                namespace=pool.lvols_cr_namespace,
+                name=pool.lvols_cr_name,
                 add={
                     "uuid": lvol.get_id(),
                     "lvolName": lvol.lvol_name,
