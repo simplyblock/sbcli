@@ -29,7 +29,12 @@ def _lvol_event(lvol, message, caused_by, event):
                 (lvol.crypto_key1, lvol.crypto_key2)
                 if lvol.crypto_key1 and lvol.crypto_key2
                 else None
-            ),
+            )
+
+            node_urls = [
+                f"{constants.WEBAPI_K8S_ENDPOINT}/clusters/{snode.cluster_id}/storage-nodes/{node_id}/"
+                for node_id in lvol.nodes
+            ]
 
             utils.patch_cr_lvol_status(
                 group=constants.CR_GROUP,
@@ -41,14 +46,7 @@ def _lvol_event(lvol, message, caused_by, event):
                     "uuid": lvol.get_id(),
                     "lvolName": lvol.lvol_name,
                     "status": lvol.status,
-                    "nodeUUID": [
-                        str(Request.url_for(
-                            'clusters:storage-nodes:detail',
-                            cluster_id=snode.cluster_id,
-                            storage_node_id=node_id,
-                        ))
-                        for node_id in lvol.nodes
-                    ],
+                    "nodeUUID": node_urls,
                     "size": utils.humanbytes(lvol.size),
                     "health": lvol.health_check,
                     "isCrypto": crypto_key != None,
