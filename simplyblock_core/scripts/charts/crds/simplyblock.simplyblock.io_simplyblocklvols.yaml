@@ -83,7 +83,8 @@ spec:
                       format: int64
                       type: integer
                     namespaceID:
-                      type: string
+                      format: int64
+                      type: integer
                     nodeUUID:
                       items:
                         type: string

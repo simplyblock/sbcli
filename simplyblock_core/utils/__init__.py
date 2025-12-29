@@ -2038,6 +2038,106 @@ def patch_cr_node_status(
             f"Failed to patch node status for {name}: {e.reason} {e.body}"
         )
 
+def patch_cr_lvol_status(
+    *,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str,
+    name: str,
+    lvol_uuid: str | None = None,
+    updates: dict | None = None,
+    remove: bool = False,
+    add: dict | None = None,
+):
+    """
+    Patch status.lvols[*] for an LVOL CustomResource.
+
+    Operations:
+      - Update an existing LVOL (by uuid)
+      - Remove an LVOL (by uuid)
+      - Add a new LVOL entry
+
+    Parameters:
+      lvol_uuid:
+        UUID of the lvol entry to update or remove
+
+      updates:
+        Dict of fields to update on the matched lvol
+        Example:
+          {"status": "offline", "health": False}
+
+      remove:
+        If True, remove the lvol identified by lvol_uuid
+
+      add:
+        Full lvol dict to append to status.lvols
+    """
+
+    load_kube_config_with_fallback()
+    api = client.CustomObjectsApi()
+
+    try:
+        cr = api.get_namespaced_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+        )
+
+        status = cr.get("status", {})
+        lvols = status.get("lvols", [])
+
+        # Ensure list exists
+        if lvols is None:
+            lvols = []
+
+        # ---- ADD ----
+        if add is not None:
+            lvols.append(add)
+
+        # ---- UPDATE / REMOVE ----
+        if lvol_uuid:
+            found = False
+            new_lvols = []
+
+            for lvol in lvols:
+                if lvol.get("uuid") == lvol_uuid:
+                    found = True
+
+                    if remove:
+                        continue
+
+                    if updates:
+                        lvol.update(updates)
+
+                new_lvols.append(lvol)
+
+            if not found:
+                raise RuntimeError(f"LVOL not found (uuid={lvol_uuid})")
+
+            lvols = new_lvols
+
+        body = {
+            "status": {
+                "lvols": lvols
+            }
+        }
+
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body=body,
+        )
+
+    except ApiException as e:
+        raise RuntimeError(
+            f"Failed to patch lvol status for {name}: {e.reason} {e.body}"
+        )
 
 def get_node_name_by_ip(target_ip: str) -> str:
     load_kube_config_with_fallback()
