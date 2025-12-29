@@ -1158,6 +1158,57 @@ spec:
             - key: cluster-file
               path: fdb.cluster
 ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-backup-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-backup-service
+  template:
+    metadata:
+      annotations:
+        log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
+      labels:
+        app: simplyblock-backup-service
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: backup-service
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_fdb_backup.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "400m"
+              memory: "1Gi"
+      volumes:
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
+---
 
 apiVersion: apps/v1
 kind: DaemonSet

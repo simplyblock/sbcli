@@ -4,9 +4,9 @@ import time
 from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, constants, cluster_ops, utils
-from simplyblock_core.controllers import cluster_events
+from simplyblock_core.controllers import cluster_events, tasks_controller
 from simplyblock_core.models.cluster import Cluster
-
+from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = utils.get_logger(__name__)
 
@@ -14,10 +14,22 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 last_event: dict[str, dict] = {}
 
+
+def create_fdb_backup_if_needed(cluster):
+    last_backup_task = None
+    tasks = tasks_controller.get_backup_tasks(cluster.get_id())
+    if tasks:
+        last_backup_task = tasks[0]
+    if last_backup_task and last_backup_task.status == JobSchedule.STATUS_DONE:
+        if last_backup_task.date + cluster.backup_frequency_seconds > time.time():
+            tasks_controller.add_backup_task(cluster.get_id())
+
+
 logger.info("Starting capacity monitoring service...")
 while True:
     clusters = db.get_clusters()
     for cl in clusters:
+        create_fdb_backup_if_needed(cl)
         logger.info(f"Checking cluster: {cl.get_id()}")
         records = db.get_cluster_capacity(cl, 1)
         if not records:

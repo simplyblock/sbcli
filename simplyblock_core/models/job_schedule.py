@@ -23,6 +23,7 @@ class JobSchedule(BaseModel):
     FN_BALANCING_AFTER_DEV_EXPANSION = "balancing_on_dev_add"
     FN_JC_COMP_RESUME = "jc_comp_resume"
     FN_LVOL_SYNC_DEL = "lvol_sync_del"
+    FN_FDB_BACKUP = "fdb_backup"
 
     canceled: bool = False
     cluster_id: str = ""

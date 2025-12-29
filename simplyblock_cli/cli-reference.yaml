@@ -1947,3 +1947,48 @@ commands:
             type: str
             required: false
             default: ""
+  - name: "backup"
+    help: "FDB Backup operations"
+    weight: 800
+    subcommands:
+      - name: create
+        help: "Creates an fdb backup"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster ID to create db backup for"
+            dest: cluster_id
+            type: str
+      - name: list
+        help: "Lists all fdb backups"
+      - name: status
+        help: "get backup status"
+      - name: restore
+        help: "restore a backup"
+        arguments:
+          - name: "name"
+            help: "backup class name"
+            dest: name
+            type: str
+      - name: config
+        help: "Set backup configuration"
+        arguments:
+          - name: "--backup-path"
+            help: 'local backup path, defaults to /etc/foundationdb/backup'
+            dest: backup_path
+            type: str
+          - name: "--backup-frequency"
+            help: "backup frequency, can be 3h, 1d"
+            dest: backup_frequency
+            type: str
+          - name: "--s3-bucket"
+            help: 'AWS S3 bucket name'
+            dest: bucket_name
+            type: str
+          - name: "--s3-region"
+            help: 'AWS S3 region'
+            dest: region_name
+            type: str
+          - name: "--s3-credentials"
+            help: 'AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]'
+            dest: backup_credentials
+            type: str

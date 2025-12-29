@@ -160,8 +160,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
         return False
 
     data = []
-    tasks = db.get_job_tasks(cluster_id, reverse=True)
-    tasks.reverse()
+    tasks = db.get_job_tasks(cluster_id, reverse=False)
     if is_json is True:
         for t in tasks:
             if t.function_name == JobSchedule.FN_DEV_MIG:
@@ -420,3 +419,35 @@ def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
                     return task.uuid
     return False
 
+
+def add_backup_task(cluster_id):
+    try:
+        cluster = db.get_cluster_by_id(cluster_id)
+    except Exception as e:
+        logger.error(f"Failed to get cluster {cluster_id}: {e}")
+        return False
+
+    tasks = get_backup_tasks(cluster_id)
+    for task in tasks:
+        if task.status != JobSchedule.STATUS_DONE:
+            logger.info(f"Backup task found: {tasks[0].uuid}")
+            return False
+
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster.get_id()
+    task_obj.date = int(time.time())
+    task_obj.max_retry = constants.TASK_EXEC_RETRY_COUNT
+    task_obj.status = JobSchedule.STATUS_NEW
+    task_obj.write_to_db()
+    logger.info(f"Backup task created: {task_obj.uuid}")
+    return task_obj.uuid
+
+
+def get_backup_tasks(cluster_id):
+    backup_tasks = []
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_FDB_BACKUP:
+            backup_tasks.append(task)
+    return backup_tasks
