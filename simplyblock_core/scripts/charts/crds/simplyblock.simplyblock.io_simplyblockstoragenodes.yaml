@@ -150,7 +150,7 @@ spec:
                     devices:
                       type: string
                     health:
-                      type: string
+                      type: boolean
                     hostname:
                       type: string
                     lvol_port:
