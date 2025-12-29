@@ -25,7 +25,6 @@ def _lvol_event(lvol, message, caused_by, event):
         pool = db_controller.get_pool_by_id(lvol.pool_uuid)
 
         if event == ec.EVENT_OBJ_CREATED:
-            logger.info("Creating lvol CR object")
             crypto_key=(
                 (lvol.crypto_key1, lvol.crypto_key2)
                 if lvol.crypto_key1 and lvol.crypto_key2

@@ -2097,11 +2097,9 @@ def patch_cr_lvol_status(
             lvols = []
 
         # ---- ADD ----
-        logger.info(f"what is lvol add objects {add}")
         if add is not None:
             add.setdefault("createDt", now)
             add["updateDt"] = now
-            logger.info(f"Here is lvol add objects {add}")
             lvols.append(add)
 
         # ---- UPDATE / REMOVE ----
