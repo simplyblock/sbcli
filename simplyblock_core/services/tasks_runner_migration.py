@@ -215,7 +215,7 @@ while True:
                                 node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
                             try:
                                 ret, err = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-                                if err and "code" in err and err["code"] != -2:
+                                if err:
                                     logger.info("Failed to resume JC compression adding task...")
                                     tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
                             except Exception as e:
