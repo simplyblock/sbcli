@@ -46,7 +46,6 @@ class ClusterDTO(BaseModel):
     status: Literal['active', 'read_only', 'inactive', 'suspended', 'degraded', 'unready', 'in_activation', 'in_expansion']
     is_re_balancing: bool
     block_size: util.Unsigned
-    coding: Tuple[util.Unsigned, util.Unsigned]
     ha: bool
     utliziation_critical: util.Percent
     utilization_warning: util.Percent
