@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core import cluster_ops
-from simplyblock_web import utils
 
 from .dtos import ClusterDTO
 from . import util as util
@@ -68,7 +67,7 @@ def add(request: Request, parameters: ClusterParams):
         raise ValueError('Failed to create cluster')
 
     cluster = db.get_cluster_by_id(cluster_id_or_false)
-    return utils.get_response(ClusterDTO.from_model(cluster))
+    return ClusterDTO.from_model(cluster)
 
 
 instance_api = APIRouter(prefix='/{cluster_id}')
