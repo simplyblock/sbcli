@@ -40,11 +40,11 @@ class CapacityStatDTO(BaseModel):
 
 
 class ClusterDTO(BaseModel):
-    id: UUID
+    uuid: UUID
     name: Optional[str]
     nqn: str
     status: Literal['active', 'read_only', 'inactive', 'suspended', 'degraded', 'unready', 'in_activation', 'in_expansion']
-    rebalancing: bool
+    is_re_balancing: bool
     block_size: util.Unsigned
     coding: Tuple[util.Unsigned, util.Unsigned]
     ha: bool
@@ -55,18 +55,21 @@ class ClusterDTO(BaseModel):
     node_affinity: bool
     anti_affinity: bool
     secret: str
+    distr_ndcs: int
+    distr_npcs: int
     capacity: CapacityStatDTO
 
     @staticmethod
     def from_model(model: Cluster, stat_obj: Optional[StatsObject]=None):
         return ClusterDTO(
-            id=UUID(model.get_id()),
+            uuid=UUID(model.get_id()),
             name=model.cluster_name,
             nqn=model.nqn,
             status=model.status,  # type: ignore
-            rebalancing=model.is_re_balancing,
+            is_re_balancing=model.is_re_balancing,
             block_size=model.blk_size,
-            coding=(model.distr_ndcs, model.distr_npcs),
+            distr_ndcs=model.distr_ndcs,
+            distr_npcs=model.distr_npcs,
             ha=model.ha_type == 'ha',
             utilization_warning=model.cap_warn,
             utliziation_critical=model.cap_crit,
