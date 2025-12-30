@@ -23,7 +23,7 @@ spec:
         fsGroup: 65532
       serviceAccountName: simplyblock-manager
       containers:
-        - image: simplyblock/simplyblock-manager:get_clusteruuid_func
+        - image: simplyblock/simplyblock-manager:allow_multi_cluster
           imagePullPolicy: Always
           name: manager
           env:
@@ -110,6 +110,8 @@ rules:
   - get
   - list
   - watch
+  - update
+  - patch
 - apiGroups:
   - "rbac.authorization.k8s.io"
   resources:
