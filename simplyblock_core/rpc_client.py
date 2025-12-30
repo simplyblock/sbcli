@@ -511,8 +511,8 @@ class RPCClient:
             params["bdb_lcpu_mask_alt_workers"] = int(alceml_worker_cpu_mask, 16)
         if write_protection:
             params["write_protection"] = True
-        if full_page_unmap:
-            params["use_map_whole_page_on_1st_write"] = True
+        #if full_page_unmap:
+        #   params["use_map_whole_page_on_1st_write"] = True
         return self._request("bdev_alceml_create", params)
        
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
