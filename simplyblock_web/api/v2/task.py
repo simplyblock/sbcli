@@ -1,4 +1,3 @@
-import json
 from typing import Annotated, List
 from uuid import UUID
 
@@ -6,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.controllers import tasks_controller
 
 from .cluster import Cluster
 from .dtos import TaskDTO

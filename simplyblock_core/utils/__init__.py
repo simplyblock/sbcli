@@ -10,7 +10,6 @@ import subprocess
 import sys
 import uuid
 import time
-import socket
 from typing import Union, Any, Optional, Tuple, Dict
 from datetime import datetime, timezone
 from docker import DockerClient

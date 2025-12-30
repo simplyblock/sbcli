@@ -23,7 +23,7 @@ spec:
         fsGroup: 65532
       serviceAccountName: simplyblock-manager
       containers:
-        - image: simplyblock/simplyblock-manager:develop_lvol_controller_cr
+        - image: simplyblock/simplyblock-manager:get_clusteruuid_func
           imagePullPolicy: Always
           name: manager
           env:

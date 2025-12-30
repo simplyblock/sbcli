@@ -4,7 +4,6 @@ import logging
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils, constants
-from fastapi import Request
 
 logger = logging.getLogger()
 
@@ -49,7 +48,7 @@ def _lvol_event(lvol, message, caused_by, event):
                     "nodeUUID": node_urls,
                     "size": utils.humanbytes(lvol.size),
                     "health": lvol.health_check,
-                    "isCrypto": crypto_key != None,
+                    "isCrypto": crypto_key is not None,
                     "nqn": lvol.nqn,
                     "subsysPort": lvol.subsys_port,
                     "hostname": lvol.hostname,

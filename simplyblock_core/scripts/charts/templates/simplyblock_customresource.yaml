@@ -4,7 +4,7 @@ metadata:
   name: demo-simplyblock-cluster
   namespace: simplyblock
 spec:
-  clusterName: "demo-cluster"
+  clusterName: demo-cluster
   mgmtIfc: "eth0"                     
   fabric: "tcp"                            
   isSingleNode: false
