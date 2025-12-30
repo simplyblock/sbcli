@@ -89,7 +89,7 @@ while True:
                             if "jm_vuid" in task.function_params:
                                 jm_vuid = task.function_params["jm_vuid"]
                             try:
-                                ret, err = rpc_client.jc_compression_start(jm_vuid=jm_vuid)
+                                ret, err = rpc_client.jc_suspend_compression(jm_vuid=jm_vuid, suspend=False)
                             except Exception as e:
                                 logger.error(e)
                                 continue

@@ -15,7 +15,7 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import cluster_events, device_controller, qos_controller
+from simplyblock_core.controllers import cluster_events, device_controller, qos_controller, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -680,6 +680,15 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
                 if not ret:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
+
+    # Start JC compression on each node
+    if ols_status == Cluster.STATUS_UNREADY:
+        for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+            if node.status == StorageNode.STATUS_ONLINE:
+                ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+                if not ret:
+                    logger.info("Failed to resume JC compression adding task...")
+                    tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=node.jm_vuid)
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
