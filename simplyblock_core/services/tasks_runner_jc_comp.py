@@ -97,7 +97,7 @@ while True:
                                 task.function_result = f"JC {node.jm_vuid} compression resumed on node"
                                 task.status = JobSchedule.STATUS_DONE
                                 task.write_to_db(db.kv_store)
-                            elif err and "code" in err and err["code"] == -2:
+                            elif err:
                                 task.function_result = f"JC {node.jm_vuid} compression not needed"
                                 task.status = JobSchedule.STATUS_DONE
                                 task.write_to_db(db.kv_store)
