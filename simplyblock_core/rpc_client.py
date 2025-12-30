@@ -1147,7 +1147,7 @@ class RPCClient:
             "jm_vuid": jm_vuid,
             "suspend": suspend,
         }
-        return self._request("jc_suspend_compression", params)
+        return self._request2("jc_suspend_compression", params)
 
     def nvmf_subsystem_add_listener(self, nqn, trtype, traddr, trsvcid, ana_state=None):
         params = {
