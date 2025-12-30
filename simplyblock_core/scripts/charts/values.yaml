@@ -3,7 +3,7 @@ graylog:
   passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
 
 monitoring:
-  enabled: true
+  enabled: false
   secret: "sWbpOgba1bKnCfcPkVQi"
 
 log:
@@ -19,11 +19,11 @@ grafana:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "main"
+    tag: "improved_user_experience"
     pullPolicy: "Always"
 
 ports:
-  lvolNvmfPortStart:
+  lvolNvmfPortStart: 9100
 
 storageclass:  
   allowedTopologyZones: []
@@ -61,7 +61,7 @@ opensearch:
   persistence:
     enabled: true
     storageClass: local-hostpath
-    size: 10Gi
+    size: 20Gi
 
   resources:
     requests:
@@ -180,7 +180,7 @@ prometheus:
     enabled: false
 
 ingress:
-  enabled: true
+  enabled: false
   ingressClassName: nginx
   useDNS: false
   host: ""

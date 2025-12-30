@@ -80,7 +80,7 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
 
 
 def _add_graylog_input(cluster_ip, password):
-    base_url = f"http://{cluster_ip}/graylog/api"
+    base_url = f"{cluster_ip}/api"
     input_url = f"{base_url}/system/inputs"
 
     retries = 30
@@ -161,7 +161,7 @@ def _add_graylog_input(cluster_ip, password):
 
 def _set_max_result_window(cluster_ip, max_window=100000):
 
-    url_existing_indices = f"http://{cluster_ip}/opensearch/_all/_settings"
+    url_existing_indices = f"{cluster_ip}/_all/_settings"
 
     retries = 30
     reachable=False
@@ -188,7 +188,7 @@ def _set_max_result_window(cluster_ip, max_window=100000):
         logger.error(f"Failed to update settings for existing indices: {response.text}")
         return False
 
-    url_template = f"http://{cluster_ip}/opensearch/_template/all_indices_template"
+    url_template = f"{cluster_ip}/_template/all_indices_template"
     payload_template = json.dumps({
         "index_patterns": ["*"],
         "settings": {
@@ -317,8 +317,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         cluster.grafana_endpoint = grafana_endpoint
     elif ingress_host_source == "hostip":
         cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
+        graylog_endpoint = f"http://{dev_ip}/graylog"
+        os_endpoint = f"http://{dev_ip}/opensearch"
     else:
         cluster.grafana_endpoint = f"http://{dns_name}/grafana"
+        graylog_endpoint = f"http://{dns_name}/graylog"
+        os_endpoint = f"http://{dns_name}/opensearch"
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
@@ -355,9 +359,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if ingress_host_source == "hostip":
             dns_name = dev_ip
 
-        _set_max_result_window(dns_name)
+        
+        _set_max_result_window(os_endpoint)
 
-        _add_graylog_input(dns_name, monitoring_secret)
+        _add_graylog_input(graylog_endpoint, monitoring_secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
         if mode == "kubernetes":
@@ -433,12 +438,13 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
-                cluster_ip=None, grafana_secret=None) -> str:
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None, 
+                cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None) -> str:
 
 
     default_cluster = None
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
     clusters = db_controller.get_clusters()
     if clusters:
         default_cluster = clusters[0]
@@ -471,16 +477,27 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         cluster.db_connection = fdb_cluster_string
         if monitoring_secret:
             cluster.grafana_secret = monitoring_secret
+        elif enable_monitoring != "true":
+            cluster.grafana_secret = ""
         else:
             raise Exception("monitoring_secret is required")
-        cluster.grafana_endpoint = "http://simplyblock-grafana:3000"
+        cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
         if not cluster_ip:
             cluster_ip = "0.0.0.0"
 
         # add mgmt node object
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
-                   
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        if enable_monitoring == "true":
+            graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
+            os_endpoint = constants.OS_K8S_ENDPOINT          
+            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+
+            _set_max_result_window(os_endpoint)
+
+            _add_graylog_input(graylog_endpoint, monitoring_secret)
+
+    if cluster.mode  == "kubernetes":
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
                     
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
@@ -492,6 +509,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
+    cluster.cr_name = cr_name
+    cluster.cr_namespace = cr_namespace
+    cluster.cr_plural = cr_plural
+
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:

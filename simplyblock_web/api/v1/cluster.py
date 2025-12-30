@@ -47,6 +47,9 @@ def add_cluster():
     qpair_count = cl_data.get('qpair_count', 256)
     name = cl_data.get('name', None)
     fabric = cl_data.get('fabric', "tcp")
+    cr_name = cl_data.get('cr_name', None)
+    cr_namespace = cl_data.get('cr_namespace', None)
+    cr_plural = cl_data.get('cr_plural', None)
 
     max_queue_size = cl_data.get('max_queue_size', 128)
     inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
@@ -56,7 +59,8 @@ def add_cluster():
     return utils.get_response(cluster_ops.add_cluster(
         blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
         distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-        qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric
+        qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, 
+        cr_name, cr_namespace, cr_plural, fabric
     ))
 
 
@@ -78,7 +82,7 @@ def create_first_cluster():
     distr_npcs = cl_data.get('distr_npcs', 1)
     distr_bs = cl_data.get('distr_bs', 4096)
     distr_chunk_bs = cl_data.get('distr_chunk_bs', 4096)
-    ha_type = cl_data.get('ha_type', 'single')
+    ha_type = cl_data.get('ha_type', 'ha')
     enable_node_affinity = cl_data.get('enable_node_affinity', False)
     qpair_count = cl_data.get('qpair_count', 256)
     name = cl_data.get('name', None)
@@ -91,6 +95,9 @@ def create_first_cluster():
     inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
     strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
     is_single_node = cl_data.get('is_single_node', False)
+    cr_name = cl_data.get('cr_name', None)
+    cr_namespace = cl_data.get('cr_namespace', None)
+    cr_plural = cl_data.get('cr_plural', None)
     cluster_ip = cl_data.get('cluster_ip', None)
     grafana_secret = cl_data.get('grafana_secret', None)
 
@@ -98,8 +105,8 @@ def create_first_cluster():
         cluster_id = cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
-            cluster_ip=cluster_ip, grafana_secret=grafana_secret)
+            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name,
+            cr_name, cr_namespace, cr_plural, fabric, cluster_ip=cluster_ip, grafana_secret=grafana_secret)
         if cluster_id:
             return utils.get_response(db.get_cluster_by_id(cluster_id).to_dict())
         else:
