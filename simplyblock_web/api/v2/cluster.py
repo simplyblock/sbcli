@@ -66,8 +66,8 @@ def add(request: Request, parameters: ClusterParams):
     if not cluster_id_or_false:
         raise ValueError('Failed to create cluster')
 
-    entity_url = request.app.url_path_for('get', cluster_id=cluster_id_or_false)
-    return Response(status_code=201, headers={'Location': entity_url})
+    cluster = db.get_cluster_by_id(cluster_id_or_false)
+    return ClusterDTO.from_model(cluster)
 
 
 instance_api = APIRouter(prefix='/{cluster_id}')
