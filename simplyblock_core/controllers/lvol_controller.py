@@ -281,9 +281,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 host_node = nodes[0]
             else:
                 return False, f"Can not find storage node: {host_id_or_name}"
-        if not host_node.wait_for_lvol_async_del():
-            logger.error(f"LVol async deletion found on node: {host_node.get_id()}")
-            return False, f"LVol async deletion found on node: {host_node.get_id()}"
+        if host_node.lvol_sync_del():
+            logger.error(f"LVol sync deletion found on node: {host_node.get_id()}")
+            return False, f"LVol sync deletion found on node: {host_node.get_id()}"
 
     if namespace:
         try:
@@ -952,7 +952,7 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.info("Done")
         return True
 
-    if not snode.wait_for_lvol_async_del():
+    if snode.lvol_sync_del():
         logger.error(f"LVol async deletion found on node: {snode.get_id()}")
         return False
 
@@ -1394,9 +1394,9 @@ def resize_lvol(id, new_size):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    if not snode.wait_for_lvol_async_del():
-        logger.error(f"LVol async deletion found on node: {snode.get_id()}")
-        return False, f"LVol async deletion found on node: {snode.get_id()}"
+    if snode.lvol_sync_del():
+        logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
+        return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
     logger.info(f"Resizing LVol: {lvol.get_id()}")
     logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {utils.humanbytes(new_size)}")
