@@ -51,9 +51,9 @@ def add(lvol_id, snapshot_name):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    if not snode.wait_for_lvol_async_del():
-        logger.error(f"LVol async deletion found on node: {snode.get_id()}")
-        return False, f"LVol async deletion found on node: {snode.get_id()}"
+    if snode.lvol_sync_del():
+        logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
+        return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
@@ -386,9 +386,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.exception(msg)
         return False, msg
 
-    if not snode.wait_for_lvol_async_del():
-        logger.error(f"LVol async deletion found on node: {snode.get_id()}")
-        return False, f"LVol async deletion found on node: {snode.get_id()}"
+    if snode.lvol_sync_del():
+        logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
+        return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
