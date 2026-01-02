@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import List, Tuple
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -281,6 +281,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 host_node = nodes[0]
             else:
                 return False, f"Can not find storage node: {host_id_or_name}"
+        if not host_node.wait_for_lvol_async_del():
+            logger.error(f"LVol async deletion found on node: {host_node.get_id()}")
+            return False, f"LVol async deletion found on node: {host_node.get_id()}"
 
     if namespace:
         try:
@@ -456,14 +459,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
         lvol.max_namespace_per_subsys = max_namespace_per_subsys
 
-    nodes = []
-    if host_node:
-        nodes.insert(0, host_node)
-    else:
+    if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
-        host_node = nodes[0]
+        for n in nodes:
+            lvol_sync_del_found = tasks_controller.get_lvol_sync_del_task(n.cluster_id, n.uuid)
+            if lvol_sync_del_found:
+                logger.warning(f"LVol sync delete task found on node: {n.get_id()}, skipping")
+            else:
+                host_node = n
+                break
+        if not host_node:
+            return False, "No nodes found with enough resources to create the LVol"
+
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
     is_active_primary = getattr(host_node, attr_name)
@@ -943,6 +952,10 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.info("Done")
         return True
 
+    if not snode.wait_for_lvol_async_del():
+        logger.error(f"LVol async deletion found on node: {snode.get_id()}")
+        return False
+
     if lvol.ha_type == 'single':
         if snode.status  != StorageNode.STATUS_ONLINE:
             logger.error(f"Node status is not online, node: {snode.get_id()}, status: {snode.status}")
@@ -1380,6 +1393,10 @@ def resize_lvol(id, new_size):
             return False, msg
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    if not snode.wait_for_lvol_async_del():
+        logger.error(f"LVol async deletion found on node: {snode.get_id()}")
+        return False, f"LVol async deletion found on node: {snode.get_id()}"
 
     logger.info(f"Resizing LVol: {lvol.get_id()}")
     logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {utils.humanbytes(new_size)}")
