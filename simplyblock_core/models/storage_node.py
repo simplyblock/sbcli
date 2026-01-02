@@ -4,6 +4,7 @@ from typing import List
 from uuid import uuid4
 
 from simplyblock_core import utils
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.base_model import BaseNodeObject
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -326,3 +327,10 @@ class StorageNode(BaseNodeObject):
             except Exception:
                 logger.warning("Failed to get replication task!")
         return False
+
+    def lvol_sync_del(self) -> bool:
+        ret=tasks_controller.get_lvol_sync_del_task(self.cluster_id, self.uuid)
+        if ret:
+           sleep(2)
+           ret=tasks_controller.get_lvol_sync_del_task(self.cluster_id, self.uuid)
+        return ret
