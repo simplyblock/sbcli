@@ -328,6 +328,9 @@ class StorageNode(BaseNodeObject):
                 logger.warning("Failed to get replication task!")
         return False
 
-    def wait_for_lvol_sync_del(self) -> bool:
-        return tasks_controller.get_lvol_sync_del_task(self.cluster_id, self.uuid)
- 
+    def lvol_sync_del(self) -> bool:
+        ret=tasks_controller.get_lvol_sync_del_task(self.cluster_id, self.uuid)
+        if ret:
+           sleep(2)
+           ret=tasks_controller.get_lvol_sync_del_task(self.cluster_id, self.uuid)
+        return ret
