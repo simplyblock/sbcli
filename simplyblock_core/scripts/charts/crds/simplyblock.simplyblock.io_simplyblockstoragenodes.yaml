@@ -117,6 +117,8 @@ spec:
                 type: string
               useSeparateJournalDevice:
                 type: boolean
+              workerNode:
+                type: string
               workerNodes:
                 items:
                   type: string
