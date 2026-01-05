@@ -4,7 +4,6 @@ from typing import List
 from uuid import uuid4
 
 from simplyblock_core import utils
-from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.base_model import BaseNodeObject
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -105,6 +104,7 @@ class StorageNode(BaseNodeObject):
     active_rdma: bool = False
     socket: int = 0
     firewall_port: int = 50001
+    lvol_del_sync_tasks: int = 0
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -329,8 +329,6 @@ class StorageNode(BaseNodeObject):
         return False
 
     def lvol_sync_del(self) -> bool:
-        ret=tasks_controller.get_lvol_sync_del_task(self.cluster_id, self.uuid)
-        if ret:
-           sleep(2)
-           ret=tasks_controller.get_lvol_sync_del_task(self.cluster_id, self.uuid)
-        return ret
+        if self.lvol_del_sync_tasks > 0:
+           time.sleep(2)
+        return bool(self.lvol_del_sync_tasks > 0)

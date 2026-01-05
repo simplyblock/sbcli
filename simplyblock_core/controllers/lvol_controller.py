@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import List, Tuple
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -464,8 +464,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         for n in nodes:
-            lvol_sync_del_found = tasks_controller.get_lvol_sync_del_task(n.cluster_id, n.uuid)
-            if lvol_sync_del_found:
+            if n.lvol_del_sync_tasks > 0:
                 logger.warning(f"LVol sync delete task found on node: {n.get_id()}, skipping")
             else:
                 host_node = n
