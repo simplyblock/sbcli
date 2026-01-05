@@ -104,6 +104,7 @@ class StorageNode(BaseNodeObject):
     active_rdma: bool = False
     socket: int = 0
     firewall_port: int = 50001
+    lvol_del_sync_tasks: int = 0
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -326,3 +327,8 @@ class StorageNode(BaseNodeObject):
             except Exception:
                 logger.warning("Failed to get replication task!")
         return False
+
+    def lvol_sync_del(self) -> bool:
+        if self.lvol_del_sync_tasks > 0:
+           time.sleep(2)
+        return bool(self.lvol_del_sync_tasks > 0)
