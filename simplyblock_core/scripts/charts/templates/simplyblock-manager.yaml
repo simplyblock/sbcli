@@ -23,7 +23,7 @@ spec:
         fsGroup: 65532
       serviceAccountName: simplyblock-manager
       containers:
-        - image: simplyblock/simplyblock-manager:allow_multi_cluster
+        - image: simplyblock/simplyblock-manager:cluster_activation_logic
           imagePullPolicy: Always
           name: manager
           env:

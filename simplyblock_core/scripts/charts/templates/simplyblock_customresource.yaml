@@ -60,6 +60,7 @@ spec:
     - "vm03.simplyblock3.localdomain"
     - "vm04.simplyblock3.localdomain"
 
+
 ---
 apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockDevice
@@ -69,9 +70,6 @@ metadata:
 spec:
   clusterName: demo-cluster
   #nodeUUID: d482e889-7960-4e26-9d21-51fc5959d4a1
-  includeStats: false
-  statsHistoryInSeconds: 300
-
 ---
 apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockTask
