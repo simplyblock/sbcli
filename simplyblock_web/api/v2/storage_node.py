@@ -207,12 +207,12 @@ def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -
 class _RestartParams(BaseModel):
     force: bool = False
     reattach_volume: bool = False
-    node_address: Annotated[str, Field(web_utils.IP_PATTERN)] = None
+    node_address: Annotated[str, Field(web_utils.IP_PATTERN)]
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
 @instance_api.post('/restart', name='clusters:storage-nodes:restart', status_code=202, responses={202: {"content": None}})
-def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartParams = _RestartParams()) -> Response:
+def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartParams) -> Response:
     storage_node = storage_node
     Thread(
         target=storage_node_ops.restart_storage_node,
