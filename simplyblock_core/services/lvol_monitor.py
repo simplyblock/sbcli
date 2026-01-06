@@ -133,7 +133,7 @@ def process_lvol_delete_finish(lvol):
     else:
         sec_node = db.get_storage_node_by_id(snode.get_id())
 
-    if sec_node:
+    if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
         tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
 
     lvol_events.lvol_delete(lvol)
