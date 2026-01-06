@@ -75,6 +75,8 @@ spec:
               haJmCount:
                 format: int32
                 type: integer
+              idDeviceByNQN:
+                type: boolean
               jmPercent:
                 format: int32
                 type: integer
