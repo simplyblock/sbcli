@@ -42,6 +42,7 @@ class StorageNodeParams(BaseModel):
     spdk_debug: bool = Field(False)
     data_nics: List[str] = Field([])
     namespace: str = Field('default')
+    id_device_by_nqn: Optional[bool] = Field(False)
     jm_percent: util.Percent = Field(3)
     partitions: int = Field(1)
     iobuf_small_pool_count: int = Field(0)
@@ -70,6 +71,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams):
             'enable_test_device': parameters.test_device,
             'namespace': parameters.namespace,
             'enable_ha_jm': parameters.ha_jm,
+            'id_device_by_nqn': parameters.id_device_by_nqn,
             'cr_name': parameters.cr_name,
             'cr_namespace': parameters.cr_namespace,
             'cr_plural': parameters.cr_plural,
