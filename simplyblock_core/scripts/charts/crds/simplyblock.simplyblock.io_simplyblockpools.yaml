@@ -68,10 +68,24 @@ spec:
           status:
             description: status defines the observed state of Pool
             properties:
+              qosHost:
+                type: string
+              qosIOPSLimit:
+                format: int32
+                type: integer
+              rLimit:
+                format: int32
+                type: integer
+              rwLimit:
+                format: int32
+                type: integer
               status:
                 type: string
               uuid:
                 type: string
+              wLimit:
+                format: int32
+                type: integer
             type: object
         required:
         - spec
