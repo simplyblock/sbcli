@@ -40,6 +40,10 @@ spec:
           spec:
             description: spec defines the desired state of SimplyBlockStorageCluster
             properties:
+              action:
+                enum:
+                - activate
+                type: string
               blkSize:
                 format: int32
                 type: integer
@@ -117,6 +121,23 @@ spec:
                 type: string
               UUID:
                 type: string
+              actionStatus:
+                properties:
+                  action:
+                    type: string
+                  message:
+                    type: string
+                  nodeUUID:
+                    type: string
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  state:
+                    type: string
+                  updatedAt:
+                    format: date-time
+                    type: string
+                type: object
               clusterName:
                 type: string
               configured:

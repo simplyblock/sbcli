@@ -139,6 +139,9 @@ spec:
                     type: string
                   nodeUUID:
                     type: string
+                  observedGeneration:
+                    format: int64
+                    type: integer
                   state:
                     type: string
                   updatedAt:
