@@ -160,11 +160,6 @@ spec:
               storageNodes:
                 format: int32
                 type: integer
-            required:
-            - UUID
-            - clusterName
-            - rebalancing
-            - status
             type: object
         required:
         - spec
