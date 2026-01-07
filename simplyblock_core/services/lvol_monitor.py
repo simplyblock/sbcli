@@ -125,17 +125,17 @@ def process_lvol_delete_finish(lvol):
 
     # 3-1 async delete lvol bdev from primary
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
-    if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-        primary_node.lvol_del_sync_tasks += 1
-        primary_node.write_to_db()
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+        if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+                                            StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+            primary_node.lvol_del_sync_lock()
         ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
         if not ret:
             logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
     # 3-2 async delete lvol bdev from secondary
     if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-        tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+        tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), f"{lvol.lvs_name}/{lvol.lvol_bdev}", primary_node.get_id())
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
