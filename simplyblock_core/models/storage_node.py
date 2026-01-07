@@ -106,7 +106,7 @@ class StorageNode(BaseNodeObject):
     active_tcp: bool = True
     active_rdma: bool = False
     socket: int = 0
-    firewall_port: int = 50001
+    firewall_port: int = 5001
     lvol_del_sync_tasks: int = 0
 
     def rpc_client(self, **kwargs):
