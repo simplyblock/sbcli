@@ -91,7 +91,7 @@ spec:
             - name: etc
               mountPath: /etc
             - name: rootfs
-              mountPath: /
+              mountPath: /host
             - name: var-simplyblock
               mountPath: /var/simplyblock
           command: ["/bin/sh", "-c"]
@@ -204,7 +204,7 @@ spec:
               tuned-adm profile "$TUNED_PROFILE"
               case "$OS_ID" in
                   centos|rhel|rocky|almalinux)
-                  grubby --update-kernel=ALL --args="isolcpus=$ISOLATED_CORES nohz_full=$ISOLATED_CORES rcu_nocbs=$ISOLATED_CORES"
+                  chroot /host grubby --update-kernel=ALL --args="isolcpus=$ISOLATED_CORES nohz_full=$ISOLATED_CORES rcu_nocbs=$ISOLATED_CORES"
                       ;;
                   *)
                       echo ""
