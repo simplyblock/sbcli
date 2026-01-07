@@ -308,20 +308,28 @@ def check_node(snode):
             continue
 
         passed = True
-        ret = health_controller.check_lvol_on_node(
-            lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
-        if not ret:
-            passed = False
+        try:
+            ret = health_controller.check_lvol_on_node(
+                lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
+            if not ret:
+                passed = False
+        except Exception as e:
+            logger.error(f"Failed to check lvol:{lvol.get_id()} on node: {lvol.node_id}")
+            logger.error(e)
 
         if lvol.ha_type == "ha":
             sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
             if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                ret = health_controller.check_lvol_on_node(
-                    lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
-                if not ret:
-                    passed = False
-                else:
-                    passed = True
+                try:
+                    ret = health_controller.check_lvol_on_node(
+                        lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
+                    if not ret:
+                        passed = False
+                    else:
+                        passed = True
+                except Exception as e:
+                    logger.error(f"Failed to check lvol: {lvol.get_id()} on node: {snode.secondary_node_id}")
+                    logger.error(e)
 
         if snode.lvstore_status == "ready":
 
@@ -336,20 +344,6 @@ def check_node(snode):
             present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
             set_snapshot_health_check(snap, present)
 
-        snode = db.get_storage_node_by_id(snode.get_id())
-        if snode.status == StorageNode.STATUS_ONLINE:
-            not_deleted = []
-            for bdev_name in snode.lvol_sync_del_queue:
-                logger.info(f"Sync delete bdev: {bdev_name} from node: {snode.get_id()}")
-                ret, err = snode.rpc_client().delete_lvol(bdev_name, del_async=True)
-                if not ret:
-                    if "code" in err and err["code"] == -19:
-                        logger.error(f"Sync delete completed with error: {err}")
-                    else:
-                        logger.error(f"Failed to sync delete bdev: {bdev_name} from node: {snode.get_id()}")
-                        not_deleted.append(bdev_name)
-            snode.lvol_sync_del_queue = not_deleted
-            snode.write_to_db()
 
 
 # get DB controller
