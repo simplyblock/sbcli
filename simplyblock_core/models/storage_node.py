@@ -4,7 +4,6 @@ from typing import List
 from uuid import uuid4
 
 from simplyblock_core import utils
-from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.base_model import BaseNodeObject, BaseModel
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -330,6 +329,7 @@ class StorageNode(BaseNodeObject):
         return False
 
     def lvol_sync_del(self) -> bool:
+        from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         lock = db_controller.get_lvol_del_lock(self.get_id())
         if lock:
@@ -337,6 +337,7 @@ class StorageNode(BaseNodeObject):
         return False
 
     def lvol_del_sync_lock(self) -> bool:
+        from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         lock = db_controller.get_lvol_del_lock(self.get_id())
         if not lock:
@@ -346,6 +347,7 @@ class StorageNode(BaseNodeObject):
         return True
 
     def lvol_del_sync_lock_reset(self) -> bool:
+        from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         task_found = False
         tasks = db_controller.get_job_tasks(self.cluster_id)
@@ -355,12 +357,13 @@ class StorageNode(BaseNodeObject):
                     task_found = True
                     break
 
+        lock = db_controller.get_lvol_del_lock(self.get_id())
         if task_found:
-            lock = NodeLVolDelLock({"uuid": self.uuid})
-            lock.write_to_db()
+            if not lock:
+                lock = NodeLVolDelLock({"uuid": self.uuid})
+                lock.write_to_db()
             logger.info(f"Created lvol_del_sync_lock on node: {self.get_id()}")
         else:
-            lock = db_controller.get_lvol_del_lock(self.get_id())
             if lock:
                 lock.remove(db_controller.kv_store)
                 logger.info(f"remove lvol_del_sync_lock from node: {self.get_id()}")
