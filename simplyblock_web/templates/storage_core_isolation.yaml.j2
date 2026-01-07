@@ -18,6 +18,42 @@ spec:
         - effect: NoExecute
           operator: Exists
       volumes:
+        - name: boot
+          hostPath:
+            path: /boot
+        - name: usr-bin
+          hostPath:
+            path: /usr/bin
+        - name: usr-sbin
+          hostPath:
+            path: /usr/sbin
+        - name: lib
+          hostPath:
+            path: /lib
+        - name: lib64
+          hostPath:
+            path: /lib64
+        - name: usr-lib
+          hostPath:
+            path: /usr/lib
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: run
+          hostPath:
+            path: /run
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: usr-share
+          hostPath:
+            path: /usr/share
+        - name: etc
+          hostPath:
+            path: /etc
         - name: rootfs
           hostPath:
             path: /
@@ -30,24 +66,41 @@ spec:
           securityContext:
             privileged: true
           volumeMounts:
+            - name: boot
+              mountPath: /boot
+            - name: usr-bin
+              mountPath: /usr/bin
+            - name: usr-sbin
+              mountPath: /usr/sbin
+            - name: lib
+              mountPath: /lib
+            - name: lib64
+              mountPath: /lib64
+            - name: usr-lib
+              mountPath: /usr/lib
+            - name: dev
+              mountPath: /dev
+            - name: run
+              mountPath: /run
+            - name: proc
+              mountPath: /proc
+            - name: sys
+              mountPath: /sys
+            - name: usr-share
+              mountPath: /usr/share
+            - name: etc
+              mountPath: /etc
             - name: rootfs
-              mountPath: /host
+              mountPath: /
             - name: var-simplyblock
               mountPath: /var/simplyblock
-          command: ["/bin/bash", "-c"]
+          command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
-
-              mount --bind /proc /host/proc
-              mount --bind /sys  /host/sys
-              mount --bind /dev  /host/dev
-              mount --bind /run  /host/run
-
-              cp /etc/resolv.conf /host/etc/resolv.conf
-
-              if [[ -f /host/etc/os-release ]]; then
-                  source /host/etc/os-release
+              
+              if [[ -f /etc/os-release ]]; then
+                  source /etc/os-release
                   OS_ID=$ID
               else
                   echo "[ERROR] Unable to detect OS"
@@ -57,16 +110,15 @@ spec:
 
               case "$OS_ID" in
                   debian)
-                      chroot /host apt update && chroot /host apt install -y grep jq nvme-cli tuned
+                      apt update && apt install -y grep jq nvme-cli tuned
                       ;;
                   ubuntu)
                       chroot /host apt update && chroot /host apt install -y grep jq nvme-cli tuned
-                      HOST_KERNEL=$(chroot /host uname -r)
-                      chroot /host apt-get install -y linux-modules-extra-$HOST_KERNEL
+                      chroot /host apt-get install -y linux-modules-extra-$(uname -r)
                       ;;
                   centos|rhel|rocky|almalinux)
-                      export YUM_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /host/etc/os-release)
-                      export DNF_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /host/etc/os-release)
+                      export YUM_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
+                      export DNF_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
                       chroot /host dnf install -y grep jq nvme-cli kernel-modules-extra tuned \
                        --setopt=tsflags=nocontexts,noscripts --setopt=install_weak_deps=False 
                       ;;
@@ -91,15 +143,15 @@ spec:
 
               echo "[INFO] Isolated cores to apply: $ISOLATED_CORES"
 
-              chroot /host modprobe nvme-tcp
+              modprobe nvme-tcp
               echo "[INFO] Loaded nvme-tcp module"
 
-              chroot /host modprobe nvme-rdma
+              modprobe nvme-rdma
               echo "[INFO] Loaded nvme-rdma module"
 
               TUNED_PROFILE="isolated-cpu"
-              TUNED_PROFILE_DIR="/host/etc/tuned/$TUNED_PROFILE"
-              TUNED_PROFILE_DIR2="/host/etc/tuned/profiles/$TUNED_PROFILE"
+              TUNED_PROFILE_DIR="/etc/tuned/$TUNED_PROFILE"
+              TUNED_PROFILE_DIR2="/etc/tuned/profiles/$TUNED_PROFILE"
 
               mkdir -p "$TUNED_PROFILE_DIR"
               mkdir -p "$TUNED_PROFILE_DIR2"
@@ -129,11 +181,11 @@ spec:
               echo "[INFO] Tuned profile created."
 
               echo "[INFO] Starting tuned daemon in background..."
-              /host/usr/sbin/tuned -l -P &
+              /usr/sbin/tuned -l -P &
               TUNED_PID=$!
 
               for i in {1..10}; do
-                  if chroot /host tuned-adm active &>/dev/null; then
+                  if tuned-adm active &>/dev/null; then
                       echo "[INFO] Tuned is running."
                       break
                   else
@@ -142,17 +194,17 @@ spec:
                   fi
               done
 
-              if ! chroot /host tuned-adm active &>/dev/null; then
+              if ! tuned-adm active &>/dev/null; then
                   echo "[ERROR] Tuned failed to start. Please check logs."
                   ps aux | grep tuned
                   exit 1
               fi
 
               echo "[INFO] Applying tuned profile: $TUNED_PROFILE"
-              chroot /host tuned-adm profile "$TUNED_PROFILE"
+              tuned-adm profile "$TUNED_PROFILE"
               case "$OS_ID" in
                   centos|rhel|rocky|almalinux)
-                  chroot /host grubby --update-kernel=ALL --args="isolcpus=$ISOLATED_CORES nohz_full=$ISOLATED_CORES rcu_nocbs=$ISOLATED_CORES"
+                  grubby --update-kernel=ALL --args="isolcpus=$ISOLATED_CORES nohz_full=$ISOLATED_CORES rcu_nocbs=$ISOLATED_CORES"
                       ;;
                   *)
                       echo ""
