@@ -73,10 +73,7 @@ while True:
                         task.function_result = f"bdev {lvol_bdev_name} deleted"
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db.kv_store)
-                        nodes = db.get_primary_storage_nodes_by_secondary_node_id(node.get_id())
-                        if nodes:
-                            primary_node = nodes[0]
-                            primary_node.lvol_del_sync_tasks -= 1
-                            primary_node.write_to_db()
+                        primary_node = db.get_storage_node_by_id(task.function_params["primary_node"])
+                        primary_node.lvol_del_sync_lock_reset()
 
     time.sleep(3)
