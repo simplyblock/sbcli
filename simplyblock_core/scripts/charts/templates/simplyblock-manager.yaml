@@ -23,7 +23,7 @@ spec:
         fsGroup: 65532
       serviceAccountName: simplyblock-manager
       containers:
-        - image: simplyblock/simplyblock-manager:skip_activation_core_isolation
+        - image: simplyblock/simplyblock-manager:add_new_actions
           imagePullPolicy: Always
           name: manager
           env:

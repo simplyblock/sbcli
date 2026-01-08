@@ -45,6 +45,7 @@ spec:
                 - restart
                 - suspend
                 - resume
+                - remove
                 type: string
               addPcieToAllowList:
                 description: restart params

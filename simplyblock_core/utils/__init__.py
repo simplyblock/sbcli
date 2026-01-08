@@ -1976,10 +1976,15 @@ def patch_cr_node_status(
     name: str,
     node_uuid: str,
     node_mgmt_ip: str,
-    updates: dict,
+    updates: Optional[Dict[str, Any]] = None,
+    remove: bool = False,
 ):
     """
     Patch status.nodes[*] fields for a specific node identified by UUID.
+    
+    Operations:
+      - Update a node (by uuid or mgmtIp)
+      - Remove a node (by uuid or mgmtIp)
 
     updates example:
         {"health": "true"}
@@ -2004,19 +2009,33 @@ def patch_cr_node_status(
             raise RuntimeError("CR has no status.nodes")
 
         found = False
+        arr_nodes = []
+        
         for node in nodes:
             if node.get("uuid") == node_uuid:
-                node.update(updates)
                 found = True
-                break
+
+                if remove:
+                    continue
+
+                if updates:
+                    node.update(updates)          
 
             if not node.get("uuid") and node.get("mgmtIp") == node_mgmt_ip:
-                node.update(updates)
                 found = True
-                break
+
+                if remove:
+                    continue
+
+                if updates:
+                    node.update(updates)
+
+            arr_nodes.append(node)    
 
         if not found:
             raise RuntimeError(f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})")
+
+        nodes = arr_nodes
 
         body = {
             "status": {
