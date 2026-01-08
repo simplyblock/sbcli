@@ -106,12 +106,19 @@ def get(cluster: Cluster, storage_node: StorageNode):
 
 @instance_api.delete('/', name='clusters:storage-nodes:delete')
 def delete(
-        cluster: Cluster, storage_node: StorageNode, force_remove: bool = False, force_migrate: bool = False) -> Response:
+        cluster: Cluster, storage_node: StorageNode, force_remove: bool = False, force_migrate: bool = False, force_delete: bool = False ) -> Response:
     none_or_false = storage_node_ops.remove_storage_node(
             storage_node.get_id(), force_remove=force_remove, force_migrate=force_migrate
     )
     if none_or_false == False:  # noqa
         raise ValueError('Failed to remove storage node')
+    
+    if force_delete:
+        none_or_false = storage_node_ops.delete_storage_node(
+            storage_node.get_id(), force=force_delete
+        )
+        if none_or_false == False:  # noqa
+            raise ValueError('Failed to delete storage node')
 
     return Response(status_code=204)
 
