@@ -440,6 +440,7 @@ def add_backup_task(cluster_id):
     task_obj.date = int(time.time())
     task_obj.max_retry = constants.TASK_EXEC_RETRY_COUNT
     task_obj.status = JobSchedule.STATUS_NEW
+    task_obj.function_name = JobSchedule.FN_FDB_BACKUP
     task_obj.write_to_db()
     logger.info(f"Backup task created: {task_obj.uuid}")
     return task_obj.uuid
