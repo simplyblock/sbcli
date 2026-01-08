@@ -1899,6 +1899,18 @@ commands:
             dest: resize
             type: size
             default: "0"
+      - name: backup
+        help: "create backup task for snapshot"
+        arguments:
+          - name: "snapshot_id"
+            help: "Snapshot id"
+            dest: snapshot_id
+            type: str
+          - name: "--delete-after-finish"
+            help: "Delete the snapshot after backup is completed"
+            dest: delete_after_finish
+            type: bool
+            action: store_true
   - name: "qos"
     help: "qos commands"
     weight: 700

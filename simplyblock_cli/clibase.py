@@ -657,6 +657,9 @@ class CLIWrapperBase:
         success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
         return details
 
+    def snapshot__backup(self, sub_command, args):
+        return snapshot_controller.create_backup(args.snapshot_id, args.delete_after_finish)
+
     def qos__add(self, sub_command, args):
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)
 

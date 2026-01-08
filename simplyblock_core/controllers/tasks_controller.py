@@ -9,6 +9,7 @@ from simplyblock_core import db_controller, constants, utils
 from simplyblock_core.controllers import tasks_events, device_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
@@ -449,5 +450,41 @@ def get_backup_tasks(cluster_id):
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
         if task.function_name == JobSchedule.FN_FDB_BACKUP:
+            backup_tasks.append(task)
+    return backup_tasks
+
+
+def add_snap_backup_task(snapshot: SnapShot, delete_after_finish: bool = False):
+    try:
+        cluster = db.get_cluster_by_id(snapshot.cluster_id)
+    except Exception as e:
+        logger.error(f"Failed to get cluster {snapshot.cluster_id}: {e}")
+        return False
+
+    tasks = get_snap_backup_task(snapshot.cluster_id)
+    for task in tasks:
+        if task.status != JobSchedule.STATUS_DONE and task.function_params.get("snapshot_id") == snapshot.get_id():
+            logger.info(f"Snapshot Backup task found: {task.uuid}")
+            return False
+
+    task_obj = JobSchedule()
+    task_obj.uuid = str(uuid.uuid4())
+    task_obj.cluster_id = cluster.get_id()
+    task_obj.date = int(time.time())
+    task_obj.max_retry = constants.TASK_EXEC_RETRY_COUNT
+    task_obj.status = JobSchedule.STATUS_NEW
+    task_obj.function_name = JobSchedule.FN_SNAPSHOT_BACKUP
+    task_obj.function_params ={"snapshot_id": snapshot.get_id(), "delete_after_finish": delete_after_finish}
+    task_obj.write_to_db()
+
+    logger.info(f"Backup task created: {task_obj.uuid}")
+    return task_obj.uuid
+
+
+def get_snap_backup_task(cluster_id):
+    backup_tasks = []
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_SNAPSHOT_BACKUP:
             backup_tasks.append(task)
     return backup_tasks

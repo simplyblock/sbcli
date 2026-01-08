@@ -10,6 +10,7 @@ import docker
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.snapshot import SnapShot
 
 logger = lg.getLogger()
 db_controller = DBController()
@@ -157,3 +158,20 @@ def backup_configure(backup_path, backup_frequency, bucket_name, region_name, ba
         clusters[0].write_to_db()
         return True
 
+
+def create_snapshot_backup(snapshot: SnapShot):
+    container = __get_fdb_cont()
+    if container:
+        backup_path = cluster.backup_local_path
+        if cluster.backup_s3_bucket and cluster.backup_s3_cred:
+            folder = f"backup-{str(datetime.datetime.now())}"
+            folder = folder.replace(" ", "-")
+            folder = folder.replace(":", "-")
+            folder = folder.split(".")[0]
+            backup_path = f"blobstore://{cluster.backup_s3_cred}@s3.{cluster.backup_s3_region}.amazonaws.com/{folder}?bucket={cluster.backup_s3_bucket}&region={cluster.backup_s3_region}&sc=0"
+
+        res = container.exec_run(cmd=f"fdbbackup start -d {backup_path} -w")
+        cont = res.output.decode("utf-8")
+        logger.info(cont)
+        return True
+    return False
