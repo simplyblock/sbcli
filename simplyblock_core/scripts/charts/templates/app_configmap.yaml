@@ -6,8 +6,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
 
 data:
-  LOG_LEVEL: {{ .Values.log.level }}
-  LOG_DELETION_INTERVAL: {{ .Values.log.deletionInterval }}
+  LOG_LEVEL: {{ .Values.observability.level }}
+  LOG_DELETION_INTERVAL: {{ .Values.observability.deletionInterval }}
 
 ---
 

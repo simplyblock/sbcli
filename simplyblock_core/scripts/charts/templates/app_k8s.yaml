@@ -33,7 +33,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
         - name: MONITORING_SECRET
           valueFrom:
             secretKeyRef:
@@ -107,12 +107,12 @@ spec:
         - name: LVOL_NVMF_PORT_START
           value: "{{ .Values.ports.lvolNvmfPortStart }}"
         - name: ENABLE_MONITORING
-          value: "{{ .Values.monitoring.enabled }}"
+          value: "{{ .Values.observability.enabled }}"
         - name: K8S_NAMESPACE
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
         - name: MONITORING_SECRET
           valueFrom:
             secretKeyRef:

@@ -1,20 +1,17 @@
-graylog:
-  rootPasswordSha2: "b87c15a8ae4736d771ca60a7cc2014baaeab19b11c31f5fedef9421958a403c9"
-  passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
 
-monitoring:
+observability:
   enabled: false
   secret: "sWbpOgba1bKnCfcPkVQi"
-
-log:
   deletionInterval: "3d"
-  retentionPeriod: "7d"
   level: "DEBUG"
-  maxNumberIndex: "3"
-
-grafana:
-  endpoint: ""
-  contactPoint: "https://hooks.slack.com/services/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"
+  graylog:
+    rootPasswordSha2: "b87c15a8ae4736d771ca60a7cc2014baaeab19b11c31f5fedef9421958a403c9"
+    passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
+    maxNumberIndex: "3"
+    retentionPeriod: "7d"
+  grafana:
+    endpoint: ""
+    contactPoint: "https://hooks.slack.com/services/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"
 
 image:
   simplyblock: 
