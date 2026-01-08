@@ -922,7 +922,7 @@ class RPCClient:
         params = {"name": name}
         return self._request("distr_migration_status", params)
 
-    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=1024, jobs=4):
+    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=64, jobs=64):
         params = {
             "name": name,
             "storage_ID": storage_ID,
@@ -935,7 +935,7 @@ class RPCClient:
             params["jobs"] = jobs
         return self._request("distr_migration_failure_start", params)
 
-    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=1024, jobs=4):
+    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=64, jobs=64):
         params = {
             "name": name,
         }

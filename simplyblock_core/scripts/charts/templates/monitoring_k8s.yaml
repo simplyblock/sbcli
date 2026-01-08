@@ -68,6 +68,8 @@ spec:
               value: "false"
             - name: GRAYLOG_ELASTICSEARCH_REPLICAS
               value: "1"
+            - name: GRAYLOG_MESSAGE_JOURNAL_MAX_SIZE
+              value: "10gb"
           ports:
             - containerPort: 5044
             - containerPort: 5140

@@ -19,6 +19,8 @@ spec:
         app: simplyblock-admin-control
     spec:
       serviceAccountName: simplyblock-control-sa
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet 
       containers:
       - name: simplyblock-control
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -91,6 +93,17 @@ spec:
             configMapKeyRef:
               name: simplyblock-config
               key: LOG_LEVEL
+        - name: LVOL_NVMF_PORT_START
+          value: "{{ .Values.ports.lvolNvmfPortStart }}"
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: MONITORING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: simplyblock-grafana-secrets
+              key: MONITORING_SECRET
         - name: FLASK_DEBUG
           value: "False"
         - name: FLASK_ENV
@@ -133,6 +146,8 @@ spec:
       labels:
         app: simplyblock-storage-node-monitor
     spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet 
       containers:
       - name: storage-node-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -183,6 +198,8 @@ spec:
       labels:
         app: simplyblock-mgmt-node-monitor
     spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet 
       containers:
         - name: mgmt-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -235,6 +252,8 @@ spec:
       labels:
         app: simplyblock-lvol-stats-collector
     spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet 
       containers:
         - name: lvol-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -284,7 +303,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-main-distr-event-collector
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
         - name: main-distr-event-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -334,7 +355,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-capacity-and-stats-collector
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
       - name: capacity-and-stats-collector
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -385,7 +408,8 @@ spec:
       labels:
         app: simplyblock-capacity-monitor
     spec:
-      
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
       - name: capacity-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -435,7 +459,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-health-check
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
       - name: health-check
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -485,7 +511,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-device-monitor
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
       - name: device-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -535,7 +563,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-lvol-monitor
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
       - name: lvol-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -584,7 +614,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-snapshot-monitor
-    spec:     
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet      
       containers:
       - name: snapshot-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -685,7 +717,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-restart
-    spec:     
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet      
       containers:
         - name: tasks-runner-restart
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -735,7 +769,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-migration
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
         - name: tasks-runner-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -784,7 +820,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-failed-migration
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
         - name: tasks-runner-failed-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -833,7 +871,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-cluster-status
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
         - name: tasks-runner-cluster-status
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -882,7 +922,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-new-device-migration
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
         - name: tasks-runner-new-device-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -931,7 +973,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-node-add-runner
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
         - name: tasks-node-addrunner
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -983,7 +1027,9 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-port-allow
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
         - name: tasks-runner-port-allow
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -1032,12 +1078,65 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-tasks-runner-jc-comp-resume
-    spec:      
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet       
       containers:
         - name: tasks-runner-jc-comp-resume
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_jc_comp.py"]
+          env:
+            - name: SIMPLYBLOCK_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: simplyblock-config
+                  key: LOG_LEVEL
+          volumeMounts:
+          - name: fdb-cluster-file
+            mountPath: /etc/foundationdb/fdb.cluster
+            subPath: fdb.cluster
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "400m"
+              memory: "1Gi"
+      volumes:
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-tasks-runner-sync-lvol-del
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-tasks-runner-sync-lvol-del
+  template:
+    metadata:
+      annotations:
+        log-collector/enabled: "true"
+        reloader.stakater.com/auto: "true"
+        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
+      labels:
+        app: simplyblock-tasks-runner-sync-lvol-del
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: tasks-runner-sync-lvol-del
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_sync_lvol_del.py"]
           env:
             - name: SIMPLYBLOCK_LOG_LEVEL
               valueFrom:

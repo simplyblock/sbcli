@@ -24,7 +24,7 @@ class _UpdateParams(BaseModel):
 
 
 class ClusterParams(BaseModel):
-    name: Optional[str] = None
+    name: str = ""
     blk_size: Literal[512, 4096] = 512
     page_size_in_blocks: int = Field(2097152, gt=0)
     cap_warn: util.Percent = 0
@@ -41,16 +41,21 @@ class ClusterParams(BaseModel):
     inflight_io_threshold: int = 4
     enable_node_affinity: bool = False
     strict_node_anti_affinity: bool = False
-
+    is_single_node: bool = False
+    fabric: str = "tcp"
+    cluster_ip: str = ""
+    grafana_secret: str = ""
 
 @api.get('/', name='clusters:list')
 def list() -> List[ClusterDTO]:
-    return [
-        ClusterDTO.from_model(cluster)
-        for cluster
-        in db.get_clusters()
-    ]
-
+    data = []
+    for cluster in db.get_clusters():
+        stat_obj = None
+        ret = db.get_cluster_capacity(cluster, 1)
+        if ret:
+            stat_obj = ret[0]
+        data.append(ClusterDTO.from_model(cluster, stat_obj))
+    return data
 
 @api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
 def add(request: Request, parameters: ClusterParams):
@@ -58,8 +63,8 @@ def add(request: Request, parameters: ClusterParams):
     if not cluster_id_or_false:
         raise ValueError('Failed to create cluster')
 
-    entity_url = request.app.url_path_for('get', cluster_id=cluster_id_or_false)
-    return Response(status_code=201, headers={'Location': entity_url})
+    cluster = db.get_cluster_by_id(cluster_id_or_false)
+    return ClusterDTO.from_model(cluster)
 
 
 instance_api = APIRouter(prefix='/{cluster_id}')
@@ -77,7 +82,11 @@ Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
 
 @instance_api.get('/', name='clusters:detail')
 def get(cluster: Cluster) -> ClusterDTO:
-    return ClusterDTO.from_model(cluster)
+    stat_obj = None
+    ret = db.get_cluster_capacity(cluster, 1)
+    if ret:
+        stat_obj = ret[0]
+    return ClusterDTO.from_model(cluster, stat_obj)
 
 
 class UpdatableClusterParameters(BaseModel):

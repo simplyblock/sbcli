@@ -12,8 +12,12 @@ import uuid
 import time
 import socket
 from typing import Union, Any, Optional, Tuple
+from docker import DockerClient
 from kubernetes import client, config
-from kubernetes.client import ApiException
+from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
+    V1PodTemplateSpec, V1PodSpec, V1Container, V1EnvVar, V1VolumeMount, V1Volume, V1ConfigMapVolumeSource, \
+    V1LabelSelector, V1ResourceRequirements
+
 import docker
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
@@ -725,7 +729,13 @@ def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> in
     raw = size / (base ** exponent)
     return math.ceil(raw) if round_up else int(raw)
 
-
+def first_six_chars(s: str) -> str:
+    """
+    Returns the first six characters of a given string.
+    If the string is shorter than six characters, returns the entire string.
+    """
+    return s[:6]
+    
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:
@@ -1093,7 +1103,7 @@ def addNvmeDevices(rpc_client, snode, devs):
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
                 if "ns_data" in nvme_driver_data:
-                    serial_number = nvme_driver_data['pci_address'] + nvme_driver_data['ns_data']['id']
+                    serial_number = nvme_driver_data['pci_address'] + str(nvme_driver_data['ns_data']['id'])
                 else:
                     logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
 
@@ -2031,17 +2041,135 @@ def patch_prometheus_configmap(username: str, password: str):
     load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
-    cm = v1.read_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace=constants.K8S_NAMESPACE)
-    prometheus_yml = cm.data.get("prometheus.yml", "")
+    try:
+        cm = v1.read_namespaced_config_map(
+            name="sbcli-simplyblock-prometheus-config",
+            namespace=constants.K8S_NAMESPACE
+        )
+    except client.exceptions.ApiException as e:
+        logger.error(f"Failed to read ConfigMap: {e}")
+        return False
 
-    prometheus_yml = re.sub(r"username:*", f"username: '{username}'", prometheus_yml)
-    prometheus_yml = re.sub(r"password:*", f"password: '{password}'", prometheus_yml)
+    try:
+        prometheus_yml = cm.data.get("prometheus.yml", "")
+        if not prometheus_yml:
+            logger.error("prometheus.yml key not found in ConfigMap.")
+            return False
 
-    patch_body = {
-        "data": {
-            "prometheus.yml": prometheus_yml
+        try:
+            prometheus_yml = re.sub(r"username:.*", f"username: '{username}'", prometheus_yml)
+            prometheus_yml = re.sub(r"password:.*", f"password: '{password}'", prometheus_yml)
+        except re.error as e:
+            logger.error(f"Regex error while patching Prometheus YAML: {e}")
+            return False
+
+        patch_body = {
+            "data": {
+                "prometheus.yml": prometheus_yml
+            }
         }
-    }
 
-    v1.patch_namespaced_config_map(name="sbcli-simplyblock-prometheus-config", namespace=constants.K8S_NAMESPACE, body=patch_body)
-    logger.info("Patched sbcli-simplyblock-prometheus-config ConfigMap with new credentials.")
+        v1.patch_namespaced_config_map(
+            name="sbcli-simplyblock-prometheus-config",
+            namespace=constants.K8S_NAMESPACE,
+            body=patch_body
+        )
+
+        logger.info("Patched sbcli-simplyblock-prometheus-config ConfigMap with new credentials.")
+        return True
+
+    except client.exceptions.ApiException as e:
+        logger.error(f"Failed to patch ConfigMap: {e}")
+        return False
+
+    except Exception as e:
+        logger.error(f"Unexpected error while patching ConfigMap: {e}")
+        return False
+
+
+def create_docker_service(cluster_docker: DockerClient, service_name: str, service_file: str, service_image: str):
+    logger.info(f"Creating service: {service_name}")
+    cluster_docker.services.create(
+        image=service_image,
+        command=service_file,
+        name=service_name,
+        mounts=["/etc/foundationdb:/etc/foundationdb"],
+        env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
+        networks=["host"],
+        constraints=["node.role == manager"],
+        labels={
+            "com.docker.stack.image": service_image,
+            "com.docker.stack.namespace": "app"}
+    )
+
+def create_k8s_service(namespace: str, deployment_name: str,
+                       container_name: str, service_file: str, container_image: str):
+
+    logger.info(f"Creating deployment: {deployment_name} in namespace {namespace}")
+    load_kube_config_with_fallback()
+    apps_v1 = client.AppsV1Api()
+
+    env_list = [
+        V1EnvVar(
+            name="SIMPLYBLOCK_LOG_LEVEL",
+            value_from={"config_map_key_ref": {"name": "simplyblock-config", "key": "LOG_LEVEL"}}
+        )
+    ]
+
+    volume_mounts = [
+        V1VolumeMount(
+            name="fdb-cluster-file",
+            mount_path="/etc/foundationdb/fdb.cluster",
+            sub_path="fdb.cluster"
+        )
+    ]
+
+    volumes = [
+        V1Volume(
+            name="fdb-cluster-file",
+            config_map=V1ConfigMapVolumeSource(
+                name="simplyblock-fdb-cluster-config",
+                items=[{"key": "cluster-file", "path": "fdb.cluster"}]
+            )
+        )
+    ]
+
+    container = V1Container(
+        name=container_name,
+        image=container_image,
+        command=["python", service_file], 
+        env=env_list,
+        volume_mounts=volume_mounts,
+        resources=V1ResourceRequirements(
+            requests={"cpu": "200m", "memory": "256Mi"},
+            limits={"cpu": "400m", "memory": "1Gi"}
+        )
+    )
+
+    pod_spec = V1PodSpec(
+        containers=[container],
+        volumes=volumes,
+        host_network=True,
+        dns_policy="ClusterFirstWithHostNet"
+    )
+
+    pod_template = V1PodTemplateSpec(
+        metadata=V1ObjectMeta(labels={"app": deployment_name}),
+        spec=pod_spec
+    )
+
+    deployment_spec = V1DeploymentSpec(
+        replicas=1,
+        selector=V1LabelSelector(match_labels={"app": deployment_name}),
+        template=pod_template
+    )
+
+    deployment = V1Deployment(
+        api_version="apps/v1",
+        kind="Deployment",
+        metadata=V1ObjectMeta(name=deployment_name, namespace=namespace),
+        spec=deployment_spec
+    )
+
+    apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
+    logger.info(f"Deployment {deployment_name} created successfully.")

@@ -20,12 +20,15 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-pools:list')
 def list(cluster: Cluster) -> List[StoragePoolDTO]:
-    return [
-        StoragePoolDTO.from_model(pool)
-        for pool
-        in db.get_pools()
-        if pool.cluster_id == cluster.get_id()
-    ]
+    data = []
+    for pool in db.get_pools():
+        if pool.cluster_id == cluster.get_id():
+            stat_obj = None
+            ret = db.get_pool_stats(pool, 1)
+            if ret:
+                stat_obj = ret[0]
+            data.append(StoragePoolDTO.from_model(pool, stat_obj))
+    return data
 
 
 class StoragePoolParams(BaseModel):
@@ -54,9 +57,8 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
 
     if not id_or_false:
         raise ValueError('Failed to create pool')
-
-    entity_url = request.app.url_path_for('clusters:storage-pools:detail', cluster_id=cluster.get_id(), pool_id=id_or_false)
-    return Response(status_code=201, headers={'Location': entity_url})
+    pool = db.get_pool_by_id(id_or_false)
+    return pool.to_dict()
 
 
 instance_api = APIRouter(prefix='/{pool_id}')
@@ -74,7 +76,11 @@ StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
 
 @instance_api.get('/', name='clusters:storage-pools:detail')
 def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
-    return StoragePoolDTO.from_model(pool)
+    stat_obj = None
+    ret = db.get_pool_stats(pool, 1)
+    if ret:
+        stat_obj = ret[0]
+    return StoragePoolDTO.from_model(pool, stat_obj)
 
 
 @instance_api.delete('/', name='clusters:storage-pools:delete', status_code=204, responses={204: {"content": None}})
@@ -122,5 +128,5 @@ def update(cluster: Cluster, pool: StoragePool, parameters: UpdatableStoragePool
 
 @instance_api.get('/iostats', name='clusters:storage-pools:iostats')
 def iostats(cluster: Cluster, pool: StoragePool, limit: int = 20):
-    records = db.get_pool_stats(pool, limit)
-    return core_utils.process_records(records, 20)
+    data = pool_controller.get_io_stats(pool.get_id(), history="")
+    return core_utils.process_records(data, 20)

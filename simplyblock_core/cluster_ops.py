@@ -25,6 +25,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, NodeStatObject, DeviceStatObject
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.prom_client import PromClient
 from simplyblock_core.utils import pull_docker_image_with_retry
 
 logger = utils.get_logger(__name__)
@@ -281,9 +282,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dev_ip:
             raise ValueError("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
 
-        current_node = utils.get_node_name_by_ip(dev_ip)
-        utils.label_node_as_mgmt_plane(current_node)
-
     if not cli_pass:
         cli_pass = utils.generate_string(10)
 
@@ -435,18 +433,23 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp") -> str:
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
+                cluster_ip=None, grafana_secret=None) -> str:
 
+
+    default_cluster = None
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
     clusters = db_controller.get_clusters()
-    if not clusters:
-        raise ValueError("No previous clusters found!")
+    if clusters:
+        default_cluster = clusters[0]
+    else:
+        logger.info("No previous clusters found")
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
-    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
-    
     logger.info("Adding new cluster")
+
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
@@ -455,14 +458,30 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.secret = utils.generate_string(20)
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
+    if default_cluster:
+        cluster.mode = default_cluster.mode
+        cluster.db_connection = default_cluster.db_connection
+        cluster.grafana_secret = grafana_secret if grafana_secret else default_cluster.grafana_secret
+        cluster.grafana_endpoint = default_cluster.grafana_endpoint
+    else:
+        # creating first cluster on k8s
+        cluster.mode = "kubernetes"
+        logger.info("Retrieving foundationdb connection string...")
+        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
+        cluster.db_connection = fdb_cluster_string
+        if monitoring_secret:
+            cluster.grafana_secret = monitoring_secret
+        else:
+            raise Exception("monitoring_secret is required")
+        cluster.grafana_endpoint = "http://simplyblock-grafana:3000"
+        if not cluster_ip:
+            cluster_ip = "0.0.0.0"
 
-    default_cluster = clusters[0]
-    cluster.db_connection = default_cluster.db_connection
-    cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
-    cluster.grafana_endpoint = default_cluster.grafana_endpoint
-
+        # add mgmt node object
+        mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
+                   
     _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
-
+                    
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
     cluster.distr_bs = distr_bs
@@ -489,7 +508,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
-    qos_controller.add_class("Default", 100, cluster.get_id())
 
     return cluster.get_id()
 
@@ -1000,16 +1018,11 @@ def list_all_info(cluster_id) -> str:
 
 
 def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-
-    if history:
-        records_number = utils.parse_history_param(history)
-        if not records_number:
-            raise ValueError(f"Error parsing history string: {history}")
-    else:
-        records_number = 20
-
-    records = db_controller.get_cluster_capacity(cluster, records_number)
+    try:
+        _ = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        logger.error(f"Cluster not found: {cluster_id}")
+        return []
 
     cap_stats_keys = [
         "date",
@@ -1020,20 +1033,17 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
         "size_util",
         "size_prov_util",
     ]
+    prom_client = PromClient(cluster_id)
+    records = prom_client.get_cluster_metrics(cluster_id, cap_stats_keys, history)
     return utils.process_records(records, records_count, keys=cap_stats_keys)
 
 
 def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> t.List[dict]:
-    cluster = db_controller.get_cluster_by_id(cluster_id)
-
-    if history_string:
-        records_number = utils.parse_history_param(history_string)
-        if not records_number:
-            raise ValueError(f"Error parsing history string: {history_string}")
-    else:
-        records_number = 20
-
-    records = db_controller.get_cluster_stats(cluster, records_number)
+    try:
+        _ = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        logger.error(f"Cluster not found: {cluster_id}")
+        return []
 
     io_stats_keys = [
         "date",
@@ -1071,6 +1081,9 @@ def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes
                 "write_latency_ticks",
             ]
         )
+
+    prom_client = PromClient(cluster_id)
+    records = prom_client.get_cluster_metrics(cluster_id, io_stats_keys, history_string)
     # combine records
     return utils.process_records(records, records_count, keys=io_stats_keys)
 
@@ -1183,32 +1196,43 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                     service_names.append(service.attrs['Spec']['Name'])
 
         if "app_SnapshotMonitor" not in service_names:
-            logger.info("Creating snapshot monitor service")
-            cluster_docker.services.create(
-                image=service_image,
-                command="python simplyblock_core/services/snapshot_monitor.py",
-                name="app_SnapshotMonitor",
-                mounts=["/etc/foundationdb:/etc/foundationdb"],
-                env=["SIMPLYBLOCK_LOG_LEVEL=DEBUG"],
-                networks=["host"],
-                constraints=["node.role == manager"]
-            )
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_SnapshotMonitor",
+                service_file="python simplyblock_core/services/snapshot_monitor.py",
+                service_image=service_image)
+
+        if "app_TasksRunnerLVolSyncDelete" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerLVolSyncDelete",
+                service_file="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                service_image=service_image)
+
+        if "app_TasksRunnerJCCompResume" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_TasksRunnerJCCompResume",
+                service_file="python simplyblock_core/services/tasks_runner_jc_comp.py",
+                service_image=service_image)
+
         logger.info("Done updating mgmt cluster")
 
     elif cluster.mode == "kubernetes":
         utils.load_kube_config_with_fallback()
         apps_v1 = k8s_client.AppsV1Api()
-
+        namespace = constants.K8S_NAMESPACE
         image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
         image_parts = "/".join(image_without_tag.split("/")[-2:])
         service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
-
+        deployment_names = []
         # Update Deployments
-        deployments = apps_v1.list_namespaced_deployment(namespace=constants.K8S_NAMESPACE)
+        deployments = apps_v1.list_namespaced_deployment(namespace=namespace)
         for deploy in deployments.items:
             if deploy.metadata.name == constants.ADMIN_DEPLOY_NAME:
                 logger.info(f"Skipping deployment {deploy.metadata.name}")
                 continue
+            deployment_names.append(deploy.metadata.name)
             for c in deploy.spec.template.spec.containers:
                 if image_parts in c.image:
                     logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
@@ -1218,12 +1242,28 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                     deploy.spec.template.metadata.annotations = annotations
                     apps_v1.patch_namespaced_deployment(
                         name=deploy.metadata.name,
-                        namespace=constants.K8S_NAMESPACE,
+                        namespace=namespace,
                         body={"spec": {"template": deploy.spec.template}}
                     )
 
+        if "simplyblock-tasks-runner-sync-lvol-del" not in deployment_names:
+            utils.create_k8s_service(
+                namespace=namespace,
+                deployment_name="simplyblock-tasks-runner-sync-lvol-del",
+                container_name="tasks-runner-sync-lvol-del",
+                service_file="simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                container_image=service_image)
+
+        if "simplyblock-snapshot-monitor" not in deployment_names:
+            utils.create_k8s_service(
+                namespace=namespace,
+                deployment_name="simplyblock-snapshot-monitor",
+                container_name="snapshot-monitor",
+                service_file="simplyblock_core/services/snapshot_monitor.py",
+                container_image=service_image)
+
         # Update DaemonSets
-        daemonsets = apps_v1.list_namespaced_daemon_set(namespace=constants.K8S_NAMESPACE)
+        daemonsets = apps_v1.list_namespaced_daemon_set(namespace=namespace)
         for ds in daemonsets.items:
             for c in ds.spec.template.spec.containers:
                 if image_parts in c.image:
@@ -1234,7 +1274,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                     ds.spec.template.metadata.annotations = annotations
                     apps_v1.patch_namespaced_daemon_set(
                         name=ds.metadata.name,
-                        namespace=constants.K8S_NAMESPACE,
+                        namespace=namespace,
                         body={"spec": {"template": ds.spec.template}}
                         )
 
