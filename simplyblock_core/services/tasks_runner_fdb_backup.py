@@ -69,18 +69,22 @@ def process_snap_backup_task(task):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db.kv_store)
 
+    cluster = db.get_cluster_by_id(task.cluster_id)
     snapshot_id = task.function_params["snapshot_id"]
-
-    logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
-    ret, err = node.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
-    if not ret:
-        if "code" in err and err["code"] == -19:
-            logger.error(f"Sync delete completed with error: {err}")
-        else:
+    snapshot = db.get_snapshot_by_id(snapshot_id)
+    logger.info(f"backing up: {snapshot_id}")
+    if cluster.backup_s3_bucket and cluster.backup_s3_cred:
+        folder = f"backup-{snapshot_id}"
+        folder = folder.replace(" ", "-")
+        folder = folder.replace(":", "-")
+        folder = folder.split(".")[0]
+        backup_path = f"blobstore://{cluster.backup_s3_cred}@s3.{cluster.backup_s3_region}.amazonaws.com/{folder}?bucket={cluster.backup_s3_bucket}&region={cluster.backup_s3_region}&sc=0"
+        ret, err = node.rpc_client().bdev_lvol_s3_backup(backup_path, snapshot.snap_bdev)
+        if not ret:
             logger.error(
-                f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
+                f"Failed to backup snapshot: {snapshot_id}, error: {err}")
 
-    task.function_result = f"bdev {lvol_bdev_name} deleted"
+    task.function_result = f"snap backup done"
     task.status = JobSchedule.STATUS_DONE
     task.write_to_db(db.kv_store)
 

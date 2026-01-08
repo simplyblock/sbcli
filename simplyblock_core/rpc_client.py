@@ -1235,10 +1235,10 @@ class RPCClient:
     def nvmf_get_blocked_ports_rdma(self):
         return self._request("nvmf_get_blocked_ports")
 
-    def bdev_lvol_s3_backup(self, s3_id, cluster_batch, snapshots):
+    def bdev_lvol_s3_backup(self, s3_id, snapshots):
         params = {
             "s3_id": s3_id,
-            "cluster_batch": cluster_batch,
+            "cluster_batch": 16,
             "snapshots": snapshots
         }
-        return self._request("bdev_lvol_s3_backup", params)
+        return self._request2("bdev_lvol_s3_backup", params)
