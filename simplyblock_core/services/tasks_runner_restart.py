@@ -3,6 +3,7 @@ import time
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller, health_controller, tasks_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -171,6 +172,13 @@ def task_runner_node(task):
             return True
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db.kv_store)
+
+    cluster = db.get_cluster_by_id(task.cluster_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        task.function_result = f"Cluster is not active: {cluster.status}, retry"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return False
 
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
