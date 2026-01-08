@@ -1,80 +1,145 @@
+{{- if .Values.simplyblock.cluster }}
 apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockStorageCluster
 metadata:
-  name: demo-simplyblock-cluster
-  namespace: simplyblock
+  name: {{ .Values.simplyblock.cluster.clusterName }}
+  namespace: {{ .Release.Namespace }}
 spec:
-  clusterName: demo-cluster
-  mgmtIfc: "eth0"                     
-  fabric: "tcp"                            
-  isSingleNode: false
-  enableNodeAffinity: false
-  strictNodeAntiAffinity: false
-  capWarn: 80
-  capCrit: 90
-  provCapWarn: 120
-  provCapCrit: 150
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
 
+  {{- if .Values.simplyblock.cluster.mgmtIfc }}
+  mgmtIfc: {{ .Values.simplyblock.cluster.mgmtIfc }}
+  {{- end }}
 
+  {{- if .Values.simplyblock.cluster.fabric }}
+  fabric: {{ .Values.simplyblock.cluster.fabric }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.cluster "isSingleNode" }}
+  isSingleNode: {{ .Values.simplyblock.cluster.isSingleNode }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.cluster "enableNodeAffinity" }}
+  enableNodeAffinity: {{ .Values.simplyblock.cluster.enableNodeAffinity }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.cluster "strictNodeAntiAffinity" }}
+  strictNodeAntiAffinity: {{ .Values.simplyblock.cluster.strictNodeAntiAffinity }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.cluster.capWarn }}
+  capWarn: {{ .Values.simplyblock.cluster.capWarn }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.cluster.capCrit }}
+  capCrit: {{ .Values.simplyblock.cluster.capCrit }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.cluster.provCapWarn }}
+  provCapWarn: {{ .Values.simplyblock.cluster.provCapWarn }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.cluster.provCapCrit }}
+  provCapCrit: {{ .Values.simplyblock.cluster.provCapCrit }}
+  {{- end }}
+{{- end }}
 
 ---
+{{- if .Values.simplyblock.pool }}
 apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockPool
 metadata:
-  name: demo-pool
-  namespace: simplyblock
+  name: {{ .Values.simplyblock.pool.name }}
+  namespace: {{ .Release.Namespace }}
 spec:
-  name: demo-pool               
-  clusterName: demo-cluster
-  capacityLimit: "100Gi"      
+  name: {{ .Values.simplyblock.pool.name }}
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+
+  {{- if .Values.simplyblock.pool.capacityLimit }}
+  capacityLimit: {{ .Values.simplyblock.pool.capacityLimit | quote }}
+  {{- end }}
+{{- end }}
 
 ---
+{{- if .Values.simplyblock.lvol }}
 apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockLvol
 metadata:
-  name: demo-lvol
-  namespace: simplyblock
+  name: {{ .Values.simplyblock.lvol.name }}
+  namespace: {{ .Release.Namespace }}
 spec:
-  clusterName: demo-cluster
-  poolName: demo-pool
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+  poolName: {{ .Values.simplyblock.pool.name }}
+{{- end }}
 
 ---
+{{- if .Values.simplyblock.storageNodes }}
 apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockStorageNode
 metadata:
-  name: demo-node
-  namespace: simplyblock
-spec:  
-  clusterName: demo-cluster
-  clusterImage: public.ecr.aws/simply-block/simplyblock:improved_user_experience
-##  spdkImage: simplyblock/spdk:R25.10-Hotfix-28b85c82
-  mgmtIfc: eth0
-  maxLVol: 10
-  maxSize: 150G
-  partitions: 0
-  corePercentage: 65
-  spdkDebug: false
-  coreIsolation: false
-  workerNodes:
-    - "vm02.simplyblock3.localdomain"
-    - "vm03.simplyblock3.localdomain"
-    - "vm04.simplyblock3.localdomain"
+  name: {{ .Values.simplyblock.storageNodes.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
 
+  {{- if .Values.simplyblock.storageNodes.clusterImage }}
+  clusterImage: {{ .Values.simplyblock.storageNodes.clusterImage }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.mgmtIfc }}
+  mgmtIfc: {{ .Values.simplyblock.storageNodes.mgmtIfc }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.maxLVol }}
+  maxLVol: {{ .Values.simplyblock.storageNodes.maxLVol }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.maxSize }}
+  maxSize: {{ .Values.simplyblock.storageNodes.maxSize | quote }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.storageNodes "partitions" }}
+  partitions: {{ .Values.simplyblock.storageNodes.partitions }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.corePercentage }}
+  corePercentage: {{ .Values.simplyblock.storageNodes.corePercentage }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.storageNodes "spdkDebug" }}
+  spdkDebug: {{ .Values.simplyblock.storageNodes.spdkDebug }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.storageNodes "coreIsolation" }}
+  coreIsolation: {{ .Values.simplyblock.storageNodes.coreIsolation }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.workerNodes }}
+  workerNodes:
+  {{- range .Values.simplyblock.storageNodes.workerNodes }}
+    - {{ . }}
+  {{- end }}
+  {{- end }}
+{{- end }}
 
 ---
+{{- if .Values.simplyblock.devices }}
 apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockDevice
 metadata:
-  name: demo-devices
-  namespace: simplyblock
+  name: {{ .Values.simplyblock.devices.name }}
+  namespace: {{ .Release.Namespace }}
 spec:
-  clusterName: demo-cluster
-  #nodeUUID: d482e889-7960-4e26-9d21-51fc5959d4a1
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+{{- end }}
+
 ---
+{{- if .Values.simplyblock.tasks }}
 apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockTask
 metadata:
-  name: demo-task
-  namespace: simplyblock
+  name: {{ .Values.simplyblock.tasks.name }}
+  namespace: {{ .Release.Namespace }}
 spec:
-  clusterName: demo-cluster
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+{{- end }}
