@@ -84,7 +84,10 @@ def process_snap_backup_task(task):
             logger.error(
                 f"Failed to backup snapshot: {snapshot_id}, error: {err}")
 
-    task.function_result = f"snap backup done"
+            task.function_result = f"snap backup error"
+        else:
+            task.function_result = f"snap backup done"
+
     task.status = JobSchedule.STATUS_DONE
     task.write_to_db(db.kv_store)
 
