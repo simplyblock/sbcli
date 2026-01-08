@@ -651,6 +651,14 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 if not ret:
                     logger.info("Failed to resume JC compression adding task...")
                     tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=node.jm_vuid)
+                # start comp on node for sec stack
+                nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node.get_id())
+                if nodes:
+                    sec_node = nodes[0]
+                    ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=sec_node.jm_vuid, suspend=False)
+                    if not ret:
+                        logger.info("Failed to resume JC compression adding task...")
+                        tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=sec_node.jm_vuid)
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
