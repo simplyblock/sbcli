@@ -6,8 +6,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
 
 data:
-  LOG_LEVEL: {{ .Values.log.level }}
-  LOG_DELETION_INTERVAL: {{ .Values.log.deletionInterval }}
+  LOG_LEVEL: {{ .Values.observability.level }}
+  LOG_DELETION_INTERVAL: {{ .Values.observability.deletionInterval }}
 
 ---
 
@@ -29,6 +29,7 @@ data:
         Path              /var/log/containers/*.log
         Parser            docker
         Tag               kube.*
+        Exclude_Path      /var/log/containers/*fluent-bit*.log
         Refresh_Interval  5
         Mem_Buf_Limit     5MB
         Skip_Long_Lines   On
@@ -69,9 +70,11 @@ data:
 
   filter.lua: |
     function filter_tagged_pods(tag, timestamp, record)
-        annotations = record["kubernetes"]["annotations"]
-        if annotations ~= nil and annotations["log-collector/enabled"] == "true" then
-            return 1, record
+        if record["kubernetes"] ~= nil then
+            local annotations = record["kubernetes"]["annotations"]
+            if annotations ~= nil and annotations["log-collector/enabled"] == "true" then
+                return 1, record
+            end
         end
         return -1, record
     end

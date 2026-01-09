@@ -35,7 +35,7 @@ class ClusterParams(BaseModel):
     distr_npcs: int = 1
     distr_bs: int = 4096
     distr_chunk_bs: int = 4096
-    ha_type: Literal['single', 'ha'] = 'single'
+    ha_type: Literal['single', 'ha'] = 'ha'
     qpair_count: int = 256
     max_queue_size: int = 128
     inflight_io_threshold: int = 4
@@ -43,6 +43,9 @@ class ClusterParams(BaseModel):
     strict_node_anti_affinity: bool = False
     is_single_node: bool = False
     fabric: str = "tcp"
+    cr_name: str = ""
+    cr_namespace: str = ""
+    cr_plural: str = ""
     cluster_ip: str = ""
     grafana_secret: str = ""
 
@@ -163,6 +166,13 @@ def activate(cluster: Cluster) -> Response:
     ).start()
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
+@instance_api.post('/expand', name='clusters:expand', status_code=202, responses={202: {"content": None}})
+def expand(cluster: Cluster) -> Response:
+    Thread(
+        target=cluster_ops.cluster_expand,
+        args=(cluster.get_id(),),
+    ).start()
+    return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 @instance_api.post('/update', name='clusters:upgrade', status_code=204, responses={204: {"content": None}})
 def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:

@@ -23,7 +23,8 @@ def _generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id, qos_host=None):
+def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id,
+                 cr_name=None, cr_namespace=None, cr_plural=None, qos_host=None):
     db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
@@ -71,6 +72,9 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.max_rw_mbytes_per_sec = max_rw_mbytes
     pool.max_r_mbytes_per_sec = max_r_mbytes
     pool.max_w_mbytes_per_sec = max_w_mbytes
+    pool.cr_name = cr_name
+    pool.cr_namespace = cr_namespace
+    pool.cr_plural = cr_plural
     if pool.has_qos() and not qos_host:
         next_nodes = lvol_controller._get_next_3_nodes(cluster_id)
         if next_nodes:
@@ -121,7 +125,8 @@ def qos_exists_on_child_lvol(db_controller: DBController, pool_uuid):
     return False
 
 def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
-             max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name=""):
+             max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0, name="",
+             lvols_cr_name="", lvols_cr_namespace="", lvols_cr_plural=""):
     db_controller = DBController()
     try:
         pool = db_controller.get_pool_by_id(uuid)
@@ -142,6 +147,17 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
                 logger.error(msg)
                 return False, msg
         pool.pool_name = name
+
+    if lvols_cr_name and lvols_cr_name != pool.lvols_cr_name:
+        for p in db_controller.get_pools():
+            if p.lvols_cr_name == lvols_cr_name:
+                msg = f"Pool found with the same lvol cr name: {name}"
+                logger.error(msg)
+                return False, msg
+        pool.lvols_cr_name = lvols_cr_name
+        pool.lvols_cr_namespace = lvols_cr_namespace
+        pool.lvols_cr_plural = lvols_cr_plural
+
 
     # Normalize inputs
     max_rw_iops = max_rw_iops or 0
@@ -265,8 +281,10 @@ def set_status(pool_id, status):
     except KeyError:
         logger.error(f"Pool not found {pool_id}")
         return False
+    old_status = pool.status
     pool.status = status
     pool.write_to_db(db_controller.kv_store)
+    pool_events.pool_status_change(pool, pool.status, old_status)
     logger.info("Done")
 
 

@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
 ---
 apiVersion: v1
 kind: Service
@@ -25,43 +25,18 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: simplyblock-thanos-store
+  name: simplyblock-thanos
   namespace: {{ .Release.Namespace }}
 spec:
   selector:
-    app: simplyblock-thanos-store
+    app: simplyblock-thanos
   ports:
-    - name: thanos-store
+    - name: store
       port: 10901
       targetPort: 10901
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: simplyblock-thanos-query
-  namespace: {{ .Release.Namespace }}
-spec:
-  selector:
-    app: simplyblock-thanos-query
-  ports:
-    - name: thanos-query
+    - name: query
       port: 9091
       targetPort: 9091
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: simplyblock-node-exporter
-  namespace: {{ .Release.Namespace }}
-spec:
-  selector:
-    app: simplyblock-node-exporter
-  ports:
-    - name: simplyblock-node-exporter
-      protocol: TCP
-      port: 9200
-      targetPort: 9200
 
 ---
 apiVersion: v1
