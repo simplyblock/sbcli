@@ -166,6 +166,13 @@ def activate(cluster: Cluster) -> Response:
     ).start()
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
+@instance_api.post('/expand', name='clusters:expand', status_code=202, responses={202: {"content": None}})
+def expand(cluster: Cluster) -> Response:
+    Thread(
+        target=cluster_ops.cluster_expand,
+        args=(cluster.get_id(),),
+    ).start()
+    return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 @instance_api.post('/update', name='clusters:upgrade', status_code=204, responses={204: {"content": None}})
 def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
