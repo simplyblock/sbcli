@@ -46,10 +46,13 @@ def task_runner(task):
         return False
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+        current_online_devices = 0
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             if node.is_secondary_node:  # pass
                 continue
-
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    current_online_devices += 1
             if node.status == StorageNode.STATUS_ONLINE and node.online_since:
                 try:
                     diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
@@ -61,6 +64,17 @@ def task_runner(task):
                         return False
                 except Exception as e:
                     logger.error(f"Failed to get online since: {e}")
+
+        migration_devices = 0
+        if "migration_devices" in task.function_params:
+            migration_devices = task.function_params["migration_devices"]
+
+        if current_online_devices < migration_devices:
+            task.function_result = f"only {current_online_devices} devices online, waiting for more devices to be online"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.retry += 1
+            task.write_to_db(db.kv_store)
+            return False
 
         task.status = JobSchedule.STATUS_RUNNING
         task.function_result = ""
@@ -77,6 +91,12 @@ def task_runner(task):
             task.function_result = "Device not found"
             task.write_to_db(db.kv_store)
             return True
+
+        current_online_devices = 0
+        for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    current_online_devices += 1
 
         distr_name = task.function_params["distr_name"]
 
@@ -96,10 +116,9 @@ def task_runner(task):
             task.retry += 1
             task.write_to_db(db.kv_store)
             return True
-        task.function_params['migration'] = {
-            "name": distr_name}
+        task.function_params['migration'] = {"name": distr_name}
+        task.function_params['migration_devices'] = current_online_devices
         task.write_to_db(db.kv_store)
-        # time.sleep(1)
 
     try:
         if "migration" in task.function_params:
