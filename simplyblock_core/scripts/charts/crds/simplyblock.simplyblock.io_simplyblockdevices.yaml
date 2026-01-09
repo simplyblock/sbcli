@@ -39,21 +39,42 @@ spec:
           spec:
             description: spec defines the desired state of SimplyBlockDevice
             properties:
+              action:
+                enum:
+                - remove
+                - restart
+                type: string
               clusterName:
                 type: string
-              includeStats:
-                type: boolean
+              deviceID:
+                type: string
               nodeUUID:
                 type: string
-              statsHistoryInSeconds:
-                format: int32
-                type: integer
             required:
             - clusterName
             type: object
           status:
             description: status defines the observed state of SimplyBlockDevice
             properties:
+              actionStatus:
+                properties:
+                  action:
+                    type: string
+                  message:
+                    type: string
+                  nodeUUID:
+                    type: string
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  state:
+                    type: string
+                  triggered:
+                    type: boolean
+                  updatedAt:
+                    format: date-time
+                    type: string
+                type: object
               nodes:
                 items:
                   properties:
@@ -103,6 +124,11 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: nodeUUID and deviceID are required when action is specified
+          rule: '!(has(self.spec.action) && self.spec.action != "" && ((!has(self.spec.nodeUUID)
+            || self.spec.nodeUUID == "") || (!has(self.spec.deviceID) || self.spec.deviceID
+            == "")))'
     served: true
     storage: true
     subresources:
