@@ -50,15 +50,15 @@ def get(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceDT
 
 
 @instance_api.post('/remove', name='clusters:storage_nodes:devices:remove', status_code=204, responses={204: {"content": None}})
-def remove(cluster: Cluster, storage_node: StorageNode, device: Device) -> Response:
-    if not device_controller.device_remove(device.get_id()):
+def remove(cluster: Cluster, storage_node: StorageNode, device: Device, force: bool = False) -> Response:
+    if not device_controller.device_remove(device.get_id(), force):
         raise ValueError('Failed to remove device')
 
     return Response(status_code=204)
 
 @instance_api.post('/restart', name='clusters:storage_nodes:devices:restart', status_code=204, responses={204: {"content": None}})
-def restart(cluster: Cluster, storage_node: StorageNode, device: Device) -> Response:
-    if not device_controller.restart_device(device.get_id()):
+def restart(cluster: Cluster, storage_node: StorageNode, device: Device, force: bool = False) -> Response:
+    if not device_controller.restart_device(device.get_id(), force):
         raise ValueError('Failed to restart device')
 
     return Response(status_code=204)
