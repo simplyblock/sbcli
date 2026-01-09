@@ -43,6 +43,7 @@ spec:
               action:
                 enum:
                 - activate
+                - expand
                 type: string
               blkSize:
                 format: int32
@@ -134,6 +135,8 @@ spec:
                     type: integer
                   state:
                     type: string
+                  triggered:
+                    type: boolean
                   updatedAt:
                     format: date-time
                     type: string
