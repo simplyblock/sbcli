@@ -343,7 +343,9 @@ def device_remove(device_id, force=True):
             device = dev
             break
 
-    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
+    if device.status == NVMeDevice.STATUS_REMOVED:
+        return True
+    if device.status == NVMeDevice.STATUS_FAILED:
         logger.error(f"Unsupported device status: {device.status}")
         return False
 
