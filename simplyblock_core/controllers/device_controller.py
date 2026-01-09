@@ -8,7 +8,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient
-
+from simplyblock_core.snode_client import SNodeClient
 
 logger = logging.getLogger()
 
@@ -252,6 +252,15 @@ def restart_device(device_id, force=False):
     logger.info(f"Restarting device {device_id}")
     device_set_retries_exhausted(device_id, True)
     device_set_unavailable(device_id)
+
+    if not snode.rpc_client().bdev_nvme_controller_list(device_obj.nvme_controller):
+        try:
+            ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
+            logger.debug(ret)
+            snode.rpc_client().bdev_nvme_controller_attach(device_obj.nvme_controller, device_obj.pcie_address)
+        except Exception as e:
+            logger.error(e)
+            return False
 
     ret = _def_create_device_stack(device_obj, snode, force=force)
 

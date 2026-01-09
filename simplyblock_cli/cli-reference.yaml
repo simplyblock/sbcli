@@ -458,6 +458,11 @@ commands:
             help: "Device id"
             dest: device_id
             type: str
+          - name: "--force"
+            help: "Force remove"
+            dest: force
+            type: bool
+            action: store_true
       - name: add-device
         help: "Adds a new storage device"
         usage: >
