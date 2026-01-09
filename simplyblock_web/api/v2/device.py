@@ -49,13 +49,19 @@ def get(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceDT
     return DeviceDTO.from_model(device, stat_obj)
 
 
-@instance_api.delete('/', name='clusters:storage_nodes:devices:delete', status_code=204, responses={204: {"content": None}})
-def delete(cluster: Cluster, storage_node: StorageNode, device: Device) -> Response:
+@instance_api.post('/remove', name='clusters:storage_nodes:devices:remove', status_code=204, responses={204: {"content": None}})
+def remove(cluster: Cluster, storage_node: StorageNode, device: Device) -> Response:
     if not device_controller.device_remove(device.get_id()):
         raise ValueError('Failed to remove device')
 
     return Response(status_code=204)
 
+@instance_api.post('/restart', name='clusters:storage_nodes:devices:restart', status_code=204, responses={204: {"content": None}})
+def restart(cluster: Cluster, storage_node: StorageNode, device: Device) -> Response:
+    if not device_controller.restart_device(device.get_id()):
+        raise ValueError('Failed to restart device')
+
+    return Response(status_code=204)
 
 @instance_api.get('/capacity', name='clusters:storage_nodes:devices:capacity')
 def capacity(
