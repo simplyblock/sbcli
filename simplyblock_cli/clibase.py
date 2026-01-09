@@ -256,7 +256,7 @@ class CLIWrapperBase:
         return device_controller.reset_storage_device(args.device_id)
 
     def storage_node__restart_device(self, sub_command, args):
-        return device_controller.restart_device(args.device_id)
+        return device_controller.restart_device(args.device_id, args.force)
 
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)

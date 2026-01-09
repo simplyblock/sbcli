@@ -226,6 +226,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__restart_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restart-device', 'Restarts a storage device')
         subcommand.add_argument('device_id', help='Device id', type=str)
+        argument = subcommand.add_argument('--force', help='Force remove', dest='force', action='store_true')
 
     def init_storage_node__add_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-device', 'Adds a new storage device')
