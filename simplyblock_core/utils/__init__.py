@@ -2036,19 +2036,6 @@ def patch_cr_node_status(
                 f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
             )
 
-        api.patch_namespaced_custom_object_status(
-            group=group,
-            version=version,
-            namespace=namespace,
-            plural=plural,
-            name=name,
-            body={
-                "status": {
-                    "nodes": new_status_nodes
-                }
-            },
-        )
-
         if remove and removed_hostname:
             new_worker_nodes = [
                 n for n in spec_worker_nodes if n != removed_hostname
@@ -2067,6 +2054,19 @@ def patch_cr_node_status(
                 },
             )
 
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body={
+                "status": {
+                    "nodes": new_status_nodes
+                }
+            },
+        )
+        
     except ApiException as e:
         raise RuntimeError(
             f"Failed to patch node for {name}: {e.reason} {e.body}"
