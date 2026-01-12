@@ -106,7 +106,7 @@ def task_runner(task):
             allow_all_errors = False
             for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
                 for dev in node.nvme_devices:
-                    if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_FAILED]:
                         allow_all_errors = True
                         break
 
