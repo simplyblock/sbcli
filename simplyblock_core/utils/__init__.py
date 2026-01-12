@@ -1991,7 +1991,6 @@ def patch_cr_node_status(
         {"status": "offline"}
         {"capacity": {"sizeUsed": 1234}}
     """
-
     load_kube_config_with_fallback()
     api = client.CustomObjectsApi()
 
@@ -2004,25 +2003,25 @@ def patch_cr_node_status(
             name=name,
         )
 
-        nodes = cr.get("status", {}).get("nodes", [])
-        if not nodes:
+        status_nodes = cr.get("status", {}).get("nodes", [])
+        if not status_nodes:
             raise RuntimeError("CR has no status.nodes")
 
+        spec_worker_nodes = cr.get("spec", {}).get("workerNodes", [])
+
         found = False
-        arr_nodes = []
-        
-        for node in nodes:
-            if node.get("uuid") == node_uuid:
+        new_status_nodes = []
+        removed_hostname = None
+
+        for node in status_nodes:
+            match = (
+                node.get("uuid") == node_uuid or
+                node.get("mgmtIp") == node_mgmt_ip
+            )
+
+            if match:
                 found = True
-
-                if remove:
-                    continue
-
-                if updates:
-                    node.update(updates)          
-
-            if not node.get("uuid") and node.get("mgmtIp") == node_mgmt_ip:
-                found = True
+                removed_hostname = node.get("hostname")
 
                 if remove:
                     continue
@@ -2030,18 +2029,12 @@ def patch_cr_node_status(
                 if updates:
                     node.update(updates)
 
-            arr_nodes.append(node)    
+            new_status_nodes.append(node)
 
         if not found:
-            raise RuntimeError(f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})")
-
-        nodes = arr_nodes
-
-        body = {
-            "status": {
-                "nodes": nodes
-            }
-        }
+            raise RuntimeError(
+                f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
+            )
 
         api.patch_namespaced_custom_object_status(
             group=group,
@@ -2049,12 +2042,34 @@ def patch_cr_node_status(
             namespace=namespace,
             plural=plural,
             name=name,
-            body=body,
+            body={
+                "status": {
+                    "nodes": new_status_nodes
+                }
+            },
         )
+
+        if remove and removed_hostname:
+            new_worker_nodes = [
+                n for n in spec_worker_nodes if n != removed_hostname
+            ]
+
+            api.patch_namespaced_custom_object(
+                group=group,
+                version=version,
+                namespace=namespace,
+                plural=plural,
+                name=name,
+                body={
+                    "spec": {
+                        "workerNodes": new_worker_nodes
+                    }
+                },
+            )
 
     except ApiException as e:
         raise RuntimeError(
-            f"Failed to patch node status for {name}: {e.reason} {e.body}"
+            f"Failed to patch node for {name}: {e.reason} {e.body}"
         )
 
 def patch_cr_lvol_status(
