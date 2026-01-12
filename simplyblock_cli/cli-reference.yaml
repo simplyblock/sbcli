@@ -481,16 +481,6 @@ commands:
             help: "Device id"
             dest: device_id
             type: str
-      - name: reset-device
-        help: "Resets a storage device"
-        usage: >
-          Hardware device reset. Resetting the device can return the device from an unavailable into online state, if
-          successful.
-        arguments:
-          - name: "device_id"
-            help: "Device id"
-            dest: device_id
-            type: str
       - name: restart-device
         help: "Restarts a storage device"
         usage: >

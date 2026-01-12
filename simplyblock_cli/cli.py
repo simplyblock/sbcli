@@ -52,7 +52,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_storage_node__device_testing_mode(subparser)
         self.init_storage_node__get_device(subparser)
-        self.init_storage_node__reset_device(subparser)
         self.init_storage_node__restart_device(subparser)
         self.init_storage_node__add_device(subparser)
         self.init_storage_node__remove_device(subparser)
@@ -217,10 +216,6 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__get_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-device', 'Gets storage device by its id')
-        subcommand.add_argument('device_id', help='Device id', type=str)
-
-    def init_storage_node__reset_device(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'reset-device', 'Resets a storage device')
         subcommand.add_argument('device_id', help='Device id', type=str)
 
     def init_storage_node__restart_device(self, subparser):
@@ -872,8 +867,6 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.storage_node__device_testing_mode(sub_command, args)
                 elif sub_command in ['get-device']:
                     ret = self.storage_node__get_device(sub_command, args)
-                elif sub_command in ['reset-device']:
-                    ret = self.storage_node__reset_device(sub_command, args)
                 elif sub_command in ['restart-device']:
                     ret = self.storage_node__restart_device(sub_command, args)
                 elif sub_command in ['add-device']:
