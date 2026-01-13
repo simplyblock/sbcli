@@ -38,12 +38,12 @@ jobs:
 
     - name: Build & Push
       run: |
-        SHORT_SHA=$(echo ${{ env.SHA }} | head -c 8)
+        IMAGE_TAG=base_image_313
 
         docker buildx ls
         docker buildx create --name mybuilder --bootstrap --use
-        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:base_image \
-        -t public.ecr.aws/simply-block/simplyblock:base_image -f docker/Dockerfile_base . --push
+        docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$IMAGE_TAG \
+        -t public.ecr.aws/simply-block/simplyblock:$IMAGE_TAG -f docker/Dockerfile_base . --push
 
-        echo "::notice title=Docker.com::simplyblock/simplyblock:base_image
-        echo "::notice title=AWS-ECR::public.ecr.aws/simply-block/simplyblock:base_image
+        echo "::notice title=Docker.com::simplyblock/simplyblock:$IMAGE_TAG
+        echo "::notice title=AWS-ECR::public.ecr.aws/simply-block/simplyblock:$IMAGE_TAG

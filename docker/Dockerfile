@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM simplyblock/simplyblock:base_image
+FROM simplyblock/simplyblock:base_image_313
 
 LABEL name="simplyblock"
 LABEL vendor="Simplyblock"
@@ -10,7 +10,7 @@ LABEL description="Simplyblock controlplane plane container"
 LABEL maintainer="developers@simplyblock.io"
 
 COPY LICENSE /licenses/LICENSE
-
+USER simplyblock
 WORKDIR /app
 
 COPY requirements.txt .
