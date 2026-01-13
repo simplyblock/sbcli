@@ -898,7 +898,7 @@ def new_device_from_failed(device_id):
         return False
 
     if not device_node:
-        logger.info(f"node not found")
+        logger.info("node not found")
         return False
 
     if device.status != NVMeDevice.STATUS_FAILED_AND_MIGRATED:
