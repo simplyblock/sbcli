@@ -915,6 +915,19 @@ def new_device_from_failed(device_id):
         logger.error("Device is already added back from failed")
         return False
 
+    if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
+        try:
+            ret = SNodeClient(device_node.api_endpoint, timeout=30, retry=1).bind_device_to_spdk(device.pcie_address)
+            logger.debug(ret)
+            device_node.rpc_client().bdev_nvme_controller_attach(device.nvme_controller, device.pcie_address)
+        except Exception as e:
+            logger.error(e)
+            return False
+
+    if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
+        logger.error(f"Failed to find device nvme controller {device.nvme_controller}")
+        return False
+
     new_device = NVMeDevice(device.to_dict())
     new_device.uuid = str(uuid.uuid4())
     new_device.status = NVMeDevice.STATUS_NEW
