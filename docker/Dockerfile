@@ -20,10 +20,10 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY . /app
 
-RUN python setup.py install
+RUN sudo python setup.py install
 
 RUN if [ -d /usr/share/terminfo ]; then \
        find /usr/share/terminfo -lname '*ncr260vt300wpp*' -exec rm -f {} + ; \
-       rm -f /usr/share/terminfo/n/ncr260vt300wpp || true ; \
+       sudo rm -f /usr/share/terminfo/n/ncr260vt300wpp || true ; \
     fi
 
