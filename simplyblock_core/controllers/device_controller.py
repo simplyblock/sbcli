@@ -354,14 +354,21 @@ def device_remove(device_id, force=True):
         logger.error(e)
         return False
 
+    device = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device = dev
             break
 
-    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
-        logger.error(f"Unsupported device status: {device.status}")
+    if not device:
+        logger.error("device not found")
         return False
+
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED,
+                         NVMeDevice.STATUS_NEW]:
+        logger.error(f"Unsupported device status: {device.status}")
+        if force is False:
+            return False
 
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
     if task_id:
@@ -603,13 +610,14 @@ def device_set_failed(device_id):
         logger.error(e)
         return False
 
+    if dev.status != NVMeDevice.STATUS_REMOVED:
+        logger.error(f"Device must be in removed status, current status: {dev.status}")
+        return False
+
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not fail device")
         return False
-
-    if dev.status == NVMeDevice.STATUS_FAILED:
-        return True
 
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
     if not ret:
@@ -678,25 +686,11 @@ def add_device(device_id, add_migration_task=True):
 def device_set_failed_and_migrated(device_id):
     db_controller = DBController()
     device_set_state(device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
-    device = db_controller.get_storage_device_by_id(device_id)
-    for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
+    dev = db_controller.get_storage_device_by_id(device_id)
+    for node in db_controller.get_storage_nodes_by_cluster_id(dev.cluster_id):
         if node.status == StorageNode.STATUS_ONLINE:
             rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-            rpc_client.distr_replace_id_in_map_prob(device.cluster_device_order, -1)
-
-    logger.info("Disconnecting device from all nodes")
-    distr_controller.disconnect_device(device)
-
-    snode = db_controller.get_storage_node_by_id(device.node_id)
-    rpc_client = snode.rpc_client()
-    logger.info("Removing device fabric")
-    ret = rpc_client.subsystem_delete(device.nvmf_nqn)
-    if ret:
-        logger.error(f"subsystem removed: {device.nvmf_nqn}")
-    logger.info("Removing device bdevs")
-    rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
-    rpc_client.bdev_alceml_delete(device.alceml_bdev)
-    rpc_client.qos_vbdev_delete(device.qos_bdev)
+            rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
     return True
 
 
