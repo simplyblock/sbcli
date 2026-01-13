@@ -1,5 +1,6 @@
 import time
 import logging
+import uuid
 
 from simplyblock_core import distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, tasks_controller
@@ -124,7 +125,7 @@ def get_alceml_name(alceml_id):
     return f"alceml_{alceml_id}"
 
 
-def _def_create_device_stack(device_obj, snode, force=False):
+def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     db_controller = DBController()
 
     rpc_client = RPCClient(
@@ -158,7 +159,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
     if alceml_name not in bdev_names:
         ret = snode.create_alceml(
             alceml_name, nvme_bdev, alceml_id,
-            pba_init_mode=2,
+            pba_init_mode=3 if clear_data else 2,
             write_protection=cluster.distr_ndcs > 1,
             pba_page_size=cluster.page_size_in_blocks,
             full_page_unmap=cluster.full_page_unmap
@@ -242,6 +243,10 @@ def restart_device(device_id, force=False):
         if dev.get_id() == device_id:
             device_obj = dev
             break
+
+    if not device_obj:
+        logger.error("device not found")
+        return False
 
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
     if task_id:
@@ -615,6 +620,7 @@ def device_set_failed(device_id):
             rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
 
     tasks_controller.add_device_failed_mig_task(device_id)
+    return True
 
 
 def add_device(device_id, add_migration_task=True):
@@ -630,14 +636,18 @@ def add_device(device_id, add_migration_task=True):
         logger.error("Device must be in new state")
         return False
 
+    device_obj = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device_obj = dev
             break
 
+    if not device_obj:
+        logger.error("device not found")
+        return False
+
     logger.info(f"Adding device {device_id}")
-    # if snode.num_partitions_per_dev == 0 or device_obj.is_partition:
-    ret = _def_create_device_stack(device_obj, snode, force=True)
+    ret = _def_create_device_stack(device_obj, snode, force=True, clear_data=True)
     if not ret:
         logger.error("Failed to create device stack")
         return False
@@ -668,11 +678,25 @@ def add_device(device_id, add_migration_task=True):
 def device_set_failed_and_migrated(device_id):
     db_controller = DBController()
     device_set_state(device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
-    dev = db_controller.get_storage_device_by_id(device_id)
-    for node in db_controller.get_storage_nodes_by_cluster_id(dev.cluster_id):
+    device = db_controller.get_storage_device_by_id(device_id)
+    for node in db_controller.get_storage_nodes_by_cluster_id(device.cluster_id):
         if node.status == StorageNode.STATUS_ONLINE:
             rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
-            rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
+            rpc_client.distr_replace_id_in_map_prob(device.cluster_device_order, -1)
+
+    logger.info("Disconnecting device from all nodes")
+    distr_controller.disconnect_device(device)
+
+    snode = db_controller.get_storage_node_by_id(device.node_id)
+    rpc_client = snode.rpc_client()
+    logger.info("Removing device fabric")
+    ret = rpc_client.subsystem_delete(device.nvmf_nqn)
+    if ret:
+        logger.error(f"subsystem removed: {device.nvmf_nqn}")
+    logger.info("Removing device bdevs")
+    rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
+    rpc_client.bdev_alceml_delete(device.alceml_bdev)
+    rpc_client.qos_vbdev_delete(device.qos_bdev)
     return True
 
 
@@ -877,7 +901,12 @@ def new_device_from_failed(device_id):
         logger.error(f"Device status: {device.status} but expected status is {NVMeDevice.STATUS_FAILED_AND_MIGRATED}")
         return False
 
+    if device.serial_number.endswith("_failed"):
+        logger.error("Device is already added back from failed")
+        return False
+
     new_device = NVMeDevice(device.to_dict())
+    new_device.uuid = str(uuid.uuid4())
     new_device.status = NVMeDevice.STATUS_NEW
     new_device.cluster_device_order = -1
     new_device.deleted = False
