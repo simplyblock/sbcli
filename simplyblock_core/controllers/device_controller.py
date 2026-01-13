@@ -400,7 +400,7 @@ def device_remove(device_id, force=True):
         logger.info(f"Removing bdev: {device.pt_bdev}")
         ret = rpc_client.bdev_PT_NoExcl_delete(device.pt_bdev)
         if not ret:
-            logger.error(f"Failed to remove bdev: device.pt_bdev")
+            logger.error(f"Failed to remove bdev: {device.pt_bdev}")
             if not force:
                 return False
 
