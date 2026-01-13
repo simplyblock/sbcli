@@ -40,11 +40,13 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+{{- if .Values.monitoring.enabled }}
         - name: MONITORING_SECRET
           valueFrom:
             secretKeyRef:
               name: simplyblock-grafana-secrets
               key: MONITORING_SECRET
+{{- end }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
