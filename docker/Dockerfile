@@ -12,13 +12,11 @@ LABEL maintainer="developers@simplyblock.io"
 COPY LICENSE /licenses/LICENSE
 USER simplyblock
 WORKDIR /app
-
-COPY requirements.txt .
-
-RUN pip3 install --no-cache-dir -r requirements.txt
-
-
 COPY . /app
+
+RUN sudo pip3 install --upgrade pip
+RUN sudo pip3 install setuptools --upgrade
+RUN sudo pip3 install -r requirements.txt
 
 RUN sudo python setup.py install
 
