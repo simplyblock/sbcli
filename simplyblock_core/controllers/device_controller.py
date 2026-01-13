@@ -860,26 +860,32 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
 
 def new_device_from_failed(device_id):
     db_controller = DBController()
-    try:
-        dev = db_controller.get_storage_device_by_id(device_id)
-        snode = db_controller.get_storage_node_by_id(dev.node_id)
-    except KeyError as e:
-        logger.error(e)
+    device = None
+    device_node = None
+    for node in db_controller.get_storage_nodes():
+        for dev in node.nvme_devices:
+            if dev.get_id() == device_id:
+                device = dev
+                device_node = node
+                break
+
+    if not device:
+        logger.info(f"Device not found: {device_id}")
         return False
 
-    if dev.status != NVMeDevice.STATUS_FAILED_AND_MIGRATED:
-        logger.error(f"Device status: {dev.status} but expected status is {NVMeDevice.STATUS_FAILED_AND_MIGRATED}")
+    if device.status != NVMeDevice.STATUS_FAILED_AND_MIGRATED:
+        logger.error(f"Device status: {device.status} but expected status is {NVMeDevice.STATUS_FAILED_AND_MIGRATED}")
         return False
 
-    new_device = NVMeDevice(dev.to_dict())
+    new_device = NVMeDevice(device.to_dict())
     new_device.status = NVMeDevice.STATUS_NEW
     new_device.cluster_device_order = -1
     new_device.deleted = False
     new_device.io_error = False
     new_device.retries_exhausted = False
-    snode.nvme_devices.append(new_device)
+    device_node.nvme_devices.append(new_device)
 
-    dev.serial_number = f"{dev.serial_number}_failed"
-    snode.write_to_db(db_controller.kv_store)
+    device.serial_number = f"{device.serial_number}_failed"
+    device_node.write_to_db(db_controller.kv_store)
     logger.info(f"New device created from failed device: {device_id}, new device id: {new_device.get_id()}")
     return new_device.get_id()
