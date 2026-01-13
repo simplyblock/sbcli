@@ -30,6 +30,10 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         rm -f foundationdb-clients_7* ; \
     fi
 
+RUN useradd -ms /bin/bash simplyblock
+RUN echo "simplyblock  ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+USER simplyblock
+
 WORKDIR /app
 
 RUN pip3 install --upgrade pip
@@ -39,7 +43,5 @@ COPY requirements.txt requirements.txt
 
 RUN pip3 install -r requirements.txt
 
-RUN useradd -ms /bin/bash simplyblock
-RUN echo "simplyblock  ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-USER simplyblock
+
 
