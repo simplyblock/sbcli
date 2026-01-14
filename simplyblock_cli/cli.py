@@ -286,6 +286,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'restart-jm-device', 'Restarts a journaling device')
         subcommand.add_argument('jm_device_id', help='Journaling device id', type=str)
         argument = subcommand.add_argument('--force', help='Force device remove', dest='force', action='store_true')
+        argument = subcommand.add_argument('--format', help='Format the Alceml device used for JM device', dest='format', action='store_true')
 
     def init_storage_node__send_cluster_map(self, subparser):
         subcommand = self.add_sub_command(subparser, 'send-cluster-map', 'Sends a new cluster map')

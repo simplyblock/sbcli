@@ -652,6 +652,11 @@ commands:
             dest: force
             type: bool
             action: store_true
+          - name: "--format"
+            help: "Format the Alceml device used for JM device"
+            dest: format
+            type: bool
+            action: store_true
       - name: send-cluster-map
         help: "Sends a new cluster map"
         private: true
