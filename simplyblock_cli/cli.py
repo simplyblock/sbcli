@@ -77,6 +77,7 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__dump_lvstore(subparser)
         if self.developer_mode:
             self.init_storage_node__set(subparser)
+        self.init_storage_node__new_device_from_failed(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -300,6 +301,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('node_id', help='Storage node id', type=str)
         subcommand.add_argument('attr_name', help='attr_name', type=str)
         subcommand.add_argument('attr_value', help='attr_value', type=str)
+
+    def init_storage_node__new_device_from_failed(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'new-device-from-failed', 'Adds a new device to from failed device information')
+        subcommand.add_argument('device_id', help='Device id', type=str)
 
 
     def init_cluster(self):
@@ -926,6 +931,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.storage_node__set(sub_command, args)
+                elif sub_command in ['new-device-from-failed']:
+                    ret = self.storage_node__new_device_from_failed(sub_command, args)
                 else:
                     self.parser.print_help()
 

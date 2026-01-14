@@ -316,6 +316,9 @@ class CLIWrapperBase:
         node_id = args.node_id
         return storage_ops.dump_lvstore(node_id)
 
+    def storage_node__new_device_from_failed(self, sub_command, args):
+        return device_controller.new_device_from_failed(args.device_id)
+
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 
