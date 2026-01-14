@@ -2752,7 +2752,7 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
 
     node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "python simplyblock_web/node_webapp.py storage_node",
+        "sudo python simplyblock_web/node_webapp.py storage_node",
         detach=True,
         privileged=True,
         name="SNodeAPI",
