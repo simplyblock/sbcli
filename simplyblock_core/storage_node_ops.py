@@ -1066,7 +1066,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if n.api_endpoint == node_addr and n.socket == node_socket:
-                total_mem += n.spdk_mem
+                total_mem += (n.spdk_mem + 500000000)
 
         logger.info("Deploying SPDK")
         results = None
@@ -1748,7 +1748,7 @@ def restart_storage_node(
     total_mem = minimum_hp_memory
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if n.api_endpoint == snode.api_endpoint and n.socket == snode.socket and n.uuid != snode.uuid:
-            total_mem += n.spdk_mem
+            total_mem += (n.spdk_mem + 500000000)
 
     results = None
     try:
