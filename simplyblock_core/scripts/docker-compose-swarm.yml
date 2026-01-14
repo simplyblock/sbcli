@@ -49,7 +49,7 @@ services:
   WebAppAPI:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_web/app.py"
+    command: "sudo -E python simplyblock_web/app.py"
     networks:
       - localnet
     deploy:
@@ -67,7 +67,7 @@ services:
   StorageNodeMonitor:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/storage_node_monitor.py"
+    command: "sudo -E python simplyblock_core/services/storage_node_monitor.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -81,7 +81,7 @@ services:
   MgmtNodeMonitor:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/mgmt_node_monitor.py"
+    command: "sudo -E python simplyblock_core/services/mgmt_node_monitor.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -95,7 +95,7 @@ services:
   LVolStatsCollector:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/lvol_stat_collector.py"
+    command: "sudo -E python simplyblock_core/services/lvol_stat_collector.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -109,7 +109,7 @@ services:
   MainDistrEventCollector:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/main_distr_event_collector.py"
+    command: "sudo -E python simplyblock_core/services/main_distr_event_collector.py"
     networks:
       - hostnet
     deploy:
@@ -141,7 +141,7 @@ services:
   CapacityAndStatsCollector:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/capacity_and_stats_collector.py"
+    command: "sudo -E python simplyblock_core/services/capacity_and_stats_collector.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -155,7 +155,7 @@ services:
   CapacityMonitor:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/cap_monitor.py"
+    command: "sudo -E python simplyblock_core/services/cap_monitor.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -169,7 +169,7 @@ services:
   HealthCheck:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/health_check_service.py"
+    command: "sudo -E python simplyblock_core/services/health_check_service.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -183,7 +183,7 @@ services:
   DeviceMonitor:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/device_monitor.py"
+    command: "sudo -E python simplyblock_core/services/device_monitor.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -197,7 +197,7 @@ services:
   LVolMonitor:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/lvol_monitor.py"
+    command: "sudo -E python simplyblock_core/services/lvol_monitor.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -211,7 +211,7 @@ services:
   SnapshotMonitor:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/snapshot_monitor.py"
+    command: "sudo -E python simplyblock_core/services/snapshot_monitor.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -228,7 +228,7 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
       LOG_DELETION_INTERVAL: "${LOG_DELETION_INTERVAL}"
-    command: "sudo python simplyblock_core/workers/cleanup_foundationdb.py"
+    command: "sudo -E python simplyblock_core/workers/cleanup_foundationdb.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -240,7 +240,7 @@ services:
   TasksRunnerRestart:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/tasks_runner_restart.py"
+    command: "sudo -E python simplyblock_core/services/tasks_runner_restart.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -254,7 +254,7 @@ services:
   TasksRunnerMigration:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/tasks_runner_migration.py"
+    command: "sudo -E python simplyblock_core/services/tasks_runner_migration.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -268,7 +268,7 @@ services:
   TasksRunnerFailedMigration:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/tasks_runner_failed_migration.py"
+    command: "sudo -E python simplyblock_core/services/tasks_runner_failed_migration.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -282,7 +282,7 @@ services:
   TasksRunnerClusterStatus:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/tasks_cluster_status.py"
+    command: "sudo -E python simplyblock_core/services/tasks_cluster_status.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -296,7 +296,7 @@ services:
   TasksRunnerNewDeviceMigration:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/tasks_runner_new_dev_migration.py"
+    command: "sudo -E python simplyblock_core/services/tasks_runner_new_dev_migration.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -310,7 +310,7 @@ services:
   TasksNodeAddRunner:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/tasks_runner_node_add.py"
+    command: "sudo -E python simplyblock_core/services/tasks_runner_node_add.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -324,7 +324,7 @@ services:
   TasksRunnerPortAllow:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/tasks_runner_port_allow.py"
+    command: "sudo -E python simplyblock_core/services/tasks_runner_port_allow.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -338,7 +338,7 @@ services:
   TasksRunnerJCCompResume:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/tasks_runner_jc_comp.py"
+    command: "sudo -E python simplyblock_core/services/tasks_runner_jc_comp.py"
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -352,7 +352,7 @@ services:
   TasksRunnerLVolSyncDelete:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "sudo python simplyblock_core/services/tasks_runner_sync_lvol_del.py"
+    command: "sudo -E python simplyblock_core/services/tasks_runner_sync_lvol_del.py"
     deploy:
       placement:
         constraints: [node.role == manager]
