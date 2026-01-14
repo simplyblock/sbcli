@@ -1,5 +1,6 @@
 import time
 import logging
+import uuid
 
 from simplyblock_core import distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, tasks_controller
@@ -124,7 +125,7 @@ def get_alceml_name(alceml_id):
     return f"alceml_{alceml_id}"
 
 
-def _def_create_device_stack(device_obj, snode, force=False):
+def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     db_controller = DBController()
 
     rpc_client = RPCClient(
@@ -158,7 +159,7 @@ def _def_create_device_stack(device_obj, snode, force=False):
     if alceml_name not in bdev_names:
         ret = snode.create_alceml(
             alceml_name, nvme_bdev, alceml_id,
-            pba_init_mode=2,
+            pba_init_mode=3 if clear_data else 2,
             write_protection=cluster.distr_ndcs > 1,
             pba_page_size=cluster.page_size_in_blocks,
             full_page_unmap=cluster.full_page_unmap
@@ -242,6 +243,10 @@ def restart_device(device_id, force=False):
         if dev.get_id() == device_id:
             device_obj = dev
             break
+
+    if not device_obj:
+        logger.error("device not found")
+        return False
 
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
     if task_id:
@@ -349,14 +354,21 @@ def device_remove(device_id, force=True):
         logger.error(e)
         return False
 
+    device = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device = dev
             break
 
-    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED]:
-        logger.error(f"Unsupported device status: {device.status}")
+    if not device:
+        logger.error("device not found")
         return False
+
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED,
+                         NVMeDevice.STATUS_NEW]:
+        logger.error(f"Unsupported device status: {device.status}")
+        if force is False:
+            return False
 
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
     if task_id:
@@ -370,34 +382,46 @@ def device_remove(device_id, force=True):
     logger.info("Disconnecting device from all nodes")
     distr_controller.disconnect_device(device)
 
-    logger.info("Removing device fabric")
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
-    ret = rpc_client.subsystem_delete(device.nvmf_nqn)
-    if not ret:
-        logger.error(f"Failed to remove subsystem: {device.nvmf_nqn}")
-        if not force:
-            return False
+    bdev_names = []
+    for dev in rpc_client.get_bdevs():
+        bdev_names.append(dev['name'])
 
-    logger.info("Removing device bdevs")
-    ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
-    if not ret:
-        logger.error(f"Failed to remove bdev: {device.alceml_bdev}_PT")
-        if not force:
-            return False
-    ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
-    if not ret:
-        logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
-        if not force:
-            return False
-    ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
-    if not ret:
-        logger.error(f"Failed to remove bdev: {device.qos_bdev}")
-        if not force:
-            return False
-    if snode.enable_test_device:
+    if rpc_client.subsystem_list(device.nvmf_nqn):
+        logger.info("Removing device subsystem")
+        ret = rpc_client.subsystem_delete(device.nvmf_nqn)
+        if not ret:
+            logger.error(f"Failed to remove subsystem: {device.nvmf_nqn}")
+            if not force:
+                return False
+
+    if device.pt_bdev in bdev_names:
+        logger.info(f"Removing bdev: {device.pt_bdev}")
+        ret = rpc_client.bdev_PT_NoExcl_delete(device.pt_bdev)
+        if not ret:
+            logger.error(f"Failed to remove bdev: {device.pt_bdev}")
+            if not force:
+                return False
+
+    if device.alceml_bdev in bdev_names:
+        logger.info(f"Removing bdev: {device.alceml_bdev}")
+        ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
+        if not ret:
+            logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
+            if not force:
+                return False
+
+    if device.qos_bdev in bdev_names:
+        logger.info(f"Removing bdev: {device.qos_bdev}")
+        ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
+        if not ret:
+            logger.error(f"Failed to remove bdev: {device.qos_bdev}")
+            if not force:
+                return False
+
+    if snode.enable_test_device and device.testing_bdev in bdev_names:
+        logger.info(f"Removing bdev: {device.testing_bdev}")
         ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.testing_bdev}")
@@ -598,13 +622,14 @@ def device_set_failed(device_id):
         logger.error(e)
         return False
 
+    if dev.status != NVMeDevice.STATUS_REMOVED:
+        logger.error(f"Device must be in removed status, current status: {dev.status}")
+        return False
+
     task_id = tasks_controller.get_active_dev_restart_task(snode.cluster_id, device_id)
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not fail device")
         return False
-
-    if dev.status == NVMeDevice.STATUS_FAILED:
-        return True
 
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
     if not ret:
@@ -615,6 +640,7 @@ def device_set_failed(device_id):
             rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
 
     tasks_controller.add_device_failed_mig_task(device_id)
+    return True
 
 
 def add_device(device_id, add_migration_task=True):
@@ -630,14 +656,18 @@ def add_device(device_id, add_migration_task=True):
         logger.error("Device must be in new state")
         return False
 
+    device_obj = None
     for dev in snode.nvme_devices:
         if dev.get_id() == device_id:
             device_obj = dev
             break
 
+    if not device_obj:
+        logger.error("device not found")
+        return False
+
     logger.info(f"Adding device {device_id}")
-    # if snode.num_partitions_per_dev == 0 or device_obj.is_partition:
-    ret = _def_create_device_stack(device_obj, snode, force=True)
+    ret = _def_create_device_stack(device_obj, snode, force=True, clear_data=True)
     if not ret:
         logger.error("Failed to create device stack")
         return False
@@ -856,3 +886,58 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                 set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
     return True
+
+
+def new_device_from_failed(device_id):
+    db_controller = DBController()
+    device = None
+    device_node = None
+    for node in db_controller.get_storage_nodes():
+        for dev in node.nvme_devices:
+            if dev.get_id() == device_id:
+                device = dev
+                device_node = node
+                break
+
+    if not device:
+        logger.info(f"Device not found: {device_id}")
+        return False
+
+    if not device_node:
+        logger.info("node not found")
+        return False
+
+    if device.status != NVMeDevice.STATUS_FAILED_AND_MIGRATED:
+        logger.error(f"Device status: {device.status} but expected status is {NVMeDevice.STATUS_FAILED_AND_MIGRATED}")
+        return False
+
+    if device.serial_number.endswith("_failed"):
+        logger.error("Device is already added back from failed")
+        return False
+
+    if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
+        try:
+            ret = SNodeClient(device_node.api_endpoint, timeout=30, retry=1).bind_device_to_spdk(device.pcie_address)
+            logger.debug(ret)
+            device_node.rpc_client().bdev_nvme_controller_attach(device.nvme_controller, device.pcie_address)
+        except Exception as e:
+            logger.error(e)
+            return False
+
+    if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
+        logger.error(f"Failed to find device nvme controller {device.nvme_controller}")
+        return False
+
+    new_device = NVMeDevice(device.to_dict())
+    new_device.uuid = str(uuid.uuid4())
+    new_device.status = NVMeDevice.STATUS_NEW
+    new_device.cluster_device_order = -1
+    new_device.deleted = False
+    new_device.io_error = False
+    new_device.retries_exhausted = False
+    device_node.nvme_devices.append(new_device)
+
+    device.serial_number = f"{device.serial_number}_failed"
+    device_node.write_to_db(db_controller.kv_store)
+    logger.info(f"New device created from failed device: {device_id}, new device id: {new_device.get_id()}")
+    return new_device.get_id()
