@@ -298,7 +298,7 @@ class CLIWrapperBase:
         return device_controller.remove_jm_device(args.jm_device_id, args.force)
 
     def storage_node__restart_jm_device(self, sub_command, args):
-        return device_controller.restart_jm_device(args.jm_device_id, args.force)
+        return device_controller.restart_jm_device(args.jm_device_id, args.force, args.format)
 
     def storage_node__send_cluster_map(self, sub_command, args):
         node_id = args.node_id
