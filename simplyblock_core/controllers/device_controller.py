@@ -283,7 +283,7 @@ def restart_device(device_id, force=False):
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
         if not snode.jm_device.raid_bdev:
             if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-                restart_jm_device(snode.jm_device.get_id(), force=True)
+                set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
         else:
             # looking for jm partition
             rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
