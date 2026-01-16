@@ -482,6 +482,9 @@ def remove_from_jm_device(device_id, jm_bdev):
                 if has_any:
                     rpc_client.bdev_raid_remove_base_bdev(jm_bdev)
                     return True
+                else:
+                    set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+
             except KeyError as e:
                 logger.error(e)
                 return False
