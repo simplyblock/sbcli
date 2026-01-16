@@ -294,6 +294,7 @@ def restart_device(device_id, force=False):
             if snode.jm_device.status == JMDevice.STATUS_ONLINE and \
                     jm_dev_part not in snode.jm_device.jm_nvme_bdev_list:
                 if snode.rpc_client().bdev_raid_get_bdevs(snode.jm_device.raid_bdev):
+                    logger.info(f"Adding to raid: {jm_dev_part}")
                     snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
 
     return "Done"
@@ -430,8 +431,9 @@ def device_remove(device_id, force=True):
 
     device_set_state(device_id, NVMeDevice.STATUS_REMOVED)
 
-    # remove device from jm raid
-    if snode.jm_device.raid_bdev:
+    if not snode.jm_device.raid_bdev:
+        remove_jm_device(snode.jm_device.get_id())
+    else:
         nvme_controller = device.nvme_controller
         dev_to_remove = None
         for part in snode.jm_device.jm_nvme_bdev_list:
@@ -440,10 +442,37 @@ def device_remove(device_id, force=True):
                 break
 
         if dev_to_remove:
-            if snode.jm_device.status == NVMeDevice.STATUS_ONLINE and snode.jm_device.raid_bdev:
-                if snode.rpc_client().bdev_raid_get_bdevs(snode.jm_device.raid_bdev):
-                    logger.info(f"Removing device from jm raid: {dev_to_remove}")
-                    snode.rpc_client().bdev_raid_remove_base_bdev(snode.jm_device.raid_bdev)
+            remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
+    return True
+
+
+def remove_from_jm_device(device_id, jm_bdev):
+    db_controller = DBController()
+
+    try:
+        snode = get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    if snode.status == StorageNode.STATUS_ONLINE:
+        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+        if snode.jm_device.raid_bdev:
+            logger.info(f"device part of raid1: only remove from raid")
+            try:
+                ret = rpc_client.bdev_raid_get_bdevs()
+                has_any = any(
+                    bdev["name"] != snode.jm_device.raid_bdev
+                    for raid in ret["result"]
+                    for bdev in raid.get("base_bdevs_list", [])
+                )
+                if has_any:
+                    rpc_client.bdev_raid_remove_base_bdev(snode.jm_device.raid_bdev, jm_bdev)
+                    return True
+            except KeyError as e:
+                logger.error(e)
+                return False
 
     return True
 

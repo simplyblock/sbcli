@@ -1240,7 +1240,7 @@ class RPCClient:
         params = {
             "category": "online"
         }
-    return self._request("bdev_raid_get_bdevs", params)
+        return self._request("bdev_raid_get_bdevs", params)
 
  
 
