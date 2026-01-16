@@ -263,6 +263,7 @@ def restart_device(device_id, force=False):
             ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
             logger.debug(ret)
             snode.rpc_client().bdev_nvme_controller_attach(device_obj.nvme_controller, device_obj.pcie_address)
+            snode.rpc_client().bdev_examine(device_obj.nvme_bdev)
         except Exception as e:
             logger.error(e)
             return False
