@@ -475,7 +475,7 @@ def remove_from_jm_device(device_id, jm_bdev):
             try:
                 ret = rpc_client.bdev_raid_get_bdevs()
                 has_any = any(
-                    bdev["name"] != jm_bdev
+                    bdev["name"] and bdev["name"] != jm_bdev
                     for raid in ret
                     for bdev in raid.get("base_bdevs_list", [])
                 )
