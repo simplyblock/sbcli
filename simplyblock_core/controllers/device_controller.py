@@ -288,9 +288,8 @@ def restart_device(device_id, force=False):
 
             if snode.jm_device.status == JMDevice.STATUS_ONLINE and \
                     jm_dev_part not in snode.jm_device.jm_nvme_bdev_list:
-                remove_jm_device(snode.jm_device.get_id(), force=True)
-                time.sleep(3)
-                restart_jm_device(snode.jm_device.get_id(), force=True)
+                if snode.rpc_client().bdev_raid_get_bdevs(snode.jm_device.raid_bdev):
+                    snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
 
     return "Done"
 
@@ -429,11 +428,10 @@ def device_remove(device_id, force=True):
                 break
 
         if dev_to_remove:
-            if snode.jm_device.status == NVMeDevice.STATUS_ONLINE:
-                remove_jm_device(snode.jm_device.get_id(), force=True)
-                time.sleep(3)
-
-            restart_jm_device(snode.jm_device.get_id(), force=True)
+            if snode.jm_device.status == NVMeDevice.STATUS_ONLINE and snode.jm_device.raid_bdev:
+                if snode.rpc_client().bdev_raid_get_bdevs(snode.jm_device.raid_bdev):
+                    logger.info(f"Removing device from jm raid: {dev_to_remove}")
+                    snode.rpc_client().bdev_raid_remove_base_bdev(snode.jm_device.raid_bdev)
 
     return True
 
