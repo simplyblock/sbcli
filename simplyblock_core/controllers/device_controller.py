@@ -472,12 +472,12 @@ def remove_from_jm_device(device_id, jm_bdev):
         if snode.jm_device.raid_bdev:
             logger.info("device part of raid1: only remove from raid")
             try:
-                ret = rpc_client.bdev_raid_get_bdevs()
-                has_any = any(
-                    bdev["name"] and bdev["name"] != jm_bdev
-                    for raid in ret
-                    for bdev in raid.get("base_bdevs_list", [])
-                )
+                has_any = False
+                for raid_info in rpc_client.bdev_raid_get_bdevs():
+                    if raid_info["name"] == snode.jm_device.raid_bdev:
+                        base_bdevs = raid_info.get("base_bdevs_list", [])
+                        if any(bdev["name"] and bdev["name"] != jm_bdev for bdev in base_bdevs):
+                            has_any = True
                 if has_any:
                     rpc_client.bdev_raid_remove_base_bdev(jm_bdev)
                     return True
