@@ -294,8 +294,7 @@ def restart_device(device_id, force=False):
                 if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
                     restart_jm_device(snode.jm_device.get_id(), force=True)
 
-                if snode.jm_device.status == JMDevice.STATUS_ONLINE and \
-                        jm_dev_part not in snode.jm_device.jm_nvme_bdev_list:
+                if snode.jm_device.status == JMDevice.STATUS_ONLINE:
                     if snode.rpc_client().bdev_raid_get_bdevs(snode.jm_device.raid_bdev):
                         logger.info(f"Adding to raid: {jm_dev_part}")
                         snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
@@ -467,11 +466,11 @@ def remove_from_jm_device(device_id, jm_bdev):
                 ret = rpc_client.bdev_raid_get_bdevs()
                 has_any = any(
                     bdev["name"] != snode.jm_device.raid_bdev
-                    for raid in ret["result"]
+                    for raid in ret
                     for bdev in raid.get("base_bdevs_list", [])
                 )
                 if has_any:
-                    rpc_client.bdev_raid_remove_base_bdev(snode.jm_device.raid_bdev, jm_bdev)
+                    rpc_client.bdev_raid_remove_base_bdev(jm_bdev)
                     return True
             except KeyError as e:
                 logger.error(e)
