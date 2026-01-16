@@ -280,22 +280,25 @@ def restart_device(device_id, force=False):
     device_set_online(device_id)
     device_events.device_restarted(device_obj)
 
-    # add to jm raid
-    if snode.jm_device and snode.jm_device.raid_bdev and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        # looking for jm partition
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
-        ret = rpc_client.get_bdevs(jm_dev_part)
-        if ret:
-            logger.info(f"JM part found: {jm_dev_part}")
+    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+        if not snode.jm_device.raid_bdev:
             if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
                 restart_jm_device(snode.jm_device.get_id(), force=True)
+        else:
+            # looking for jm partition
+            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
+            ret = rpc_client.get_bdevs(jm_dev_part)
+            if ret:
+                logger.info(f"JM part found: {jm_dev_part}")
+                if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+                    restart_jm_device(snode.jm_device.get_id(), force=True)
 
-            if snode.jm_device.status == JMDevice.STATUS_ONLINE and \
-                    jm_dev_part not in snode.jm_device.jm_nvme_bdev_list:
-                if snode.rpc_client().bdev_raid_get_bdevs(snode.jm_device.raid_bdev):
-                    logger.info(f"Adding to raid: {jm_dev_part}")
-                    snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
+                if snode.jm_device.status == JMDevice.STATUS_ONLINE and \
+                        jm_dev_part not in snode.jm_device.jm_nvme_bdev_list:
+                    if snode.rpc_client().bdev_raid_get_bdevs(snode.jm_device.raid_bdev):
+                        logger.info(f"Adding to raid: {jm_dev_part}")
+                        snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
 
     return "Done"
 
@@ -459,7 +462,7 @@ def remove_from_jm_device(device_id, jm_bdev):
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
         if snode.jm_device.raid_bdev:
-            logger.info(f"device part of raid1: only remove from raid")
+            logger.info("device part of raid1: only remove from raid")
             try:
                 ret = rpc_client.bdev_raid_get_bdevs()
                 has_any = any(
