@@ -73,7 +73,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
           for controller in ret[0]["ctrlrs"]:
             controller_state = controller["state"]
             logger.info(f"Controller found: {name}, status: {controller_state}")
-            if controller.state == "failed":
+            if controller_state == "failed":
                 #we can remove the controller only for certain, if its failed. other states are intermediate and require retry.
                 rpc_client.bdev_nvme_detach_controller(name)
                 time.sleep(2)
