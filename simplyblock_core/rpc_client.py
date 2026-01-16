@@ -954,10 +954,9 @@ class RPCClient:
         }
         return self._request("bdev_raid_add_base_bdev", params)
 
-    def bdev_raid_remove_base_bdev(self, raid_bdev, base_bdev):
+    def bdev_raid_remove_base_bdev(self, base_bdev):
         params = {
-            "raid_bdev": raid_bdev,
-            "base_bdev": base_bdev,
+            "name": base_bdev,
         }
         return self._request("bdev_raid_remove_base_bdev", params)
 
