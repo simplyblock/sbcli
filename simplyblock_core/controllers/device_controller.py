@@ -296,20 +296,19 @@ def restart_device(device_id, force=False):
                 if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
                     if snode.rpc_client().get_bdevs(snode.jm_device.raid_bdev):
                         logger.info("Raid found, setting jm device online")
+                        ret = snode.rpc_client().bdev_raid_get_bdevs()
+                        has_bdev = any(
+                            bdev["name"] == jm_dev_part
+                            for raid in ret
+                            for bdev in raid.get("base_bdevs_list", [])
+                        )
+                        if not has_bdev:
+                            logger.info(f"Adding to raid: {jm_dev_part}")
+                            snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
                         set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
                     else:
                         logger.info("Raid not found, restarting jm device")
-                        restart_device(snode.jm_device.get_id(), force=True)
-
-                ret = snode.rpc_client().bdev_raid_get_bdevs()
-                has_bdev = any(
-                    bdev["name"] == jm_dev_part
-                    for raid in ret
-                    for bdev in raid.get("base_bdevs_list", [])
-                )
-                if not has_bdev:
-                    logger.info(f"Adding to raid: {jm_dev_part}")
-                    snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
+                        restart_jm_device(snode.jm_device.get_id(), force=True)
 
     return "Done"
 
