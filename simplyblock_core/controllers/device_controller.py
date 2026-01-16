@@ -449,11 +449,16 @@ def device_remove(device_id, force=True):
                 break
 
         if dev_to_remove:
+            raid_found = False
             for raid_info in rpc_client.bdev_raid_get_bdevs():
                 if raid_info["name"] == snode.jm_device.raid_bdev:
+                    raid_found = True
                     base_bdevs = raid_info.get("base_bdevs_list", [])
                     if any(bdev["name"] == dev_to_remove for bdev in base_bdevs):
                         remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
+            if not raid_found:
+                set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+
     return True
 
 
