@@ -263,6 +263,8 @@ def restart_device(device_id, force=False):
             ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
             logger.debug(ret)
             snode.rpc_client().bdev_nvme_controller_attach(device_obj.nvme_controller, device_obj.pcie_address)
+            snode.rpc_client().bdev_examine(f"{device_obj.nvme_controller}n1")
+            snode.rpc_client().bdev_wait_for_examine()
         except Exception as e:
             logger.error(e)
             return False
@@ -280,22 +282,33 @@ def restart_device(device_id, force=False):
     device_set_online(device_id)
     device_events.device_restarted(device_obj)
 
-    # add to jm raid
-    if snode.jm_device and snode.jm_device.raid_bdev and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        # looking for jm partition
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
-        ret = rpc_client.get_bdevs(jm_dev_part)
-        if ret:
-            logger.info(f"JM part found: {jm_dev_part}")
+    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+        if not snode.jm_device.raid_bdev:
             if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-                restart_jm_device(snode.jm_device.get_id(), force=True)
-
-            if snode.jm_device.status == JMDevice.STATUS_ONLINE and \
-                    jm_dev_part not in snode.jm_device.jm_nvme_bdev_list:
-                remove_jm_device(snode.jm_device.get_id(), force=True)
-                time.sleep(3)
-                restart_jm_device(snode.jm_device.get_id(), force=True)
+                set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+        else:
+            # looking for jm partition
+            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
+            ret = rpc_client.get_bdevs(jm_dev_part)
+            if ret:
+                logger.info(f"JM part found: {jm_dev_part}")
+                if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
+                    if snode.rpc_client().get_bdevs(snode.jm_device.raid_bdev):
+                        logger.info("Raid found, setting jm device online")
+                        ret = snode.rpc_client().bdev_raid_get_bdevs()
+                        has_bdev = any(
+                            bdev["name"] == jm_dev_part
+                            for raid in ret
+                            for bdev in raid.get("base_bdevs_list", [])
+                        )
+                        if not has_bdev:
+                            logger.info(f"Adding to raid: {jm_dev_part}")
+                            snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
+                        set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+                    else:
+                        logger.info("Raid not found, restarting jm device")
+                        restart_jm_device(snode.jm_device.get_id(), force=True)
 
     return "Done"
 
@@ -382,11 +395,15 @@ def device_remove(device_id, force=True):
     logger.info("Disconnecting device from all nodes")
     distr_controller.disconnect_device(device)
 
+    logger.info("Removing device fabric")
     rpc_client = snode.rpc_client()
-
-    bdev_names = []
-    for dev in rpc_client.get_bdevs():
-        bdev_names.append(dev['name'])
+    node_bdev = {}
+    ret = rpc_client.get_bdevs()
+    if ret:
+        for b in ret:
+            node_bdev[b['name']] = b
+            for al in b['aliases']:
+                node_bdev[al] = b
 
     if rpc_client.subsystem_list(device.nvmf_nqn):
         logger.info("Removing device subsystem")
@@ -396,32 +413,29 @@ def device_remove(device_id, force=True):
             if not force:
                 return False
 
-    if device.pt_bdev in bdev_names:
-        logger.info(f"Removing bdev: {device.pt_bdev}")
-        ret = rpc_client.bdev_PT_NoExcl_delete(device.pt_bdev)
+    if f"{device.alceml_bdev}_PT" in node_bdev or force:
+        logger.info("Removing device PT")
+        ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
         if not ret:
-            logger.error(f"Failed to remove bdev: {device.pt_bdev}")
+            logger.error(f"Failed to remove bdev: {device.alceml_bdev}_PT")
             if not force:
                 return False
 
-    if device.alceml_bdev in bdev_names:
-        logger.info(f"Removing bdev: {device.alceml_bdev}")
+    if device.alceml_bdev in node_bdev or force:
         ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
             if not force:
                 return False
 
-    if device.qos_bdev in bdev_names:
-        logger.info(f"Removing bdev: {device.qos_bdev}")
+    if device.qos_bdev in node_bdev or force:
         ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.qos_bdev}")
             if not force:
                 return False
 
-    if snode.enable_test_device and device.testing_bdev in bdev_names:
-        logger.info(f"Removing bdev: {device.testing_bdev}")
+    if snode.enable_test_device and device.testing_bdev in node_bdev or force:
         ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.testing_bdev}")
@@ -430,8 +444,9 @@ def device_remove(device_id, force=True):
 
     device_set_state(device_id, NVMeDevice.STATUS_REMOVED)
 
-    # remove device from jm raid
-    if snode.jm_device.raid_bdev:
+    if not snode.jm_device.raid_bdev:
+        remove_jm_device(snode.jm_device.get_id())
+    else:
         nvme_controller = device.nvme_controller
         dev_to_remove = None
         for part in snode.jm_device.jm_nvme_bdev_list:
@@ -440,11 +455,49 @@ def device_remove(device_id, force=True):
                 break
 
         if dev_to_remove:
-            if snode.jm_device.status == NVMeDevice.STATUS_ONLINE:
-                remove_jm_device(snode.jm_device.get_id(), force=True)
-                time.sleep(3)
+            raid_found = False
+            for raid_info in rpc_client.bdev_raid_get_bdevs():
+                if raid_info["name"] == snode.jm_device.raid_bdev:
+                    raid_found = True
+                    base_bdevs = raid_info.get("base_bdevs_list", [])
+                    if any(bdev["name"] == dev_to_remove for bdev in base_bdevs):
+                        remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
+            if not raid_found:
+                set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
-            restart_jm_device(snode.jm_device.get_id(), force=True)
+    return True
+
+
+def remove_from_jm_device(device_id, jm_bdev):
+    db_controller = DBController()
+
+    try:
+        snode = get_storage_node_by_jm_device(db_controller, device_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    if snode.status == StorageNode.STATUS_ONLINE:
+        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+
+        if snode.jm_device.raid_bdev:
+            logger.info("device part of raid1: only remove from raid")
+            try:
+                has_any = False
+                for raid_info in rpc_client.bdev_raid_get_bdevs():
+                    if raid_info["name"] == snode.jm_device.raid_bdev:
+                        base_bdevs = raid_info.get("base_bdevs_list", [])
+                        if any(bdev["name"] and bdev["name"] != jm_bdev for bdev in base_bdevs):
+                            has_any = True
+                if has_any:
+                    rpc_client.bdev_raid_remove_base_bdev(jm_bdev)
+                    return True
+                else:
+                    set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+
+            except KeyError as e:
+                logger.error(e)
+                return False
 
     return True
 
