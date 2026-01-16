@@ -407,7 +407,7 @@ def device_remove(device_id, force=True):
             if not force:
                 return False
 
-    if f"{device.alceml_bdev}_PT" in node_bdev:
+    if f"{device.alceml_bdev}_PT" in node_bdev or force:
         logger.info("Removing device PT")
         ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
         if not ret:
@@ -415,21 +415,21 @@ def device_remove(device_id, force=True):
             if not force:
                 return False
 
-    if device.alceml_bdev in node_bdev:
+    if device.alceml_bdev in node_bdev or force:
         ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
             if not force:
                 return False
 
-    if device.qos_bdev in node_bdev:
+    if device.qos_bdev in node_bdev or force:
         ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.qos_bdev}")
             if not force:
                 return False
 
-    if snode.enable_test_device and device.testing_bdev in node_bdev:
+    if snode.enable_test_device and device.testing_bdev in node_bdev or force:
         ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.testing_bdev}")
