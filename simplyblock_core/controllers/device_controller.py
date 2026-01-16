@@ -292,7 +292,7 @@ def restart_device(device_id, force=False):
             if ret:
                 logger.info(f"JM part found: {jm_dev_part}")
                 if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
-                    restart_jm_device(snode.jm_device.get_id(), force=True)
+                    set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
                 if snode.jm_device.status == JMDevice.STATUS_ONLINE:
                     ret = snode.rpc_client().bdev_raid_get_bdevs()
