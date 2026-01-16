@@ -295,7 +295,13 @@ def restart_device(device_id, force=False):
                     restart_jm_device(snode.jm_device.get_id(), force=True)
 
                 if snode.jm_device.status == JMDevice.STATUS_ONLINE:
-                    if snode.rpc_client().bdev_raid_get_bdevs(snode.jm_device.raid_bdev):
+                    ret = snode.rpc_client().bdev_raid_get_bdevs()
+                    has_bdev = any(
+                        bdev["name"] == jm_dev_part
+                        for raid in ret
+                        for bdev in raid.get("base_bdevs_list", [])
+                    )
+                    if not has_bdev:
                         logger.info(f"Adding to raid: {jm_dev_part}")
                         snode.rpc_client().bdev_raid_add_base_bdev(snode.jm_device.raid_bdev, jm_dev_part)
 
@@ -465,7 +471,7 @@ def remove_from_jm_device(device_id, jm_bdev):
             try:
                 ret = rpc_client.bdev_raid_get_bdevs()
                 has_any = any(
-                    bdev["name"] != snode.jm_device.raid_bdev
+                    bdev["name"] != jm_bdev
                     for raid in ret
                     for bdev in raid.get("base_bdevs_list", [])
                 )
