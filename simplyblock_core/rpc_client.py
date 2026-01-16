@@ -580,7 +580,7 @@ class RPCClient:
             params["uuid"] = uuid
         return self._request("bdev_get_iostat", params)
 
-    def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4):
+    def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4, superblock=False):
         try:
             ret = self.get_bdevs(name)
             if ret:
@@ -592,7 +592,8 @@ class RPCClient:
             "raid_level": raid_level,
             "strip_size_kb": strip_size_kb,
             "base_bdevs": bdevs_list,
-            "io_unmap_limit": 100
+            "io_unmap_limit": 100,
+            "superblock": superblock
         }
         if raid_level == "1":
             params["strip_size_kb"] = 0
@@ -1234,3 +1235,15 @@ class RPCClient:
 
     def nvmf_get_blocked_ports_rdma(self):
         return self._request("nvmf_get_blocked_ports")
+
+    def bdev_raid_get_bdevs(self):
+        params = {
+            "category": "online"
+        }
+        return self._request("bdev_raid_get_bdevs", params)
+
+ 
+
+    
+
+
