@@ -450,7 +450,11 @@ def device_remove(device_id, force=True):
                 break
 
         if dev_to_remove:
-            remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
+            for raid_info in rpc_client.bdev_raid_get_bdevs():
+                if raid_info["name"] == snode.jm_device.raid_bdev:
+                    base_bdevs = raid_info.get("base_bdevs_list", [])
+                    if any(bdev["name"] == dev_to_remove for bdev in base_bdevs):
+                        remove_from_jm_device(snode.jm_device.get_id(), dev_to_remove)
     return True
 
 
