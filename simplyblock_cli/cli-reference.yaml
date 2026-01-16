@@ -642,6 +642,11 @@ commands:
             dest: force
             type: bool
             action: store_true
+          - name: "--format"
+            help: "Format the Alceml device used for JM device"
+            dest: format
+            type: bool
+            action: store_true
       - name: send-cluster-map
         help: "Sends a new cluster map"
         private: true
@@ -695,6 +700,16 @@ commands:
           - name: "attr_value"
             help: "attr_value"
             dest: attr_value
+            type: str
+      - name: new-device-from-failed
+        help: "Adds a new device to from failed device information"
+        usage: >
+          A previously failed and migrated device may be added back into the cluster as a new device. The new device
+          would have the same info as the failed device but would be empty and not contain any data.
+        arguments:
+          - name: "device_id"
+            help: "Device id"
+            dest: device_id
             type: str
   - name: "cluster"
     help: "Cluster commands"
