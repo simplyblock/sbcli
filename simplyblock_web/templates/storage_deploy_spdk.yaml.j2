@@ -123,10 +123,10 @@ spec:
           mountPath: /etc/simplyblock
       resources:
         limits:
-          hugepages-2Mi: {{ MEM_GEGA }}Gi
+          hugepages-2Mi: {{ MEM_MEGA }}Gi
           cpu: {{ CORES }}
         requests:
-          hugepages-2Mi: {{ MEM_GEGA }}Gi
+          hugepages-2Mi: {{ MEM_MEGA }}Gi
 
     - name: spdk-proxy-container
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
