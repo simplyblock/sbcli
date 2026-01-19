@@ -835,8 +835,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
-             namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3):
+             namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
+             id_device_by_nqn=False, partition_size="", ha_jm_count=3):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1086,6 +1086,9 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         snode.cloud_name = cloud_instance['cloud'] or ""
 
         snode.namespace = namespace
+        snode.cr_name = cr_name
+        snode.cr_namespace = cr_namespace
+        snode.cr_plural = cr_plural
         snode.ssd_pcie = ssd_pcie
         snode.hostname = hostname
         snode.host_nqn = subsystem_nqn
@@ -1148,7 +1151,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             snode.physical_label = 0
         else:
             snode.physical_label = get_next_physical_device_order(snode)
-
+        
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent
         snode.id_device_by_nqn = id_device_by_nqn
@@ -1683,7 +1686,7 @@ def restart_storage_node(
         cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
 
     else:
-        cluster_ip = utils.get_k8s_node_ip()
+        cluster_ip = utils.get_k8s_node_ip()       
 
     total_mem = 0
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -1864,7 +1867,7 @@ def restart_storage_node(
             snode.nvme_devices.append(dev)
 
     snode.write_to_db(db_controller.kv_store)
-    if node_ip and len(new_devices)>0:
+    if node_ip:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 

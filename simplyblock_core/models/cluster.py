@@ -63,6 +63,9 @@ class Cluster(BaseModel):
     fabric_rdma: bool = False
     client_qpair_count: int = 3
     secret: str = ""
+    cr_name: str = ""
+    cr_namespace: str = ""
+    cr_plural: str = ""
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
     tls: bool = False

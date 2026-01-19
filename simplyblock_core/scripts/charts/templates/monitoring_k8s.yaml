@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -46,7 +46,7 @@ spec:
             - name: GRAYLOG_ELASTICSEARCH_HOSTS
               value: "http://opensearch-cluster-master:9200"
             - name: GRAYLOG_MONGODB_URI
-              value: "mongodb://admin:{{ .Values.monitoring.secret }}@simplyblock-mongo-svc:27017/graylog"
+              value: "mongodb://admin:{{ .Values.observability.secret }}@simplyblock-mongo-svc:27017/graylog"
             - name: GRAYLOG_SKIP_PREFLIGHT_CHECKS
               value: "true"
             - name: GRAYLOG_ROTATION_STRATEGY
@@ -105,30 +105,37 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simplyblock-thanos-store
+  name: simplyblock-thanos
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: simplyblock-thanos-store
+      app: simplyblock-thanos
   template:
     metadata:
       labels:
-        app: simplyblock-thanos-store
-    spec:      
+        app: simplyblock-thanos
+    spec:
       containers:
         - name: thanos-store
           image: thanosio/thanos:v0.31.0
           args:
             - store
+            - --grpc-address=0.0.0.0:10901
+            - --http-address=0.0.0.0:10902
             - --objstore.config-file=/etc/thanos/objstore.yml
             - --index-cache-size=500MB
             - --chunk-pool-size=500MB
+          ports:
+            - name: grpc
+              containerPort: 10901
+            - name: http
+              containerPort: 10902
           volumeMounts:
             - name: objstore-config
               mountPath: /etc/thanos
-            - name: thanos-data
+            - name: data
               mountPath: /data
           resources:
             requests:
@@ -137,37 +144,20 @@ spec:
             limits:
               cpu: "250m"
               memory: "1Gi"
-      volumes:
-        - name: objstore-config
-          configMap:
-            name: simplyblock-objstore-config
-        - name: thanos-data
-          emptyDir: {}
-          
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-thanos-query
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-thanos-query
-  template:
-    metadata:
-      labels:
-        app: simplyblock-thanos-query
-    spec:      
-      containers:
+
         - name: thanos-query
           image: thanosio/thanos:v0.31.0
           args:
             - query
+            - --grpc-address=0.0.0.0:10911
             - --http-address=0.0.0.0:9091
-            - --store=simplyblock-thanos-store:10901
+            - --store=simplyblock-thanos:10901
             - --store=simplyblock-prometheus:10901
+          ports:
+            - containerPort: 9091
+              name: http
+            - containerPort: 10911
+              name: grpc
           resources:
             requests:
               cpu: "100m"
@@ -176,28 +166,11 @@ spec:
               cpu: "250m"
               memory: "1Gi"
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-thanos-compactor
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-thanos-compactor
-  template:
-    metadata:
-      labels:
-        app: simplyblock-thanos-compactor
-    spec:
-      
-      containers:
         - name: thanos-compactor
           image: thanosio/thanos:v0.31.0
           args:
             - compact
+            - --http-address=0.0.0.0:10922
             - --data-dir=/data
             - --objstore.config-file=/etc/thanos/objstore.yml
             - --retention.resolution-raw=30d
@@ -205,10 +178,13 @@ spec:
             - --retention.resolution-1h=90d
             - --compact.concurrency=1
             - --wait
+          ports:
+            - containerPort: 10922
+              name: http
           volumeMounts:
             - name: objstore-config
               mountPath: /etc/thanos
-            - name: compactor-data
+            - name: data
               mountPath: /data
           resources:
             requests:
@@ -217,72 +193,14 @@ spec:
             limits:
               cpu: "250m"
               memory: "1Gi"
+
       volumes:
         - name: objstore-config
           configMap:
             name: simplyblock-objstore-config
-        - name: compactor-data
-          emptyDir: {}
 
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: simplyblock-node-exporter
-  namespace: {{ .Release.Namespace }}
-spec:
-  selector:
-    matchLabels:
-      app: simplyblock-node-exporter
-  template:
-    metadata:
-      labels:
-        app: simplyblock-node-exporter
-    spec:      
-      containers:
-        - name: node-exporter
-          image: prom/node-exporter:v1.7.0
-          args:
-            - '--path.procfs=/host/proc'
-            - '--path.sysfs=/host/sys'
-            - '--path.rootfs=/host/root'
-            - '--collector.filesystem.ignored-mount-points=^(/rootfs|/host|)/(sys|proc|dev|host|etc|var/lib/docker/.+|var/lib/kubelet/pods/.+)($|/)'
-            - '--collector.filesystem.ignored-fs-types=^(sys|proc|auto|cgroup|devpts|ns|au|fuse.lxc|mqueue)(fs|)$'
-            - '--no-collector.ipvs'
-            - '--web.listen-address=:9200'
-          ports:
-            - containerPort: 9200
-              protocol: TCP
-          volumeMounts:
-            - name: proc
-              mountPath: /host/proc
-              readOnly: true
-              mountPropagation: HostToContainer
-            - name: sys
-              mountPath: /host/sys
-              mountPropagation: HostToContainer
-              readOnly: true
-            - name: root
-              mountPath: /host/root
-              mountPropagation: HostToContainer
-              readOnly: true
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "250m"
-              memory: "1Gi"
-      volumes:
-        - name: proc
-          hostPath:
-            path: /proc
-        - name: sys
-          hostPath:
-            path: /sys
-        - name: root
-          hostPath:
-            path: /
+        - name: data
+          emptyDir: {}
 
 ---
 apiVersion: apps/v1
@@ -345,9 +263,6 @@ spec:
             - name: dashboard-pools
               mountPath: /var/lib/grafana/dashboards/pools.json
               subPath: pools.json
-            - name: dashboard-node-exporter
-              mountPath: /var/lib/grafana/dashboards/node-exporter.json
-              subPath: node-exporter.json
             - name: grafana-data
               mountPath: /var/lib/grafana
       volumes:
@@ -375,9 +290,6 @@ spec:
         - name: dashboard-pools
           configMap:
             name: simplyblock-grafana-dashboard-pools
-        - name: dashboard-node-exporter
-          configMap:
-            name: simplyblock-grafana-dashboard-node-exporter
         - name: grafana-data
           emptyDir: {}
 {{- end }}

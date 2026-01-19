@@ -10,8 +10,8 @@ import subprocess
 import sys
 import uuid
 import time
-import socket
-from typing import Union, Any, Optional, Tuple
+from typing import Union, Any, Optional, Tuple, Dict
+from datetime import datetime, timezone
 from docker import DockerClient
 from kubernetes import client, config
 from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
@@ -198,16 +198,8 @@ def get_k8s_node_ip():
         logger.error("No mgmt nodes was found in the cluster!")
         return False
 
-    mgmt_ips = [node.mgmt_ip for node in nodes]
-
-    for ip in mgmt_ips:
-        try:
-            with socket.create_connection((ip, 10250), timeout=2):
-                return ip
-        except Exception as e:
-            print(e)
-            raise e
-    return False
+    for node in nodes:
+        return node.mgmt_ip
 
 
 def dict_agg(data, mean=False, keys=None):
@@ -1937,6 +1929,254 @@ def load_kube_config_with_fallback():
     except Exception:
         config.load_kube_config()
 
+def patch_cr_status(
+    *,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str,
+    name: str,
+    status_patch: dict,
+):
+    """
+    Patch the status subresource of a Custom Resource.
+
+    status_patch example:
+        {"<KEY>": "<VALUE", "<KEY>": <VALUE>}
+    """
+
+    load_kube_config_with_fallback()
+
+    api = client.CustomObjectsApi()
+
+    body = {
+        "status": status_patch
+    }
+
+    try:
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body=body,
+        )
+    except ApiException as e:
+        raise RuntimeError(
+            f"Failed to patch status for {name}: {e.reason} {e.body}"
+        )
+
+def patch_cr_node_status(
+    *,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str,
+    name: str,
+    node_uuid: str,
+    node_mgmt_ip: str,
+    updates: Optional[Dict[str, Any]] = None,
+    remove: bool = False,
+):
+    """
+    Patch status.nodes[*] fields for a specific node identified by UUID.
+    
+    Operations:
+      - Update a node (by uuid or mgmtIp)
+      - Remove a node (by uuid or mgmtIp)
+
+    updates example:
+        {"health": "true"}
+        {"status": "offline"}
+        {"capacity": {"sizeUsed": 1234}}
+    """
+    load_kube_config_with_fallback()
+    api = client.CustomObjectsApi()
+
+    try:
+        cr = api.get_namespaced_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+        )
+
+        status_nodes = cr.get("status", {}).get("nodes", [])
+        if not status_nodes:
+            raise RuntimeError("CR has no status.nodes")
+
+        spec_worker_nodes = cr.get("spec", {}).get("workerNodes", [])
+
+        found = False
+        new_status_nodes = []
+        removed_hostname = None
+
+        for node in status_nodes:
+            match = (
+                node.get("uuid") == node_uuid or
+                node.get("mgmtIp") == node_mgmt_ip
+            )
+
+            if match:
+                found = True
+                removed_hostname = node.get("hostname")
+
+                if remove:
+                    continue
+
+                if updates:
+                    node.update(updates)
+
+            new_status_nodes.append(node)
+
+        if not found:
+            raise RuntimeError(
+                f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
+            )
+
+        if remove and removed_hostname:
+            new_worker_nodes = [
+                n for n in spec_worker_nodes if n != removed_hostname
+            ]
+
+            api.patch_namespaced_custom_object(
+                group=group,
+                version=version,
+                namespace=namespace,
+                plural=plural,
+                name=name,
+                body={
+                    "spec": {
+                        "workerNodes": new_worker_nodes
+                    }
+                },
+            )
+
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body={
+                "status": {
+                    "nodes": new_status_nodes
+                }
+            },
+        )
+        
+    except ApiException as e:
+        raise RuntimeError(
+            f"Failed to patch node for {name}: {e.reason} {e.body}"
+        )
+
+def patch_cr_lvol_status(
+    *,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str,
+    name: str,
+    lvol_uuid: Optional[str] = None,
+    updates: Optional[Dict[str, Any]] = None,
+    remove: bool = False,
+    add: Optional[Dict[str, Any]] = None,
+):
+    """
+    Patch status.lvols[*] for an LVOL CustomResource.
+
+    Operations:
+      - Update an existing LVOL (by uuid)
+      - Remove an LVOL (by uuid)
+      - Add a new LVOL entry
+
+    Parameters:
+      lvol_uuid:
+        UUID of the lvol entry to update or remove
+
+      updates:
+        Dict of fields to update on the matched lvol
+        Example:
+          {"status": "offline", "health": False}
+
+      remove:
+        If True, remove the lvol identified by lvol_uuid
+
+      add:
+        Full lvol dict to append to status.lvols
+    """
+
+    load_kube_config_with_fallback()
+    api = client.CustomObjectsApi()
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    try:
+        cr = api.get_namespaced_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+        )
+
+        status = cr.get("status", {})
+        lvols = status.get("lvols", [])
+
+        # Ensure list exists
+        if lvols is None:
+            lvols = []
+
+        # ---- ADD ----
+        if add is not None:
+            add.setdefault("createDt", now)
+            add["updateDt"] = now
+            lvols.append(add)
+
+        # ---- UPDATE / REMOVE ----
+        if lvol_uuid:
+            found = False
+            new_lvols = []
+
+            for lvol in lvols:
+                if lvol.get("uuid") == lvol_uuid:
+                    found = True
+
+                    if remove:
+                        continue
+
+                    if updates:
+                        lvol.update(updates)
+                        lvol["updateDt"] = now
+
+                new_lvols.append(lvol)
+
+            if not found:
+                raise RuntimeError(f"LVOL not found (uuid={lvol_uuid})")
+
+            lvols = new_lvols
+
+        body = {
+            "status": {
+                "lvols": lvols
+            }
+        }
+
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body=body,
+        )
+
+    except ApiException as e:
+        raise RuntimeError(
+            f"Failed to patch lvol status for {name}: {e.reason} {e.body}"
+        )
 
 def get_node_name_by_ip(target_ip: str) -> str:
     load_kube_config_with_fallback()

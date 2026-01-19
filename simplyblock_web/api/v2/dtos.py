@@ -40,13 +40,12 @@ class CapacityStatDTO(BaseModel):
 
 
 class ClusterDTO(BaseModel):
-    id: UUID
+    uuid: UUID
     name: Optional[str]
     nqn: str
     status: Literal['active', 'read_only', 'inactive', 'suspended', 'degraded', 'unready', 'in_activation', 'in_expansion']
-    rebalancing: bool
+    is_re_balancing: bool
     block_size: util.Unsigned
-    coding: Tuple[util.Unsigned, util.Unsigned]
     ha: bool
     utliziation_critical: util.Percent
     utilization_warning: util.Percent
@@ -55,18 +54,21 @@ class ClusterDTO(BaseModel):
     node_affinity: bool
     anti_affinity: bool
     secret: str
+    distr_ndcs: int
+    distr_npcs: int
     capacity: CapacityStatDTO
 
     @staticmethod
     def from_model(model: Cluster, stat_obj: Optional[StatsObject]=None):
         return ClusterDTO(
-            id=UUID(model.get_id()),
+            uuid=UUID(model.get_id()),
             name=model.cluster_name,
             nqn=model.nqn,
             status=model.status,  # type: ignore
-            rebalancing=model.is_re_balancing,
+            is_re_balancing=model.is_re_balancing,
             block_size=model.blk_size,
-            coding=(model.distr_ndcs, model.distr_npcs),
+            distr_ndcs=model.distr_ndcs,
+            distr_npcs=model.distr_npcs,
             ha=model.ha_type == 'ha',
             utilization_warning=model.cap_warn,
             utliziation_critical=model.cap_crit,
@@ -181,6 +183,13 @@ class SnapshotDTO(BaseModel):
 class StorageNodeDTO(BaseModel):
     uuid: UUID
     status: str
+    hostname: str
+    cpu: int
+    spdk_mem: int
+    lvols: int
+    rpc_port: int
+    lvol_subsys_port: int
+    nvmf_port: int
     mgmt_ip: IPv4Address
     health_check: bool
     online_devices: str
@@ -191,6 +200,13 @@ class StorageNodeDTO(BaseModel):
         return StorageNodeDTO(
             uuid=UUID(model.get_id()),
             status=model.status,
+            hostname=model.hostname,
+            cpu=model.cpu,
+            spdk_mem=model.spdk_mem,
+            lvols=model.lvols,
+            rpc_port=model.rpc_port,
+            lvol_subsys_port=model.lvol_subsys_port,
+            nvmf_port=model.nvmf_port,
             mgmt_ip=IPv4Address(model.mgmt_ip),
             health_check=model.health_check,
             online_devices=f"{len(model.nvme_devices)}/{len([d for d in model.nvme_devices if d.status=='online'])}",
@@ -211,7 +227,7 @@ class TaskDTO(BaseModel):
     @staticmethod
     def from_model(model: JobSchedule):
         return TaskDTO(
-            id=UUID(model.get_id()),
+            id=UUID(model.uuid),
             status=model.status,
             canceled=model.canceled,
             function_name=model.function_name,
@@ -228,12 +244,24 @@ class VolumeDTO(BaseModel):
     status: str
     health_check: bool
     nqn: str
+    hostname: str
+    fabric: str
     nodes: List[util.UrlPath]
     port: util.Port
     size: util.Unsigned
+    ndcs: int
+    npcs: int
+    pool_uuid: str
+    pool_name: str
+    pvc_name: str = ""
+    snapshot_name: str = ""
+    blobid: int
+    ns_id: int
     cloned_from: Optional[util.UrlPath]
     crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
+    lvol_priority_class: util.Unsigned
+    max_namespace_per_subsys: int
     max_rw_iops: util.Unsigned
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
@@ -248,6 +276,8 @@ class VolumeDTO(BaseModel):
             status=model.status,
             health_check=model.health_check,
             nqn=model.nqn,
+            hostname=model.hostname,
+            fabric=model.fabric,
             nodes=[
                 str(request.url_for(
                     'clusters:storage-nodes:detail',
@@ -270,6 +300,16 @@ class VolumeDTO(BaseModel):
                 else None
             ),
             high_availability=model.ha_type == 'ha',
+            pool_uuid=model.pool_uuid,
+            pool_name=model.pool_name,
+            pvc_name=model.pvc_name,
+            snapshot_name=model.snapshot_name,
+            ndcs=model.ndcs,
+            npcs=model.npcs,
+            blobid=model.blobid,
+            ns_id=model.ns_id,
+            lvol_priority_class=model.lvol_priority_class,
+            max_namespace_per_subsys=model.max_namespace_per_subsys,
             max_rw_iops=model.rw_ios_per_sec,
             max_rw_mbytes=model.rw_mbytes_per_sec,
             max_r_mbytes=model.r_mbytes_per_sec,

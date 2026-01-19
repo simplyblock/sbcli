@@ -39,6 +39,9 @@ class StoragePoolParams(BaseModel):
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
+    cr_name: str
+    cr_namespace: str 
+    cr_plural: str
 
 
 @api.post('/', name='clusters:storage-pools:create', status_code=201, responses={201: {"content": None}})
@@ -52,7 +55,7 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
 
     id_or_false =  pool_controller.add_pool(
         parameters.name, parameters.pool_max, parameters.volume_max_size, parameters.max_rw_iops, parameters.max_rw_mbytes,
-        parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id()
+        parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id(), parameters.cr_name, parameters.cr_namespace, parameters.cr_plural
     )
 
     if not id_or_false:
@@ -102,6 +105,9 @@ class UpdatableStoragePoolParams(BaseModel):
     max_rw_mbytes: Optional[util.Unsigned] = None
     max_r_mbytes: Optional[util.Unsigned] = None
     max_w_mbytes: Optional[util.Unsigned] = None
+    lvols_cr_name: Optional[str] = None
+    lvols_cr_namespace: Optional[str] = None
+    lvols_cr_plural: Optional[str] = None
 
 
 @instance_api.put('/', name='clusters:storage-pools:update', status_code=204, responses={204: {"content": None}})

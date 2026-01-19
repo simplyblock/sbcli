@@ -1,29 +1,26 @@
-graylog:
-  rootPasswordSha2: "b87c15a8ae4736d771ca60a7cc2014baaeab19b11c31f5fedef9421958a403c9"
-  passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
 
-monitoring:
-  enabled: true
+observability:
+  enabled: false
   secret: "sWbpOgba1bKnCfcPkVQi"
-
-log:
   deletionInterval: "3d"
-  retentionPeriod: "7d"
   level: "DEBUG"
-  maxNumberIndex: "3"
-
-grafana:
-  endpoint: ""
-  contactPoint: "https://hooks.slack.com/services/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"
+  graylog:
+    rootPasswordSha2: "b87c15a8ae4736d771ca60a7cc2014baaeab19b11c31f5fedef9421958a403c9"
+    passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
+    maxNumberIndex: "3"
+    retentionPeriod: "7d"
+  grafana:
+    endpoint: ""
+    contactPoint: "https://hooks.slack.com/services/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"
 
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "main"
+    tag: "improved_user_experience"
     pullPolicy: "Always"
 
 ports:
-  lvolNvmfPortStart:
+  lvolNvmfPortStart: 9100
 
 storageclass:  
   allowedTopologyZones: []
@@ -61,7 +58,7 @@ opensearch:
   persistence:
     enabled: true
     storageClass: local-hostpath
-    size: 10Gi
+    size: 20Gi
 
   resources:
     requests:
@@ -180,7 +177,7 @@ prometheus:
     enabled: false
 
 ingress:
-  enabled: true
+  enabled: false
   ingressClassName: nginx
   useDNS: false
   host: ""
@@ -193,3 +190,45 @@ ingress:
     extraArgs:
       tcp-services-configmap: "simplyblock/simplyblock-tcp-services"
     nodeSelector: {}
+
+
+simplyblock:
+  cluster:
+    clusterName: demo-cluster
+    mgmtIfc: eth0
+    fabric: tcp
+    isSingleNode: false
+    enableNodeAffinity: false
+    strictNodeAntiAffinity: false
+    capWarn: 80
+    capCrit: 90
+    provCapWarn: 120
+    provCapCrit: 150
+
+  pool:
+    name: demo-pool
+    capacityLimit: 100Gi
+
+  lvol:
+    name: demo-lvol
+    
+  storageNodes:
+    name: demo-node
+    clusterImage: public.ecr.aws/simply-block/simplyblock:improved_user_experience
+    mgmtIfc: eth0
+    maxLVol: 10
+    maxSize: 150G
+    partitions: 0
+    corePercentage: 65
+    spdkDebug: false
+    coreIsolation: false
+    workerNodes:
+      - vm02.simplyblock3.localdomain
+      - vm03.simplyblock3.localdomain
+      - vm04.simplyblock3.localdomain
+
+  devices:
+    name: demo-devices
+
+  tasks:
+    name: demo-task

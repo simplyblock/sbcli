@@ -1,5 +1,5 @@
 import logging
-import os
+import fdb
 
 from flask import jsonify
 from flask import Flask
@@ -45,28 +45,21 @@ def status():
 
 @api.route('/health/fdb', methods=['GET'])
 def health_fdb():
-    fdb_cluster_file = constants.KVD_DB_FILE_PATH
-
-    if not os.path.exists(fdb_cluster_file):
-        return jsonify({
-            "fdb_connected": False,
-            "message": "FDB cluster file not found"
-        }), 503
-
     try:
-        with open(fdb_cluster_file, 'r') as f:
-            cluster_data = f.read().strip()
-            if not cluster_data:
-                return jsonify({
-                    "fdb_connected": False,
-                    "message": "FDB cluster file is empty"
-                }), 503
+        fdb.api_version(constants.KVD_DB_VERSION)
+        
+        db = fdb.open(constants.KVD_DB_FILE_PATH)
+        tr = db.create_transaction()
+
+        tr.get(b"\x00")
+        tr.commit().wait()
+
+        return jsonify({
+            "fdb_connected": True
+        }), 200
+
     except Exception as e:
         return jsonify({
             "fdb_connected": False,
-            "message": f"Failed to read FDB cluster file: {str(e)}"
+            "error": str(e)
         }), 503
-
-    return jsonify({
-        "fdb_connected": True,
-    }), 200
