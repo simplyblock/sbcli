@@ -168,7 +168,7 @@ def spdk_process_start(body: SPDKParams):
 
     container = node_docker.containers.run(
         body.spdk_image,
-        f"/root/scripts/run_distr_with_ssd.sh {body.l_cores} {spdk_mem_mib} {spdk_debug}",
+        f"sudo -E /root/scripts/run_distr_with_ssd.sh {body.l_cores} {spdk_mem_mib} {spdk_debug}",
         name=f"spdk_{body.rpc_port}",
         detach=True,
         privileged=True,
