@@ -275,6 +275,23 @@ def cluster_activate(uuid):
     # FIXME: Any failure within the thread are not handled
     return utils.get_response(True), 202
 
+@bp.route('/cluster/addreplication/<string:uuid>', methods=['PUT'])
+def cluster_add_replication(uuid):
+    req_data = request.get_json()
+    target_cluster_uuid = req_data.get("target_cluster_uuid", None)
+    replication_timeout = req_data.get("replication_timeout", 0)
+    target_pool_uuid = req_data.get("target_pool_uuid", None)
+
+    try:
+        db.get_cluster_by_id(uuid)
+    except KeyError:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    cluster_ops.add_replication(source_cl_id=uuid, target_cl_id=target_cluster_uuid, 
+                                    timeout=replication_timeout, target_pool=target_pool_uuid)
+    return utils.get_response(True), 202
+
+
 
 @bp.route('/cluster/allstats/<string:uuid>/history/<string:history>', methods=['GET'])
 @bp.route('/cluster/allstats/<string:uuid>', methods=['GET'], defaults={'history': None})
