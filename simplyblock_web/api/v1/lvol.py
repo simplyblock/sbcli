@@ -312,7 +312,7 @@ def inflate_lvol(uuid):
 @bp.route('/lvol/replication_start/<string:uuid>', methods=['PUT'])
 def replication_start(uuid):
     try:
-        lvol = db.get_lvol_by_id(uuid)
+        db.get_lvol_by_id(uuid)
     except KeyError as e:
         return utils.get_response_error(str(e), 404)
 
@@ -322,7 +322,7 @@ def replication_start(uuid):
 @bp.route('/lvol/replication_stop/<string:uuid>', methods=['PUT'])
 def replication_stop(uuid):
     try:
-        lvol = db.get_lvol_by_id(uuid)
+        db.get_lvol_by_id(uuid)
     except KeyError as e:
         return utils.get_response_error(str(e), 404)
 
