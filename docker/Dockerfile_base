@@ -1,9 +1,18 @@
 # syntax=docker/dockerfile:1
 FROM fedora:43
 
+LABEL name="simplyblock"
+LABEL vendor="Simplyblock"
+LABEL version="1.0.0"
+LABEL release="1"
+LABEL summary="Simplyblock controlplane plane component"
+LABEL description="Simplyblock controlplane plane container"
+LABEL maintainer="developers@simplyblock.io"
+
+
 RUN dnf config-manager addrepo --from-repofile https://download.docker.com/linux/fedora/docker-ce.repo
 
-RUN dnf install -y wget dmidecode nvme-cli iptables pciutils sudo nano parted gdisk ssh \
+RUN dnf install -y wget dmidecode nvme-cli iptables pciutils sudo nano parted gdisk ssh su \
     ca-certificates curl kmod docker-ce-cli python3.13 python3-pip iputils iproute iscsi-initiator-utils
 
 ARG TARGETPLATFORM
@@ -19,18 +28,14 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         rm -f foundationdb-clients_7* ; \
     fi
 
+COPY LICENSE /licenses/LICENSE
+
+WORKDIR /app
+COPY requirements.txt requirements.txt
+RUN pip3 install --upgrade pip setuptools
+RUN pip3 install -r requirements.txt
+
 RUN useradd -ms /bin/bash simplyblock
 RUN echo "simplyblock  ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 USER simplyblock
-
-WORKDIR /app
-
-RUN pip3 install --upgrade pip
-RUN pip3 install setuptools --upgrade
-
-COPY requirements.txt requirements.txt
-
-RUN pip3 install -r requirements.txt
-
-
 
