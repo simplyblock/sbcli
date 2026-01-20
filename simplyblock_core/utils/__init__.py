@@ -221,7 +221,7 @@ def dict_agg(data, mean=False, keys=None):
     return out
 
 
-def get_weights(node_stats, cluster_stats):
+def get_weights(node_stats, cluster_stats, keys_weights):
     """"
     node_st = {
             "lvol": len(node.lvols),
@@ -233,8 +233,8 @@ def get_weights(node_stats, cluster_stats):
     """
 
     def _normalize_w(key, v):
-        if key in constants.weights:
-            return round(((v * constants.weights[key]) / 100), 2)
+        if key in keys_weights:
+            return round(((v * keys_weights[key]) / 100), 2)
         else:
             return v
 
@@ -247,8 +247,6 @@ def get_weights(node_stats, cluster_stats):
         return w
 
     out: dict = {}
-    heavy_node_w = 0
-    heavy_node_id = None
     for node_id in node_stats:
         out[node_id] = {}
         total = 0
@@ -258,12 +256,6 @@ def get_weights(node_stats, cluster_stats):
             out[node_id][key] = w
             total += w
         out[node_id]['total'] = int(total)
-        if total > heavy_node_w:
-            heavy_node_w = total
-            heavy_node_id = node_id
-
-    if heavy_node_id:
-        out[heavy_node_id]['total'] *= 5
 
     return out
 
@@ -274,7 +266,7 @@ def print_table_dict(node_stats):
         data = {"node_id": node_id}
         data.update(node_stats[node_id])
         d.append(data)
-    print(print_table(d))
+    return str(print_table(d))
 
 
 def generate_rpc_user_and_pass():

@@ -1,9 +1,13 @@
 from typing import ContextManager
 
 import pytest
+from unittest.mock import patch
 
 from simplyblock_core import utils
 from simplyblock_core.utils import helpers, parse_thread_siblings_list
+from simplyblock_core.controllers import lvol_controller
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.storage_node import StorageNode
 
 
 @pytest.mark.parametrize('args,expected', [
@@ -146,3 +150,37 @@ def test_parse_thread_siblings_list(input, expected):
             parse_thread_siblings_list(input)
     else:
         assert parse_thread_siblings_list(input) == expected
+
+
+@patch.object(DBController, 'get_storage_nodes_by_cluster_id')
+@patch.object(DBController, 'get_storage_node_by_id')
+def run_lvol_scheduler_test(testing_nodes, db_controller_get_storage_node_by_id, db_controller_get_storage_nodes_by_cluster_id):
+    RUN_PER_TEST = 10000
+    print("-" * 100)
+    for testing_map in testing_nodes:
+        nodes = {n['uuid']: n for n in testing_map}
+        def get_node_by_id(node_id):
+            for node in testing_map:
+                if node['uuid'] == node_id:
+                    return StorageNode({"status": StorageNode.STATUS_ONLINE, **node})
+        db_controller_get_storage_node_by_id.side_effect = get_node_by_id
+        db_controller_get_storage_nodes_by_cluster_id.return_value = [
+            StorageNode({"status": StorageNode.STATUS_ONLINE, **node_params}) for node_params in testing_map]
+        cluster_id = "cluster_id"
+        out = {}
+        total = RUN_PER_TEST
+        for i in range(total):
+            selected_nodes = lvol_controller._get_next_3_nodes(cluster_id)
+            for index, node in enumerate(selected_nodes):
+                if node.get_id() not in out:
+                    out[node.get_id()] = {f"{index}": 1}
+                else:
+                    out[node.get_id()][f"{index}"] = out[node.get_id()].get(f"{index}", 0) + 1
+        # assert len(nodes) == 3
+
+        for k, v in out.items():
+            print(f"node {k}: size_util={nodes[k]['node_size_util']} lvols_util={nodes[k]['lvol_count_util']} stats: {[f'{sk}: {int(v[sk]/total*100)}%' for sk in sorted(v.keys())]}")
+        for v in testing_map:
+            if v['uuid'] not in out:
+                print(f"node {v['uuid']}: size_util={v['node_size_util']} lvols_util={v['lvol_count_util']} stats: excluded")
+        print("-"*100)

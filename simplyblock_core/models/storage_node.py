@@ -9,6 +9,7 @@ from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
 
@@ -105,6 +106,8 @@ class StorageNode(BaseNodeObject):
     hublvol: HubLVol = None  # type: ignore[assignment]
     active_tcp: bool = True
     active_rdma: bool = False
+    lvol_count_util: int = 0
+    node_size_util: int = 0
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -112,6 +115,10 @@ class StorageNode(BaseNodeObject):
         return RPCClient(
             self.mgmt_ip, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
+
+    def snode_api(self, **kwargs) -> SNodeClient:
+        """Return storage node API client to this node"""
+        return SNodeClient(f"{self.mgmt_ip}:5000", timeout=10, retry=2)
 
     def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port):
         rpc_client = self.rpc_client()
