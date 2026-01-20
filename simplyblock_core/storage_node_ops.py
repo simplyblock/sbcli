@@ -1040,7 +1040,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=socket, cluster_id=cluster_id)
+                socket=node_socket, cluster_id=cluster_id)
 
             time.sleep(5)
 
@@ -1657,7 +1657,7 @@ def restart_storage_node(
             logger.error(f"Invalid max_prov value: {max_prov}")
             return False
     else:
-        max_prov = snode.max_prove
+        max_prov = snode.max_prov
 
     if spdk_image:
         snode.spdk_image = spdk_image
