@@ -21,7 +21,7 @@ RUN sudo pip3 install -r requirements.txt
 RUN sudo python setup.py install
 
 RUN if [ -d /usr/share/terminfo ]; then \
-       find /usr/share/terminfo -lname '*ncr260vt300wpp*' -exec rm -f {} + ; \
+       sudo find /usr/share/terminfo -lname '*ncr260vt300wpp*' -exec rm -f {} + ; \
        sudo rm -f /usr/share/terminfo/n/ncr260vt300wpp || true ; \
     fi
 

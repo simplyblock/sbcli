@@ -1,29 +1,20 @@
 # syntax=docker/dockerfile:1
-FROM python:3.13-slim
+FROM fedora:43
 
-RUN apt-get update ; apt-get upgrade -y
+RUN dnf config-manager addrepo --from-repofile https://download.docker.com/linux/fedora/docker-ce.repo
 
-RUN apt-get install -y \
-    wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi iptables \
-    iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl kmod
-
-
-RUN install -m 0755 -d /etc/apt/keyrings
-RUN curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-RUN chmod a+r /etc/apt/keyrings/docker.asc
-RUN echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" | \
-    tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-RUN apt-get update ; apt-get install docker-ce-cli -y
-RUN apt-get upgrade -y
+RUN dnf install -y wget dmidecode nvme-cli  iptables pciutils sudo nano parted gdisk ssh  \
+    ca-certificates curl kmod docker-ce-cli python3.13 python3-pip iputils iproute iscsi-initiator-utils
 
 ARG TARGETPLATFORM
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         echo "ARM64 version"; \
+    	wget https://github.com/apple/foundationdb/releases/download/7.3.69/foundationdb-clients-7.3.69-1.el9.aarch64.rpm; \
+        dpkg -i foundationdb-clients_7* ; \
+        rm -f foundationdb-clients_7* ; \
     else \
         echo "AMD64 version"; \
-        wget https://github.com/apple/foundationdb/releases/download/7.3.56/foundationdb-clients_7.3.56-1_amd64.deb; \
+        wget https://github.com/apple/foundationdb/releases/download/7.3.69/foundationdb-clients-7.3.69-1.el7.x86_64.rpm; \
         dpkg -i foundationdb-clients_7* ; \
         rm -f foundationdb-clients_7* ; \
     fi
