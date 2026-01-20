@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import sys
+import itertools
 
 from http.server import HTTPServer
 from http.server import ThreadingHTTPServer
@@ -19,6 +20,9 @@ logger = logging.getLogger()
 logger.addHandler(logger_handler)
 logger.setLevel(logging.INFO)
 
+# Thread-safe request counter
+request_counter = itertools.count(1)
+
 
 def get_env_var(name, default=None, is_required=False):
     if not name:
@@ -30,12 +34,12 @@ def get_env_var(name, default=None, is_required=False):
     return os.environ.get(name, default)
 
 
-def rpc_call(req):
+def rpc_call(req, request_id):
     req_data = json.loads(req.decode('ascii'))
     params = ""
     if "params" in req_data:
         params = str(req_data['params'])
-    logger.info(f"Request function: {str(req_data['method'])}, params: {params}")
+    logger.info(f"[{request_id}] Request function: {str(req_data['method'])}, params: {params}")
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(TIMEOUT)
     sock.connect(rpc_sock)
@@ -65,7 +69,8 @@ def rpc_call(req):
     if not response and len(buf) > 0:
         raise ValueError('Invalid response')
 
-    logger.debug(f"Response data: {buf}")
+    logger.debug(f"[{request_id}] Response data: {buf}")
+    logger.info(f"[{request_id}] Response ready")
 
     return buf
 
@@ -96,9 +101,13 @@ class ServerHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        if self.headers['Authorization'] != 'Basic ' + self.key:
-            self.do_AUTHHEAD()
-        else:
+        # Unique request ID
+        request_id = next(request_counter)
+        try:
+            if self.headers['Authorization'] != 'Basic ' + self.key:
+                self.do_AUTHHEAD()
+                return
+
             if "Content-Length" in self.headers:
                 data_string = self.rfile.read(int(self.headers['Content-Length']))
             elif "chunked" in self.headers.get("Transfer-Encoding", ""):
@@ -120,15 +129,19 @@ class ServerHandler(BaseHTTPRequestHandler):
                         break
 
             try:
-                response = rpc_call(data_string)
+                response = rpc_call(data_string, request_id)
                 if response is not None:
                     self.do_HEAD()
                     self.wfile.write(bytes(response.encode(encoding='ascii')))
                 else:
                     self.do_HEAD_no_content()
 
-            except ValueError:
+            except ValueError as e:
+                logger.error(f"[{request_id}] Invalid RPC request from {self.client_address[0]}: {e}")
                 self.do_INTERNALERROR()
+
+        except Exception:
+            logger.error(f"[{request_id}] Error processing request from {self.client_address[0]}", exc_info=True)
 
 
 def run_server(host, port, user, password, is_threading_enabled=False):
