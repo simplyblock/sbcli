@@ -12,18 +12,18 @@ LABEL maintainer="developers@simplyblock.io"
 
 RUN dnf config-manager addrepo --from-repofile https://download.docker.com/linux/fedora/docker-ce.repo
 
-RUN dnf install -y wget dmidecode nvme-cli iptables pciutils sudo nano parted gdisk ssh su \
+RUN dnf install -y wget dmidecode nvme-cli iptables pciutils sudo nano parted gdisk ssh su pkg-config\
     ca-certificates curl kmod docker-ce-cli python3.13 python3-pip iputils iproute iscsi-initiator-utils
 
 ARG TARGETPLATFORM
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         echo "ARM64 version"; \
     	wget https://github.com/apple/foundationdb/releases/download/7.3.69/foundationdb-clients-7.3.69-1.el9.aarch64.rpm; \
-        dnf install -y foundationdb-clients-7.3.69-1.el9.aarch64.rpm ; \
+        rpm -ivh --nodigest --nofiledigest foundationdb-clients-7* ; \
     else \
         echo "AMD64 version"; \
         wget https://github.com/apple/foundationdb/releases/download/7.3.69/foundationdb-clients-7.3.69-1.el7.x86_64.rpm; \
-        dnf install -y foundationdb-clients-7.3.69-1.el7.x86_64.rpm ; \
+        rpm -ivh --nodigest --nofiledigest foundationdb-clients-7* ; \
     fi
 
 COPY LICENSE /licenses/LICENSE
