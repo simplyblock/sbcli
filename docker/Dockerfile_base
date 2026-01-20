@@ -12,7 +12,7 @@ LABEL maintainer="developers@simplyblock.io"
 
 RUN dnf config-manager addrepo --from-repofile https://download.docker.com/linux/fedora/docker-ce.repo
 
-RUN dnf install -y wget dmidecode nvme-cli iptables pciutils sudo nano parted gdisk ssh su pkg-config\
+RUN dnf install -y wget dmidecode nvme-cli iptables pciutils sudo nano parted gdisk ssh su pkg-config hostname\
     ca-certificates curl kmod docker-ce-cli python3.13 python3-pip iputils iproute iscsi-initiator-utils
 
 ARG TARGETPLATFORM
