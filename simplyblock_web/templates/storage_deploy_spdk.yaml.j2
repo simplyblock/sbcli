@@ -16,6 +16,7 @@ spec:
   nodeSelector:
     kubernetes.io/hostname: {{ HOSTNAME }}
   hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
   tolerations:
     - effect: NoSchedule
       operator: Exists
@@ -57,6 +58,11 @@ spec:
     - name: dockercontainerlogdirectory
       hostPath:
         path: /var/log/pods
+    {% if MODE == "kubernetes" %}
+    - name: config
+      configMap:
+        name: simplyblock-fluent-bit-config
+    {% endif %}
 
   initContainers:
     - name: copy-script
@@ -160,4 +166,19 @@ spec:
         - name: dockercontainerlogdirectory
           mountPath: /var/log/pods
           readOnly: true
+  {% elif MODE == "kubernetes" %}
+    - name: fluent-bit
+      image: fluent/fluent-bit:1.8.11
+      volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: config
+          mountPath: /fluent-bit/etc/
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "200Mi"
+        limits:
+          cpu: "400m"
+          memory: "2Gi"
   {% endif %}

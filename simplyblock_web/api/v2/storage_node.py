@@ -22,27 +22,34 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-nodes:list')
 def list(cluster: Cluster) -> List[StorageNodeDTO]:
-    return [
-        StorageNodeDTO.from_model(storage_node)
-        for storage_node
-        in db.get_storage_nodes_by_cluster_id(cluster.get_id())
-    ]
+    data = []
+    for storage_node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        node_stat_obj = None
+        ret = db.get_node_capacity(storage_node, 1)
+        if ret:
+            node_stat_obj = ret[0]
+        data.append(StorageNodeDTO.from_model(storage_node, node_stat_obj))
+    return data
 
 
 class StorageNodeParams(BaseModel):
     node_address: Annotated[str, Field(web_utils.IP_PATTERN)]
     interface_name: str
-    max_snapshots: int = Field(500)
-    ha_jm: bool = Field(True)
-    test_device: bool = Field(False)
+    max_snapshots: Optional[int] = Field(500)
+    ha_jm: Optional[bool] = Field(True)
+    test_device: Optional[bool] = Field(False)
     spdk_image: Optional[str] = Field("")
     spdk_debug: bool = Field(False)
     data_nics: List[str] = Field([])
     namespace: str = Field('default')
+    id_device_by_nqn: Optional[bool] = Field(False)
     jm_percent: util.Percent = Field(3)
     partitions: int = Field(1)
     iobuf_small_pool_count: int = Field(0)
     iobuf_large_pool_count: int = Field(0)
+    cr_name: str
+    cr_namespace: str 
+    cr_plural: str
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -64,6 +71,10 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams):
             'enable_test_device': parameters.test_device,
             'namespace': parameters.namespace,
             'enable_ha_jm': parameters.ha_jm,
+            'id_device_by_nqn': parameters.id_device_by_nqn,
+            'cr_name': parameters.cr_name,
+            'cr_namespace': parameters.cr_namespace,
+            'cr_plural': parameters.cr_plural,
         }
     )
     if not task_id_or_false:
@@ -86,17 +97,28 @@ StorageNode = Annotated[StorageNodeModel, Depends(_lookup_storage_node)]
 
 @instance_api.get('/', name='clusters:storage-nodes:detail')
 def get(cluster: Cluster, storage_node: StorageNode):
-    return StorageNodeDTO.from_model(storage_node)
+    node_stat_obj = None
+    ret = db.get_node_capacity(storage_node, 1)
+    if ret:
+        node_stat_obj = ret[0]
+    return StorageNodeDTO.from_model(storage_node, node_stat_obj)
 
 
 @instance_api.delete('/', name='clusters:storage-nodes:delete')
 def delete(
-        cluster: Cluster, storage_node: StorageNode, force_remove: bool = False, force_migrate: bool = False) -> Response:
+        cluster: Cluster, storage_node: StorageNode, force_remove: bool = False, force_migrate: bool = False, force_delete: bool = False ) -> Response:
     none_or_false = storage_node_ops.remove_storage_node(
             storage_node.get_id(), force_remove=force_remove, force_migrate=force_migrate
     )
     if none_or_false == False:  # noqa
         raise ValueError('Failed to remove storage node')
+    
+    if force_delete:
+        none_or_false = storage_node_ops.delete_storage_node(
+            storage_node.get_id(), force=force_delete
+        )
+        if none_or_false == False:  # noqa
+            raise ValueError('Failed to delete storage node')
 
     return Response(status_code=204)
 
@@ -194,17 +216,20 @@ def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -
 class _RestartParams(BaseModel):
     force: bool = False
     reattach_volume: bool = False
+    node_address: Optional[Annotated[str, Field(pattern=web_utils.IP_PATTERN)]] = None
+
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
 @instance_api.post('/restart', name='clusters:storage-nodes:restart', status_code=202, responses={202: {"content": None}})
-def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartParams = _RestartParams()) -> Response:
+def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartParams) -> Response:
     storage_node = storage_node
     Thread(
         target=storage_node_ops.restart_storage_node,
         kwargs={
             "node_id": storage_node.get_id(),
             "force": parameters.force,
+            "node_ip": parameters.node_address,
             "reattach_volume": parameters.reattach_volume,
         }
     ).start()

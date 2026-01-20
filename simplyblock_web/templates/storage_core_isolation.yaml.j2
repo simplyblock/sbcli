@@ -91,7 +91,7 @@ spec:
             - name: etc
               mountPath: /etc
             - name: rootfs
-              mountPath: /
+              mountPath: /host
             - name: var-simplyblock
               mountPath: /var/simplyblock
           command: ["/bin/sh", "-c"]
@@ -113,13 +113,13 @@ spec:
                       apt update && apt install -y grep jq nvme-cli tuned
                       ;;
                   ubuntu)
-                      apt update && apt install -y grep jq nvme-cli tuned
-                      apt-get install -y linux-modules-extra-$(uname -r)
+                      chroot /host apt update && chroot /host apt install -y grep jq nvme-cli tuned
+                      chroot /host apt-get install -y linux-modules-extra-$(uname -r)
                       ;;
                   centos|rhel|rocky|almalinux)
                       export YUM_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
                       export DNF_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
-                      dnf install -y grep jq nvme-cli kernel-modules-extra tuned \
+                      chroot /host dnf install -y grep jq nvme-cli kernel-modules-extra tuned \
                        --setopt=tsflags=nocontexts,noscripts --setopt=install_weak_deps=False 
                       ;;
                   *)
@@ -204,7 +204,7 @@ spec:
               tuned-adm profile "$TUNED_PROFILE"
               case "$OS_ID" in
                   centos|rhel|rocky|almalinux)
-                  grubby --update-kernel=ALL --args="isolcpus=$ISOLATED_CORES nohz_full=$ISOLATED_CORES rcu_nocbs=$ISOLATED_CORES"
+                  chroot /host grubby --update-kernel=ALL --args="isolcpus=$ISOLATED_CORES nohz_full=$ISOLATED_CORES rcu_nocbs=$ISOLATED_CORES"
                       ;;
                   *)
                       echo ""

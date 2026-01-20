@@ -18,10 +18,14 @@ db = DBController()
 
 @api.get('/', name='clusters:storage_nodes:devices:list')
 def list(cluster: Cluster, storage_node: StorageNode) -> List[DeviceDTO]:
-    return [
-        DeviceDTO.from_model(device)
-        for device in storage_node.nvme_devices
-    ]
+    data = []
+    for device in storage_node.nvme_devices:
+        stat_obj = None
+        ret = db.get_device_stats(device, 1)
+        if ret:
+            stat_obj = ret[0]
+        data.append(DeviceDTO.from_model(device, stat_obj))
+    return data
 
 instance_api = APIRouter(prefix='/{device_id}')
 
@@ -38,16 +42,26 @@ Device = Annotated[NVMeDevice, Depends(_lookup_device)]
 
 @instance_api.get('/', name='clusters:storage_nodes:devices:detail')
 def get(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceDTO:
-    return DeviceDTO.from_model(device)
+    stat_obj = None
+    ret = db.get_device_stats(device, 1)
+    if ret:
+        stat_obj = ret[0]
+    return DeviceDTO.from_model(device, stat_obj)
 
 
-@instance_api.delete('/', name='clusters:storage_nodes:devices:delete', status_code=204, responses={204: {"content": None}})
-def delete(cluster: Cluster, storage_node: StorageNode, device: Device) -> Response:
-    if not device_controller.device_remove(device.get_id()):
+@instance_api.post('/remove', name='clusters:storage_nodes:devices:remove', status_code=204, responses={204: {"content": None}})
+def remove(cluster: Cluster, storage_node: StorageNode, device: Device, force: bool = False) -> Response:
+    if not device_controller.device_remove(device.get_id(), force):
         raise ValueError('Failed to remove device')
 
     return Response(status_code=204)
 
+@instance_api.post('/restart', name='clusters:storage_nodes:devices:restart', status_code=204, responses={204: {"content": None}})
+def restart(cluster: Cluster, storage_node: StorageNode, device: Device, force: bool = False) -> Response:
+    if not device_controller.restart_device(device.get_id(), force):
+        raise ValueError('Failed to restart device')
+
+    return Response(status_code=204)
 
 @instance_api.get('/capacity', name='clusters:storage_nodes:devices:capacity')
 def capacity(

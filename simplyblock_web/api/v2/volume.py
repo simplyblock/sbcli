@@ -21,11 +21,14 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-pools:volumes:list')
 def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDTO]:
-    return [
-        VolumeDTO.from_model(lvol, request, cluster.get_id())
-        for lvol
-        in db.get_lvols_by_pool_id(pool.get_id())
-    ]
+    data = []
+    for lvol in db.get_lvols_by_pool_id(pool.get_id()):
+        stat_obj = None
+        ret = db.get_lvol_stats(lvol, 1)
+        if ret:
+            stat_obj = ret[0]
+        data.append(VolumeDTO.from_model(lvol, request, cluster.get_id(), stat_obj))
+    return data
 
 
 class _CreateParams(BaseModel):
@@ -129,7 +132,11 @@ Volume = Annotated[LVol, Depends(_lookup_volume)]
 
 @instance_api.get('/', name='clusters:storage-pools:volumes:detail')
 def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> VolumeDTO:
-    return VolumeDTO.from_model(volume, request, cluster.get_id())
+    stat_obj = None
+    ret = db.get_lvol_stats(volume, 1)
+    if ret:
+        stat_obj = ret[0]
+    return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj)
 
 
 class UpdatableLVolParams(BaseModel):

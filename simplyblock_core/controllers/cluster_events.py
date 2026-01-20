@@ -4,6 +4,7 @@ import logging
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.events import EventObj
+from simplyblock_core import utils, constants
 
 logger = logging.getLogger()
 db_controller = DBController()
@@ -38,6 +39,15 @@ def cluster_status_change(cluster, new_state, old_status):
         db_object=cluster,
         caused_by=ec.CAUSED_BY_CLI,
         message=f"Cluster status changed from {old_status} to {new_state}")
+
+    if cluster.mode == "kubernetes":
+        utils.patch_cr_status(
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
+            plural=cluster.cr_plural,
+            namespace=cluster.cr_namespace,
+            name=cluster.cr_name,
+            status_patch={"status": new_state})
 
 
 def _cluster_cap_event(cluster, msg, event_level):
@@ -80,3 +90,21 @@ def cluster_delete(cluster):
         db_object=cluster,
         caused_by=ec.CAUSED_BY_CLI,
         message=f"Cluster deleted {cluster.get_id()}")
+
+
+def cluster_rebalancing_change(cluster, new_state, old_status):
+    ec.log_event_cluster(
+        cluster_id=cluster.get_id(),
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=cluster,
+        caused_by=ec.CAUSED_BY_CLI,
+        message=f"Cluster rebalancing changed from {old_status} to {new_state}")
+    if cluster.mode == "kubernetes":
+        utils.patch_cr_status(
+            group=constants.CR_GROUP,
+            version=constants.CR_VERSION,
+            plural=cluster.cr_plural,
+            namespace=cluster.cr_namespace,
+            name=cluster.cr_name,
+            status_patch={"rebalancing": new_state})

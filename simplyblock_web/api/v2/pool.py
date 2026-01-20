@@ -20,12 +20,15 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-pools:list')
 def list(cluster: Cluster) -> List[StoragePoolDTO]:
-    return [
-        StoragePoolDTO.from_model(pool)
-        for pool
-        in db.get_pools()
-        if pool.cluster_id == cluster.get_id()
-    ]
+    data = []
+    for pool in db.get_pools():
+        if pool.cluster_id == cluster.get_id():
+            stat_obj = None
+            ret = db.get_pool_stats(pool, 1)
+            if ret:
+                stat_obj = ret[0]
+            data.append(StoragePoolDTO.from_model(pool, stat_obj))
+    return data
 
 
 class StoragePoolParams(BaseModel):
@@ -36,6 +39,9 @@ class StoragePoolParams(BaseModel):
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
+    cr_name: str
+    cr_namespace: str 
+    cr_plural: str
 
 
 @api.post('/', name='clusters:storage-pools:create', status_code=201, responses={201: {"content": None}})
@@ -49,7 +55,7 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
 
     id_or_false =  pool_controller.add_pool(
         parameters.name, parameters.pool_max, parameters.volume_max_size, parameters.max_rw_iops, parameters.max_rw_mbytes,
-        parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id()
+        parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id(), parameters.cr_name, parameters.cr_namespace, parameters.cr_plural
     )
 
     if not id_or_false:
@@ -73,7 +79,11 @@ StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
 
 @instance_api.get('/', name='clusters:storage-pools:detail')
 def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
-    return StoragePoolDTO.from_model(pool)
+    stat_obj = None
+    ret = db.get_pool_stats(pool, 1)
+    if ret:
+        stat_obj = ret[0]
+    return StoragePoolDTO.from_model(pool, stat_obj)
 
 
 @instance_api.delete('/', name='clusters:storage-pools:delete', status_code=204, responses={204: {"content": None}})
@@ -95,6 +105,9 @@ class UpdatableStoragePoolParams(BaseModel):
     max_rw_mbytes: Optional[util.Unsigned] = None
     max_r_mbytes: Optional[util.Unsigned] = None
     max_w_mbytes: Optional[util.Unsigned] = None
+    lvols_cr_name: Optional[str] = None
+    lvols_cr_namespace: Optional[str] = None
+    lvols_cr_plural: Optional[str] = None
 
 
 @instance_api.put('/', name='clusters:storage-pools:update', status_code=204, responses={204: {"content": None}})

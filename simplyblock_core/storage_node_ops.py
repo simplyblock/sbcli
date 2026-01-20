@@ -835,8 +835,8 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
-             namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3):
+             namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
+             id_device_by_nqn=False, partition_size="", ha_jm_count=3):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1088,6 +1088,9 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         snode.cloud_name = cloud_instance['cloud'] or ""
 
         snode.namespace = namespace
+        snode.cr_name = cr_name
+        snode.cr_namespace = cr_namespace
+        snode.cr_plural = cr_plural
         snode.ssd_pcie = ssd_pcie
         snode.hostname = hostname
         snode.host_nqn = subsystem_nqn
@@ -1110,8 +1113,6 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         snode.active_tcp=active_tcp
         snode.active_rdma=active_rdma
 
-        if 'cpu_count' in node_info:
-            snode.cpu = node_info['cpu_count']
         if 'cpu_hz' in node_info:
             snode.cpu_hz = node_info['cpu_hz']
         if 'memory' in node_info:
@@ -1119,6 +1120,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
         if 'hugepages' in node_info:
             snode.hugepages = node_info['hugepages']
 
+        snode.cpu = len(utils.hexa_to_cpu_list(spdk_cpu_mask))
         snode.l_cores = l_cores or ""
         snode.spdk_cpu_mask = spdk_cpu_mask or ""
         snode.spdk_mem = minimum_hp_memory
@@ -1152,7 +1154,7 @@ def add_node(cluster_id, node_addr, iface_name,data_nics_list,
             snode.physical_label = 0
         else:
             snode.physical_label = get_next_physical_device_order(snode)
-
+        
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent
         snode.id_device_by_nqn = id_device_by_nqn
@@ -1693,7 +1695,7 @@ def restart_storage_node(
         cluster_ip = cluster_docker.info()["Swarm"]["NodeAddr"]
 
     else:
-        cluster_ip = utils.get_k8s_node_ip()
+        cluster_ip = utils.get_k8s_node_ip()       
 
     total_mem = 0
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -1880,7 +1882,7 @@ def restart_storage_node(
             snode.nvme_devices.append(dev)
 
     snode.write_to_db(db_controller.kv_store)
-    if node_ip and len(new_devices)>0:
+    if node_ip:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
@@ -1923,7 +1925,6 @@ def restart_storage_node(
         return False
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-    snode.health_check = True
     snode.lvstore_status = ""
     snode.write_to_db(db_controller.kv_store)
 
@@ -2985,7 +2986,6 @@ def set_node_status(node_id, status, reconnect_on_online=True):
             return False
         if snode.enable_ha_jm:
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-        snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
         distr_controller.send_cluster_map_to_node(snode)
 
@@ -3617,6 +3617,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
         sec_node.write_to_db()
 
+    storage_events.node_ports_changed(snode)
     return True
 
 
