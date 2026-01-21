@@ -16,7 +16,7 @@ observability:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "main-sfam-2359"
+    tag: "snapshot_replication_operator_support"
     pullPolicy: "Always"
 
 ports:

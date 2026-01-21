@@ -126,7 +126,7 @@ class ManagementNodeDTO(BaseModel):
 
 
 class StoragePoolDTO(BaseModel):
-    id: UUID
+    uuid: UUID
     name: str
     status: Literal['active', 'inactive']
     max_size: util.Unsigned
@@ -140,7 +140,7 @@ class StoragePoolDTO(BaseModel):
     @staticmethod
     def from_model(model: Pool, stat_obj: Optional[StatsObject]=None):
         return StoragePoolDTO(
-            id=UUID(model.get_id()),
+            uuid=UUID(model.get_id()),
             name=model.pool_name,
             status=model.status,  # type: ignore
             max_size=model.pool_max_size,
