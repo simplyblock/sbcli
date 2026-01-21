@@ -467,6 +467,18 @@ spec:
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
+
+        - name: tasks-runner-snapshot-replication
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/snapshot_replication.py"]
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
+          env:
+{{ toYaml .env | nindent 12 }}
+          volumeMounts:
+{{ toYaml .volumeMounts | nindent 12 }}
+          resources:
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
         - name: fluent-bit
           image: fluent/fluent-bit:1.8.11
           volumeMounts:
