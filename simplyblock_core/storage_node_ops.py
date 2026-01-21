@@ -709,7 +709,7 @@ def _connect_to_remote_devs(
 
     rpc_client = RPCClient(
         this_node.mgmt_ip, this_node.rpc_port,
-        this_node.rpc_username, this_node.rpc_password, timeout=3, retry=1)
+        this_node.rpc_username, this_node.rpc_password, timeout=5, retry=1)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
