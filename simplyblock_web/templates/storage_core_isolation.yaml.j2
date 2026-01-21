@@ -116,7 +116,7 @@ spec:
                       chroot /host apt update && chroot /host apt install -y grep jq nvme-cli tuned
                       chroot /host apt-get install -y linux-modules-extra-$(uname -r)
                       ;;
-                  centos|rhel|rocky|almalinux)
+                  centos|rhel|rocky|almalinux|ol)
                       export YUM_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
                       export DNF_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
                       chroot /host dnf install -y grep jq nvme-cli kernel-modules-extra tuned \

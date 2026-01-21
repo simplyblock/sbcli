@@ -4,7 +4,6 @@ import json
 import math
 import os
 from pathlib import Path
-import subprocess
 import time
 from typing import List, Optional, Union
 
@@ -142,6 +141,7 @@ class SPDKParams(BaseModel):
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
+    socket: Optional[int] = Field(None, ge=0)
     cluster_id: str
 
 
@@ -181,24 +181,28 @@ def spdk_process_start(body: SPDKParams):
             f'/tmp/shm_{body.rpc_port}/:/dev/shm/',
             '/lib/modules/:/lib/modules/',
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
-            '/sys:/sys'],
+            '/sys:/sys',
+            '/mnt/ramdisk:/mnt/ramdisk',
+        ],
         environment=[
             f"RPC_PORT={body.rpc_port}",
             f"ssd_pcie={ssd_pcie_params}",
             f"PCI_ALLOWED={ssd_pcie_list}",
             f"TOTAL_HP={total_mem_mib}",
+            f"NSOCKET={body.socket}",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
     node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "python simplyblock_core/services/spdk_http_proxy_server.py",
+        "python simplyblock_core/services/spdk_http_proxy_server.py ",
         name=f"spdk_proxy_{body.rpc_port}",
         detach=True,
         network_mode="host",
         log_config=log_config,
         volumes=[
             f'/var/tmp/spdk_{body.rpc_port}:/var/tmp',
+            '/mnt/ramdisk:/mnt/ramdisk',
         ],
         environment=[
             f"SERVER_IP={body.server_ip}",
@@ -509,8 +513,10 @@ def bind_device_to_nvme(body: utils.DeviceParams):
 def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
     bind_device_to_nvme(body)
     device_name = pci_utils.nvme_device_name(body.device_pci)
-    subprocess.check_call(['parted', '-fs', f'/dev/{device_name}', 'mklabel' 'gpt'])
-    return utils.get_response(True)
+    cmd = f"parted -fs /dev/{device_name} mklabel gpt"
+    out, err, ret_code = shell_utils.run_command(cmd)
+    logger.info(f"out: {out}, err: {err}, ret_code: {ret_code}")
+    return utils.get_response(ret_code==0, error=err)
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
