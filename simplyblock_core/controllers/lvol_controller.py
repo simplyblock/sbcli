@@ -866,6 +866,10 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
     except KeyError:
         return True
 
+    if lvol.frozen:
+        logger.warning(f"lvol in migration. cannot delete lvol {lvol.uuid}")
+        return False
+
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
 

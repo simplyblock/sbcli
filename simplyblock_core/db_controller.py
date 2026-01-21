@@ -8,6 +8,7 @@ from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_migration import MigrationObject
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -19,8 +20,6 @@ from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, Clus
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode
 
-
-
 class Singleton(type):
     _instances = {}  # type: ignore
     def __call__(cls, *args, **kwargs):
@@ -31,8 +30,6 @@ class Singleton(type):
             if ins is not None and ins.kv_store is not None:
                 cls._instances[cls] = ins
             return ins
-
-
 
 class DBController(metaclass=Singleton):
 
@@ -270,7 +267,7 @@ class DBController(metaclass=Singleton):
         ret = []
         snaps = SnapShot().read_from_db(self.kv_store)
         for snap in snaps:
-            if snap.lvol.node_id == node_id:
+            if snap.node_id == node_id:
                 ret.append(snap)
         return ret
 
@@ -309,3 +306,16 @@ class DBController(metaclass=Singleton):
         else:
             classes = QOSClass().read_from_db(self.kv_store)
         return sorted(classes, key=lambda x: x.class_id)
+
+    def get_migrations(self) -> List[MigrationObject]:
+        ret = MigrationObject().read_from_db(self.kv_store)
+        migrations = []
+        for m in ret:
+            migrations.append(m)
+        return sorted(migrations, key=lambda x: x.create_dt)
+
+    def get_migration_by_id(self, id) -> MigrationObject:
+        migrations = MigrationObject().read_from_db(self.kv_store, id=id)
+        if not migrations:
+            raise KeyError(f'Migration {id} not found')
+        return migrations[0]
