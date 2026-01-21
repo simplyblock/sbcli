@@ -37,7 +37,6 @@ from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
 import os
-import subprocess
 
 logger = utils.get_logger(__name__)
 

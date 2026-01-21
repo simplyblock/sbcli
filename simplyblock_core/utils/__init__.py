@@ -10,10 +10,8 @@ import subprocess
 import sys
 import uuid
 import time
-from typing import Union, Any, Optional, Tuple, Dict
 from datetime import datetime, timezone
 from docker import DockerClient
-import socket
 from typing import Union, Any, Optional, Tuple, List, Dict
 from kubernetes import client, config
 from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
