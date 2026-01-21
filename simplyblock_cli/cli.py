@@ -5,7 +5,7 @@ import logging
 import sys
 import traceback
 
-from simplyblock_cli.clibase import CLIWrapperBase, range_type, regex_type, size_type
+from simplyblock_cli.clibase import CLIWrapperBase, range_type, size_type
 from simplyblock_core import utils
 
 class CLIWrapper(CLIWrapperBase):

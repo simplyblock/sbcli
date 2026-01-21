@@ -363,7 +363,7 @@ def check_node(snode):
     # 3- check spdk process through node API
     try:
         snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=20, retry=2)
-        is_up, _ = snode_api.spdk_process_is_up( snode.rpc_port)
+        is_up, _ = snode_api.spdk_process_is_up( snode.rpc_port, snode.cluster_id)
         logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {bool(is_up)}")
         if not is_up:
             logger.info("Check: node API failed, setting node offline")
