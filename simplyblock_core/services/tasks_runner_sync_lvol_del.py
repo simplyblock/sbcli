@@ -37,6 +37,8 @@ while True:
                             task.function_result = "canceled"
                             task.status = JobSchedule.STATUS_DONE
                             task.write_to_db(db.kv_store)
+                            primary_node = db.get_storage_node_by_id(task.function_params["primary_node"])
+                            primary_node.lvol_del_sync_lock_reset()
                             continue
 
                         node = db.get_storage_node_by_id(task.node_id)
