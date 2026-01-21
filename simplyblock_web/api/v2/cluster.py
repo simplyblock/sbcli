@@ -18,9 +18,9 @@ db = DBController()
 
 
 class _ReplicationParams(BaseModel):
-    snapshot_replication_target_cluster: Optional[str]
-    snapshot_replication_timeout: Optional[str]
-    target_pool: Optional[str]
+    snapshot_replication_target_cluster: str
+    snapshot_replication_timeout: int = 0
+    target_pool: Optional[str] = None
 
 class _UpdateParams(BaseModel):
     management_image: Optional[str]

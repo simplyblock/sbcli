@@ -16,7 +16,7 @@ observability:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "improved_user_experience"
+    tag: "main-sfam-2359"
     pullPolicy: "Always"
 
 ports:
@@ -214,7 +214,7 @@ simplyblock:
     
   storageNodes:
     name: demo-node
-    clusterImage: public.ecr.aws/simply-block/simplyblock:improved_user_experience
+    clusterImage: public.ecr.aws/simply-block/simplyblock:main-sfam-2359
     mgmtIfc: eth0
     maxLVol: 10
     maxSize: 150G
@@ -223,9 +223,9 @@ simplyblock:
     spdkDebug: false
     coreIsolation: false
     workerNodes:
-      - vm02.simplyblock3.localdomain
-      - vm03.simplyblock3.localdomain
-      - vm04.simplyblock3.localdomain
+      - israel-storage-node-1
+      - israel-storage-node-2
+      - israel-storage-node-3
 
   devices:
     name: demo-devices
