@@ -1068,10 +1068,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 total_mem += (n.spdk_mem + 500000000)
 
         logger.info("Deploying SPDK")
-        results = None
         l_cores = node_config.get("l-cores")
         spdk_cpu_mask = node_config.get("cpu_mask")
-        socket = node_config.get("socket")
         for ssd in ssd_pcie:
             snode_api.bind_device_to_spdk(ssd)
         try:
