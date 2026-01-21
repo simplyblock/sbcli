@@ -68,7 +68,8 @@ def get_env_var(name, default=None, is_required=False):
         raise Exception("env value is required: %s" % name)
     return os.environ.get(name, default)
 
-unix_sockets: list = []
+
+unix_sockets: list[socket] = []  # type: ignore[valid-type]
 def rpc_call(req):
     logger.info(f"active threads: {threading.active_count()}")
     logger.info(f"active unix sockets: {len(unix_sockets)}")
@@ -119,7 +120,8 @@ def rpc_call(req):
 
 
 class ServerHandler(BaseHTTPRequestHandler):
-    server_session: list = []
+
+    server_session: list[int] = []
     key = ""
     def do_HEAD(self):
         self.send_response(200)
@@ -214,6 +216,7 @@ try:
     rpc_port = int(rpc_port)
 except Exception:
     rpc_port = 8080
+rpc_sock = f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
 
 is_threading_enabled = bool(is_threading_enabled)
 run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)

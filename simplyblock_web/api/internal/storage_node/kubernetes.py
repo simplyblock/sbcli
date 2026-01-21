@@ -340,8 +340,8 @@ def spdk_process_start(body: SPDKParams):
             "L_CORES": body.l_cores,
             "CORES": core_utils.get_total_cpu_cores(body.l_cores),
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
-            'MEM_GEGA': core_utils.convert_size(body.spdk_mem, 'GiB', round_up=True),
-            'MEM2_GEGA': core_utils.convert_size(body.system_mem, 'GiB', round_up=True),
+            'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
+            'MEM2_MEGA': (core_utils.convert_size(body.system_mem, 'MiB', round_up=True) // 2) * 2,
             'SERVER_IP': body.server_ip,
             'RPC_PORT': body.rpc_port,
             'RPC_USERNAME': body.rpc_username,
@@ -643,10 +643,13 @@ def apply_config():
     # Set Huge page memory
     huge_page_memory_dict: dict = {}
     for node_config in nodes:
+        hg_memory = node_config["huge_page_memory"]
+        if int(node_config["max_size"]) > 0:
+            hg_memory = max(hg_memory , node_config["max_size"])
         numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + hg_memory + 1000000000
     for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // (2048 * 1024)
+        num_pages = huge_page_memory // 2000000
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)

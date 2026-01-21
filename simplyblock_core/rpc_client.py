@@ -886,6 +886,12 @@ class RPCClient:
         }
         return self._request("nbd_stop_disk", params)
 
+    def nbd_get_disks(self, nbd_device):
+        params = {
+            "nbd_device": nbd_device
+        }
+        return self._request("nbd_get_disks", params)
+
     def bdev_jm_unmap_vuid(self, name, vuid):
         params = {"name": name, "vuid": vuid}
         return self._request("bdev_jm_unmap_vuid", params)

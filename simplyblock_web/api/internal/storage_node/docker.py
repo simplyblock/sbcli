@@ -4,7 +4,6 @@ import json
 import math
 import os
 from pathlib import Path
-import subprocess
 import time
 from typing import List, Optional, Union
 
@@ -142,6 +141,7 @@ class SPDKParams(BaseModel):
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
+    socket: Optional[int] = Field(None, ge=0)
     cluster_id: str
     socket: Optional[int] = Field(None, ge=0)
     firewall_port: int = Field(constants.FW_PORT_START)
@@ -517,8 +517,10 @@ def bind_device_to_nvme(body: utils.DeviceParams):
 def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
     bind_device_to_nvme(body)
     device_name = pci_utils.nvme_device_name(body.device_pci)
-    subprocess.check_call(['parted', '-fs', f'/dev/{device_name}', 'mklabel' 'gpt'])
-    return utils.get_response(True)
+    cmd = f"parted -fs /dev/{device_name} mklabel gpt"
+    out, err, ret_code = shell_utils.run_command(cmd)
+    logger.info(f"out: {out}, err: {err}, ret_code: {ret_code}")
+    return utils.get_response(ret_code==0, error=err)
 
 
 CPU_INFO = cpuinfo.get_cpu_info()

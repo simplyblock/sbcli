@@ -60,6 +60,16 @@ commands:
             dest: sockets_to_use
             type: str
             default: "0"
+          - name: "--cores-percentage"
+            help: "The percentage of cores to be used for spdk (0-99)"
+            description: >
+              The percentage of cores to be used for spdk (0-99)
+            dest: cores_percentage
+            type:
+              range:
+                min: 0
+                max: 99
+            default: 0
           - name: "--pci-allowed"
             help: "Comma separated list of PCI addresses of Nvme devices to use for storage devices."
             description: >
@@ -76,6 +86,27 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--device-model"
+            help: "NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together"
+            description: >
+              NVMe SSD model string, example: --model PM1628,  --device-model and --size-range must be set together
+            dest: device_model
+            required: false
+            type: str
+            default: ""
+          - name: "--size-range"
+            help: "NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together"
+            description: >
+              NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987,  --device-model and --size-range must be set together
+            dest: size_range
+            required: false
+            type: str
+            default: ""
+          - name: "--force"
+            help: "Force format detected or passed nvme pci address to 4K and clean partitions"
+            dest: force
+            type: bool
+            action: store_true
       - name: configure-upgrade
         help: "Upgrade the automated configuration file with new changes of cpu mask or storage devices"
         description: >
@@ -86,6 +117,19 @@ commands:
         description: >
           Run locally on storage nodes and control plane hosts. Remove a previous deployment to support a fresh
           scratch-deployment of cluster software.
+
+      - name: clean-devices
+        help: "clean devices stored in /etc/simplyblock/sn_config_file (local run)"
+        description: >
+          Run locally on storage nodes to clean nvme devices and free them.
+        arguments:
+          - name: "--config-path"
+            help: "Config path to read stored nvme devices from"
+            dest: config_path
+            required: false
+            type: str
+            default: "/etc/simplyblock/sn_config_file"
+
       - name: add-node
         help: "Adds a storage node by its IP address"
         arguments:

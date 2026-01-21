@@ -153,7 +153,6 @@ def test_parse_thread_siblings_list(input, expected):
         assert parse_thread_siblings_list(input) == expected
 
 
-
 @patch.object(DBController, 'get_jm_device_by_id')
 def test_get_node_jm_names(db_controller_get_jm_device_by_id):
 

@@ -18,11 +18,11 @@ from simplyblock_web import node_utils_k8s
 import os
 import subprocess
 
-
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
 
 POD_PREFIX: str = "snode-spdk-pod"
+
 
 def _is_pod_present_for_node() -> bool:
     """
@@ -45,11 +45,11 @@ def _is_pod_present_for_node() -> bool:
         resp = k8s_core_v1.list_namespaced_pod(namespace)
         for pod in resp.items:
             if (
-                pod.metadata and
-                pod.metadata.name and
-                pod.spec and
-                pod.spec.node_name == node_name and
-                pod.metadata.name.startswith(POD_PREFIX)
+                    pod.metadata and
+                    pod.metadata.name and
+                    pod.spec and
+                    pod.spec.node_name == node_name and
+                    pod.metadata.name.startswith(POD_PREFIX)
             ):
                 return True
     except ApiException as e:
@@ -122,13 +122,35 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--cores-percentage',
-        help='The percentage of cores to be used for spdk (0-100)',
-        type=range_type(0, 100),
+        help='The percentage of cores to be used for spdk (0-99)',
+        type=range_type(0, 99),
         dest='cores_percentage',
         required=False,
         default=0
     )
-
+    parser.add_argument(
+        '--force',
+        help='Force format detected or passed nvme pci address to 4K and clean partitions',
+        action='store_true',
+        dest='force',
+        required=False
+    )
+    parser.add_argument(
+        '--device-model',
+        help='NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together',
+        type=str,
+        default='',
+        dest='device_model',
+        required=False
+    )
+    parser.add_argument(
+        '--size-range',
+        help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together',
+        type=str,
+        default='',
+        dest='size_range',
+        required=False
+    )
     return parser.parse_args()
 
 def validate_arguments(args: argparse.Namespace) -> None:
@@ -146,7 +168,6 @@ def validate_arguments(args: argparse.Namespace) -> None:
             raise argparse.ArgumentError(None, '--max-lvol is required')
         if not args.max_prov:
             args.max_prov=0
-
         try:
             max_lvol = int(args.max_lvol)
             if max_lvol <= 0:
@@ -228,7 +249,10 @@ def main() -> None:
             sockets_to_use=sockets_to_use,
             pci_allowed=pci_allowed,
             pci_blocked=pci_blocked,
-            cores_percentage=args.cores_percentage
+            cores_percentage=args.cores_percentage,
+            force=args.force,
+            device_model=args.device_model,
+            size_range=args.size_range
         )
 
         logger.info("create RPC socket mount")
@@ -253,7 +277,6 @@ def main() -> None:
 
         # 4️⃣ Verify
         subprocess.run(["df", "-h", mount_point])
-
     except argparse.ArgumentError as e:
         logger.error(f"Argument error: {e}")
         sys.exit(1)

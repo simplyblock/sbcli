@@ -17,11 +17,20 @@ spec:
           operator: Exists
         - effect: NoExecute
           operator: Exists
+
+      volumes:
+        - name: host-proc
+          hostPath:
+            path: /proc
       containers:
         - name: init-setup
           image: simplyblock/ubuntu-tools:22.04
           securityContext:
             privileged: true
+
+          volumeMounts:
+            - name: host-proc
+              mountPath: /proc
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -44,15 +53,19 @@ spec:
               OS_ID="$(cat /proc/version | awk '{print $3}' | awk -F'-' '{print $NF}')"
 
               if [ "$OS_ID" != "talos" ]; then
-                echo "--- Restarting kubelet ---"
-                nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
-                  if command -v systemctl >/dev/null 2>&1; then
-                    echo "Restarting kubelet..."
-                    systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
-                  else
-                    echo "systemctl not found; skipping kubelet restart"
-                  fi
-                '
+                HUGEPAGES_AFTER=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
+                echo "[INFO] Hugepages after: $HUGEPAGES_AFTER"
+
+                if [ "$HUGEPAGES_BEFORE" != "$HUGEPAGES_AFTER" ]; then
+                  echo "[INFO] Hugepages changed, restarting kubelet..."
+                  nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
+                    if command -v systemctl >/dev/null 2>&1; then
+                      systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
+                    fi
+                  '
+                else
+                  echo "[INFO] Hugepages unchanged, skipping kubelet restart."
+                fi
               else
                 echo "Talos detected - skipping nsenter and kubelet restart."
                 echo "Use 'talosctl service kubelet restart -n $NODE_IP' to restart the node kubelet"
