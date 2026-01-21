@@ -239,7 +239,7 @@ class TaskDTO(BaseModel):
 
 
 class VolumeDTO(BaseModel):
-    id: UUID
+    uuid: UUID
     name: str
     status: str
     health_check: bool
@@ -271,7 +271,7 @@ class VolumeDTO(BaseModel):
     @staticmethod
     def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None):
         return VolumeDTO(
-            id=UUID(model.get_id()),
+            uuid=UUID(model.get_id()),
             name=model.lvol_name,
             status=model.status,
             health_check=model.health_check,
