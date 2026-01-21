@@ -313,3 +313,9 @@ class DBController(metaclass=Singleton):
         for m in ret:
             migrations.append(m)
         return sorted(migrations, key=lambda x: x.create_dt)
+
+    def get_migration_by_id(self, id) -> MigrationObject:
+        migrations = MigrationObject().read_from_db(self.kv_store, id=id)
+        if not migrations:
+            raise KeyError(f'Migration {id} not found')
+        return migrations[0]
