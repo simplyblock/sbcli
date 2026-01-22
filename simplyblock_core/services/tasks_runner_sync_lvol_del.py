@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-
+from typing import Optional
 
 from simplyblock_core import db_controller, utils
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -11,6 +11,14 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
+def get_primary_node(task) -> Optional[StorageNode]:
+    if "primary_node" in task.function_params:
+        return db.get_storage_node_by_id(task.function_params["primary_node"])
+
+    nodes = db.get_primary_storage_nodes_by_secondary_node_id(task.node_id)
+    if nodes:
+        return nodes[0]
 
 
 logger.info("Starting Tasks runner...")
@@ -37,8 +45,9 @@ while True:
                             task.function_result = "canceled"
                             task.status = JobSchedule.STATUS_DONE
                             task.write_to_db(db.kv_store)
-                            primary_node = db.get_storage_node_by_id(task.function_params["primary_node"])
-                            primary_node.lvol_del_sync_lock_reset()
+                            primary_node = get_primary_node(task)
+                            if primary_node:
+                                primary_node.lvol_del_sync_lock_reset()
                             continue
 
                         node = db.get_storage_node_by_id(task.node_id)
@@ -75,7 +84,8 @@ while True:
                         task.function_result = f"bdev {lvol_bdev_name} deleted"
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db.kv_store)
-                        primary_node = db.get_storage_node_by_id(task.function_params["primary_node"])
-                        primary_node.lvol_del_sync_lock_reset()
+                        primary_node = get_primary_node(task)
+                        if primary_node:
+                            primary_node.lvol_del_sync_lock_reset()
 
     time.sleep(3)
