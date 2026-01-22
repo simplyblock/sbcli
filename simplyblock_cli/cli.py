@@ -5,7 +5,7 @@ import logging
 import sys
 import traceback
 
-from simplyblock_cli.clibase import CLIWrapperBase, range_type, regex_type, size_type
+from simplyblock_cli.clibase import CLIWrapperBase, range_type, size_type
 from simplyblock_core import utils
 
 class CLIWrapper(CLIWrapperBase):
@@ -52,7 +52,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_storage_node__device_testing_mode(subparser)
         self.init_storage_node__get_device(subparser)
-        self.init_storage_node__reset_device(subparser)
         self.init_storage_node__restart_device(subparser)
         self.init_storage_node__add_device(subparser)
         self.init_storage_node__remove_device(subparser)
@@ -78,6 +77,7 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__dump_lvstore(subparser)
         if self.developer_mode:
             self.init_storage_node__set(subparser)
+        self.init_storage_node__new_device_from_failed(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -219,13 +219,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'get-device', 'Gets storage device by its id')
         subcommand.add_argument('device_id', help='Device id', type=str)
 
-    def init_storage_node__reset_device(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'reset-device', 'Resets a storage device')
-        subcommand.add_argument('device_id', help='Device id', type=str)
-
     def init_storage_node__restart_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restart-device', 'Restarts a storage device')
         subcommand.add_argument('device_id', help='Device id', type=str)
+        argument = subcommand.add_argument('--force', help='Force remove', dest='force', action='store_true')
 
     def init_storage_node__add_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-device', 'Adds a new storage device')
@@ -285,6 +282,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'restart-jm-device', 'Restarts a journaling device')
         subcommand.add_argument('jm_device_id', help='Journaling device id', type=str)
         argument = subcommand.add_argument('--force', help='Force device remove', dest='force', action='store_true')
+        argument = subcommand.add_argument('--format', help='Format the Alceml device used for JM device', dest='format', action='store_true')
 
     def init_storage_node__send_cluster_map(self, subparser):
         subcommand = self.add_sub_command(subparser, 'send-cluster-map', 'Sends a new cluster map')
@@ -307,6 +305,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('node_id', help='Storage node id', type=str)
         subcommand.add_argument('attr_name', help='attr_name', type=str)
         subcommand.add_argument('attr_value', help='attr_value', type=str)
+
+    def init_storage_node__new_device_from_failed(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'new-device-from-failed', 'Adds a new device to from failed device information')
+        subcommand.add_argument('device_id', help='Device id', type=str)
 
 
     def init_cluster(self):
@@ -871,8 +873,6 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.storage_node__device_testing_mode(sub_command, args)
                 elif sub_command in ['get-device']:
                     ret = self.storage_node__get_device(sub_command, args)
-                elif sub_command in ['reset-device']:
-                    ret = self.storage_node__reset_device(sub_command, args)
                 elif sub_command in ['restart-device']:
                     ret = self.storage_node__restart_device(sub_command, args)
                 elif sub_command in ['add-device']:
@@ -935,6 +935,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.storage_node__set(sub_command, args)
+                elif sub_command in ['new-device-from-failed']:
+                    ret = self.storage_node__new_device_from_failed(sub_command, args)
                 else:
                     self.parser.print_help()
 

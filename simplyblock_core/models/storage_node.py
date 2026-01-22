@@ -4,10 +4,11 @@ from typing import List
 from uuid import uuid4
 
 from simplyblock_core import utils
-from simplyblock_core.models.base_model import BaseNodeObject
+from simplyblock_core.models.base_model import BaseNodeObject, BaseModel
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.rpc_client import RPCClient, RPCException
 
 logger = utils.get_logger(__name__)
@@ -79,8 +80,8 @@ class StorageNode(BaseNodeObject):
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
-    remote_devices: List[NVMeDevice] = []
-    remote_jm_devices: List[JMDevice] = []
+    remote_devices: List[RemoteDevice] = []
+    remote_jm_devices: List[RemoteJMDevice] = []
     rpc_password: str = ""
     rpc_port: int = -1
     rpc_username: str = ""
@@ -105,8 +106,8 @@ class StorageNode(BaseNodeObject):
     hublvol: HubLVol = None  # type: ignore[assignment]
     active_tcp: bool = True
     active_rdma: bool = False
-    lvol_sync_del_queue: List[str] = []
     socket: int = 0
+    firewall_port: int = 5001
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -309,6 +310,8 @@ class StorageNode(BaseNodeObject):
         )
 
     def wait_for_jm_rep_tasks_to_finish(self, jm_vuid):
+        if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
+            return True # no lvstore means no need to wait
         retry = 10
         while retry > 0:
             try:
@@ -327,3 +330,48 @@ class StorageNode(BaseNodeObject):
             except Exception:
                 logger.warning("Failed to get replication task!")
         return False
+
+    def lvol_sync_del(self) -> bool:
+        from simplyblock_core.db_controller import DBController
+        db_controller = DBController()
+        lock = db_controller.get_lvol_del_lock(self.get_id())
+        if lock:
+            return True
+        return False
+
+    def lvol_del_sync_lock(self) -> bool:
+        from simplyblock_core.db_controller import DBController
+        db_controller = DBController()
+        lock = db_controller.get_lvol_del_lock(self.get_id())
+        if not lock:
+            lock = NodeLVolDelLock({"uuid": self.uuid})
+            lock.write_to_db()
+            logger.info(f"Created lvol_del_sync_lock on node: {self.get_id()}")
+        return True
+
+    def lvol_del_sync_lock_reset(self) -> bool:
+        from simplyblock_core.db_controller import DBController
+        db_controller = DBController()
+        task_found = False
+        tasks = db_controller.get_job_tasks(self.cluster_id)
+        for task in tasks:
+            if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL and task.node_id == self.secondary_node_id:
+                if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                    task_found = True
+                    break
+
+        lock = db_controller.get_lvol_del_lock(self.get_id())
+        if task_found:
+            if not lock:
+                lock = NodeLVolDelLock({"uuid": self.uuid})
+                lock.write_to_db()
+            logger.info(f"Created lvol_del_sync_lock on node: {self.get_id()}")
+        else:
+            if lock:
+                lock.remove(db_controller.kv_store)
+                logger.info(f"remove lvol_del_sync_lock from node: {self.get_id()}")
+        return True
+
+
+class NodeLVolDelLock(BaseModel):
+    pass

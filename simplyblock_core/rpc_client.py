@@ -109,11 +109,10 @@ class RPCClient:
         if params:
             payload['params'] = params
         try:
-            logger.debug("Requesting method: %s, params: %s", method, params)
+            logger.debug("From: %s, Requesting method: %s, params: %s", self.ip_address, method, params)
             response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
-        except Exception as e:
-            logger.error(e)
-            return False, str(e)
+        except Exception:
+            raise RPCException("connection error")
 
         ret_code = response.status_code
         ret_content = response.content
@@ -581,7 +580,7 @@ class RPCClient:
             params["uuid"] = uuid
         return self._request("bdev_get_iostat", params)
 
-    def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4):
+    def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4, superblock=False):
         try:
             ret = self.get_bdevs(name)
             if ret:
@@ -593,7 +592,8 @@ class RPCClient:
             "raid_level": raid_level,
             "strip_size_kb": strip_size_kb,
             "base_bdevs": bdevs_list,
-            "io_unmap_limit": 100
+            "io_unmap_limit": 100,
+            "superblock": superblock
         }
         if raid_level == "1":
             params["strip_size_kb"] = 0
@@ -928,7 +928,7 @@ class RPCClient:
         params = {"name": name}
         return self._request("distr_migration_status", params)
 
-    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=64, jobs=64):
+    def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
         params = {
             "name": name,
             "storage_ID": storage_ID,
@@ -941,7 +941,7 @@ class RPCClient:
             params["jobs"] = jobs
         return self._request("distr_migration_failure_start", params)
 
-    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=64, jobs=64):
+    def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
         params = {
             "name": name,
         }
@@ -960,10 +960,9 @@ class RPCClient:
         }
         return self._request("bdev_raid_add_base_bdev", params)
 
-    def bdev_raid_remove_base_bdev(self, raid_bdev, base_bdev):
+    def bdev_raid_remove_base_bdev(self, base_bdev):
         params = {
-            "raid_bdev": raid_bdev,
-            "base_bdev": base_bdev,
+            "name": base_bdev,
         }
         return self._request("bdev_raid_remove_base_bdev", params)
 
@@ -1148,7 +1147,7 @@ class RPCClient:
             "jm_vuid": jm_vuid,
             "suspend": suspend,
         }
-        return self._request("jc_suspend_compression", params)
+        return self._request2("jc_suspend_compression", params)
 
     def nvmf_subsystem_add_listener(self, nqn, trtype, traddr, trsvcid, ana_state=None):
         params = {
@@ -1235,3 +1234,15 @@ class RPCClient:
 
     def nvmf_get_blocked_ports_rdma(self):
         return self._request("nvmf_get_blocked_ports")
+
+    def bdev_raid_get_bdevs(self):
+        params = {
+            "category": "online"
+        }
+        return self._request("bdev_raid_get_bdevs", params)
+
+ 
+
+    
+
+

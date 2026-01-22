@@ -550,7 +550,7 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
             6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
 
-    return int(4.0 * small_pool_count), int(2.5 * large_pool_count)
+    return int(small_pool_count), int(large_pool_count)
 
 
 def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, max_prov, cpu_count):
@@ -636,7 +636,7 @@ def get_logger(name=""):
 
     if not logg.hasHandlers():
         logger_handler = logging.StreamHandler(stream=sys.stdout)
-        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
         logg.addHandler(logger_handler)
         # gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
         # logg.addHandler(gelf_handler)
@@ -743,8 +743,6 @@ def first_six_chars(s: str) -> str:
     If the string is shorter than six characters, returns the entire string.
     """
     return s[:6]
-
-
 def nearest_upper_power_of_2(n):
     # Check if n is already a power of 2
     if (n & (n - 1)) == 0:
@@ -838,7 +836,7 @@ def get_next_rpc_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = 8080
+    port = constants.RPC_PORT_RANGE_START
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.rpc_port > 0:
@@ -851,6 +849,22 @@ def get_next_rpc_port(cluster_id):
             return next_port
 
     return 0
+
+
+def get_next_fw_port(cluster_id):
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    port = constants.FW_PORT_START
+    used_ports = []
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.firewall_port > 0:
+            used_ports.append(node.firewall_port)
+    next_port = port
+    while True:
+        if next_port not in used_ports:
+            return next_port
+        next_port += 1
 
 
 def get_next_dev_port(cluster_id):
@@ -2110,7 +2124,7 @@ def patch_cr_node_status(
 ):
     """
     Patch status.nodes[*] fields for a specific node identified by UUID.
-    
+
     Operations:
       - Update a node (by uuid or mgmtIp)
       - Remove a node (by uuid or mgmtIp)

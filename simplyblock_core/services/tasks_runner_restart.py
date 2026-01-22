@@ -3,6 +3,7 @@ import time
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller, health_controller, tasks_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -127,18 +128,19 @@ def task_runner_device(task):
 
 
 def task_runner_node(task):
-    node = db.get_storage_node_by_id(task.node_id)
+    try:
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        task.function_result = "node not found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
+
     if task.retry >= task.max_retry:
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
-        return True
-
-    if not node:
-        task.function_result = "node not found"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
         return True
 
     if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
@@ -171,6 +173,13 @@ def task_runner_node(task):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db.kv_store)
 
+    cluster = db.get_cluster_by_id(task.cluster_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        task.function_result = f"Cluster is not active: {cluster.status}, retry"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return False
+
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
     logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
@@ -191,19 +200,26 @@ def task_runner_node(task):
         return False
 
 
-    # shutting down node
-    logger.info(f"Shutdown node {node.get_id()}")
-    ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-    if ret:
-        logger.info("Node shutdown succeeded")
+    try:
+        # shutting down node
+        logger.info(f"Shutdown node {node.get_id()}")
+        ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+        if ret:
+            logger.info("Node shutdown succeeded")
+        time.sleep(3)
+    except Exception as e:
+        logger.error(e)
+        return False
 
-    time.sleep(3)
-
-    # resetting node
-    logger.info(f"Restart node {node.get_id()}")
-    ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
-    if ret:
-        logger.info("Node restart succeeded")
+    try:
+        # resetting node
+        logger.info(f"Restart node {node.get_id()}")
+        ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
+        if ret:
+            logger.info("Node restart succeeded")
+    except Exception as e:
+        logger.error(e)
+        return False
 
     time.sleep(3)
     node = db.get_storage_node_by_id(task.node_id)

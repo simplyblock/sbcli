@@ -128,7 +128,7 @@ def scan_devices():
 
 class SPDKParams(BaseModel):
     server_ip: str = Field(pattern=utils.IP_PATTERN)
-    rpc_port: int = Field(constants.RPC_HTTP_PROXY_PORT, ge=1, le=65536)
+    rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=1, le=65536)
     rpc_username: str
     rpc_password: str
     ssd_pcie: Optional[List[str]] = Field(None)
@@ -143,6 +143,7 @@ class SPDKParams(BaseModel):
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
     cluster_id: str
+    firewall_port: int = Field(constants.FW_PORT_START)
 
 
 @api.post('/spdk_process_start', responses={
@@ -155,7 +156,8 @@ def spdk_process_start(body: SPDKParams):
     ssd_pcie_list = " ".join(body.ssd_pcie) if body.ssd_pcie else "none"
     spdk_debug = '1' if body.spdk_debug else ''
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MiB') if body.total_mem else ''
-    spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
+    # spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
+    spdk_mem_mib = 0
 
     node_docker = get_docker_client(timeout=60 * 3)
     for name in {f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"}:
@@ -190,6 +192,7 @@ def spdk_process_start(body: SPDKParams):
             f"PCI_ALLOWED={ssd_pcie_list}",
             f"TOTAL_HP={total_mem_mib}",
             f"NSOCKET={body.socket}",
+            f"FW_PORT={body.firewall_port}",
         ]
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )

@@ -150,26 +150,29 @@ class CLIWrapperBase:
         enable_ha_jm = args.enable_ha_jm
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
-
-        out = storage_ops.add_node(
-            cluster_id=cluster_id,
-            node_addr=node_addr,
-            iface_name=ifname,
-            data_nics_list=data_nics,
-            max_snap=max_snap,
-            spdk_image=spdk_image,
-            spdk_debug=spdk_debug,
-            small_bufsize=small_bufsize,
-            large_bufsize=large_bufsize,
-            num_partitions_per_dev=num_partitions_per_dev,
-            jm_percent=jm_percent,
-            enable_test_device=enable_test_device,
-            namespace=namespace,
-            enable_ha_jm=enable_ha_jm,
-            id_device_by_nqn=args.id_device_by_nqn,
-            partition_size=args.partition_size,
-            ha_jm_count=ha_jm_count,
-        )
+        try:
+            out = storage_ops.add_node(
+                cluster_id=cluster_id,
+                node_addr=node_addr,
+                iface_name=ifname,
+                data_nics_list=data_nics,
+                max_snap=max_snap,
+                spdk_image=spdk_image,
+                spdk_debug=spdk_debug,
+                small_bufsize=small_bufsize,
+                large_bufsize=large_bufsize,
+                num_partitions_per_dev=num_partitions_per_dev,
+                jm_percent=jm_percent,
+                enable_test_device=enable_test_device,
+                namespace=namespace,
+                enable_ha_jm=enable_ha_jm,
+                id_device_by_nqn=args.id_device_by_nqn,
+                partition_size=args.partition_size,
+                ha_jm_count=ha_jm_count,
+            )
+        except Exception as e:
+            print(e)
+            return False
 
         return out
 
@@ -200,11 +203,15 @@ class CLIWrapperBase:
         large_bufsize = args.large_bufsize
         ssd_pcie = args.ssd_pcie
 
-        return storage_ops.restart_storage_node(
-            node_id, max_lvol, max_snap, max_prov,
-            spdk_image, spdk_debug,
-            small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
-            new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
+        try:
+            return storage_ops.restart_storage_node(
+                node_id, max_lvol, max_snap, max_prov,
+                spdk_image, spdk_debug,
+                small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
+                new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
+        except Exception as e:
+            print(e)
+            return False
 
     def storage_node__shutdown(self, sub_command, args):
         return storage_ops.shutdown_storage_node(args.node_id, args.force)
@@ -249,7 +256,7 @@ class CLIWrapperBase:
         return device_controller.reset_storage_device(args.device_id)
 
     def storage_node__restart_device(self, sub_command, args):
-        return device_controller.restart_device(args.device_id)
+        return device_controller.restart_device(args.device_id, args.force)
 
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)
@@ -308,7 +315,7 @@ class CLIWrapperBase:
         return device_controller.remove_jm_device(args.jm_device_id, args.force)
 
     def storage_node__restart_jm_device(self, sub_command, args):
-        return device_controller.restart_jm_device(args.jm_device_id, args.force)
+        return device_controller.restart_jm_device(args.jm_device_id, args.force, args.format)
 
     def storage_node__send_cluster_map(self, sub_command, args):
         node_id = args.node_id
@@ -325,6 +332,9 @@ class CLIWrapperBase:
     def storage_node__dump_lvstore(self, sub_command, args):
         node_id = args.node_id
         return storage_ops.dump_lvstore(node_id)
+
+    def storage_node__new_device_from_failed(self, sub_command, args):
+        return device_controller.new_device_from_failed(args.device_id)
 
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)

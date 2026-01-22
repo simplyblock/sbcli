@@ -3,7 +3,6 @@
 
 import argparse
 import logging
-import os
 import sys
 from typing import List, Optional, cast
 
@@ -16,6 +15,8 @@ from simplyblock_core.storage_node_ops import (
 )
 from simplyblock_cli.clibase import range_type
 from simplyblock_web import node_utils_k8s
+import os
+import subprocess
 
 logger = logging.getLogger(__name__)
 logger.setLevel(constants.LOG_LEVEL)
@@ -150,9 +151,7 @@ def parse_arguments() -> argparse.Namespace:
         dest='size_range',
         required=False
     )
-
     return parser.parse_args()
-
 
 def validate_arguments(args: argparse.Namespace) -> None:
     """
@@ -168,8 +167,7 @@ def validate_arguments(args: argparse.Namespace) -> None:
         if not args.max_lvol:
             raise argparse.ArgumentError(None, '--max-lvol is required')
         if not args.max_prov:
-            args.max_prov = 0
-
+            args.max_prov=0
         try:
             max_lvol = int(args.max_lvol)
             if max_lvol <= 0:
@@ -204,7 +202,7 @@ def main() -> None:
             return
 
         if not args.max_prov:
-            args.max_prov = 0
+            args.max_prov=0
         validate_arguments(args)
 
         if _is_pod_present_for_node():
@@ -257,6 +255,28 @@ def main() -> None:
             size_range=args.size_range
         )
 
+        logger.info("create RPC socket mount")
+        mount_point = "/mnt/ramdisk"
+        size = "1G"
+        fstab_entry = f"tmpfs {mount_point} tmpfs size={size},mode=1777,noatime 0 0\n"
+
+        # 1️⃣ Create the mount point if it doesn't exist
+        os.makedirs(mount_point, exist_ok=True)
+
+        # 2️⃣ Add to /etc/fstab if not already present
+        with open("/etc/fstab", "r+") as fstab:
+            lines = fstab.readlines()
+            if not any(mount_point in line for line in lines):
+                fstab.write(fstab_entry)
+                print(f"Added fstab entry for {mount_point}")
+            else:
+                print(f"fstab entry for {mount_point} already exists")
+
+        # 3️⃣ Mount the RAM disk immediately
+        subprocess.run(["mount", mount_point], check=True)
+
+        # 4️⃣ Verify
+        subprocess.run(["df", "-h", mount_point])
     except argparse.ArgumentError as e:
         logger.error(f"Argument error: {e}")
         sys.exit(1)
