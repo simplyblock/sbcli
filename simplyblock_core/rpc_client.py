@@ -1241,8 +1241,8 @@ class RPCClient:
         }
         return self._request("bdev_raid_get_bdevs", params)
 
- 
-
-    
-
-
+    def distr_debug_placement_map_dump(self, distrib_name):
+        params = {
+            "name": distrib_name
+        }
+        return self._request("distr_debug_placement_map_dump", params)

@@ -2079,6 +2079,8 @@ def restart_storage_node(
                     logger.error("RPC failed bdev_lvol_set_qos_limit")
                     return False
 
+            dump_distrib_placement_map()
+
             online_devices_list = []
             for dev in snode.nvme_devices:
                 if dev.status in [NVMeDevice.STATUS_ONLINE,
@@ -2089,6 +2091,45 @@ def restart_storage_node(
             if online_devices_list:
                 tasks_controller.add_device_mig_task(online_devices_list, snode.cluster_id)
             return True
+
+
+def dump_distrib_placement_map():
+    db_controller = DBController()
+    for snode in db_controller.get_storage_nodes():
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+
+        node_distribs_list = []
+        for bdev in snode.lvstore_stack:
+            type = bdev['type']
+            if type == "bdev_raid":
+                node_distribs_list = bdev["distribs_list"]
+                break
+
+        if not node_distribs_list:
+            logger.error(f"Failed to find distribs list for node: {snode.get_id()}")
+            continue
+
+        def __get_spdk_cont(node):
+            node_docker = docker.DockerClient(base_url=f"tcp://{node.mgmt_ip}:2375", version="auto")
+            for container in node_docker.containers.list():
+                if container.name.startswith(f"spdk_{node.rpc_port}"):  # type: ignore[union-attr]
+                    return container
+
+        base_dir = f"/etc/simplyblock/alceml_placement_maps/{time.time_ns()}/"
+
+        rpc_client = snode.rpc_client()
+        for distr in node_distribs_list:
+            ret = rpc_client.distr_debug_placement_map_dump(distr)
+            if not ret:
+                logger.error(f"Failed to dump placement map on node {snode.get_id()}")
+            else:
+                container = __get_spdk_cont(snode)
+                if container:
+                    res = container.exec_run(cmd=f"mkdir -p {base_dir} ; cp {ret} {base_dir}", stdout=True, stderr=True)
+                    logger.debug(res)
+                new_path = f"{base_dir}/{ret.split('/')[-1]}"
+                logger.info(f"Placement map dumped from node {snode.get_id()}, distrib: {distr}, file: {new_path}")
 
 
 def list_storage_nodes(is_json, cluster_id=None):
