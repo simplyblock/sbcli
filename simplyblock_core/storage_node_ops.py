@@ -2126,7 +2126,9 @@ def dump_distrib_placement_map():
             else:
                 container = __get_spdk_cont(snode)
                 if container:
-                    res = container.exec_run(cmd=f"mkdir -p {base_dir} ; cp {ret} {base_dir}", stdout=True, stderr=True)
+                    res = container.exec_run(cmd=f"mkdir -p {base_dir}", stdout=True, stderr=True)
+                    logger.debug(res)
+                    res = container.exec_run(cmd=f"cp {ret} {base_dir}", stdout=True, stderr=True)
                     logger.debug(res)
                 new_path = f"{base_dir}/{ret.split('/')[-1]}"
                 logger.info(f"Placement map dumped from node {snode.get_id()}, distrib: {distr}, file: {new_path}")
