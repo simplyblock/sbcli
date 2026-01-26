@@ -635,7 +635,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
     # prepare JM device
     jm_device = snode.jm_device
-    if jm_device is None or jm_device.status == JMDevice.STATUS_REMOVED:
+    if jm_device is None:
         return True
 
     if not jm_device or not jm_device.uuid:
@@ -644,20 +644,22 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     jm_device.status = JMDevice.STATUS_UNAVAILABLE
 
     if jm_device.jm_nvme_bdev_list:
-        all_bdevs_found = True
+        jm_bdevs_found = []
         for bdev_name in jm_device.jm_nvme_bdev_list:
             ret = rpc_client.get_bdevs(bdev_name)
             if not ret:
                 logger.error(f"BDev not found: {bdev_name}")
-                all_bdevs_found = False
-                break
+                jm_bdevs_found.append(bdev_name)
 
-        if all_bdevs_found:
+        if len(jm_bdevs_found) > 1:
             ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
-
+        else:
+            logger.error("Only one jm nvme bdev found, setting jm device to removed")
+            jm_device.status = JMDevice.STATUS_REMOVED
+            return True
 
     else:
         nvme_bdev = jm_device.nvme_bdev
