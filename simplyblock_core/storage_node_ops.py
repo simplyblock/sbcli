@@ -2321,9 +2321,12 @@ def shutdown_storage_node(node_id, force=False):
     pci_address = []
     for dev in snode.nvme_devices:
         if dev.pcie_address not in pci_address:
-            ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
-            logger.debug(ret)
-            pci_address.append(dev.pcie_address)
+            try:
+                ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
+                logger.debug(ret)
+                pci_address.append(dev.pcie_address)
+            except Exception as e:
+                logger.debug(e)
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
