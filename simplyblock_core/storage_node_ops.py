@@ -186,13 +186,24 @@ def _search_for_partitions(rpc_client, nvme_device):
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
-    raid_bdev = f"raid_jm_{snode.get_id()}"
-
-    raid_level = "1"
-    ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
-    if not ret:
-        logger.error(f"Failed to create raid_jm_{snode.get_id()}")
-        return False
+    if snode.jm_device and snode.jm_device.raid_bdev:
+        raid_bdev = snode.jm_device.raid_bdev
+        if raid_bdev.startswith("raid_jm_"):
+            raid_level = "1"
+            ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
+            if not ret:
+                logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+                return False
+    else:
+        if len(jm_nvme_bdevs) > 1:
+            raid_bdev = f"raid_jm_{snode.get_id()}"
+            raid_level = "1"
+            ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
+            if not ret:
+                logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+                return False
+        else:
+            raid_bdev = jm_nvme_bdevs[0]
 
     alceml_id = snode.get_id()
     alceml_name = f"alceml_jm_{snode.get_id()}"
@@ -624,7 +635,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
     # prepare JM device
     jm_device = snode.jm_device
-    if jm_device is None or jm_device.status == JMDevice.STATUS_REMOVED:
+    if jm_device is None:
         return True
 
     if not jm_device or not jm_device.uuid:
@@ -633,20 +644,22 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     jm_device.status = JMDevice.STATUS_UNAVAILABLE
 
     if jm_device.jm_nvme_bdev_list:
-        all_bdevs_found = True
+        jm_bdevs_found = []
         for bdev_name in jm_device.jm_nvme_bdev_list:
             ret = rpc_client.get_bdevs(bdev_name)
             if not ret:
                 logger.error(f"BDev not found: {bdev_name}")
-                all_bdevs_found = False
-                break
+                jm_bdevs_found.append(bdev_name)
 
-        if all_bdevs_found:
+        if len(jm_bdevs_found) > 1:
             ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
-
+        else:
+            logger.error("Only one jm nvme bdev found, setting jm device to removed")
+            jm_device.status = JMDevice.STATUS_REMOVED
+            return True
 
     else:
         nvme_bdev = jm_device.nvme_bdev
@@ -2308,9 +2321,12 @@ def shutdown_storage_node(node_id, force=False):
     pci_address = []
     for dev in snode.nvme_devices:
         if dev.pcie_address not in pci_address:
-            ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
-            logger.debug(ret)
-            pci_address.append(dev.pcie_address)
+            try:
+                ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
+                logger.debug(ret)
+                pci_address.append(dev.pcie_address)
+            except Exception as e:
+                logger.debug(e)
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
