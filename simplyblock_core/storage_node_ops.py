@@ -1104,7 +1104,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=node_socket, firewall_port=firewall_port)
+                socket=node_socket, firewall_port=firewall_port, cluster_id=cluster_id)
             time.sleep(5)
 
         except Exception as e:
@@ -1562,7 +1562,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         if health_controller._check_node_api(snode.mgmt_ip):
             logger.info("Stopping SPDK container")
             snode_api = SNodeClient(snode.api_endpoint, timeout=20)
-            snode_api.spdk_process_kill(snode.rpc_port)
+            snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             snode_api.leave_swarm()
             pci_address = []
             for dev in snode.nvme_devices:
@@ -1783,7 +1783,7 @@ def restart_storage_node(
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-            socket=snode.socket, firewall_port=snode.firewall_port)
+            socket=snode.socket, firewall_port=snode.firewall_port, cluster_id=snode.cluster_id)
 
     except Exception as e:
         logger.error(e)
@@ -2321,7 +2321,7 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Stopping SPDK")
     try:
-        SNodeClient(snode.api_endpoint, timeout=10, retry=10).spdk_process_kill(snode.rpc_port)
+        SNodeClient(snode.api_endpoint, timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
@@ -3293,7 +3293,7 @@ def recreate_lvstore(snode, force=False):
     def _kill_app():
         storage_events.snode_restart_failed(snode)
         snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
-        snode_api.spdk_process_kill(snode.rpc_port)
+        snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
     # If LVol Store recovery failed then stop spdk process

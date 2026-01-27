@@ -143,6 +143,7 @@ class SPDKParams(BaseModel):
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
     firewall_port: int = Field(constants.FW_PORT_START)
+    cluster_id: str
 
 
 @api.post('/spdk_process_start', responses={
