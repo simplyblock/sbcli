@@ -659,9 +659,11 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         jm_bdevs_found = []
         for bdev_name in jm_device.jm_nvme_bdev_list:
             ret = rpc_client.get_bdevs(bdev_name)
-            if not ret:
-                logger.error(f"BDev not found: {bdev_name}")
+            if ret:
+                logger.info(f"JM bdev found: {bdev_name}")
                 jm_bdevs_found.append(bdev_name)
+            else:
+                logger.error(f"JM bdev not found: {bdev_name}")
 
         if len(jm_bdevs_found) > 1:
             ret = _create_jm_stack_on_raid(rpc_client, jm_bdevs_found, snode, after_restart=not clear_data)
