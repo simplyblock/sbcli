@@ -19,6 +19,7 @@ def get_primary_node(task) -> Optional[StorageNode]:
     nodes = db.get_primary_storage_nodes_by_secondary_node_id(task.node_id)
     if nodes:
         return nodes[0]
+    return None
 
 
 logger.info("Starting Tasks runner...")

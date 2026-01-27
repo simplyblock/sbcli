@@ -6,7 +6,7 @@ import sys
 import traceback
 
 from simplyblock_cli.clibase import CLIWrapperBase, range_type, size_type
-from simplyblock_core import utils
+from simplyblock_core import utils, constants
 
 class CLIWrapper(CLIWrapperBase):
 
@@ -98,6 +98,10 @@ class CLIWrapper(CLIWrapperBase):
             self.logger.setLevel(logging.DEBUG)
         else:
             self.logger.setLevel(logging.INFO)
+
+        if args.version:
+            print(f"simplyblock version: {constants.SIMPLY_BLOCK_VERSION}")
+            return True
 
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
 
