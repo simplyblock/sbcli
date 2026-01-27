@@ -2234,21 +2234,13 @@ def list_storage_devices(node_id, is_json):
         logger.debug(remote_device)
         logger.debug("*" * 20)
         name = remote_device.alceml_name
-        status = remote_device.status
-        if remote_device.remote_bdev:
-            name = remote_device.remote_bdev
-            try:
-                org_dev = db_controller.get_storage_device_by_id(device.get_id())
-                status = org_dev.status
-            except KeyError:
-                pass
 
         remote_devices.append({
             "UUID": remote_device.uuid,
             "Name": name,
             "Size": utils.humanbytes(remote_device.size),
             "Node ID": remote_device.node_id,
-            "Status": status,
+            "Status": remote_device.status,
         })
 
     for remote_jm_device in snode.remote_jm_devices:
