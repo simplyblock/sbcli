@@ -84,14 +84,6 @@ def task_runner(task):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
     if "migration" not in task.function_params:
-        try:
-            device = db.get_storage_device_by_id(task.device_id)
-        except KeyError:
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = "Device not found"
-            task.write_to_db(db.kv_store)
-            return True
-
         current_online_devices = 0
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             for dev in node.nvme_devices:
@@ -110,8 +102,9 @@ def task_runner(task):
             logger.error(e)
             rsp = False
         if not rsp:
-            logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
-            task.function_result = "Failed to start device migration task, retry later"
+            msg = "Failed to start device migration task, retry later"
+            logger.error(msg)
+            task.function_result =msg
             task.status = JobSchedule.STATUS_SUSPENDED
             task.retry += 1
             task.write_to_db(db.kv_store)
