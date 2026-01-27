@@ -251,7 +251,8 @@ def get_subtasks(master_task_id):
         logger.debug(sub_task)
         data.append({
             "Task ID": sub_task.uuid,
-            "Node ID / Device ID": f"{sub_task.node_id}\n{sub_task.device_id}",
+            "Node ID": sub_task.node_id,
+            "Distrib": sub_task.device_id,
             "Function": sub_task.function_name,
             "Retry": retry,
             "Status": sub_task.status,

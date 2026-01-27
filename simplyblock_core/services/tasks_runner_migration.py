@@ -59,7 +59,6 @@ def task_runner(task):
                     if diff.total_seconds() < 60:
                         task.function_result = "node is online < 1 min, retrying"
                         task.status = JobSchedule.STATUS_SUSPENDED
-                        task.retry += 1
                         task.write_to_db(db.kv_store)
                         return False
                 except Exception as e:
