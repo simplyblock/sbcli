@@ -654,6 +654,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
+            return True
 
         jm_bdevs_found = []
         for bdev_name in jm_device.jm_nvme_bdev_list:
