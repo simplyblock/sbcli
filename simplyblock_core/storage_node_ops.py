@@ -3054,7 +3054,8 @@ def set_node_status(node_id, status, reconnect_on_online=True):
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
-        distr_controller.send_cluster_map_to_node(snode)
+        for device in snode.nvme_devices:
+            distr_controller.send_dev_status_event(device, device.status, target_node=snode)
 
         for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
             if node.get_id() == snode.get_id():
@@ -3063,7 +3064,8 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 try:
                     node.remote_devices = _connect_to_remote_devs(node)
                     node.write_to_db()
-                    distr_controller.send_cluster_map_to_node(node)
+                    for device in node.nvme_devices:
+                        distr_controller.send_dev_status_event(device, device.status, target_node=node)
                 except RuntimeError:
                     logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
                     continue
