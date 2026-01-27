@@ -119,6 +119,7 @@ def process_snap_replicate_finish(task, snapshot):
     snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
     replicate_to_source = task.function_params["replicate_to_source"]
+    replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
     target_prev_snap = None
     if replicate_to_source:
         org_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
@@ -127,11 +128,13 @@ def process_snap_replicate_finish(task, snapshot):
         except KeyError as e:
             logger.error(e)
     else:
-        if snapshot.prev_snap_uuid:
+        if snapshot.snap_ref_id:
             try:
-                prev_snap = db.get_snapshot_by_id(snapshot.prev_snap_uuid)
-                if prev_snap.target_replicated_snap_uuid:
-                    target_prev_snap = db.get_snapshot_by_id(prev_snap.target_replicated_snap_uuid)
+                prev_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
+                for sn_inst in prev_snap.instances:
+                    if sn_inst.lvol.node_id == remote_snode.get_id():
+                        target_prev_snap = sn_inst
+                        break
             except KeyError as e:
                 logger.error(e)
 
@@ -167,14 +170,6 @@ def process_snap_replicate_finish(task, snapshot):
 
     new_snapshot_uuid = str(uuid.uuid4())
 
-    if snapshot.status == SnapShot.STATUS_IN_REPLICATION:
-        snapshot.status = SnapShot.STATUS_ONLINE
-        if replicate_to_source:
-            snapshot.source_replicated_snap_uuid = new_snapshot_uuid
-        else:
-            snapshot.target_replicated_snap_uuid = new_snapshot_uuid
-        snapshot.write_to_db()
-
     new_snapshot = SnapShot()
     new_snapshot.uuid = new_snapshot_uuid
     new_snapshot.cluster_id = remote_snode.cluster_id
@@ -187,17 +182,27 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot.snap_name = snapshot.snap_name
     new_snapshot.blobid = remote_lv.blobid
     new_snapshot.created_at = int(time.time())
-    if replicate_to_source:
-        new_snapshot.target_replicated_snap_uuid = snapshot.uuid
-    else:
-        new_snapshot.source_replicated_snap_uuid = snapshot.uuid
     new_snapshot.status = SnapShot.STATUS_ONLINE
-    if target_prev_snap:
-        new_snapshot.prev_snap_uuid = target_prev_snap.get_id()
-        target_prev_snap.next_snap_uuid = new_snapshot_uuid
-        target_prev_snap.write_to_db()
+    snapshot.instances.append(new_snapshot)
+    if not replicate_as_snap_instance:
+        if replicate_to_source:
+            new_snapshot.target_replicated_snap_uuid = snapshot.uuid
+            snapshot.source_replicated_snap_uuid = new_snapshot_uuid
+        else:
+            snapshot.target_replicated_snap_uuid = new_snapshot_uuid
+            new_snapshot.source_replicated_snap_uuid = snapshot.uuid
+
+        if target_prev_snap:
+            new_snapshot.prev_snap_uuid = target_prev_snap.get_id()
+            target_prev_snap.next_snap_uuid = new_snapshot_uuid
+            target_prev_snap.write_to_db()
 
     new_snapshot.write_to_db()
+
+    if snapshot.status == SnapShot.STATUS_IN_REPLICATION:
+        snapshot.status = SnapShot.STATUS_ONLINE
+
+    snapshot.write_to_db()
 
     # delete lvol object
     remote_lv.bdev_stack = []

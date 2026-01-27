@@ -34,3 +34,4 @@ class SnapShot(BaseModel):
     source_replicated_snap_uuid: str = ""
     next_snap_uuid: str = ""
     prev_snap_uuid: str = ""
+    instances: list = []
