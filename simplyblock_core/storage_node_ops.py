@@ -1873,11 +1873,14 @@ def restart_storage_node(
             logger.error("Failed to set jc singleton mask")
             return False
 
+    node_info, _ = snode_api.info()
     if not snode.ssd_pcie:
-        node_info, _ = snode_api.info()
         ssds = node_info['spdk_pcie_list']
     else:
-        ssds = snode.ssd_pcie
+        ssds = []
+        for ssd in snode.ssd_pcie:
+            if ssd in node_info['spdk_pcie_list']:
+                ssds.append(ssd)
 
     nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
     if not nvme_devs:
