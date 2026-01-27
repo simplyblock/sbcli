@@ -8,7 +8,7 @@ import sys
 import time
 import argcomplete
 
-from simplyblock_core import cluster_ops, utils, db_controller
+from simplyblock_core import cluster_ops, utils, db_controller, constants
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
@@ -63,9 +63,10 @@ class CLIWrapperBase:
         argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
-        self.parser = argparse.ArgumentParser(description='Simplyblock management CLI')
+        self.parser = argparse.ArgumentParser(description=f'Simplyblock management CLI v{constants.SIMPLY_BLOCK_VERSION}')
         self.parser.add_argument("-d", '--debug', help='Print debug messages', required=False, action='store_true')
         self.parser.add_argument('--dev', help='Enable developer options', required=False, action='store_true')
+        self.parser.add_argument("-v", '--version', help='Show package version', required=False, action='store_true')
         self.subparser = self.parser.add_subparsers(dest='command')
 
     def add_command(self, command, help, aliases=None):

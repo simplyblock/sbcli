@@ -85,6 +85,7 @@ SIMPLY_BLOCK_CLI_NAME = get_config_var(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_config_var(
         "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
+SIMPLY_BLOCK_VERSION = get_config_var("SIMPLY_BLOCK_VERSION", "1")
 
 GELF_PORT = 12202
 
