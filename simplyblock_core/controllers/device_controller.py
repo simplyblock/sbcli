@@ -282,7 +282,7 @@ def restart_device(device_id, force=False):
     device_set_online(device_id)
     device_events.device_restarted(device_obj)
 
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+    if snode.jm_device:
         if not snode.jm_device.raid_bdev:
             if snode.jm_device.status == JMDevice.STATUS_UNAVAILABLE:
                 set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
