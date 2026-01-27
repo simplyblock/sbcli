@@ -604,6 +604,7 @@ def check_node(node_id, with_devices=True):
 
         if snode.enable_ha_jm:
             print("*" * 100)
+            connected_jms = []
             logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
             for remote_device in snode.remote_jm_devices:
 
@@ -612,6 +613,7 @@ def check_node(node_id, with_devices=True):
                 logger.log(INFO if bdev_info else ERROR,
                            f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
                 node_remote_devices_check &= bool(bdev_info)
+                connected_jms.append(remote_device.get_id())
 
                 controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
                 if controller_info:
@@ -627,6 +629,15 @@ def check_node(node_id, with_devices=True):
 
                     if bdev_info:
                         logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
+
+            for jm_id in snode.jm_ids:
+                logger.info(f"checking connection to JM device {jm_id}")
+                if jm_id and jm_id not in connected_jms:
+                    for nd in db_controller.get_storage_nodes():
+                        if nd.jm_device and nd.jm_device.get_id() == jm_id:
+                            if nd.status == StorageNode.STATUS_ONLINE:
+                                node_remote_devices_check = False
+                                logger.error(f"JM device {jm_id} is not connected")
 
         print("*" * 100)
         if snode.lvstore_stack:
