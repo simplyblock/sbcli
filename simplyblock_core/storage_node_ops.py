@@ -2111,10 +2111,10 @@ def restart_storage_node(
                 if dev.status in [NVMeDevice.STATUS_ONLINE,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE,
                                   NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                    logger.info(f"Starting migration task for device {dev.get_id()}")
                     online_devices_list.append(dev.get_id())
             if online_devices_list:
-                tasks_controller.add_device_mig_task(online_devices_list, snode.cluster_id)
+                logger.info(f"Starting migration task for node {snode.get_id()}")
+                tasks_controller.add_device_mig_task_for_node(snode.get_id())
             return True
 
 

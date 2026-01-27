@@ -93,15 +93,12 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     return task_obj.uuid
 
 
-def add_device_mig_task(device_id_list, cluster_id):
-    if not device_id_list:
-        return False
+def add_device_mig_task_for_node(node_id):
     sub_tasks = []
-
-    device = db.get_storage_device_by_id(device_id_list[0])
-    tasks = db.get_job_tasks(cluster_id)
+    node = db.get_storage_node_by_id(node_id)
+    cluster_id = node.cluster_id
     master_task = None
-    for task in tasks:
+    for task in  db.get_job_tasks(cluster_id):
         if task.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART :
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 logger.info("Master task found, skip adding new master task")
@@ -114,7 +111,7 @@ def add_device_mig_task(device_id_list, cluster_id):
 
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
-                task_id = _add_task(JobSchedule.FN_DEV_MIG, cluster_id, node.get_id(), device.get_id(),
+                task_id = _add_task(JobSchedule.FN_DEV_MIG, cluster_id, node.get_id(), bdev['name'],
                           max_retry=-1, function_params={'distr_name': bdev['name']}, send_to_cluster_log=False)
                 if task_id:
                     sub_tasks.append(task_id)

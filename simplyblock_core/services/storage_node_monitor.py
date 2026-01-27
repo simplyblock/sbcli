@@ -206,11 +206,13 @@ def set_node_online(node):
         # start migration tasks on node online status change
         online_devices_list = []
         for dev in node.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                logger.info("Adding task to device data migration")
+            if dev.status in [NVMeDevice.STATUS_ONLINE,
+                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                 online_devices_list.append(dev.get_id())
         if online_devices_list:
-            tasks_controller.add_device_mig_task(online_devices_list, node.cluster_id)
+            logger.info(f"Starting migration task for node {node.get_id()}")
+            tasks_controller.add_device_mig_task_for_node(node.get_id())
 
         update_cluster_status(cluster_id)
 

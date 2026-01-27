@@ -115,7 +115,7 @@ def device_set_online(device_id):
     if ret:
         logger.info("Adding task to device data migration")
         dev = DBController().get_storage_device_by_id(device_id)
-        task_id = tasks_controller.add_device_mig_task([device_id], dev.cluster_id)
+        task_id = tasks_controller.add_device_mig_task_for_node(dev.node_id)
         if task_id:
             logger.info(f"Task id: {task_id}")
     return ret
