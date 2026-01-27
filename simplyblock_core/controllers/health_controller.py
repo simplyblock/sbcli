@@ -631,7 +631,7 @@ def check_node(node_id, with_devices=True):
                         logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
 
             for jm_id in snode.jm_ids:
-                logger.info(f"checking connection to JM device {jm_id}")
+                logger.info(f"Checking connection to JM device {jm_id}")
                 if jm_id and jm_id not in connected_jms:
                     for nd in db_controller.get_storage_nodes():
                         if nd.jm_device and nd.jm_device.get_id() == jm_id:
