@@ -14,7 +14,7 @@ from http.server import ThreadingHTTPServer
 from http.server import BaseHTTPRequestHandler
 
 
-rpc_sock = '/var/tmp/spdk.sock'
+rpc_sock = '/mnt/ramdisk/spdk.sock'
 logger_handler = logging.StreamHandler(stream=sys.stdout)
 logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
 logger = logging.getLogger()
@@ -67,6 +67,7 @@ def get_env_var(name, default=None, is_required=False):
         logger.error("env value is required: %s" % name)
         raise Exception("env value is required: %s" % name)
     return os.environ.get(name, default)
+
 
 unix_sockets: list[socket] = []  # type: ignore[valid-type]
 def rpc_call(req):
@@ -214,6 +215,7 @@ try:
     rpc_port = int(rpc_port)
 except Exception:
     rpc_port = 8080
+rpc_sock = f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
 
 is_threading_enabled = bool(is_threading_enabled)
 run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)

@@ -24,8 +24,8 @@ spec:
       operator: Exists
   volumes:
     - name: socket-dir
-      emptyDir:
-        medium: "Memory"
+      hostPath:
+        path: /mnt/ramdisk
     - name: host-sys
       hostPath:
         path: /sys
@@ -93,6 +93,20 @@ spec:
           value: "{{ TOTAL_HP }}"
         - name: RPC_PORT
           value: "{{ RPC_PORT }}"
+        - name: NSOCKET
+          value: "{{ NSOCKET }}"
+        - name: FW_PORT
+          value: "{{ FW_PORT }}"
+        - name: SPDKCSI_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: simplyblock-csi-secret
+              key: secret.json
+        - name: CLUSTER_CONFIG
+          valueFrom:
+            configMapKeyRef:
+              name: simplyblock-csi-cm
+              key: config.json
       lifecycle:
         postStart:
           exec:
@@ -101,7 +115,7 @@ spec:
         privileged: true
       volumeMounts:
         - name: socket-dir
-          mountPath: /var/tmp
+          mountPath: /mnt/ramdisk
         - name: host-sys
           mountPath: /sys
         - name: host-modules
@@ -114,10 +128,10 @@ spec:
           mountPath: /etc/simplyblock
       resources:
         limits:
-          hugepages-2Mi: {{ MEM_GEGA }}Gi
+          hugepages-2Mi: {{ MEM_MEGA }}Mi
           cpu: {{ CORES }}
         requests:
-          hugepages-2Mi: {{ MEM_GEGA }}Gi
+          hugepages-2Mi: {{ MEM_MEGA }}Mi
 
     - name: spdk-proxy-container
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
@@ -125,7 +139,7 @@ spec:
       command: ["python", "simplyblock_core/services/spdk_http_proxy_server.py"]
       volumeMounts:
         - name: socket-dir
-          mountPath: /var/tmp
+          mountPath: /mnt/ramdisk
       env:
         - name: SERVER_IP
           value: "{{ SERVER_IP }}"

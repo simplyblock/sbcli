@@ -4,7 +4,6 @@ import time
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
 logger = utils.get_logger(__name__)
@@ -62,17 +61,17 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
         if last_record:
             time_diff = (now - last_record.date)
             if time_diff > 0:
-                data['read_bytes_ps'] = int((data['read_bytes'] - last_record['read_bytes']) / time_diff)
-                data['read_io_ps'] = int((data['read_io'] - last_record['read_io']) / time_diff)
-                data['read_latency_ps'] = int((data['read_latency_ticks'] - last_record['read_latency_ticks']) / time_diff)
+                data['read_bytes_ps'] = abs(int((data['read_bytes'] - last_record['read_bytes']) / time_diff))
+                data['read_io_ps'] = abs(int((data['read_io'] - last_record['read_io']) / time_diff))
+                data['read_latency_ps'] = abs(int((data['read_latency_ticks'] - last_record['read_latency_ticks']) / time_diff))
 
-                data['write_bytes_ps'] = int((data['write_bytes'] - last_record['write_bytes']) / time_diff)
-                data['write_io_ps'] = int((data['write_io'] - last_record['write_io']) / time_diff)
-                data['write_latency_ps'] = int((data['write_latency_ticks'] - last_record['write_latency_ticks']) / time_diff)
+                data['write_bytes_ps'] = abs(int((data['write_bytes'] - last_record['write_bytes']) / time_diff))
+                data['write_io_ps'] = abs(int((data['write_io'] - last_record['write_io']) / time_diff))
+                data['write_latency_ps'] = abs(int((data['write_latency_ticks'] - last_record['write_latency_ticks']) / time_diff))
 
-                data['unmap_bytes_ps'] = int((data['unmap_bytes'] - last_record['unmap_bytes']) / time_diff)
-                data['unmap_io_ps'] = int((data['unmap_io'] - last_record['unmap_io']) / time_diff)
-                data['unmap_latency_ps'] = int((data['unmap_latency_ticks'] - last_record['unmap_latency_ticks']) / time_diff)
+                data['unmap_bytes_ps'] = abs(int((data['unmap_bytes'] - last_record['unmap_bytes']) / time_diff))
+                data['unmap_io_ps'] = abs(int((data['unmap_io'] - last_record['unmap_io']) / time_diff))
+                data['unmap_latency_ps'] = abs(int((data['unmap_latency_ticks'] - last_record['unmap_latency_ticks']) / time_diff))
 
         else:
             logger.warning("last record not found")
@@ -188,15 +187,15 @@ while True:
                 logger.error("No devices found in node: %s", node.get_id())
                 continue
 
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password,
-                timeout=5, retry=2)
-
+            rpc_client = node.rpc_client(timeout=5, retry=2)
             node_devs_stats = {}
-            ret = rpc_client.get_lvol_stats()
-            if ret:
-                node_devs_stats = {b['name']: b for b in ret['bdevs']}
+            try:
+                ret = rpc_client.get_lvol_stats()
+                if ret:
+                    node_devs_stats = {b['name']: b for b in ret['bdevs']}
+            except Exception as e:
+                logger.error(e)
+                continue
 
             devices_records = []
             for device in node.nvme_devices:
@@ -204,7 +203,11 @@ while True:
                 if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     logger.info(f"Device is skipped: {device.get_id()} status: {device.status}")
                     continue
-                capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)
+                try:
+                    capacity_dict = rpc_client.alceml_get_capacity(device.alceml_name)
+                except Exception as e:
+                    logger.error(e)
+                    continue
                 if device.nvme_bdev in node_devs_stats:
                     stats_dict = node_devs_stats[device.nvme_bdev]
                     record = add_device_stats(cl, device, capacity_dict, stats_dict)
