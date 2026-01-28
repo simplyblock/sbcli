@@ -150,6 +150,14 @@ def parse_arguments() -> argparse.Namespace:
         dest='size_range',
         required=False
     )
+    parser.add_argument(
+        '--nvme-devices',
+        help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1...',
+        type=str,
+        default='',
+        dest='nvme_names',
+        required=False
+    )
 
     return parser.parse_args()
 
@@ -254,7 +262,9 @@ def main() -> None:
             cores_percentage=args.cores_percentage,
             force=args.force,
             device_model=args.device_model,
-            size_range=args.size_range
+            size_range=args.size_range,
+            nvme_names=args.nvme_names,
+            k8s=True
         )
 
     except argparse.ArgumentError as e:

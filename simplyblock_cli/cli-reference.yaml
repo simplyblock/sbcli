@@ -102,6 +102,14 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--nvme-names"
+            help: "Comma separated list of nvme namespace names like nvme0n1,nvme1n1..."
+            description: >
+              Comma separated list of nvme namespace names like nvme0n1,nvme1n1...
+            dest: nvme_names
+            required: false
+            type: str
+            default: ""
           - name: "--force"
             help: "Force format detected or passed nvme pci address to 4K and clean partitions"
             dest: force
@@ -150,6 +158,11 @@ commands:
             dest: partitions
             type: int
             default: 1
+          - name: "--format-4k"
+            help: "Force format nvme devices with 4K"
+            dest: format_4k
+            type: bool
+            action: store_true
           - name: "--jm-percent"
             help: "Number in percent to use for JM from each device"
             dest: jm_percent

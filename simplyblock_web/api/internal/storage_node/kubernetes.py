@@ -680,3 +680,5 @@ api.get('/ifc_is_tcp')(snode_ops.ifc_is_tcp)
 
 api.get('/ifc_is_roce')(snode_ops.ifc_is_roce)
 
+api.post('/format_device_with_4k')(snode_ops.format_device_with_4k)
+
