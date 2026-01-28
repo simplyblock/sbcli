@@ -555,6 +555,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__replication_start(subparser)
         self.init_volume__replication_stop(subparser)
         self.init_volume__replication_status(subparser)
+        self.init_volume__replication_trigger(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -673,6 +674,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists replication status')
         subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
+
+    def init_volume__replication_trigger(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-trigger', 'Start replication for lvol')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
 
 
     def init_control_plane(self):
@@ -1130,6 +1135,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__replication_stop(sub_command, args)
                 elif sub_command in ['replication-status']:
                     ret = self.volume__replication_status(sub_command, args)
+                elif sub_command in ['replication-trigger']:
+                    ret = self.volume__replication_trigger(sub_command, args)
                 else:
                     self.parser.print_help()
 

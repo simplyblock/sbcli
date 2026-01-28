@@ -1705,6 +1705,13 @@ commands:
             help: "Cluster UUID"
             dest: cluster_id
             type: str
+      - name: replication-trigger
+        help: "Start replication for lvol"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
   - name: "control-plane"
     help: "Control plane commands"
     aliases:
