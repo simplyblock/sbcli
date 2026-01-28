@@ -3113,12 +3113,12 @@ def recreate_lvstore_on_sec(secondary_node):
             primary_node.write_to_db()
             return False
 
-        # sending to the node that is being restarted (secondary_node) with the secondary group jm_vuid (primary_node.jm_vuid)
-        ret, err = secondary_node.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
+        # sending to the node that is being restarted (secondary_node) with the secondary group jm_vuid (secondary_node.jm_vuid)
+        ret, err = secondary_node.rpc_client().jc_suspend_compression(jm_vuid=secondary_node.jm_vuid, suspend=False)
         if not ret:
             logger.info("Failed to resume JC compression adding task...")
             tasks_controller.add_jc_comp_resume_task(
-                secondary_node.cluster_id, secondary_node.get_id(), jm_vuid=primary_node.jm_vuid)
+                secondary_node.cluster_id, secondary_node.get_id(), jm_vuid=secondary_node.jm_vuid)
 
         ### 2- create lvols nvmf subsystems
         for lvol in lvol_list:
@@ -3649,12 +3649,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             logger.error(f"Failed to create lvstore on node {sec_node.get_id()}")
             logger.error(err)
             return False
-
-        # sending to the other node (sec_node) with the primary group jm_vuid (snode.jm_vuid)
-        ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
-        if not ret:
-            logger.info("Failed to resume JC compression adding task...")
-            tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
 
         sec_rpc_client = sec_node.rpc_client()
         sec_rpc_client.bdev_examine(snode.raid)
