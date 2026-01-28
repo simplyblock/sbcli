@@ -126,7 +126,7 @@ class ManagementNodeDTO(BaseModel):
 
 
 class StoragePoolDTO(BaseModel):
-    id: UUID
+    uuid: UUID
     name: str
     status: Literal['active', 'inactive']
     max_size: util.Unsigned
@@ -140,7 +140,7 @@ class StoragePoolDTO(BaseModel):
     @staticmethod
     def from_model(model: Pool, stat_obj: Optional[StatsObject]=None):
         return StoragePoolDTO(
-            id=UUID(model.get_id()),
+            uuid=UUID(model.get_id()),
             name=model.pool_name,
             status=model.status,  # type: ignore
             max_size=model.pool_max_size,
@@ -239,7 +239,7 @@ class TaskDTO(BaseModel):
 
 
 class VolumeDTO(BaseModel):
-    id: UUID
+    uuid: UUID
     name: str
     status: str
     health_check: bool
@@ -261,6 +261,7 @@ class VolumeDTO(BaseModel):
     crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
     lvol_priority_class: util.Unsigned
+    do_replicate: bool = False
     max_namespace_per_subsys: int
     max_rw_iops: util.Unsigned
     max_rw_mbytes: util.Unsigned
@@ -271,7 +272,7 @@ class VolumeDTO(BaseModel):
     @staticmethod
     def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None):
         return VolumeDTO(
-            id=UUID(model.get_id()),
+            uuid=UUID(model.get_id()),
             name=model.lvol_name,
             status=model.status,
             health_check=model.health_check,
@@ -309,6 +310,7 @@ class VolumeDTO(BaseModel):
             blobid=model.blobid,
             ns_id=model.ns_id,
             lvol_priority_class=model.lvol_priority_class,
+            do_replicate=model.do_replicate,
             max_namespace_per_subsys=model.max_namespace_per_subsys,
             max_rw_iops=model.rw_ios_per_sec,
             max_rw_mbytes=model.rw_mbytes_per_sec,
