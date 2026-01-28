@@ -1,4 +1,5 @@
 # coding=utf-8
+import glob
 import json
 import logging
 import math
@@ -11,7 +12,7 @@ import sys
 import uuid
 import time
 import socket
-from typing import Union, Any, Optional, Tuple, List, Dict
+from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
 from docker import DockerClient
 from kubernetes import client, config
 from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
@@ -1264,9 +1265,10 @@ def get_nvme_pci_devices():
         return [], []
 
 
-def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range):
+def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names):
     pci_addresses, blocked_devices = get_nvme_pci_devices()
     ssd_pci_set = set(pci_addresses)
+    claim_devices_to_nvme()
 
     # Normalize SSD PCI addresses and user PCI list
     if pci_allowed:
@@ -1288,6 +1290,9 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range):
     elif device_model and size_range:
         pci_addresses = query_nvme_ssd_by_model_and_size(device_model, size_range)
         logger.debug(f"Found nvme devices are {pci_addresses}")
+        pci_allowed = pci_addresses
+    elif nvme_names:
+        pci_addresses = query_nvme_ssd_by_namespace_names(nvme_names)
         pci_allowed = pci_addresses
     elif pci_blocked:
         user_pci_set = set(
@@ -1597,7 +1602,7 @@ def regenerate_config(new_config, old_config, force=False):
 
 
 def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                     cores_percentage=0, force=False, device_model="", size_range=""):
+                     cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None):
     system_info = {}
     nodes_config: dict = {"nodes": []}
 
@@ -1605,7 +1610,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     validate_sockets(sockets_to_use, cores_by_numa)
     logger.debug(f"Cores by numa {cores_by_numa}")
     nics = detect_nics()
-    nvmes = detect_nvmes(pci_allowed, pci_blocked, device_model, size_range)
+    nvmes = detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
     if not nvmes:
         logger.error(
             "There are no enough SSD devices on system, you may run 'sbctl sn clean-devices', to clean devices stored in /etc/simplyblock/sn_config_file")
@@ -1753,6 +1758,29 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     nodes_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
     final_config = regenerate_config(nodes_config, nodes_config, True)
     return final_config, system_info
+
+
+def get_nvme_name_from_pci(pci_address):
+    # Search for the PCI address in the sysfs tree for NVMe devices
+    path = f"/sys/bus/pci/devices/{pci_address}/nvme/nvme*"
+    matches = glob.glob(path)
+
+    if matches:
+        # returns 'nvme0'
+        return os.path.basename(matches[0])
+    return None
+
+
+def format_device_with_4k(pci_device):
+    try:
+        nvme_device = get_nvme_name_from_pci(pci_device)
+        nvme_device_path = f"/dev/{nvme_device}n1"
+        clean_partitions(nvme_device_path)
+        nvme_json_string = get_idns(nvme_device_path)
+        lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
+        format_nvme_device(nvme_device_path, lbaf_id)
+    except Exception as e:
+        logger.error(f"Failed to format device with 4K {e}")
 
 
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
@@ -2370,7 +2398,34 @@ def get_idns(nvme_device: str):
         return "Error: The 'nvme' command was not found. Is 'nvme-cli' installed?"
 
 
+def is_namespace_4k_from_nvme_list(device_path: str) -> bool:
+    """
+    Returns True if nvme list JSON shows SectorSize == 4096 for the given DevicePath
+    (e.g. '/dev/nvme3n1').
+    """
+    try:
+        out = subprocess.check_output(["nvme", "list", "--output-format", "json"], text=True)
+        data = json.loads(out)
+
+        for dev in data.get("Devices", []):
+            if dev.get("DevicePath") == device_path:
+                return int(dev.get("SectorSize", 0)) == 4096
+
+        # Not found in list
+        return False
+
+    except subprocess.CalledProcessError:
+        print("Error: nvme list failed")
+        return False
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"Error parsing nvme list output: {e}")
+        return False
+
+
 def format_nvme_device(nvme_device: str, lbaf_id: int):
+    if is_namespace_4k_from_nvme_list(nvme_device):
+        logger.debug(f"Device {nvme_device} already formatted with 4K...skipping")
+        return
     command = ['nvme', 'format', nvme_device, f"--lbaf={lbaf_id}", '--force']
     print(" ".join(command))
     try:
@@ -2467,9 +2522,58 @@ def query_nvme_ssd_by_model_and_size(model: str, size_range: str) -> list:
     return pci_lst
 
 
-def clean_devices(nvme_devices_list):
-    for pci in nvme_devices_list:
-        pci_utils.ensure_driver(pci, 'nvme')
+def query_nvme_ssd_by_namespace_names(nvme_names: Iterable[str]) -> List[str]:
+    """
+    Match NVMe devices by namespace names (e.g. nvme0n1, nvme1n1) using nvme list -v JSON output.
+    Returns a de-duplicated list of PCI addresses (e.g. 0000:00:03.0).
+    """
+    nvme_names = list(nvme_names or [])
+    if not nvme_names:
+        print("No NVMe device names specified.")
+        return []
+
+    wanted = set(nvme_names)
+
+    json_string = get_nvme_list_verbose()  # should return the JSON string shown in your example
+    data = json.loads(json_string)
+
+    out: List[str] = []
+    seen = set()
+
+    for dev in data.get("Devices", []):
+        for subsys in dev.get("Subsystems", []):
+            for ctrl in subsys.get("Controllers", []):
+                addr = ctrl.get("Address")
+                for ns in ctrl.get("Namespaces", []) or []:
+                    ns_name = ns.get("NameSpace")  # <-- exact key in your JSON
+                    if ns_name in wanted and addr and addr not in seen:
+                        seen.add(addr)
+                        out.append(addr)
+                        break
+
+    return out
+
+
+def claim_devices_to_nvme(config_path=""):
+    config_path = config_path or constants.NODES_CONFIG_FILE
+    nvme_devices_list = []
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+        nvme_devices_list = [
+            pci
+            for node in cfg.get("nodes", [])
+            for pci in node.get("ssd_pcis", [])
+        ]
+        for pci in nvme_devices_list:
+            pci_utils.ensure_driver(pci, 'nvme')
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    return nvme_devices_list
+
+
+def clean_devices(config_path, format, force):
+    nvme_devices_list = claim_devices_to_nvme(config_path)
     try:
         json_string = get_nvme_list_verbose()
         data = json.loads(json_string)
@@ -2488,16 +2592,19 @@ def clean_devices(nvme_devices_list):
                             "NAMESPACE": controller.get("Namespaces")[0].get("NameSpace")
                         })
                         nvme_devices += f"/dev/{controller.get('Namespaces')[0].get('NameSpace')} "
-        logger.warning(f"Formating Nvme devices {nvme_devices}")
-        answer = input("Type YES/Y to continue: ").strip().lower()
-        if answer not in ("yes", "y"):
-            logger.warning("Aborted by user.")
-            exit(1)
+        if format:
+            logger.warning(f"Formating Nvme devices {nvme_devices}")
+            if not force:
+                answer = input("Type YES/Y to continue: ").strip().lower()
+                if answer not in ("yes", "y"):
+                    logger.warning("Aborted by user.")
+                    exit(1)
 
-        for mapping in controllers_list:
-            if mapping['PCI_Address'] in nvme_devices_list:
-                nvme_device_path = f"/dev/{mapping['NAMESPACE']}"
-                clean_partitions(nvme_device_path)
+            for mapping in controllers_list:
+                if mapping['PCI_Address'] in nvme_devices_list:
+                    nvme_device_path = f"/dev/{mapping['NAMESPACE']}"
+                    clean_partitions(nvme_device_path)
+
     except json.JSONDecodeError as e:
         logger.error(f"Error decoding JSON: {e}")
 

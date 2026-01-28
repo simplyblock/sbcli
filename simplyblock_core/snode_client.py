@@ -155,6 +155,10 @@ class SNodeClient:
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_nvme", params)
 
+    def format_device_with_4k(self, device_pci):
+        params = {"device_pci": device_pci}
+        return self._request("POST", "format_device_with_4k", params)
+
     def bind_device_to_spdk(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_spdk", params)
