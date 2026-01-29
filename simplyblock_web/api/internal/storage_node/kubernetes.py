@@ -526,18 +526,11 @@ def spdk_process_kill(query: utils.RPCPortParams):
 def _is_pod_up(rpc_port, cluster_id):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
-    container_name = "spdk-container"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
             if pod.metadata.name.startswith(pod_name):
-                if pod.status.phase == "Running":
-                    cs = next((c for c in pod.status.container_statuses if c.name == container_name),None)
-                    if cs is None:
-                        logger.error(f"Container '{container_name}' not found in pod '{pod_name}'")
-                        return False
-                    if cs.state.running:
-                        return True
+                return pod.status.phase == "Running"
     except ApiException as e:
         logger.error(f"API error: {e}")
         return False
