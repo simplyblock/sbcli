@@ -140,36 +140,17 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
-
         if node.status == node.STATUS_ONLINE:
-
             lvol_count = len(db_controller.get_lvols_by_node_id(node.get_id()))
             if lvol_count >= node.max_lvol:
                 continue
-
-            # Validate Eligible nodes for adding lvol
-            # snode_api = SNodeClient(node.api_endpoint)
-            # result, _ = snode_api.info()
-            # memory_free = result["memory_details"]["free"]
-            # huge_free = result["memory_details"]["huge_free"]
-            # total_node_capacity = db_controller.get_snode_size(node.get_id())
-            # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, node.max_lvol, lvol_size,  total_node_capacity, len(node.lvols))
-            # if error:
-            #     logger.warning(error)
-            #     continue
-            #
+            if node.lvol_sync_del():
+                logger.warning(f"LVol sync delete task found on node: {node.get_id()}, skipping")
+                continue
             online_nodes.append(node)
-            # node_stat_list = db_controller.get_node_stats(node, limit=1000)
-            # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": lvol_count+1,
-                # "cpu": 1 + (node.cpu * node.cpu_hz),
-                # "r_io": combined_record.read_io_ps,
-                # "w_io": combined_record.write_io_ps,
-                # "r_b": combined_record.read_bytes_ps,
-                # "w_b": combined_record.write_bytes_ps
+                "lvol": lvol_count+1
             }
-
             node_stats[node.get_id()] = node_st
 
     if len(online_nodes) <= 1:
@@ -463,14 +444,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
-        for n in nodes:
-            if n.lvol_sync_del():
-                logger.warning(f"LVol sync delete task found on node: {n.get_id()}, skipping")
-            else:
-                host_node = n
-                break
-        if not host_node:
-            return False, "No nodes found with enough resources to create the LVol"
+        host_node = nodes[0]
 
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
