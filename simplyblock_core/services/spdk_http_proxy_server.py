@@ -120,7 +120,6 @@ def rpc_call(req):
 
 
 class ServerHandler(BaseHTTPRequestHandler):
-
     server_session: list[int] = []
     key = ""
     def do_HEAD(self):

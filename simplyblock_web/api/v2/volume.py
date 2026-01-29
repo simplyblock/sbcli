@@ -46,6 +46,9 @@ class _CreateParams(BaseModel):
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
+    fabric: str = "tcp"
+    max_namespace_per_subsys: int = 1
+    do_replicate: bool = False
 
 
 class _CloneParams(BaseModel):
@@ -88,6 +91,10 @@ def add(
             pvc_name=data.pvc_name,
             ndcs=data.ndcs,
             npcs=data.npcs,
+            fabric=data.fabric,
+            max_namespace_per_subsys=data.max_namespace_per_subsys,
+            do_replicate=data.do_replicate,
+
         )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(
@@ -178,6 +185,19 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
     return Response(status_code=204)
 
+@instance_api.post('/replication_start', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
+def replication_start(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    if not lvol_controller.replication_start(volume.get_id()):
+        raise ValueError('Failed to start volume snapshot replication')
+
+    return Response(status_code=204)
+    
+@instance_api.post('/replication_stop', name='clusters:storage-pools:volumes:replication_stop', status_code=204, responses={204: {"content": None}})
+def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    if not lvol_controller.replication_stop(volume.get_id()):
+        raise ValueError('Failed to stop volume snapshot replication')
+
+    return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
 def connect(cluster: Cluster, pool: StoragePool, volume: Volume):
