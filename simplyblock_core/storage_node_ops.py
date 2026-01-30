@@ -1787,7 +1787,14 @@ def restart_storage_node(
     results = None
     try:
         if new_ssd_pcie and type(new_ssd_pcie) is list:
-            snode.ssd_pcie.extend(new_ssd_pcie)
+            for new_ssd in new_ssd_pcie:
+                if new_ssd not in snode.ssd_pcie:
+                    try:
+                        snode_api.bind_device_to_spdk(new_ssd)
+                    except:
+                        pass
+                    snode.ssd_pcie.append(new_ssd)
+
         fdb_connection = cluster.db_connection
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
