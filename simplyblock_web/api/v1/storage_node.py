@@ -252,9 +252,15 @@ def storage_node_add():
     ha_jm_count = 3
     if 'ha_jm_count' in req_data:
         ha_jm_count = int(req_data['ha_jm_count'])
+
     format_4k = False
-    if 'format_4k' in req_data:
-        format_4k = bool(req_data['format_4k'])
+    param = req_data.get('format_4k')
+    if param:
+        if isinstance(param, bool):
+            format_4k = param
+        elif isinstance(param, str):
+            format_4k = param == "true"
+
 
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
