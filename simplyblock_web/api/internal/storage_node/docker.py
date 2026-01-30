@@ -541,6 +541,7 @@ if not os.environ.get("WITHOUT_CLOUD_INFO"):
 
 @api.post('/format_device_with_4k')
 def format_device_with_4k(body: utils.DeviceParams):
+    pci_utils.ensure_driver(body.device_pci, 'nvme')
     init_utils.format_device_with_4k(body.device_pci)
     return utils.get_response(True)
 
