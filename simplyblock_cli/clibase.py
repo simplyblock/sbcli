@@ -104,12 +104,15 @@ class CLIWrapperBase:
         max_prov = utils.parse_size(max_size, assume_unit='G')
         pci_allowed = []
         pci_blocked = []
+        nvme_names = []
         if args.pci_allowed:
             pci_allowed = [str(x) for x in args.pci_allowed.split(',')]
         if args.pci_blocked:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
         if (args.device_model and not args.size_range) or (not args.device_model and args.size_range):
             self.parser.error("device_model and size_range must be set together")
+        if args.nvme_names:
+            nvme_names = [str(x) for x in args.nvme_names.split(',')]
         use_pci_allowed = bool(args.pci_allowed)
         use_pci_blocked = bool(args.pci_blocked)
         use_model_range = bool(args.device_model and args.size_range)
@@ -123,7 +126,7 @@ class CLIWrapperBase:
         return storage_ops.generate_automated_deployment_config(
             args.max_lvol, max_prov, sockets_to_use,args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
-            size_range=args.size_range, cores_percentage=cores_percentage)
+            size_range=args.size_range, cores_percentage=cores_percentage, nvme_names=nvme_names)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
@@ -151,6 +154,7 @@ class CLIWrapperBase:
         enable_ha_jm = args.enable_ha_jm
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
+        format_4k = args.format_4k
         try:
             out = storage_ops.add_node(
                 cluster_id=cluster_id,
@@ -170,6 +174,7 @@ class CLIWrapperBase:
                 id_device_by_nqn=args.id_device_by_nqn,
                 partition_size=args.partition_size,
                 ha_jm_count=ha_jm_count,
+                format_4k=format_4k
             )
         except Exception as e:
             print(e)

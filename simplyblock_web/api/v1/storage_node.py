@@ -252,6 +252,9 @@ def storage_node_add():
     ha_jm_count = 3
     if 'ha_jm_count' in req_data:
         ha_jm_count = int(req_data['ha_jm_count'])
+    format_4k = False
+    if 'format_4k' in req_data:
+        format_4k = bool(req_data['format_4k'])
 
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
@@ -269,6 +272,7 @@ def storage_node_add():
         "namespace": namespace,
         "enable_ha_jm": not disable_ha_jm,
         "ha_jm_count": ha_jm_count,
+        "format_4k": format_4k
     })
 
     return utils.get_response(True)

@@ -150,6 +150,14 @@ def parse_arguments() -> argparse.Namespace:
         dest='size_range',
         required=False
     )
+    parser.add_argument(
+        '--nvme-devices',
+        help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1...',
+        type=str,
+        default='',
+        dest='nvme_names',
+        required=False
+    )
 
     return parser.parse_args()
 
@@ -237,11 +245,14 @@ def main() -> None:
         # Process PCI device filters
         pci_allowed: List[str] = []
         pci_blocked: List[str] = []
+        nvme_names: List[str] = []
 
         if args.pci_allowed:
             pci_allowed = [pci.strip() for pci in args.pci_allowed.split(',') if pci.strip()]
         if args.pci_blocked:
             pci_blocked = [pci.strip() for pci in args.pci_blocked.split(',') if pci.strip()]
+        if args.nvme_names:
+            nvme_names = [nvme_name.strip() for nvme_name in args.nvme_names.split(',') if nvme_name.strip()]
 
         # Generate the deployment configuration
         generate_automated_deployment_config(
@@ -254,7 +265,9 @@ def main() -> None:
             cores_percentage=args.cores_percentage,
             force=args.force,
             device_model=args.device_model,
-            size_range=args.size_range
+            size_range=args.size_range,
+            nvme_names=nvme_names,
+            k8s=True
         )
 
     except argparse.ArgumentError as e:

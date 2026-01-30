@@ -96,6 +96,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--pci-blocked', help='Comma separated list of PCI addresses of Nvme devices to not use for storage devices', type=str, default='', dest='pci_blocked', required=False)
         argument = subcommand.add_argument('--device-model', help='NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together', type=str, default='', dest='device_model', required=False)
         argument = subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together', type=str, default='', dest='size_range', required=False)
+        argument = subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1...', type=str, default='', dest='nvme_names', required=False)
         argument = subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions', dest='force', action='store_true')
 
     def init_storage_node__configure_upgrade(self, subparser):
@@ -114,6 +115,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('node_addr', help='Address of storage node api to add, like <node-ip>:5000', type=str)
         subcommand.add_argument('ifname', help='Management interface name', type=str)
         argument = subcommand.add_argument('--journal-partition', help='1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space.', type=int, default=1, dest='partitions')
+        argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K', dest='format_4k', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=int, default=3, dest='jm_percent')
         argument = subcommand.add_argument('--data-nics', help='Storage network interface names. currently one interface is supported.', type=str, dest='data_nics', nargs='+')

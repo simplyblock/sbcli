@@ -912,7 +912,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3):
+             partition_size="", ha_jm_count=3, format_4k=False):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1098,6 +1098,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         l_cores = node_config.get("l-cores")
         spdk_cpu_mask = node_config.get("cpu_mask")
         for ssd in ssd_pcie:
+            if format_4k:
+                snode_api.format_device_with_4k(ssd)
+                snode_api.bind_device_to_spdk(ssd)
             snode_api.bind_device_to_spdk(ssd)
         try:
             results, err = snode_api.spdk_process_start(
@@ -2728,7 +2731,7 @@ def upgrade_automated_deployment_config():
 
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                                         cores_percentage=0, force=False, device_model="", size_range=""):
+                                         cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False):
     # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
     total_cores = os.cpu_count() or 0
     if total_cores < 6:
@@ -2740,7 +2743,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
 
     nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                        pci_allowed, pci_blocked, cores_percentage, force=force,
-                                                       device_model=device_model, size_range=size_range)
+                                                       device_model=device_model, size_range=size_range, nvme_names=nvme_names)
     if not nodes_config or not nodes_config.get("nodes"):
         return False
     utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
@@ -2752,7 +2755,8 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     for node_config in nodes_config["nodes"]:
         numa = node_config["socket"]
         huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-    utils.create_rpc_socket_mount()
+    if not k8s:
+        utils.create_rpc_socket_mount()
     # for numa, huge_page_memory in huge_page_memory_dict.items():
     #    num_pages = huge_page_memory // (2048 * 1024)
     #    utils.set_hugepages_if_needed(numa, num_pages)
@@ -2852,15 +2856,8 @@ def deploy_cleaner():
     scripts.deploy_cleaner()
 
 
-def clean_devices(config_path):
-    with open(config_path) as f:
-        cfg = json.load(f)
-    ssd_pcis = [
-        pci
-        for node in cfg.get("nodes", [])
-        for pci in node.get("ssd_pcis", [])
-    ]
-    utils.clean_devices(ssd_pcis)
+def clean_devices(config_path, format=True, force=False):
+    utils.clean_devices(config_path, format=format, force=force)
 
 
 def get_host_secret(node_id):
