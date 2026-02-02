@@ -81,8 +81,12 @@ while True:
                             if "code" in err and err["code"] == -19:
                                 logger.error(f"Sync delete completed with error: {err}")
                             else:
-                                logger.error(
-                                    f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
+                                msg =  f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}"
+                                logger.error(msg)
+                                task.function_result = msg
+                                task.status = JobSchedule.STATUS_SUSPENDED
+                                task.write_to_db(db.kv_store)
+                                continue
 
                         task.function_result = f"bdev {lvol_bdev_name} deleted"
                         task.status = JobSchedule.STATUS_DONE
