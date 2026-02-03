@@ -279,6 +279,12 @@ class RPCClient:
             params = {"name": name}
         return self._request("bdev_nvme_get_controllers", params)
 
+    def bdev_nvme_controller_list_2(self, name=None):
+        params = None
+        if name:
+            params = {"name": name}
+        return self._request2("bdev_nvme_get_controllers", params)
+
     def bdev_nvme_controller_attach(self, name, pci_addr):
         return self._request3(
                 "bdev_nvme_attach_controller", 
