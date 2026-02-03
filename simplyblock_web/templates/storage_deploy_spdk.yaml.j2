@@ -66,6 +66,13 @@ spec:
       volumeMounts:
         - name: foundationdb
           mountPath: /etc/foundationdb
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"
 
   containers:
     - name: spdk-container
@@ -125,8 +132,10 @@ spec:
         limits:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
           cpu: {{ CORES }}
+          memory: {{ MEM2_MEGA }}Mi
         requests:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
+          memory: {{ MEM2_MEGA }}Mi
 
     - name: spdk-proxy-container
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
@@ -148,6 +157,13 @@ spec:
           value: "True"
         - name: TIMEOUT
           value: "300"
+      resources:
+        limits:
+          cpu: 1
+          memory: "128Mi"
+        requests:
+          cpu: 1
+          memory: "128Mi"
     {% if MODE == "docker" %}
     - name: fluentd
       image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
