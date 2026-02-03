@@ -3414,7 +3414,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             logger.error(msg)
             return False, msg
 
-    logger.info("Add BDev to subsystem")
+    logger.info("Add BDev to subsystem "+hex(lvol.vuid))
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id, eui64=hex(lvol.vuid))
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
