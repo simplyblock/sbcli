@@ -52,7 +52,7 @@ def process_device_event(event, logger):
             ev_time = event.object_dict['timestamp']
             time_delta = datetime.now() - datetime.strptime(ev_time, '%Y-%m-%dT%H:%M:%S.%fZ')
             if time_delta.total_seconds() > 8:
-                ret, err = snode.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
+                ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
                 if ret:
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, controller ok, skipping")
                     event.status = f'skipping_late_by_{int(time_delta.total_seconds())}s_but_controller_ok'
