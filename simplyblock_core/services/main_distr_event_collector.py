@@ -52,13 +52,18 @@ def process_device_event(event, logger):
             ev_time = event.object_dict['timestamp']
             time_delta = datetime.now() - datetime.strptime(ev_time, '%Y-%m-%dT%H:%M:%S.%fZ')
             if time_delta.total_seconds() > 8:
-                if snode.rpc_client().bdev_nvme_controller_list(device_obj.nvme_controller):
+                ret, err = snode.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
+                if ret:
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, controller ok, skipping")
                     event.status = f'skipping_late_by_{int(time_delta.total_seconds())}s_but_controller_ok'
                     return
-
-                logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, checking controller filed")
-                event.status = f'late_by_{int(time_delta.total_seconds())}s'
+                if err and err['code'] == 22:
+                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, checking controller filed")
+                    event.status = f'late_by_{int(time_delta.total_seconds())}s'
+                else:
+                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, error checking controller: {err}, skipping")
+                    event.status = f'late_by_{int(time_delta.total_seconds())}s_skipping'
+                    return
 
         if device_obj.is_connection_in_progress_to_node(event_node_obj.get_id()):
             logger.warning("Connection attempt was found from node to device, sleeping 5 seconds")
