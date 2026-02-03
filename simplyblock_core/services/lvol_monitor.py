@@ -133,9 +133,20 @@ def process_lvol_delete_finish(lvol):
         if not ret:
             logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
-    # 3-2 async delete lvol bdev from secondary
-    if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-        tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), f"{lvol.lvs_name}/{lvol.lvol_bdev}", primary_node.get_id())
+    lvol_bdev_name=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    if sec_node:
+        if sec_node.status in [StorageNode.STATUS_ONLINE]:
+            logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}")
+            ret, err = sec_node.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
+            if not ret:
+                if "code" in err and err["code"] == -19:
+                    logger.error(f"Sync delete completed with error: {err}")
+                else:
+                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}"
+                    logger.error(msg)
+        elif sec_node.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+            # 3-2 async delete lvol bdev from secondary
+            tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name, primary_node.get_id())
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
