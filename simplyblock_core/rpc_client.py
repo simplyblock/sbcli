@@ -322,7 +322,7 @@ class RPCClient:
         if nsid:
             params['namespace']['nsid'] = nsid
 
-        if euid:
+        if eui64:
             params['namespace']['eui64'] = eui64
         
 
