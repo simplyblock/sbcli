@@ -344,6 +344,7 @@ class StorageNode(BaseNodeObject):
             lock = NodeLVolDelLock({"uuid": self.uuid})
             lock.write_to_db()
             logger.info(f"Created lvol_del_sync_lock on node: {self.get_id()}")
+        time.sleep(0.250)
         return True
 
     def lvol_del_sync_lock_reset(self) -> bool:
@@ -367,6 +368,7 @@ class StorageNode(BaseNodeObject):
             if lock:
                 lock.remove(db_controller.kv_store)
                 logger.info(f"remove lvol_del_sync_lock from node: {self.get_id()}")
+        time.sleep(0.250)
         return True
 
 

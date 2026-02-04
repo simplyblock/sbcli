@@ -142,8 +142,10 @@ def process_lvol_delete_finish(lvol):
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")
                 else:
-                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}"
+                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}, ading task..."
                     logger.error(msg)
+                    tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name,
+                                                            primary_node.get_id())
         elif sec_node.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
             # 3-2 async delete lvol bdev from secondary
             tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name, primary_node.get_id())
