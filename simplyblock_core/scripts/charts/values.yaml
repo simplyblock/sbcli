@@ -19,7 +19,7 @@ grafana:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "25.10.4.2"
+    tag: "R25.10.4.2-JPMC"
     pullPolicy: "Always"
 
 ports:
