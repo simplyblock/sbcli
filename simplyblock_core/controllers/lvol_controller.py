@@ -721,7 +721,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
                         return False, f"Failed to create listener for {lvol.get_id()}"
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid,f"{lvol.vuid:016X}")
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, lvol.ns_id)
     if not ret:
         return False, "Failed to add bdev to subsystem"
     lvol.ns_id = int(ret)
@@ -765,7 +765,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, f"{lvol.vuid:016X}")
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, lvol.ns_id)
     # if not ret:
     #     return False, "Failed to add bdev to subsystem"
 
