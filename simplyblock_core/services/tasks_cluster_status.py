@@ -12,7 +12,7 @@ cluster_commands = [
     f"{SBCLI_NAME} cluster show",
     f"{SBCLI_NAME} cluster get-capacity",
     f"{SBCLI_NAME} cluster get-io-stats",
-    f"{SBCLI_NAME} cluster get-logs --limit 0",
+    f"{SBCLI_NAME} cluster get-logs --limit 1000",
     f"{SBCLI_NAME} lvol list --cluster-id",
 ]
 
