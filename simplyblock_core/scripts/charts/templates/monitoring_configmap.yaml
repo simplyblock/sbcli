@@ -1,12 +1,17 @@
-
+{{- $name := printf "%s-simplyblock-prometheus-config" .Release.Name -}}
+{{- $existing := (lookup "v1" "ConfigMap" .Release.Namespace $name) -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Release.Name }}-simplyblock-prometheus-config
+  name: {{ $name }}
   labels:
     app: simplyblock-prometheus
   namespace: {{ .Release.Namespace }}
 data:
+  {{- if $existing }}
+  prometheus.yml: |
+{{ index $existing.data "prometheus.yml" | indent 4 }}
+  {{- else }}
   prometheus.yml: |
     global:
       scrape_interval: 30s
@@ -14,7 +19,6 @@ data:
         monitor: 'codelab-monitor'
 
     scrape_configs:
-
       - job_name: 'cluster_metrics'
         static_configs:
           - targets: ['simplyblock-webappapi:5000']
@@ -23,6 +27,7 @@ data:
         basic_auth:
           username:
           password:
+  {{- end }}
 
 ---
 apiVersion: v1
