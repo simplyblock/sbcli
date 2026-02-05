@@ -1791,8 +1791,8 @@ def restart_storage_node(
                 if new_ssd not in snode.ssd_pcie:
                     try:
                         snode_api.bind_device_to_spdk(new_ssd)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.error(e)
                     snode.ssd_pcie.append(new_ssd)
 
         fdb_connection = cluster.db_connection
