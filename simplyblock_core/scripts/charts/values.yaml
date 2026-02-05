@@ -20,7 +20,7 @@ image:
     pullPolicy: "Always"
 
 ports:
-  lvolNvmfPortStart: 9100
+  lvolNvmfPortStart:
 
 storageclass:  
   allowedTopologyZones: []
@@ -58,7 +58,7 @@ opensearch:
   persistence:
     enabled: true
     storageClass: local-hostpath
-    size: 20Gi
+    size: 10Gi
 
   resources:
     requests:
@@ -185,10 +185,21 @@ ingress:
   controller:
     hostNetwork: true  
     dnsPolicy: ClusterFirstWithHostNet
+    replicaCount: 2
     service:
       type: ClusterIP
     extraArgs:
       tcp-services-configmap: "simplyblock/simplyblock-tcp-services"
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - ingress
+            topologyKey: "kubernetes.io/hostname"
     nodeSelector: {}
 
 

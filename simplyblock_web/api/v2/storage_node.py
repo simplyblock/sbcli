@@ -51,6 +51,7 @@ class StorageNodeParams(BaseModel):
     cr_namespace: str
     cr_plural: str
     ha_jm_count: int = Field(3)
+    format_4k: bool = Field(False)
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -77,6 +78,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams):
             'cr_namespace': parameters.cr_namespace,
             'cr_plural': parameters.cr_plural,
             "ha_jm_count": parameters.ha_jm_count,
+            "format_4k": parameters.format_4k,
         }
     )
     if not task_id_or_false:

@@ -74,7 +74,7 @@ spec:
                       operator: In
                       values:
                         - worker
-                        - worker-isolated
+                        - worker-isolated-{{ HOSTNAME }}
                 nodeSelector:
                   matchLabels:
                     kubernetes.io/hostname: {{ HOSTNAME }}
@@ -87,7 +87,7 @@ spec:
               metadata:
                 name: worker-isolated-{{ HOSTNAME }}
                 labels:
-                  machineconfiguration.openshift.io/role: worker-isolated
+                  machineconfiguration.openshift.io/role: worker-isolated-{{ HOSTNAME }}
               spec:
                 kernelArguments:
                   - "nohz_full=${ISOLATED_CORES}"
@@ -102,11 +102,11 @@ spec:
               apiVersion: machineconfiguration.openshift.io/v1
               kind: KubeletConfig
               metadata:
-                name: set-static-cpu-manager
+                name: set-static-cpu-manager-{{ HOSTNAME }}
               spec:
                 machineConfigPoolSelector:
                   matchLabels:
-                    machineconfiguration.openshift.io/role: worker-isolated
+                    machineconfiguration.openshift.io/role: worker-isolated-{{ HOSTNAME }}
                 kubeletConfig:
                   cpuManagerPolicy: static
                   cpuManagerReconcilePeriod: 5s
@@ -117,5 +117,5 @@ spec:
               echo "[INFO] Marking node as configured."
               touch "$MARKER"
 
-              echo "[INFO] Node is rebooting. Sleeping indefinitely to stop pipeline..."
-              sleep infinity
+              echo "[INFO] Node is rebooting. Sleeping for 5 minutes to stop pipeline gracefully..."
+              sleep 300
