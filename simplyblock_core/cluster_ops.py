@@ -352,8 +352,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
-
         db_connection = fdb_cluster_string
+        
+        logger.info("Patching prometheus configmap...")
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     if not disable_monitoring:
         if ingress_host_source == "hostip":
@@ -364,8 +366,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         _add_graylog_input(dns_name, monitoring_secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
-        if mode == "kubernetes":
-            utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     cluster.db_connection = db_connection
     cluster.status = Cluster.STATUS_UNREADY
