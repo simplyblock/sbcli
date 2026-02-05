@@ -268,6 +268,8 @@ class SPDKParams(BaseModel):
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
+    socket: Optional[int] = Field(None, ge=0)
+    firewall_port: Optional[int] = Field(constants.FW_PORT_START)
     cluster_id: str
 
 
@@ -338,8 +340,8 @@ def spdk_process_start(body: SPDKParams):
             "L_CORES": body.l_cores,
             "CORES": core_utils.get_total_cpu_cores(body.l_cores),
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
-            'MEM_GEGA': core_utils.convert_size(body.spdk_mem, 'GiB', round_up=True),
-            'MEM2_GEGA': core_utils.convert_size(body.system_mem, 'GiB', round_up=True),
+            'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
+            'MEM2_MEGA': (core_utils.convert_size(body.system_mem, 'MiB', round_up=True) // 2) * 2,
             'SERVER_IP': body.server_ip,
             'RPC_PORT': body.rpc_port,
             'RPC_USERNAME': body.rpc_username,
@@ -356,7 +358,9 @@ def spdk_process_start(body: SPDKParams):
             'CLUSTER_ID': first_six_cluster_id,
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
-            'TOTAL_HP': total_mem_mib
+            'TOTAL_HP': total_mem_mib,
+            'NSOCKET': body.socket,
+            'FW_PORT': body.firewall_port
         }
 
         if ubuntu_host:
@@ -522,11 +526,18 @@ def spdk_process_kill(query: utils.RPCPortParams):
 def _is_pod_up(rpc_port, cluster_id):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
+    container_name = "spdk-container"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
             if pod.metadata.name.startswith(pod_name):
-                return pod.status.phase == "Running"
+                if pod.status.phase == "Running":
+                    cs = next((c for c in pod.status.container_statuses if c.name == container_name),None)
+                    if cs is None:
+                        logger.error(f"Container '{container_name}' not found in pod '{pod_name}'")
+                        return False
+                    if cs.state.running:
+                        return True
     except ApiException as e:
         logger.error(f"API error: {e}")
         return False
@@ -639,10 +650,13 @@ def apply_config():
     # Set Huge page memory
     huge_page_memory_dict: dict = {}
     for node_config in nodes:
+        hg_memory = node_config["huge_page_memory"]
+        if int(node_config["max_size"]) > 0:
+            hg_memory = max(hg_memory , node_config["max_size"])
         numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + hg_memory + 1000000000
     for numa, huge_page_memory in huge_page_memory_dict.items():
-        num_pages = huge_page_memory // (2048 * 1024)
+        num_pages = huge_page_memory // 2000000
         core_utils.set_hugepages_if_needed(numa, num_pages)
 
     return utils.get_response(True)

@@ -15,7 +15,7 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import cluster_events, device_controller, qos_controller
+from simplyblock_core.controllers import cluster_events, device_controller, qos_controller, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -313,16 +313,17 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.fabric_tcp = protocols["tcp"]
     cluster.fabric_rdma = protocols["rdma"]
     cluster.is_single_node = is_single_node
-    if grafana_endpoint:
-        cluster.grafana_endpoint = grafana_endpoint
-    elif ingress_host_source == "hostip":
-        cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
-        graylog_endpoint = f"http://{dev_ip}/graylog"
-        os_endpoint = f"http://{dev_ip}/opensearch"
+
+    if ingress_host_source == "hostip":
+        base = dev_ip
     else:
-        cluster.grafana_endpoint = f"http://{dns_name}/grafana"
-        graylog_endpoint = f"http://{dns_name}/graylog"
-        os_endpoint = f"http://{dns_name}/opensearch"
+        base = dns_name
+
+    graylog_endpoint = f"http://{base}/graylog"
+    os_endpoint      = f"http://{base}/opensearch"
+    default_grafana  = f"http://{base}/grafana"
+
+    cluster.grafana_endpoint = grafana_endpoint or default_grafana
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
@@ -333,6 +334,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
+    cluster.full_page_unmap = False
 
     if mode == "docker":
         if not disable_monitoring:
@@ -359,7 +361,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if ingress_host_source == "hostip":
             dns_name = dev_ip
 
-        
+
         _set_max_result_window(os_endpoint)
 
         _add_graylog_input(graylog_endpoint, monitoring_secret)
@@ -438,7 +440,7 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None, 
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
                 cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None) -> str:
 
 
@@ -489,7 +491,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
         if enable_monitoring == "true":
             graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
-            os_endpoint = constants.OS_K8S_ENDPOINT          
+            os_endpoint = constants.OS_K8S_ENDPOINT
             _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
             _set_max_result_window(os_endpoint)
@@ -498,7 +500,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     if cluster.mode  == "kubernetes":
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
-                    
+
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
     cluster.distr_bs = distr_bs
@@ -524,6 +526,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     protocols = parse_protocols(fabric)
     cluster.fabric_tcp = protocols["tcp"]
     cluster.fabric_rdma = protocols["rdma"]
+    cluster.full_page_unmap = False
 
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
@@ -634,9 +637,8 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             snode.lvstore_status = "failed"
             snode.write_to_db()
             logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-            if not force:
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to activate cluster")
+            set_cluster_status(cl_id, ols_status)
+            raise ValueError("Failed to activate cluster")
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
@@ -658,10 +660,8 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             snode.lvstore_status = "failed"
             snode.write_to_db()
             logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-            if not force:
-                logger.error("Failed to activate cluster")
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to activate cluster")
+            set_cluster_status(cl_id, ols_status)
+            raise ValueError("Failed to activate cluster")
 
     # reorder qos classes ids
     qos_classes = db_controller.get_qos(cl_id)
@@ -681,6 +681,15 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
                 if not ret:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
+
+    # Start JC compression on each node
+    if ols_status == Cluster.STATUS_UNREADY:
+        for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+            if node.status == StorageNode.STATUS_ONLINE:
+                ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+                if not ret:
+                    logger.info("Failed to resume JC compression adding task...")
+                    tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=node.jm_vuid)
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
@@ -1170,6 +1179,7 @@ def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
         if record.event in ["device_status", "node_status"]:
             msg = msg+f" ({record.count})"
 
+        logger.debug(record)
         out.append({
             "Date": record.get_date_string(),
             "NodeId": record.node_id,
@@ -1205,7 +1215,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         for service in cluster_docker.services.list():
             if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
             "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
-                if service.name == "app_CachingNodeMonitor":
+                if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
                     logger.info(f"Removing service {service.name}")
                     service.remove()
                 else:
@@ -1330,7 +1340,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.info(f"Restarting node: {node.get_id()} with SPDK image: {spdk_image}")
             else:
                 logger.info(f"Restarting node: {node.get_id()}")
-            storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
+            try:
+                storage_node_ops.restart_storage_node(node.get_id(), force=True, spdk_image=spdk_image)
+            except Exception as e:
+                logger.debug(e)
+                logger.error(f"Failed to restart node: {node.get_id()}")
+                return
 
     logger.info("Done")
 

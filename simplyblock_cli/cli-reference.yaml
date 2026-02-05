@@ -47,7 +47,7 @@ commands:
               _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
             dest: max_prov
             type: str
-            required: true
+            required: false
           - name: "--nodes-per-socket"
             help: "number of each node to be added per each socket."
             dest: nodes_per_socket
@@ -60,6 +60,16 @@ commands:
             dest: sockets_to_use
             type: str
             default: "0"
+          - name: "--cores-percentage"
+            help: "The percentage of cores to be used for spdk (0-99)"
+            description: >
+              The percentage of cores to be used for spdk (0-99)
+            dest: cores_percentage
+            type:
+              range:
+                min: 0
+                max: 99
+            default: 0
           - name: "--pci-allowed"
             help: "Comma separated list of PCI addresses of Nvme devices to use for storage devices."
             description: >
@@ -76,6 +86,27 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--device-model"
+            help: "NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together"
+            description: >
+              NVMe SSD model string, example: --model PM1628,  --device-model and --size-range must be set together
+            dest: device_model
+            required: false
+            type: str
+            default: ""
+          - name: "--size-range"
+            help: "NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together"
+            description: >
+              NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987,  --device-model and --size-range must be set together
+            dest: size_range
+            required: false
+            type: str
+            default: ""
+          - name: "--force"
+            help: "Force format detected or passed nvme pci address to 4K and clean partitions"
+            dest: force
+            type: bool
+            action: store_true
       - name: configure-upgrade
         help: "Upgrade the automated configuration file with new changes of cpu mask or storage devices"
         description: >
@@ -86,6 +117,19 @@ commands:
         description: >
           Run locally on storage nodes and control plane hosts. Remove a previous deployment to support a fresh
           scratch-deployment of cluster software.
+
+      - name: clean-devices
+        help: "clean devices stored in /etc/simplyblock/sn_config_file (local run)"
+        description: >
+          Run locally on storage nodes to clean nvme devices and free them.
+        arguments:
+          - name: "--config-path"
+            help: "Config path to read stored nvme devices from"
+            dest: config_path
+            required: false
+            type: str
+            default: "/etc/simplyblock/sn_config_file"
+
       - name: add-node
         help: "Adds a storage node by its IP address"
         arguments:
@@ -437,16 +481,6 @@ commands:
             help: "Device id"
             dest: device_id
             type: str
-      - name: reset-device
-        help: "Resets a storage device"
-        usage: >
-          Hardware device reset. Resetting the device can return the device from an unavailable into online state, if
-          successful.
-        arguments:
-          - name: "device_id"
-            help: "Device id"
-            dest: device_id
-            type: str
       - name: restart-device
         help: "Restarts a storage device"
         usage: >
@@ -458,6 +492,11 @@ commands:
             help: "Device id"
             dest: device_id
             type: str
+          - name: "--force"
+            help: "Force remove"
+            dest: force
+            type: bool
+            action: store_true
       - name: add-device
         help: "Adds a new storage device"
         usage: >
@@ -603,6 +642,11 @@ commands:
             dest: force
             type: bool
             action: store_true
+          - name: "--format"
+            help: "Format the Alceml device used for JM device"
+            dest: format
+            type: bool
+            action: store_true
       - name: send-cluster-map
         help: "Sends a new cluster map"
         private: true
@@ -656,6 +700,16 @@ commands:
           - name: "attr_value"
             help: "attr_value"
             dest: attr_value
+            type: str
+      - name: new-device-from-failed
+        help: "Adds a new device to from failed device information"
+        usage: >
+          A previously failed and migrated device may be added back into the cluster as a new device. The new device
+          would have the same info as the failed device but would be empty and not contain any data.
+        arguments:
+          - name: "device_id"
+            help: "Device id"
+            dest: device_id
             type: str
   - name: "cluster"
     help: "Cluster commands"
@@ -1650,6 +1704,13 @@ commands:
           - name: "cluster_id"
             help: "Cluster UUID"
             dest: cluster_id
+            type: str
+      - name: replication-trigger
+        help: "Start replication for lvol"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
             type: str
   - name: "control-plane"
     help: "Control plane commands"

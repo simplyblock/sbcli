@@ -6,6 +6,7 @@ import logging
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
+
 logger = logging.getLogger()
 
 
@@ -18,7 +19,7 @@ class FirewallClient:
 
     def __init__(self, node, timeout=300, retry=5):
         self.node = node
-        self.ip_address = f"{node.mgmt_ip}:5001"
+        self.ip_address = f"{node.mgmt_ip}:{node.firewall_port}"
         self.url = 'http://%s/' % self.ip_address
         self.timeout = timeout
         self.session = requests.session()
@@ -41,7 +42,7 @@ class FirewallClient:
             response = self.session.request(method, self.url+path, data=data,
                                             timeout=self.timeout, params=params)
         except Exception as e:
-            raise e
+            raise FirewallClientException(str(e))
 
         logger.debug("Response: status_code: %s, content: %s",
                      response.status_code, response.content)

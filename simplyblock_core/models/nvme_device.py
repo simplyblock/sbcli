@@ -47,24 +47,38 @@ class NVMeDevice(BaseModel):
     nvmf_nqn: str = ""
     nvmf_port: int = 0
     nvmf_multipath: bool = False
-    overload_percentage: int = 0  # Unused
-    partition_jm_bdev: str = ""  # Unused
-    partition_jm_size: int = 0  # Unused
-    partition_main_bdev: str = ""  # Unused
-    partition_main_size: int = 0  # Unused
-    partitions_count: int = 0  # Unused
     pcie_address: str = ""
     physical_label: int = 0
     pt_bdev: str = ""
     qos_bdev: str = ""
     remote_bdev: str = ""
     retries_exhausted: bool = False
-    sequential_number: int = 0  # Unused
     serial_number: str = ""
     size: int = -1
     testing_bdev: str = ""
     connecting_from_node: str = ""
     previous_status: str = ""
+
+    def __change_dev_connection_to(self, connecting_from_node):
+        from simplyblock_core.db_controller import DBController
+        db = DBController()
+        for n in db.get_storage_nodes():
+            if n.nvme_devices:
+                for d in n.nvme_devices:
+                    if d.get_id() == self.get_id():
+                        d.connecting_from_node = connecting_from_node
+                        n.write_to_db()
+                        break
+
+    def lock_device_connection(self, node_id):
+        self.__change_dev_connection_to(node_id)
+
+    def release_device_connection(self):
+        self.__change_dev_connection_to("")
+
+    def is_connection_in_progress_to_node(self, node_id):
+        if self.connecting_from_node and self.connecting_from_node == node_id:
+            return True
 
 
 class JMDevice(NVMeDevice):
@@ -73,3 +87,18 @@ class JMDevice(NVMeDevice):
     jm_bdev: str = ""
     jm_nvme_bdev_list: List[str] = []
     raid_bdev: str = ""
+
+
+class RemoteDevice(BaseModel):
+
+    remote_bdev: str = ""
+    alceml_name: str = ""
+    node_id: str = ""
+    size: int = -1
+    nvmf_multipath: bool = False
+
+
+class RemoteJMDevice(RemoteDevice):
+
+    jm_bdev: str = ""
+

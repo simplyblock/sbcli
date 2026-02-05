@@ -142,36 +142,17 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
-
         if node.status == node.STATUS_ONLINE:
-
             lvol_count = len(db_controller.get_lvols_by_node_id(node.get_id()))
             if lvol_count >= node.max_lvol:
                 continue
-
-            # Validate Eligible nodes for adding lvol
-            # snode_api = SNodeClient(node.api_endpoint)
-            # result, _ = snode_api.info()
-            # memory_free = result["memory_details"]["free"]
-            # huge_free = result["memory_details"]["huge_free"]
-            # total_node_capacity = db_controller.get_snode_size(node.get_id())
-            # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, node.max_lvol, lvol_size,  total_node_capacity, len(node.lvols))
-            # if error:
-            #     logger.warning(error)
-            #     continue
-            #
+            if node.lvol_sync_del():
+                logger.warning(f"LVol sync delete task found on node: {node.get_id()}, skipping")
+                continue
             online_nodes.append(node)
-            # node_stat_list = db_controller.get_node_stats(node, limit=1000)
-            # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": lvol_count+1,
-                # "cpu": 1 + (node.cpu * node.cpu_hz),
-                # "r_io": combined_record.read_io_ps,
-                # "w_io": combined_record.write_io_ps,
-                # "r_b": combined_record.read_bytes_ps,
-                # "w_b": combined_record.write_bytes_ps
+                "lvol": lvol_count+1
             }
-
             node_stats[node.get_id()] = node_st
 
     if len(online_nodes) <= 1:
@@ -284,6 +265,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 host_node = nodes[0]
             else:
                 return False, f"Can not find storage node: {host_id_or_name}"
+        if host_node.lvol_sync_del():
+            logger.error(f"LVol sync deletion found on node: {host_node.get_id()}")
+            return False, f"LVol sync deletion found on node: {host_node.get_id()}"
 
     if namespace:
         try:
@@ -459,14 +443,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
         lvol.max_namespace_per_subsys = max_namespace_per_subsys
 
-    nodes = []
-    if host_node:
-        nodes.insert(0, host_node)
-    else:
+    if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
     is_active_primary = getattr(host_node, attr_name)
@@ -739,7 +721,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
                         return False, f"Failed to create listener for {lvol.get_id()}"
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, lvol.ns_id)
     if not ret:
         return False, "Failed to add bdev to subsystem"
     lvol.ns_id = int(ret)
@@ -783,7 +765,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, lvol.ns_id)
     # if not ret:
     #     return False, "Failed to add bdev to subsystem"
 
@@ -1389,6 +1371,10 @@ def resize_lvol(id, new_size):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
+    if snode.lvol_sync_del():
+        logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
+        return False, f"LVol sync deletion found on node: {snode.get_id()}"
+
     logger.info(f"Resizing LVol: {lvol.get_id()}")
     logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {utils.humanbytes(new_size)}")
 
@@ -1760,6 +1746,87 @@ def inflate_lvol(lvol_id):
     else:
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
+
+def replication_trigger(lvol_id):
+    # create snapshot and replicate it
+    db_controller = DBController()
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    snapshot_controller.add(lvol_id, f"replication_{lvol_id}")
+
+    tasks = []
+    snaps = []
+    out = {
+        "lvol": lvol,
+        "last_snapshot_id": None,
+        "last_replication_time": None,
+        "last_replication_duration": None,
+        "replicated_count": None,
+        "snaps": None,
+        "tasks": None,
+    }
+    for task in db_controller.get_job_tasks(node.cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+
+            if snap.lvol.get_id() != lvol_id:
+                continue
+
+            snaps.append(snap)
+            tasks.append(task)
+            # duration = ""
+            # try:
+            #     if task.status == JobSchedule.STATUS_RUNNING:
+            #         duration = utils.strfdelta_seconds(int(time.time()) - task.function_params["start_time"])
+            #     elif "end_time" in task.function_params:
+            #         duration = utils.strfdelta_seconds(
+            #             task.function_params["end_time"] - task.function_params["start_time"])
+            # except Exception as e:
+            #     logger.error(e)
+            # status = task.status
+            # if task.canceled:
+            #     status = "cancelled"
+            # replicate_to = "target"
+            # if "replicate_to_source" in task.function_params:
+            #     if task.function_params["replicate_to_source"] is True:
+            #         replicate_to = "source"
+            # offset = 0
+            # if "offset" in task.function_params:
+            #     offset = task.function_params["offset"]
+            # data.append({
+            #     "Task ID": task.uuid,
+            #     "Snapshot ID": snap.uuid,
+            #     "Size": utils.humanbytes(snap.used_size),
+            #     "Duration": duration,
+            #     "Offset": offset,
+            #     "Status": status,
+            #     "Replicate to": replicate_to,
+            #     "Result": task.function_result,
+            #     "Cluster ID": task.cluster_id,
+            # })
+
+    if tasks:
+        tasks = sorted(tasks, key=lambda x: x.date)
+        snaps = sorted(snaps, key=lambda x: x.creation_dt)
+        out["snaps"] = snaps
+        out["tasks"] = tasks
+        out["replicated_count"] = len(snaps)
+        last_task = tasks[-1]
+        last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
+        out["last_snapshot_id"] = last_snap.get_id()
+        out["last_replication_time"] = last_task.updated_at
+        if "end_time" in last_task.function_params:
+            duration = utils.strfdelta_seconds(
+                last_task.function_params["end_time"] - last_task.function_params["start_time"])
+        else:
+            duration = utils.strfdelta_seconds(int(time.time()) - last_task.function_params["start_time"])
+        out["last_replication_duration"] = duration
+
+    return out
 
 def replication_start(lvol_id):
     db_controller = DBController()

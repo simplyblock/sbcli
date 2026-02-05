@@ -40,8 +40,7 @@ class SNodeClient:
             response = self.session.request(method, self.url+path, data=data,
                                             timeout=self.timeout, params=params)
         except Exception as e:
-            logger.error("Request failed: %s", e)
-            raise e
+            raise SNodeClientException(str(e))
 
         logger.debug("Response: status_code: %s, content: %s",
                      response.status_code, response.content)
@@ -69,11 +68,14 @@ class SNodeClient:
         if ret_code == 422:
             raise SNodeClientException(f"Request validation failed: '{response.text}'")
 
-        logger.error("Unknown http status: %s", ret_code)
-        return None, None
+        raise SNodeClientException(f"Unknown http status: {ret_code}")
 
     def is_live(self):
-        return self._request("GET", "check")
+        try:
+            return self._request("GET", "check")
+        except SNodeClientException:
+            logger.warning("Failed to call snode/check, trying snode/info")
+            return self.info()
 
     def info(self):
         return self._request("GET", "info")
@@ -81,7 +83,7 @@ class SNodeClient:
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
-                           total_mem=None, system_mem=None, cluster_mode=None, cluster_id=None):
+                           total_mem=None, system_mem=None, cluster_mode=None, socket=0, cluster_id=None, firewall_port=0):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -113,8 +115,13 @@ class SNodeClient:
             params["system_mem"] = system_mem
         if cluster_mode:
             params["cluster_mode"] = cluster_mode
+        params["socket"] = socket
+
         if cluster_id:
             params["cluster_id"] = cluster_id
+        if firewall_port:
+            params["firewall_port"] = firewall_port
+        params["socket"] = socket
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):

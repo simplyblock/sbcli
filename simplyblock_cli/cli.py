@@ -5,7 +5,7 @@ import logging
 import sys
 import traceback
 
-from simplyblock_cli.clibase import CLIWrapperBase, range_type, regex_type, size_type
+from simplyblock_cli.clibase import CLIWrapperBase, range_type, size_type
 from simplyblock_core import utils
 
 class CLIWrapper(CLIWrapperBase):
@@ -36,6 +36,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__configure(subparser)
         self.init_storage_node__configure_upgrade(subparser)
         self.init_storage_node__deploy_cleaner(subparser)
+        self.init_storage_node__clean_devices(subparser)
         self.init_storage_node__add_node(subparser)
         self.init_storage_node__delete(subparser)
         self.init_storage_node__remove(subparser)
@@ -51,7 +52,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_storage_node__device_testing_mode(subparser)
         self.init_storage_node__get_device(subparser)
-        self.init_storage_node__reset_device(subparser)
         self.init_storage_node__restart_device(subparser)
         self.init_storage_node__add_device(subparser)
         self.init_storage_node__remove_device(subparser)
@@ -77,6 +77,7 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__dump_lvstore(subparser)
         if self.developer_mode:
             self.init_storage_node__set(subparser)
+        self.init_storage_node__new_device_from_failed(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -87,17 +88,25 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node')
         argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=True)
-        argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=True)
+        argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=False)
         argument = subcommand.add_argument('--nodes-per-socket', help='number of each node to be added per each socket.', type=int, default=1, dest='nodes_per_socket')
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes', type=str, default='0', dest='sockets_to_use')
+        argument = subcommand.add_argument('--cores-percentage', help='The percentage of cores to be used for spdk (0-99)', type=range_type(0, 99), default=0, dest='cores_percentage')
         argument = subcommand.add_argument('--pci-allowed', help='Comma separated list of PCI addresses of Nvme devices to use for storage devices.', type=str, default='', dest='pci_allowed', required=False)
         argument = subcommand.add_argument('--pci-blocked', help='Comma separated list of PCI addresses of Nvme devices to not use for storage devices', type=str, default='', dest='pci_blocked', required=False)
+        argument = subcommand.add_argument('--device-model', help='NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together', type=str, default='', dest='device_model', required=False)
+        argument = subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together', type=str, default='', dest='size_range', required=False)
+        argument = subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions', dest='force', action='store_true')
 
     def init_storage_node__configure_upgrade(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure-upgrade', 'Upgrade the automated configuration file with new changes of cpu mask or storage devices')
 
     def init_storage_node__deploy_cleaner(self, subparser):
         subcommand = self.add_sub_command(subparser, 'deploy-cleaner', 'Cleans a previous simplyblock deploy (local run)')
+
+    def init_storage_node__clean_devices(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clean-devices', 'clean devices stored in /etc/simplyblock/sn_config_file (local run)')
+        argument = subcommand.add_argument('--config-path', help='Config path to read stored nvme devices from', type=str, default='/etc/simplyblock/sn_config_file', dest='config_path', required=False)
 
     def init_storage_node__add_node(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a storage node by its IP address')
@@ -210,13 +219,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'get-device', 'Gets storage device by its id')
         subcommand.add_argument('device_id', help='Device id', type=str)
 
-    def init_storage_node__reset_device(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'reset-device', 'Resets a storage device')
-        subcommand.add_argument('device_id', help='Device id', type=str)
-
     def init_storage_node__restart_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restart-device', 'Restarts a storage device')
         subcommand.add_argument('device_id', help='Device id', type=str)
+        argument = subcommand.add_argument('--force', help='Force remove', dest='force', action='store_true')
 
     def init_storage_node__add_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-device', 'Adds a new storage device')
@@ -276,6 +282,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'restart-jm-device', 'Restarts a journaling device')
         subcommand.add_argument('jm_device_id', help='Journaling device id', type=str)
         argument = subcommand.add_argument('--force', help='Force device remove', dest='force', action='store_true')
+        argument = subcommand.add_argument('--format', help='Format the Alceml device used for JM device', dest='format', action='store_true')
 
     def init_storage_node__send_cluster_map(self, subparser):
         subcommand = self.add_sub_command(subparser, 'send-cluster-map', 'Sends a new cluster map')
@@ -298,6 +305,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('node_id', help='Storage node id', type=str)
         subcommand.add_argument('attr_name', help='attr_name', type=str)
         subcommand.add_argument('attr_value', help='attr_value', type=str)
+
+    def init_storage_node__new_device_from_failed(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'new-device-from-failed', 'Adds a new device to from failed device information')
+        subcommand.add_argument('device_id', help='Device id', type=str)
 
 
     def init_cluster(self):
@@ -544,6 +555,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__replication_start(subparser)
         self.init_volume__replication_stop(subparser)
         self.init_volume__replication_status(subparser)
+        self.init_volume__replication_trigger(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -662,6 +674,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists replication status')
         subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
+
+    def init_volume__replication_trigger(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-trigger', 'Start replication for lvol')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
 
 
     def init_control_plane(self):
@@ -863,6 +879,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_node__configure_upgrade(sub_command, args)
                 elif sub_command in ['deploy-cleaner']:
                     ret = self.storage_node__deploy_cleaner(sub_command, args)
+                elif sub_command in ['clean-devices']:
+                    ret = self.storage_node__clean_devices(sub_command, args)
                 elif sub_command in ['add-node']:
                     if not self.developer_mode:
                         args.jm_percent = 3
@@ -914,8 +932,6 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.storage_node__device_testing_mode(sub_command, args)
                 elif sub_command in ['get-device']:
                     ret = self.storage_node__get_device(sub_command, args)
-                elif sub_command in ['reset-device']:
-                    ret = self.storage_node__reset_device(sub_command, args)
                 elif sub_command in ['restart-device']:
                     ret = self.storage_node__restart_device(sub_command, args)
                 elif sub_command in ['add-device']:
@@ -978,6 +994,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.storage_node__set(sub_command, args)
+                elif sub_command in ['new-device-from-failed']:
+                    ret = self.storage_node__new_device_from_failed(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1117,6 +1135,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__replication_stop(sub_command, args)
                 elif sub_command in ['replication-status']:
                     ret = self.volume__replication_status(sub_command, args)
+                elif sub_command in ['replication-trigger']:
+                    ret = self.volume__replication_trigger(sub_command, args)
                 else:
                     self.parser.print_help()
 
