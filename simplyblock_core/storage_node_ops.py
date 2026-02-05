@@ -2061,6 +2061,19 @@ def restart_storage_node(
             ret = recreate_lvstore(snode, force=force_lvol_recreate)
         except Exception as e:
             logger.error(e)
+            storage_events.snode_restart_failed(snode)
+            snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+            snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+            set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            if sec_node:
+                if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                    fw_api = FirewallClient(sec_node, timeout=5, retry=2)
+                    port_type = "tcp"
+                    if sec_node.active_rdma:
+                        port_type = "udp"
+                    fw_api.firewall_set_port(snode.lvol_subsys_port, port_type, "allow", sec_node.rpc_port)
+                    tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
             return False
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if not ret:
