@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 import simplyblock_core.utils.pci as pci_utils
+import simplyblock_core.utils as init_utils
 from simplyblock_web import utils, node_utils
 
 logger = core_utils.get_logger(__name__)
@@ -536,6 +537,13 @@ if not os.environ.get("WITHOUT_CLOUD_INFO"):
 
     if CLOUD_INFO:
         SYSTEM_ID = CLOUD_INFO["id"]
+
+
+@api.post('/format_device_with_4k')
+def format_device_with_4k(body: utils.DeviceParams):
+    pci_utils.ensure_driver(body.device_pci, 'nvme')
+    init_utils.format_device_with_4k(body.device_pci)
+    return utils.get_response(True)
 
 
 @api.post('/bind_device_to_spdk')
