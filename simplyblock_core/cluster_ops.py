@@ -313,16 +313,17 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.fabric_tcp = protocols["tcp"]
     cluster.fabric_rdma = protocols["rdma"]
     cluster.is_single_node = is_single_node
-    if grafana_endpoint:
-        cluster.grafana_endpoint = grafana_endpoint
-    elif ingress_host_source == "hostip":
-        cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
-        graylog_endpoint = f"http://{dev_ip}/graylog"
-        os_endpoint = f"http://{dev_ip}/opensearch"
+
+    if ingress_host_source == "hostip":
+        base = dev_ip
     else:
-        cluster.grafana_endpoint = f"http://{dns_name}/grafana"
-        graylog_endpoint = f"http://{dns_name}/graylog"
-        os_endpoint = f"http://{dns_name}/opensearch"
+        base = dns_name
+
+    graylog_endpoint = f"http://{base}/graylog"
+    os_endpoint      = f"http://{base}/opensearch"
+    default_grafana  = f"http://{base}/grafana"
+
+    cluster.grafana_endpoint = grafana_endpoint or default_grafana
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT

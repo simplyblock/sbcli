@@ -67,30 +67,30 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
-        counter=0
-        while(counter<5):
-          waiting = False
-          for controller in ret[0]["ctrlrs"]:
-            controller_state = controller["state"]
-            logger.info(f"Controller found: {name}, status: {controller_state}")
-            if controller_state== "failed":
-                #we can remove the controller only for certain, if its failed. other states are intermediate and require retry.
-                rpc_client.bdev_nvme_detach_controller(name)
-                time.sleep(2)
-                break
-            elif controller_state == "resetting" or controller_state == "deleting" or controller_state == "reconnect_is_delayed":
-                if counter < 5:
-                   time.sleep(2)
-                   waiting = True
-                   break
-                else: #this should never happen. It means controller is "hanging" in an intermediate state for more than 10 seconds. usually if some io is hanging.
-                   raise RuntimeError(f"Controller: {name}, status is {controller_state}")
-          if not waiting:
-               counter=5
-          else:
-               counter+=1
+        counter = 0
+        while (counter < 5):
+            waiting = False
+            for controller in ret[0]["ctrlrs"]:
+                controller_state = controller["state"]
+                logger.info(f"Controller found: {name}, status: {controller_state}")
+                if controller_state== "failed":
+                    # we can remove the controller only for certain, if its failed. other states are intermediate and require retry.
+                    rpc_client.bdev_nvme_detach_controller(name)
+                    time.sleep(2)
+                    break
+                elif controller_state == "resetting" or controller_state == "deleting" or controller_state == "reconnect_is_delayed":
+                    if counter < 5:
+                        time.sleep(2)
+                        waiting = True
+                        break
+                    else:  # this should never happen. It means controller is "hanging" in an intermediate state for more than 10 seconds. usually if some io is hanging.
+                        raise RuntimeError(f"Controller: {name}, status is {controller_state}")
+            if not waiting:
+                counter = 5
+            else:
+                counter += 1
 
-        #if reattach:
+        # if reattach:
         #    rpc_client.bdev_nvme_detach_controller(name)
         #    time.sleep(1)
 
@@ -101,36 +101,36 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
         db_ctrl = DBController()
         node = db_ctrl.get_storage_node_by_id(device.node_id)
         if node.active_rdma:
-           tr_type = "RDMA"
+            tr_type = "RDMA"
         else:
-           if node.active_tcp:
-              tr_type = "TCP"
-           else:
-             msg = "target node to connect has no active fabric."
-             logger.error(msg)
-             raise RuntimeError(msg)
+            if node.active_tcp:
+                tr_type = "TCP"
+            else:
+                msg = "target node to connect has no active fabric."
+                logger.error(msg)
+                raise RuntimeError(msg)
 
         for ip in device.nvmf_ip.split(","):
-           ret = rpc_client.bdev_nvme_attach_controller(
-            name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
-            multipath=device.nvmf_multipath)
-           if not bdev_name and ret and isinstance(ret, list):
+            ret = rpc_client.bdev_nvme_attach_controller(
+                name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
+                multipath=device.nvmf_multipath)
+            if not bdev_name and ret and isinstance(ret, list):
                 bdev_name = ret[0]
 
-           if device.nvmf_multipath:
+            if device.nvmf_multipath:
                 rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
         if not bdev_name:
-           msg = "Bdev name not returned from controller attach"
-           logger.error(msg)
-           raise RuntimeError(msg)
+            msg = "Bdev name not returned from controller attach"
+            logger.error(msg)
+            raise RuntimeError(msg)
         bdev_found = False
         for i in range(5):
-              ret = rpc_client.get_bdevs(bdev_name)
-              if ret:
+            ret = rpc_client.get_bdevs(bdev_name)
+            if ret:
                 bdev_found = True
                 break
-              else:
+            else:
                 time.sleep(1)
 
         device.release_device_connection()
@@ -187,13 +187,24 @@ def _search_for_partitions(rpc_client, nvme_device):
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
-    raid_bdev = f"raid_jm_{snode.get_id()}"
-
-    raid_level = "1"
-    ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
-    if not ret:
-        logger.error(f"Failed to create raid_jm_{snode.get_id()}")
-        return False
+    if snode.jm_device and snode.jm_device.raid_bdev:
+        raid_bdev = snode.jm_device.raid_bdev
+        if raid_bdev.startswith("raid_jm_"):
+            raid_level = "1"
+            ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
+            if not ret:
+                logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+                return False
+    else:
+        if len(jm_nvme_bdevs) > 1:
+            raid_bdev = f"raid_jm_{snode.get_id()}"
+            raid_level = "1"
+            ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
+            if not ret:
+                logger.error(f"Failed to create raid_jm_{snode.get_id()}")
+                return False
+        else:
+            raid_bdev = jm_nvme_bdevs[0]
 
     alceml_id = snode.get_id()
     alceml_name = f"alceml_jm_{snode.get_id()}"
@@ -625,7 +636,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
     # prepare JM device
     jm_device = snode.jm_device
-    if jm_device is None or jm_device.status == JMDevice.STATUS_REMOVED:
+    if jm_device is None:
         return True
 
     if not jm_device or not jm_device.uuid:
@@ -634,20 +645,36 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     jm_device.status = JMDevice.STATUS_UNAVAILABLE
 
     if jm_device.jm_nvme_bdev_list:
-        all_bdevs_found = True
-        for bdev_name in jm_device.jm_nvme_bdev_list:
-            ret = rpc_client.get_bdevs(bdev_name)
+        if len(jm_device.jm_nvme_bdev_list) == 1:
+            ret = rpc_client.get_bdevs(jm_device.jm_nvme_bdev_list[0])
             if not ret:
-                logger.error(f"BDev not found: {bdev_name}")
-                all_bdevs_found = False
-                break
-
-        if all_bdevs_found:
+                logger.error(f"BDev not found: {jm_device.jm_nvme_bdev_list[0]}")
+                jm_device.status = JMDevice.STATUS_REMOVED
+                return True
             ret = _create_jm_stack_on_raid(rpc_client, jm_device.jm_nvme_bdev_list, snode, after_restart=not clear_data)
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
+            return True
 
+        jm_bdevs_found = []
+        for bdev_name in jm_device.jm_nvme_bdev_list:
+            ret = rpc_client.get_bdevs(bdev_name)
+            if ret:
+                logger.info(f"JM bdev found: {bdev_name}")
+                jm_bdevs_found.append(bdev_name)
+            else:
+                logger.error(f"JM bdev not found: {bdev_name}")
+
+        if len(jm_bdevs_found) > 1:
+            ret = _create_jm_stack_on_raid(rpc_client, jm_bdevs_found, snode, after_restart=not clear_data)
+            if not ret:
+                logger.error("Failed to create JM device")
+                return False
+        else:
+            logger.error("Only one jm nvme bdev found, setting jm device to removed")
+            jm_device.status = JMDevice.STATUS_REMOVED
+            return True
 
     else:
         nvme_bdev = jm_device.nvme_bdev
@@ -975,7 +1002,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # Calculate pool count
         max_prov = 0
         if node_config.get("max_size"):
-           max_prov = int(utils.parse_size(node_config.get("max_size")))
+            max_prov = int(utils.parse_size(node_config.get("max_size")))
         if max_prov < 0:
             logger.error(f"Incorrect max-prov value {max_prov}")
             return False
@@ -1169,6 +1196,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.active_tcp = active_tcp
         snode.active_rdma = active_rdma
 
+        if 'cpu_count' in node_info:
+            snode.cpu = node_info['cpu_count']
         if 'cpu_hz' in node_info:
             snode.cpu_hz = node_info['cpu_hz']
         if 'memory' in node_info:
@@ -1176,7 +1205,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if 'hugepages' in node_info:
             snode.hugepages = node_info['hugepages']
 
-        snode.cpu = len(utils.hexa_to_cpu_list(spdk_cpu_mask))
         snode.l_cores = l_cores or ""
         snode.spdk_cpu_mask = spdk_cpu_mask or ""
         snode.spdk_mem = minimum_hp_memory
@@ -1696,8 +1724,8 @@ def restart_storage_node(
 
     if max_prov > 0:
         try:
-          max_prov = int(utils.parse_size(max_prov))
-          snode.max_prov = max_prov
+            max_prov = int(utils.parse_size(max_prov))
+            snode.max_prov = max_prov
         except Exception as e:
             logger.debug(e)
             logger.error(f"Invalid max_prov value: {max_prov}")
@@ -1879,11 +1907,14 @@ def restart_storage_node(
             logger.error("Failed to set jc singleton mask")
             return False
 
+    node_info, _ = snode_api.info()
     if not snode.ssd_pcie:
-        node_info, _ = snode_api.info()
         ssds = node_info['spdk_pcie_list']
     else:
-        ssds = snode.ssd_pcie
+        ssds = []
+        for ssd in snode.ssd_pcie:
+            if ssd in node_info['spdk_pcie_list']:
+                ssds.append(ssd)
 
     nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
     if not nvme_devs:
@@ -1944,8 +1975,7 @@ def restart_storage_node(
             snode.nvme_devices.append(dev)
 
     snode.write_to_db(db_controller.kv_store)
-    if node_ip:
-
+    if node_ip and len(new_devices) > 0:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
@@ -2225,21 +2255,13 @@ def list_storage_devices(node_id, is_json):
         logger.debug(remote_device)
         logger.debug("*" * 20)
         name = remote_device.alceml_name
-        status = remote_device.status
-        if remote_device.remote_bdev:
-            name = remote_device.remote_bdev
-            try:
-                org_dev = db_controller.get_storage_device_by_id(device.get_id())
-                status = org_dev.status
-            except KeyError:
-                pass
 
         remote_devices.append({
             "UUID": remote_device.uuid,
             "Name": name,
             "Size": utils.humanbytes(remote_device.size),
             "Node ID": remote_device.node_id,
-            "Status": status,
+            "Status": remote_device.status,
         })
 
     for remote_jm_device in snode.remote_jm_devices:
@@ -2327,9 +2349,12 @@ def shutdown_storage_node(node_id, force=False):
     pci_address = []
     for dev in snode.nvme_devices:
         if dev.pcie_address not in pci_address:
-            ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
-            logger.debug(ret)
-            pci_address.append(dev.pcie_address)
+            try:
+                ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
+                logger.debug(ret)
+                pci_address.append(dev.pcie_address)
+            except Exception as e:
+                logger.debug(e)
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
@@ -3043,7 +3068,8 @@ def set_node_status(node_id, status, reconnect_on_online=True):
         if snode.enable_ha_jm:
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.write_to_db(db_controller.kv_store)
-        distr_controller.send_cluster_map_to_node(snode)
+        for device in snode.nvme_devices:
+            distr_controller.send_dev_status_event(device, device.status, target_node=snode)
 
         for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
             if node.get_id() == snode.get_id():
@@ -3052,7 +3078,8 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 try:
                     node.remote_devices = _connect_to_remote_devs(node)
                     node.write_to_db()
-                    distr_controller.send_cluster_map_to_node(node)
+                    for device in node.nvme_devices:
+                        distr_controller.send_dev_status_event(device, device.status, target_node=node)
                 except RuntimeError:
                     logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
                     continue
@@ -3403,8 +3430,8 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             logger.error(msg)
             return False, msg
 
-    logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
+    logger.info("Add BDev to subsystem "+f"{lvol.vuid:016X}")
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id, eui64=f"{lvol.vuid:016X}")
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
