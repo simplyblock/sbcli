@@ -316,7 +316,7 @@ def replication_start(uuid):
     except KeyError as e:
         return utils.get_response_error(str(e), 404)
 
-    ret = lvol_controller.replication_start(uuid)
+    ret = lvol_controller.replication_trigger(uuid)
     return utils.get_response(ret)
 
 @bp.route('/lvol/replication_stop/<string:uuid>', methods=['PUT'])
