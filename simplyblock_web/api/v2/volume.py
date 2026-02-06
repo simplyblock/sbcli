@@ -136,7 +136,8 @@ def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -
     ret = db.get_lvol_stats(volume, 1)
     if ret:
         stat_obj = ret[0]
-    return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj)
+    rep_info = lvol_controller.get_replication_info(volume.get_id())
+    return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj, rep_info)
 
 
 class UpdatableLVolParams(BaseModel):
