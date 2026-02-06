@@ -214,10 +214,10 @@ simplyblock:
     
   storageNodes:
     name: demo-node
-    clusterImage: public.ecr.aws/simply-block/simplyblock:main-sfam-2359
+    clusterImage: public.ecr.aws/simply-block/simplyblock:snapshot_replication_operator_support
     mgmtIfc: eth0
     maxLVol: 10
-    maxSize: 150G
+    maxSize: 0
     partitions: 0
     corePercentage: 65
     spdkDebug: false

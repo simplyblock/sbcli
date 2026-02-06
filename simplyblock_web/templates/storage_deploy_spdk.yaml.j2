@@ -97,16 +97,6 @@ spec:
           value: "{{ NSOCKET }}"
         - name: FW_PORT
           value: "{{ FW_PORT }}"
-        - name: SPDKCSI_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: simplyblock-csi-secret
-              key: secret.json
-        - name: CLUSTER_CONFIG
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-csi-cm
-              key: config.json
       lifecycle:
         postStart:
           exec:
