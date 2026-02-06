@@ -1256,6 +1256,62 @@ def list_lvols_mem(is_json, is_csv):
         return utils.print_table(data)
 
 
+def get_replication_info(lvol_id_or_name):
+    db_controller = DBController()
+    lvol = None
+    for lv in db_controller.get_lvols():  # pass
+        if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
+            lvol = lv
+            break
+
+    if not lvol:
+        logger.error(f"LVol id or name not found: {lvol_id_or_name}")
+        return False
+
+    tasks = []
+    snaps = []
+    out = {
+        "last_snapshot_id": None,
+        "last_replication_time": None,
+        "last_replication_duration": None,
+        "replicated_count": None,
+        "snaps": None,
+        "tasks": None,
+    }
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    for task in db_controller.get_job_tasks(node.cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+
+            if snap.lvol.get_id() != lvol.get_id():
+                continue
+            snaps.append(snap)
+            tasks.append(task)
+
+    if tasks:
+        tasks = sorted(tasks, key=lambda x: x.date)
+        snaps = sorted(snaps, key=lambda x: x.creation_dt)
+        out["snaps"] = snaps
+        out["tasks"] = tasks
+        out["replicated_count"] = len(snaps)
+        last_task = tasks[-1]
+        last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
+        out["last_snapshot_id"] = last_snap.get_id()
+        out["last_replication_time"] = last_task.updated_at
+        if "end_time" in last_task.function_params:
+            duration = utils.strfdelta_seconds(
+                last_task.function_params["end_time"] - last_task.function_params["start_time"])
+        else:
+            duration = utils.strfdelta_seconds(int(time.time()) - last_task.function_params["start_time"])
+        out["last_replication_duration"] = duration
+
+    return out
+
+
 def get_lvol(lvol_id_or_name, is_json):
     db_controller = DBController()
     lvol = None
@@ -1271,6 +1327,7 @@ def get_lvol(lvol_id_or_name, is_json):
     data = lvol.get_clean_dict()
 
     del data['nvme_dev']
+
 
     if is_json:
         return json.dumps(data, indent=2)
@@ -1775,39 +1832,8 @@ def replication_trigger(lvol_id):
 
             if snap.lvol.get_id() != lvol_id:
                 continue
-
             snaps.append(snap)
             tasks.append(task)
-            # duration = ""
-            # try:
-            #     if task.status == JobSchedule.STATUS_RUNNING:
-            #         duration = utils.strfdelta_seconds(int(time.time()) - task.function_params["start_time"])
-            #     elif "end_time" in task.function_params:
-            #         duration = utils.strfdelta_seconds(
-            #             task.function_params["end_time"] - task.function_params["start_time"])
-            # except Exception as e:
-            #     logger.error(e)
-            # status = task.status
-            # if task.canceled:
-            #     status = "cancelled"
-            # replicate_to = "target"
-            # if "replicate_to_source" in task.function_params:
-            #     if task.function_params["replicate_to_source"] is True:
-            #         replicate_to = "source"
-            # offset = 0
-            # if "offset" in task.function_params:
-            #     offset = task.function_params["offset"]
-            # data.append({
-            #     "Task ID": task.uuid,
-            #     "Snapshot ID": snap.uuid,
-            #     "Size": utils.humanbytes(snap.used_size),
-            #     "Duration": duration,
-            #     "Offset": offset,
-            #     "Status": status,
-            #     "Replicate to": replicate_to,
-            #     "Result": task.function_result,
-            #     "Cluster ID": task.cluster_id,
-            # })
 
     if tasks:
         tasks = sorted(tasks, key=lambda x: x.date)

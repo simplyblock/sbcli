@@ -330,7 +330,7 @@ def add_new_device_mig_task(device_id):
 
 def add_node_add_task(cluster_id, function_params):
     return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
-                     function_params=function_params, max_retry=11)
+                     function_params=function_params, max_retry=16)
 
 
 def get_active_node_tasks(cluster_id, node_id):

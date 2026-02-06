@@ -268,9 +268,10 @@ class VolumeDTO(BaseModel):
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
     capacity: CapacityStatDTO
+    rep_info: Optional[dict] = None
 
     @staticmethod
-    def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None):
+    def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None, rep_info=None):
         return VolumeDTO(
             uuid=UUID(model.get_id()),
             name=model.lvol_name,
@@ -317,4 +318,5 @@ class VolumeDTO(BaseModel):
             max_r_mbytes=model.r_mbytes_per_sec,
             max_w_mbytes=model.w_mbytes_per_sec,
             capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
+            rep_info=rep_info
         )

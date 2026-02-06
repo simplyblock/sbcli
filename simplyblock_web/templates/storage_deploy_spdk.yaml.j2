@@ -24,8 +24,9 @@ spec:
       operator: Exists
   volumes:
     - name: socket-dir
-      hostPath:
-        path: /mnt/ramdisk
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
     - name: host-sys
       hostPath:
         path: /sys
