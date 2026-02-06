@@ -205,7 +205,7 @@ ingress:
 
 simplyblock:
   cluster:
-    clusterName: demo-cluster
+    clusterName: simplyblock-cluster
     mgmtIfc: eth0
     fabric: tcp
     isSingleNode: false
@@ -217,14 +217,14 @@ simplyblock:
     provCapCrit: 150
 
   pool:
-    name: demo-pool
+    name: simplyblock-pool
     capacityLimit: 100Gi
 
   lvol:
-    name: demo-lvol
+    name: simplyblock-lvol
     
   storageNodes:
-    name: demo-node
+    name: simplyblock-node
     clusterImage: public.ecr.aws/simply-block/simplyblock:snapshot_replication_operator_support
     mgmtIfc: eth0
     maxLVol: 10
@@ -239,7 +239,7 @@ simplyblock:
       - israel-storage-node-3
 
   devices:
-    name: demo-devices
+    name: simplyblock-devices
 
   tasks:
-    name: demo-task
+    name: simplyblock-task
