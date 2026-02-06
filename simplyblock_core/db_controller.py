@@ -9,6 +9,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvstore_queue import LVStoreQueueTask
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
@@ -315,3 +316,14 @@ class DBController(metaclass=Singleton):
             return ret[0]
         else:
             return None
+
+    def get_lvstore_queue_tasks(self, node_id=None) -> List[LVStoreQueueTask]:
+        ret = LVStoreQueueTask().read_from_db(self.kv_store)
+        tasks = []
+        if node_id:
+            for n in ret:
+                if n.primary_node_id == node_id:
+                    tasks.append(n)
+        else:
+            tasks = ret
+        return sorted(tasks, key=lambda x: x.create_dt)
