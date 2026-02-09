@@ -3,6 +3,7 @@ import threading
 import time
 
 from simplyblock_core import db_controller, utils, rpc_client
+from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.lvstore_queue import LVStoreQueueTask
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -14,6 +15,7 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 
+# def complete_lvol_add(task):
 
 def task_runner(task):
     task.status = LVStoreQueueTask.STATUS_RUNNING
@@ -45,20 +47,44 @@ def task_runner(task):
         raise Exception("Failed to get leader node")
 
 
-
     if task.function_name == LVStoreQueueTask.FN_LVOL_ADD:
-        res = rpc_client.lvol_add(task.lvstore, task.function_params["lvol_name"], task.function_params["size"])
-        if res:
-            task.function_result = res
-            task.status = LVStoreQueueTask.STATUS_DONE
-            task.write_to_db(db.kv_store)
-            logger.info(f"LVOL {task.function_params['lvol_name']} added to lvstore {task.lvstore} successfully")
-            return True
-        else:
-            task.function_result = "failed to add lvol"
-            task.write_to_db(db.kv_store)
-            logger.error(f"Failed to add lvol {task.function_params['lvol_name']} to lvstore {task.lvstore}")
-            return False
+
+        if leader_node:
+            lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
+            if error:
+                logger.error(error)
+                lvol.remove(db_controller.kv_store)
+                return False, error
+
+            lvol.lvol_uuid = lvol_bdev['uuid']
+            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+
+        if secondary_node:
+            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
+            if secondary_node.status == StorageNode.STATUS_ONLINE:
+                lvol_bdev, error = add_lvol_on_node(lvol, secondary_node, is_primary=False)
+                if error:
+                    logger.error(error)
+                    # remove lvol from primary
+                    ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
+                    if not ret:
+                        logger.error("")
+                    lvol.remove(db_controller.kv_store)
+                    return False, error
+
+        lvol.pool_uuid = pool.get_id()
+        lvol.pool_name = pool.pool_name
+        lvol.status = LVol.STATUS_ONLINE
+        lvol.write_to_db(db_controller.kv_store)
+        lvol_events.lvol_create(lvol)
+
+        if pool.has_qos():
+            connect_lvol_to_pool(lvol.uuid)
+
+        # set QOS
+        if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
+            set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
 
 
 def start_on_node(node_id):
