@@ -90,8 +90,8 @@ def process_snap_delete_finish(snap, leader_node):
         elif non_leader.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
             # 3-2 async delete lvol bdev from secondary
             tasks_controller.add_lvol_sync_del_task(non_leader.cluster_id, non_leader.get_id(), lvol_bdev_name, primary_node.get_id())
-            snapshot_events.snapshot_delete(snap)
-            snap.remove(db.kv_store)
+    snapshot_events.snapshot_delete(snap)
+    snap.remove(db.kv_store)
 
 
 
