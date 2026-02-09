@@ -2327,6 +2327,26 @@ def shutdown_storage_node(node_id, force=False):
             if task.function_name != JobSchedule.FN_NODE_RESTART:
                 tasks_controller.cancel_task(task.uuid)
 
+    online_nodes_less_than_min_time = 0
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.online_since:
+            diff = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(node.online_since)
+            if diff.total_seconds() < 15:
+                online_nodes_less_than_min_time += 1
+                break
+
+    if 0 < online_nodes_less_than_min_time <= 1:
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        if cluster.distr_npcs == 1:
+            logger.error("Can not shutdown node now, must wait for at least 15 seconds when last node was online")
+            if force is False:
+                return False
+
+    elif online_nodes_less_than_min_time > 1:
+        logger.error("Can not shutdown node now, must wait for at least 15 seconds when last node was online")
+        if force is False:
+            return False
+
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
 
@@ -2434,6 +2454,25 @@ def suspend_storage_node(node_id, force=False):
     if offline_nodes > 0:
         if force is False:
             logger.error("Offline storage nodes found, cannot suspend node without --force")
+            return False
+
+    online_nodes_less_than_min_time = 0
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.online_since:
+            diff = datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(node.online_since)
+            if diff.total_seconds() < 15:
+                online_nodes_less_than_min_time += 1
+                break
+
+    if 0 < online_nodes_less_than_min_time <= 1:
+        if cluster.distr_npcs == 1:
+            logger.error("Can not shutdown node now, must wait for at least 15 seconds when last node was online")
+            if force is False:
+                return False
+
+    elif online_nodes_less_than_min_time > 1:
+        logger.error("Can not shutdown node now, must wait for at least 15 seconds when last node was online")
+        if force is False:
             return False
 
     logger.info("Suspending node")
