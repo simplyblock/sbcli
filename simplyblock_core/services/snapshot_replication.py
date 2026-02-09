@@ -119,7 +119,10 @@ def process_snap_replicate_finish(task, snapshot):
     snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
     replicate_to_source = task.function_params["replicate_to_source"]
-    replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
+    if "replicate_as_snap_instance" in task.function_params:
+        replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
+    else:
+        replicate_as_snap_instance = False
     target_prev_snap = None
     if replicate_to_source:
         org_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
