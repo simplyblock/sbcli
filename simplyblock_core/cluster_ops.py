@@ -1312,8 +1312,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
 
 
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
-    db_controller.get_cluster_by_id(cl_id)  # ensure exists
+    get_cluster = db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    for node in st:
+        logger.info(f"Shutting down node: {node.get_id()}")
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Restarting node: {node.get_id()}")
@@ -1322,6 +1326,19 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
         get_node = db_controller.get_storage_node_by_id(node.get_id())
         if get_node.status != StorageNode.STATUS_ONLINE:
             raise ValueError("failed to restart node")
+    if get_cluster.status == Cluster.STATUS_UNREADY:
+        logger.info("Cluster is not activated yet, please manually activate it")
+
+    else:
+        while True:
+            get_cluster = db_controller.get_cluster_by_id(cl_id)
+            if get_cluster.status != Cluster.STATUS_ACTIVE:
+                logger.info(f"wait for cluster to be active, current status is: {get_cluster.status}")
+                time.sleep(5)
+            else:
+                break
+    logger.info("Cluster gracefully started")
+
 
 
 def cluster_grace_shutdown(cl_id) -> None:
@@ -1329,11 +1346,10 @@ def cluster_grace_shutdown(cl_id) -> None:
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
-        if node.status == StorageNode.STATUS_ONLINE:
-            logger.info(f"Suspending node: {node.get_id()}")
-            storage_node_ops.suspend_storage_node(node.get_id())
-            logger.info(f"Shutting down node: {node.get_id()}")
-            storage_node_ops.shutdown_storage_node(node.get_id())
+        logger.info(f"Suspending node: {node.get_id()}")
+        storage_node_ops.suspend_storage_node(node.get_id(), force=True)
+        logger.info(f"Shutting down node: {node.get_id()}")
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
 
 
 def delete_cluster(cl_id) -> None:
