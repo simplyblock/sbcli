@@ -1294,7 +1294,7 @@ def get_replication_info(lvol_id_or_name):
 
     if tasks:
         tasks = sorted(tasks, key=lambda x: x.date)
-        snaps = sorted(snaps, key=lambda x: x.creation_dt)
+        snaps = sorted(snaps, key=lambda x: x.created_at)
         out["snaps"] = snaps
         out["tasks"] = tasks
         out["replicated_count"] = len(snaps)
