@@ -236,12 +236,14 @@ class RPCClient:
             params.update({"c2h_success": True,"sock_priority": 0})
         return self._request("nvmf_create_transport", params)
 
-    def sock_impl_set_options(self):
-        method = "sock_impl_set_options"
-        params = {"impl_name": "posix", "enable_quickack": True,
-                  "enable_zerocopy_send_server": True,
-                  "enable_zerocopy_send_client": True}
-        return self._request(method, params)
+    def sock_impl_set_options(self, bind_to_device=None):
+        params = {
+            "impl_name": "posix", "enable_quickack": True,
+            "enable_zerocopy_send_server": True,
+            "enable_zerocopy_send_client": True}
+        if bind_to_device:
+            params["bind_to_device"] = bind_to_device
+        return self._request("sock_impl_set_options", params)
 
     def transport_create_caching(self, trtype):
         params = {
