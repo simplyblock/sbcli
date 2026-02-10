@@ -1750,6 +1750,10 @@ def list_by_node(node_id=None, is_json=False):
             if lvol.node_id != node_id:
                 continue
         logger.debug(lvol)
+        cloned_from_snap = ""
+        if lvol.cloned_from_snap:
+            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            cloned_from_snap = snap.snap_uuid
         data.append({
             "UUID": lvol.uuid,
             "BDdev UUID": lvol.lvol_uuid,
@@ -1759,7 +1763,7 @@ def list_by_node(node_id=None, is_json=False):
             "LVS name": lvol.lvs_name,
             "BDev": lvol.lvol_bdev,
             "Node ID": lvol.node_id,
-            "Clone From Snap": lvol.cloned_from_snap,
+            "Clone From Snap BDev": cloned_from_snap,
             "Created At": lvol.create_dt,
         })
     if is_json:
