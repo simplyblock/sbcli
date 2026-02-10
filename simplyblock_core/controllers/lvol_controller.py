@@ -1809,7 +1809,7 @@ def replication_trigger(lvol_id):
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
     node = db_controller.get_storage_node_by_id(lvol.node_id)
-    snapshot_controller.add(lvol_id, f"replication_{lvol_id}")
+    snapshot_controller.add(lvol_id, f"replication_{uuid.uuid4()}")
 
     tasks = []
     snaps = []
