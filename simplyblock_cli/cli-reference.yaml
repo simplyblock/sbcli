@@ -736,6 +736,18 @@ commands:
             dest: json
             type: bool
             action: store_true
+      - name: list-lvols
+        help: "List lvols on a storage node"
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
+          - name: "--json"
+            help: "Print json output"
+            dest: json
+            type: bool
+            action: store_true
   - name: "cluster"
     help: "Cluster commands"
     weight: 200

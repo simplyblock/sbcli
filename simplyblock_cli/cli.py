@@ -79,6 +79,7 @@ class CLIWrapper(CLIWrapperBase):
             self.init_storage_node__set(subparser)
         self.init_storage_node__new_device_from_failed(subparser)
         self.init_storage_node__list_snapshots(subparser)
+        self.init_storage_node__list_lvols(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -315,6 +316,11 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__list_snapshots(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list-snapshots', 'List snapshots on a storage node')
+        subcommand.add_argument('node_id', help='Node id', type=str)
+        argument = subcommand.add_argument('--json', help='Print json output', dest='json', action='store_true')
+
+    def init_storage_node__list_lvols(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list-lvols', 'List lvols on a storage node')
         subcommand.add_argument('node_id', help='Node id', type=str)
         argument = subcommand.add_argument('--json', help='Print json output', dest='json', action='store_true')
 
@@ -951,6 +957,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_node__new_device_from_failed(sub_command, args)
                 elif sub_command in ['list-snapshots']:
                     ret = self.storage_node__list_snapshots(sub_command, args)
+                elif sub_command in ['list-lvols']:
+                    ret = self.storage_node__list_lvols(sub_command, args)
                 else:
                     self.parser.print_help()
 
