@@ -1845,11 +1845,13 @@ def replication_trigger(lvol_id):
         last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
         out["last_snapshot_id"] = last_snap.get_id()
         out["last_replication_time"] = last_task.updated_at
-        if "end_time" in last_task.function_params:
-            duration = utils.strfdelta_seconds(
-                last_task.function_params["end_time"] - last_task.function_params["start_time"])
-        else:
-            duration = utils.strfdelta_seconds(int(time.time()) - last_task.function_params["start_time"])
+        duration = 0
+        if "start_time" in last_task.function_params:
+            if "end_time" in last_task.function_params:
+                duration = utils.strfdelta_seconds(
+                    last_task.function_params["end_time"] - last_task.function_params["start_time"])
+            else:
+                duration = utils.strfdelta_seconds(int(time.time()) - last_task.function_params["start_time"])
         out["last_replication_duration"] = duration
 
     return out
