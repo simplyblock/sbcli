@@ -40,7 +40,7 @@ class CapacityStatDTO(BaseModel):
 
 
 class ClusterDTO(BaseModel):
-    uuid: UUID
+    id: UUID
     name: Optional[str]
     nqn: str
     status: Literal['active', 'read_only', 'inactive', 'suspended', 'degraded', 'unready', 'in_activation', 'in_expansion']
@@ -61,7 +61,7 @@ class ClusterDTO(BaseModel):
     @staticmethod
     def from_model(model: Cluster, stat_obj: Optional[StatsObject]=None):
         return ClusterDTO(
-            uuid=UUID(model.get_id()),
+            id=UUID(model.get_id()),
             name=model.cluster_name,
             nqn=model.nqn,
             status=model.status,  # type: ignore
@@ -181,7 +181,7 @@ class SnapshotDTO(BaseModel):
 
 
 class StorageNodeDTO(BaseModel):
-    uuid: UUID
+    id: UUID
     status: str
     hostname: str
     cpu: int
@@ -198,7 +198,7 @@ class StorageNodeDTO(BaseModel):
     @staticmethod
     def from_model(model: StorageNode, stat_obj: Optional[StatsObject]=None):
         return StorageNodeDTO(
-            uuid=UUID(model.get_id()),
+            id=UUID(model.get_id()),
             status=model.status,
             hostname=model.hostname,
             cpu=model.cpu,
