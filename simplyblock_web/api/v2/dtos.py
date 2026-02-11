@@ -126,7 +126,7 @@ class ManagementNodeDTO(BaseModel):
 
 
 class StoragePoolDTO(BaseModel):
-    uuid: UUID
+    id: UUID
     name: str
     status: Literal['active', 'inactive']
     max_size: util.Unsigned
@@ -140,7 +140,7 @@ class StoragePoolDTO(BaseModel):
     @staticmethod
     def from_model(model: Pool, stat_obj: Optional[StatsObject]=None):
         return StoragePoolDTO(
-            uuid=UUID(model.get_id()),
+            id=UUID(model.get_id()),
             name=model.pool_name,
             status=model.status,  # type: ignore
             max_size=model.pool_max_size,
@@ -239,7 +239,7 @@ class TaskDTO(BaseModel):
 
 
 class VolumeDTO(BaseModel):
-    uuid: UUID
+    id: UUID
     name: str
     status: str
     health_check: bool
@@ -273,7 +273,7 @@ class VolumeDTO(BaseModel):
     @staticmethod
     def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None, rep_info=None):
         return VolumeDTO(
-            uuid=UUID(model.get_id()),
+            id=UUID(model.get_id()),
             name=model.lvol_name,
             status=model.status,
             health_check=model.health_check,
