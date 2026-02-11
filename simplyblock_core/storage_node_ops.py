@@ -1624,6 +1624,11 @@ def restart_storage_node(
         if force is False:
             return False
 
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.get_id() != snode.get_id() and node.status == StorageNode.STATUS_RESTARTING:
+            logger.error(f"Another node is in restarting state: {node.get_id()}")
+            return False
+
     logger.info("Setting node state to restarting")
     set_node_status(node_id, StorageNode.STATUS_RESTARTING)
     snode = db_controller.get_storage_node_by_id(node_id)
