@@ -3928,3 +3928,176 @@ def set_value(node_id, attr, value):
             pass
 
     return True
+
+
+def safe_delete_bdev(name):
+    # On primary node
+    #./ rpc.py bdev_lvol_delete lvsname / name
+    # check the statue code of the following command it must be 0
+    #./ rpc.py bdev_lvol_get_lvol_delete_status lvsname / name
+    # #./ rpc.py bdev_lvol_delete lvsname / name - s
+
+    # On secondary:
+    #./ rpc.py bdev_lvol_delete lvsname / name - s
+    return
+
+def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, force_remove_worng_ref=False):
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.error("Can not find storage node")
+        return False
+
+    if snode.status != StorageNode.STATUS_ONLINE:
+        logger.error("Storage node is not online")
+        return False
+
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cluster.status not in [Cluster.STATUS_DEGRADED, Cluster.STATUS_ACTIVE]:
+        logger.error("Cluster is not in degraded or active state")
+        return False
+
+    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+    if not ret:
+        logger.error("Failed to get LVol info")
+        return False
+    lvs_info = ret[0]
+    if "uuid" in lvs_info and lvs_info['uuid']:
+        lvs_uuid =  lvs_info['uuid']
+    else:
+        logger.error("Failed to get lvstore uuid")
+        return False
+
+    # get the lvstore uuid
+    # ./spdk/scripts/rpc.py -s /mnt/ramdisk/spdk_8080/spdk.sock bdev_lvs_dump_tree  --uuid=1dc5fb34-5ff6-4be6-ab46-eb9f006f5d47 > out_8080.json
+    lvstore_dump = snode.rpc_client().bdev_lvs_dump_tree(lvs_uuid)
+
+    # #sbctl sn list-lvols d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > lvols_8080.json
+    # with open('lvols_8082.json', 'r') as file:
+    #     lvols = json.load(file)
+    lvols = lvol_controller.list_by_node(node_id, is_json=True)
+
+    # #sbctl sn list-snapshots d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > snaps_8080.json
+    # with open('snaps_8082.json', 'r') as file:
+    #     snaps = json.load(file)
+    snaps = snapshot_controller.list_by_node(node_id, is_json=True)
+
+    out_blobid_dict = {}
+    lvols_blobid_dict = {}
+    snaps_blobid_dict = {}
+    diff_list = []
+    diff_lvol_dict = {}
+    diff_snap_dict = {}
+    diff_clone_dict = {}
+    manual_del = {}
+    inconsistent_dict = {}
+    mgmt_diff_dict = {}
+
+
+    for dump in lvstore_dump["lvols"]:
+        out_blobid_dict[dump["blobid"]] = {"uuid": dump["uuid"], "name": dump["name"], "ref": dump["ref"]}
+
+    for lvol in lvols:
+        lvols_blobid_dict[lvol["BlobID"]] = {"uuid": lvol["BDdev UUID"], "name": lvol["BDev"]}
+    for snap in snaps:
+        snaps_blobid_dict[snap["BlobID"]] = {"uuid": snap["BDdev UUID"], "name": snap["BDev"]}
+
+    out_blobid_dict_keys = out_blobid_dict.keys()
+    lvols_blobid_dict_keys = lvols_blobid_dict.keys()
+    snaps_blobid_dict_keys = snaps_blobid_dict.keys()
+    for blob in out_blobid_dict_keys:
+        if blob not in lvols_blobid_dict_keys or blob not in snaps_blobid_dict_keys:
+            if out_blobid_dict[blob]["name"] == "hublvol":
+                continue
+            else:
+                # all blob ID in spdk but not in mgmt
+                diff_list.append(blob)
+        else:
+            if blob  in lvols_blobid_dict_keys:
+                if out_blobid_dict[blob]["name"] != lvols_blobid_dict[blob]["name"] or out_blobid_dict[blob]["uuid"] != lvols_blobid_dict[blob]["uuid"]:
+                    inconsistent_dict[blob] = out_blobid_dict[blob]
+                    inconsistent_dict[blob]["type"] = "lvol|clone"
+            if blob in snaps_blobid_dict_keys:
+                if out_blobid_dict[blob]["name"] != snaps_blobid_dict[blob]["name"] or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]:
+                    inconsistent_dict[blob] = out_blobid_dict[blob]
+                    inconsistent_dict[blob]["type"] = "snap"
+
+
+    for blob in lvols_blobid_dict_keys:
+        if blob not in out_blobid_dict_keys:
+            # All blob in mgmt but not in SPDK
+            mgmt_diff_dict[blob] = lvols_blobid_dict[blob]
+            mgmt_diff_dict[blob]["type"] = "lvol|clone"
+
+    for blob in snaps_blobid_dict_keys:
+        if blob not in out_blobid_dict_keys:
+            # All blob in mgmt but not in SPDK
+            mgmt_diff_dict[blob] = snaps_blobid_dict[blob]
+            mgmt_diff_dict[blob]["type"] = "snap"
+
+    print(f"All diff count is: {len(diff_list)}")
+    print(f"All mgmt diff count is: {len(mgmt_diff_dict.keys())}")
+
+    for blob in diff_list:
+        if "LVOL" in out_blobid_dict[blob]["name"]:
+            if out_blobid_dict[blob]["ref"] !=1:
+                manual_del[blob] = out_blobid_dict[blob]
+            else:
+                diff_lvol_dict[blob] = out_blobid_dict[blob]
+        if "SNAP" in out_blobid_dict[blob]["name"]:
+            if out_blobid_dict[blob]["ref"] != 2:
+                manual_del[blob] = out_blobid_dict[blob]
+            else:
+                diff_snap_dict[blob] = out_blobid_dict[blob]
+        if "CLN" in out_blobid_dict[blob]["name"]:
+            if out_blobid_dict[blob]["ref"] !=1:
+                manual_del[blob] = out_blobid_dict[blob]
+            else:
+                diff_clone_dict[blob] = out_blobid_dict[blob]
+
+    print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
+    print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
+    print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
+    print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
+    print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
+    print("#########################################")
+    print("Safe lvols to be deleted:")
+    for blob, value in diff_lvol_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only:
+            safe_delete_bdev(value['name'])
+    print("#########################################")
+    print("Safe snaps to be deleted:")
+    for blob, value in diff_snap_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only:
+            safe_delete_bdev(value['name'])
+    print("#########################################")
+    print("Safe clones to be deleted:")
+    for blob, value in diff_clone_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only:
+            safe_delete_bdev(value['name'])
+    print("#########################################")
+    print("Manual bdeves to be deleted that have wrong ref number:")
+    for blob, value in manual_del.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only and force_remove_worng_ref:
+            safe_delete_bdev(value['name'])
+    print("#########################################")
+    print("Inconsistent bdeves to be checked:")
+    for blob, value in inconsistent_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only and force_remove_inconsistent:
+            safe_delete_bdev(value['name'])
+    print("#########################################")
+    print("All mgmt bdeves to be checked:")
+    print(mgmt_diff_dict)
+    for blob, value in mgmt_diff_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['type']}")
+
+    if validate_only:
+        return not(diff_lvol_dict or diff_snap_dict or diff_clone_dict or manual_del or inconsistent_dict or mgmt_diff_dict)
+
+    return True
