@@ -40,6 +40,10 @@ spec:
           spec:
             description: spec defines the desired state of SimplyBlockSnapshotReplication
             properties:
+              interval:
+                description: 'snapshot replication interval in seconds (default: 60sec)'
+                format: int32
+                type: integer
               sourceCluster:
                 description: Source cluster for the snapshots
                 type: string
