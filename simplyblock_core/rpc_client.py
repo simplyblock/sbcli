@@ -324,6 +324,7 @@ class RPCClient:
 
         if eui64:
             params['namespace']['eui64'] = eui64
+            params['namespace']['ptpl_file'] = "/mnt/ns_resv"+eui64+".json"
         
 
         return self._request("nvmf_subsystem_add_ns", params)
