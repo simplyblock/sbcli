@@ -4007,11 +4007,12 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
     for snap in snaps:
         snaps_blobid_dict[snap["BlobID"]] = {"uuid": snap["BDdev UUID"], "name": snap["BDev"]}
 
-    out_blobid_dict_keys = out_blobid_dict.keys()
-    lvols_blobid_dict_keys = lvols_blobid_dict.keys()
-    snaps_blobid_dict_keys = snaps_blobid_dict.keys()
+    out_blobid_dict_keys = list(out_blobid_dict.keys())
+    lvols_blobid_dict_keys = list(lvols_blobid_dict.keys())
+    snaps_blobid_dict_keys = list(snaps_blobid_dict.keys())
+
     for blob in out_blobid_dict_keys:
-        if blob not in lvols_blobid_dict_keys or blob not in snaps_blobid_dict_keys:
+        if blob not in (lvols_blobid_dict_keys + snaps_blobid_dict_keys):
             if out_blobid_dict[blob]["name"] == "hublvol":
                 continue
             else:
@@ -4049,12 +4050,12 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
                 manual_del[blob] = out_blobid_dict[blob]
             else:
                 diff_lvol_dict[blob] = out_blobid_dict[blob]
-        if "SNAP" in out_blobid_dict[blob]["name"]:
+        elif "SNAP" in out_blobid_dict[blob]["name"]:
             if out_blobid_dict[blob]["ref"] != 2:
                 manual_del[blob] = out_blobid_dict[blob]
             else:
                 diff_snap_dict[blob] = out_blobid_dict[blob]
-        if "CLN" in out_blobid_dict[blob]["name"]:
+        elif "CLN" in out_blobid_dict[blob]["name"]:
             if out_blobid_dict[blob]["ref"] !=1:
                 manual_del[blob] = out_blobid_dict[blob]
             else:

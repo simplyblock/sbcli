@@ -626,7 +626,7 @@ def list_by_node(node_id=None, is_json=False):
             "BlobID": snap.blobid,
             "Name": snap.snap_name,
             "Size": utils.humanbytes(snap.used_size),
-            "BDev": snap.snap_bdev,
+            "BDev": snap.snap_bdev.split("/")[1],
             "Node ID": snap.lvol.node_id,
             "LVol ID": snap.lvol.get_id(),
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
