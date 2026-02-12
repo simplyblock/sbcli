@@ -1,5 +1,5 @@
 SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
 SIMPLY_BLOCK_VERSION=19.2.31
 
-SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:R25.10-Hotfix-client-data-nic
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:hotfix-profiling-latest
+SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:R25.10-Hotfix-client-data-nic
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:hotfix-profiling-latest
