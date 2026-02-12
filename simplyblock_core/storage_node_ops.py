@@ -3930,7 +3930,7 @@ def set_value(node_id, attr, value):
     return True
 
 
-def safe_delete_bdev(bdev_name, node_id):
+def safe_delete_bdev(name, node_id):
     # On primary node
     #./ rpc.py bdev_lvol_delete lvsname / name
     # check the statue code of the following command it must be 0
@@ -3943,6 +3943,7 @@ def safe_delete_bdev(bdev_name, node_id):
     db_controller = DBController()
     primary_node = db_controller.get_storage_node_by_id(node_id)
     secondary_node = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+    bdev_name = f"{primary_node.lvstore}/{name}"
     logger.info(f"deleting from primary: {bdev_name}")
     ret, _ = primary_node.rpc_client().delete_lvol(bdev_name)
     if not ret:
@@ -3965,7 +3966,7 @@ def safe_delete_bdev(bdev_name, node_id):
         elif ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
             logger.info(f"deletion completed on primary: {bdev_name}")
             logger.info(f"deleting from secondary: {bdev_name}")
-            ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name)
+            ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name, del_async=True)
             if not ret:
                 logger.error(f"Failed to delete bdev: {bdev_name} from node: {secondary_node.get_id()}")
                 return False
