@@ -770,6 +770,14 @@ commands:
             dest: force_remove_wrong_ref
             type: bool
             action: store_true
+      - name: lvs-dump-tree
+        help: "dump lvstore tree for debugging"
+        private: true
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
   - name: "cluster"
     help: "Cluster commands"
     weight: 200

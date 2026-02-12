@@ -4156,3 +4156,34 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
         return not(diff_lvol_dict or diff_snap_dict or diff_clone_dict or manual_del or inconsistent_dict or mgmt_diff_dict)
 
     return True
+
+
+def lvs_dump_tree(node_id):
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.error("Can not find storage node")
+        return False
+
+    if snode.status != StorageNode.STATUS_ONLINE:
+        logger.error("Storage node is not online")
+        return False
+
+    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+    if not ret:
+        logger.error("Failed to get LVol info")
+        return False
+    lvs_info = ret[0]
+    if "uuid" in lvs_info and lvs_info['uuid']:
+        lvs_uuid =  lvs_info['uuid']
+    else:
+        logger.error("Failed to get lvstore uuid")
+        return False
+
+    ret = snode.rpc_client().bdev_lvs_dump_tree(lvs_uuid)
+    if not ret:
+        logger.error("Failed to dump lvstore tree")
+        return False
+
+    return json.dumps(ret, indent=2)
