@@ -4104,7 +4104,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
                 diff_clone_dict[blob] = out_blobid_dict[blob]
 
     if not validate_only:
-        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
+        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_ACTIVATION)
         time.sleep(3)
 
     print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
