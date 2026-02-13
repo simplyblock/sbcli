@@ -55,12 +55,14 @@ def add_cluster():
     inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
     strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
     is_single_node = cl_data.get('is_single_node', False)
+    client_data_nic = cl_data.get('client_data_nic', "")
 
     return utils.get_response(cluster_ops.add_cluster(
         blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
         distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-        qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, 
-        cr_name, cr_namespace, cr_plural, fabric
+        qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name,
+        cr_name, cr_namespace, cr_plural, fabric,
+        client_data_nic
     ))
 
 
