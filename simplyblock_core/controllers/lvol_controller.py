@@ -1958,6 +1958,12 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.cloned_from_snap = ""
     new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
 
+    lvol.lvs_name = target_node.lvstore
+    for stack in lvol.bdev_stack:
+        if stack["type"] == "bdev_lvol":
+            stack["params"]["lvs_name"] = new_lvol.lvs_name
+            break
+
     new_lvol.write_to_db(db_controller.kv_store)
 
     lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
