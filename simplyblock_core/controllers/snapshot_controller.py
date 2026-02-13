@@ -229,6 +229,7 @@ def add(lvol_id, snapshot_name):
 
 def list(all=False):
     snaps = db_controller.get_snapshots()
+    snaps = sorted(snaps, key=lambda snap: snap.created_at)
     data = []
     for snap in snaps:
         logger.debug(snap)
