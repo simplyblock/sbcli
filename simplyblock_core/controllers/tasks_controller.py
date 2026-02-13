@@ -421,3 +421,6 @@ def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
                     return task.uuid
     return False
 
+def add_lvol_add_task(cluster_id, node_id, lvol_bdev_name, primary_node):
+    return _add_task(JobSchedule.FN_LVOL_SYNC_DEL, cluster_id, node_id, "",
+                     function_params={"lvol_bdev_name": lvol_bdev_name, "primary_node": primary_node}, max_retry=10)

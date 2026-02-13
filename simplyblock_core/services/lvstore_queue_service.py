@@ -23,9 +23,9 @@ def task_runner(task):
 
     # check leadership
     primary_node = db.get_storage_node_by_id(task.primary_node_id)
-    sec_node = None
+    secondary_node = None
     if primary_node.secondary_node_id:
-        sec_node = db.get_storage_node_by_id(primary_node.secondary_node_id)
+        secondary_node = db.get_storage_node_by_id(primary_node.secondary_node_id)
     leader_node = None
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
@@ -48,12 +48,12 @@ def task_runner(task):
 
 
     if task.function_name == LVStoreQueueTask.FN_LVOL_ADD:
-
+        lvol = db.get_lvol_by_id(task.function_params["lvol_id"])
         if leader_node:
             lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
             if error:
                 logger.error(error)
-                lvol.remove(db_controller.kv_store)
+                lvol.remove(db.kv_store)
                 return False, error
 
             lvol.lvol_uuid = lvol_bdev['uuid']
@@ -61,20 +61,18 @@ def task_runner(task):
 
 
         if secondary_node:
-            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
+            secondary_node = db.get_storage_node_by_id(secondary_node.get_id())
             if secondary_node.status == StorageNode.STATUS_ONLINE:
-                lvol_bdev, error = add_lvol_on_node(lvol, secondary_node, is_primary=False)
+                lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, secondary_node, is_primary=False)
                 if error:
                     logger.error(error)
                     # remove lvol from primary
-                    ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
+                    ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
                     if not ret:
                         logger.error("")
                     lvol.remove(db_controller.kv_store)
                     return False, error
 
-        lvol.pool_uuid = pool.get_id()
-        lvol.pool_name = pool.pool_name
         lvol.status = LVol.STATUS_ONLINE
         lvol.write_to_db(db_controller.kv_store)
         lvol_events.lvol_create(lvol)

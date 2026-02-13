@@ -455,6 +455,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     if not is_active_secondary:
         return False, f"Secondary node fabric {fabric} is not active"
 
+    lvol.pool_uuid = pool.get_id()
+    lvol.pool_name = pool.pool_name
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
     lvol.lvs_name = host_node.lvstore
@@ -579,7 +581,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             lvol.remove(db_controller.kv_store)
             return False, msg
 
-
+    tasks_control
     #     if primary_node:
     #         lvol_bdev, error = add_lvol_on_node(lvol, primary_node)
     #         if error:
