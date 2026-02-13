@@ -223,7 +223,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
-                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node) -> str:
+                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -333,6 +333,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
     cluster.full_page_unmap = False
+    cluster.client_data_nic = client_data_nic or ""
 
     if mode == "docker":
         if not disable_monitoring:
@@ -437,7 +438,8 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp") -> str:
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
+                client_data_nic="") -> str:
 
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -488,6 +490,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.fabric_tcp = protocols["tcp"]
     cluster.fabric_rdma = protocols["rdma"]
     cluster.full_page_unmap = False
+    cluster.client_data_nic = client_data_nic or ""
 
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
