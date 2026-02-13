@@ -1,4 +1,5 @@
 # coding=utf-8
+import copy
 import logging as lg
 import json
 import math
@@ -1921,3 +1922,65 @@ def replication_stop(lvol_id, delete=False):
                 tasks_controller.cancel_task(task.uuid)
 
     return True
+
+
+def replicate_lvol_on_target_cluster(lvol_id):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    if not lvol.replication_node_id:
+        logger.error(f"LVol: {lvol_id} replication node id not found")
+        return False
+
+    target_node = db_controller.get_storage_node_by_id(lvol.replication_node_id)
+    if not target_node:
+        logger.error(f"Node not found: {lvol.replication_node_id}")
+        return False
+
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        logger.error(f"Node is not online!: {target_node}, status: {target_node.status}")
+        return False
+
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
+    # create lvol on target node
+    new_lvol = copy.deepcopy(lvol)
+    new_lvol.uuid = str(uuid.uuid4())
+    new_lvol.create_dt = str(datetime.now())
+    new_lvol.node_id = target_node.get_id()
+    new_lvol.nodes = [target_node.get_id(), target_node.secondary_node_id]
+    new_lvol.replication_node_id = ""
+    new_lvol.do_replicate = False
+    new_lvol.cloned_from_snap = ""
+    new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
+
+    new_lvol.write_to_db(db_controller.kv_store)
+
+    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
+    if error:
+        logger.error(error)
+        lvol.remove(db_controller.kv_store)
+        return False, error
+
+    new_lvol.lvol_uuid = lvol_bdev['uuid']
+    new_lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+    secondary_node = db_controller.get_storage_node_by_id(target_node.secondary_node_id)
+    if secondary_node.status == StorageNode.STATUS_ONLINE:
+        lvol_bdev, error = add_lvol_on_node(new_lvol, secondary_node, is_primary=False)
+        if error:
+            logger.error(error)
+            # remove lvol from primary
+            ret = delete_lvol_from_node(new_lvol, target_node)
+            if not ret:
+                logger.error("")
+            lvol.remove(db_controller.kv_store)
+            return False, error
+
+    lvol_events.lvol_replicated(lvol, new_lvol)
+
+    return new_lvol.lvol_uuid

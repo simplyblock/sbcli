@@ -117,3 +117,7 @@ def lvol_health_check_change(lvol, new_state, old_status, caused_by=ec.CAUSED_BY
 def lvol_io_error_change(lvol, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
     _lvol_event(lvol, f"LVol IO Error changed from: {old_status} to: {new_state}", caused_by, ec.EVENT_STATUS_CHANGE)
 
+
+def lvol_replicated(lvol, new_lvol, caused_by=ec.CAUSED_BY_CLI):
+    _lvol_event(lvol, f"LVol Replicated, {lvol.get_id()}, new lvol: {new_lvol.get_id()}", caused_by, ec.EVENT_STATUS_CHANGE)
+

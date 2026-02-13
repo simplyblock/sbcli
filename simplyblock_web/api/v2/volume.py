@@ -260,3 +260,8 @@ def create_snapshot(
             cluster_id=cluster.get_id(), pool_id=pool.get_id(), snapshot_id=snapshot_id,
     )
     return Response(status_code=201, headers={'Location': entity_url})
+
+
+@instance_api.get('/replicate_lvol', name='clusters:storage-pools:volumes:replicate_lvol')
+def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume: Volume):
+    return lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
