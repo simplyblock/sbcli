@@ -1957,12 +1957,30 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.do_replicate = False
     new_lvol.cloned_from_snap = ""
     new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
+    new_lvol.lvs_name = target_node.lvstore
 
-    lvol.lvs_name = target_node.lvstore
-    for stack in lvol.bdev_stack:
-        if stack["type"] == "bdev_lvol":
-            stack["params"]["lvs_name"] = new_lvol.lvs_name
-            break
+    new_lvol.bdev_stack = [
+        {
+            "type": "bdev_lvol_clone",
+            "name": lvol.top_bdev,
+            "params": {
+                "snapshot_name": lvol.snapshot_name,
+                "clone_name": lvol.lvol_bdev
+            }
+        }
+    ]
+
+    if new_lvol.crypto_bdev:
+        new_lvol.bdev_stack.append({
+            "type": "crypto",
+            "name": lvol.crypto_bdev,
+            "params": {
+                "name": lvol.crypto_bdev,
+                "base_name": lvol.top_bdev,
+                "key1": lvol.crypto_key1,
+                "key2": lvol.crypto_key2,
+            }
+        })
 
     new_lvol.write_to_db(db_controller.kv_store)
 
