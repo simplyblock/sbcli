@@ -977,6 +977,11 @@ commands:
                 min: 0
                 max: 128
             default: 3
+          - name: "--client-data-nic"
+            help: >
+              Network interface name from client to use for LVol connection.
+            dest: client_data_nic
+            type: str
       - name: add
         help: "Adds a new cluster"
         arguments:
@@ -1103,6 +1108,11 @@ commands:
             dest: name
             aliases:
               - "-n"
+            type: str
+          - name: "--client-data-nic"
+            help: >
+              Network interface name from client to use for LVol connection.
+            dest: client_data_nic
             type: str
       - name: activate
         help: >
