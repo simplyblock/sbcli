@@ -1339,6 +1339,28 @@ commands:
             help: "Name"
             dest: name
             type: str
+      - name: add-replication
+        help: Assigns the snapshot replication target cluster
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "target_cluster_id"
+            help: "Target Cluster id"
+            dest: target_cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--timeout"
+            help: "Snapshot replication network timeout"
+            dest: timeout
+            type: int
+            default: "3600"
+          - name: "--target-pool"
+            help: "Target cluster pool ID or name"
+            dest: target_pool
+            type: str
   - name: "volume"
     help: "Logical volume commands"
     aliases:
@@ -1469,6 +1491,11 @@ commands:
             dest: npcs
             type: int
             default: 0
+          - name: "--replicate"
+            help: "Replicate LVol snapshot"
+            dest: replicate
+            type: bool
+            action: store_true
       - name: qos-set
         help: "Changes QoS settings for an active logical volume"
         arguments:
@@ -1669,6 +1696,34 @@ commands:
           - name: "volume_id"
             help: "Logical volume id"
             dest: volume_id
+            type: str
+      - name: replication-start
+        help: "Start snapshot replication taken from lvol"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
+      - name: replication-stop
+        help: "Stop snapshot replication taken from lvol"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
+      - name: replication-status
+        help: "Lists replication status"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+      - name: replication-trigger
+        help: "Start replication for lvol"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
             type: str
   - name: "control-plane"
     help: "Control plane commands"
@@ -1894,6 +1949,16 @@ commands:
             dest: all
             type: bool
             action: store_true
+          - name: "--cluster-id"
+            help: "Filter snapshots by cluster UUID"
+            dest: cluster_id
+            type: str
+            required: false
+          - name: "--with-details"
+            help: "List snapshots with replicate and chaining details"
+            dest: with_details
+            type: bool
+            action: store_true
       - name: delete
         help: "Deletes a snapshot"
         arguments:
@@ -1906,6 +1971,13 @@ commands:
             dest: force
             type: bool
             action: store_true
+      - name: check
+        help: "Check a snapshot health"
+        arguments:
+          - name: "snapshot_id"
+            help: "Snapshot id"
+            dest: snapshot_id
+            type: str
       - name: clone
         help: "Provisions a new logical volume from an existing snapshot"
         arguments:
@@ -1922,6 +1994,43 @@ commands:
             dest: resize
             type: size
             default: "0"
+      - name: replication-status
+        help: "Lists snapshots replication status"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+      - name: delete-replication-only
+        help: "Delete replicated version of a snapshot"
+        arguments:
+          - name: "snapshot_id"
+            help: "Snapshot UUID"
+            dest: snapshot_id
+            type: str
+      - name: get
+        help: "Gets a snapshot information"
+        arguments:
+          - name: "snapshot_id"
+            help: "Snapshot UUID"
+            dest: snapshot_id
+            type: str
+      - name: set
+        help: "set snapshot db value"
+        private: true
+        arguments:
+          - name: "snapshot_id"
+            help: "snapshot id"
+            dest: snapshot_id
+            type: str
+          - name: "attr_name"
+            help: "attr_name"
+            dest: attr_name
+            type: str
+          - name: "attr_value"
+            help: "attr_value"
+            dest: attr_value
+            type: str
   - name: "qos"
     help: "qos commands"
     weight: 700

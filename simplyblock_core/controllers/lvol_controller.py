@@ -1,4 +1,5 @@
 # coding=utf-8
+import copy
 import logging as lg
 import json
 import math
@@ -10,8 +11,10 @@ from datetime import datetime
 from typing import List, Tuple
 
 from simplyblock_core import utils, constants
-from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
+from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
+    snapshot_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
@@ -245,10 +248,11 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
-                distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
+def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
+                distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
+                do_replicate=False):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -467,6 +471,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     else:
         lvol.npcs = cl.distr_npcs
         lvol.ndcs = cl.distr_ndcs
+    lvol.do_replicate = bool(do_replicate)
+    if lvol.do_replicate:
+        random_nodes = _get_next_3_nodes(cl.snapshot_replication_target_cluster, lvol.size)
+        lvol.replication_node_id = random_nodes[0].get_id()
 
     lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
     if lvol_count > host_node.max_lvol:
@@ -1208,7 +1216,8 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
-            "Mode": mode
+            "Mode": mode,
+            "Replicated On": lvol.replication_node_id,
         }
         data.append(lvol_data)
 
@@ -1248,6 +1257,62 @@ def list_lvols_mem(is_json, is_csv):
         return utils.print_table(data)
 
 
+def get_replication_info(lvol_id_or_name):
+    db_controller = DBController()
+    lvol = None
+    for lv in db_controller.get_lvols():  # pass
+        if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
+            lvol = lv
+            break
+
+    if not lvol:
+        logger.error(f"LVol id or name not found: {lvol_id_or_name}")
+        return False
+
+    tasks = []
+    snaps = []
+    out = {
+        "last_snapshot_id": None,
+        "last_replication_time": None,
+        "last_replication_duration": None,
+        "replicated_count": None,
+        "snaps": None,
+        "tasks": None,
+    }
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    for task in db_controller.get_job_tasks(node.cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+
+            if snap.lvol.get_id() != lvol.get_id():
+                continue
+            snaps.append(snap)
+            tasks.append(task)
+
+    if tasks:
+        tasks = sorted(tasks, key=lambda x: x.date)
+        snaps = sorted(snaps, key=lambda x: x.created_at)
+        out["snaps"] = [s.to_dict() for s in snaps]
+        out["tasks"] = [t.to_dict() for t in tasks]
+        out["replicated_count"] = len(snaps)
+        last_task = tasks[-1]
+        last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
+        out["last_snapshot_id"] = last_snap.get_id()
+        out["last_replication_time"] = last_task.updated_at
+        if "end_time" in last_task.function_params:
+            duration = utils.strfdelta_seconds(
+                last_task.function_params["end_time"] - last_task.function_params["start_time"])
+        else:
+            duration = utils.strfdelta_seconds(int(time.time()) - last_task.function_params["start_time"])
+        out["last_replication_duration"] = duration
+
+    return out
+
+
 def get_lvol(lvol_id_or_name, is_json):
     db_controller = DBController()
     lvol = None
@@ -1263,6 +1328,7 @@ def get_lvol(lvol_id_or_name, is_json):
     data = lvol.get_clean_dict()
 
     del data['nvme_dev']
+
 
     if is_json:
         return json.dumps(data, indent=2)
@@ -1738,3 +1804,232 @@ def inflate_lvol(lvol_id):
     else:
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
+
+def replication_trigger(lvol_id):
+    # create snapshot and replicate it
+    db_controller = DBController()
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    snapshot_controller.add(lvol_id, f"replication_{uuid.uuid4()}")
+
+    tasks = []
+    snaps = []
+    out = {
+        "lvol": lvol,
+        "last_snapshot_id": None,
+        "last_replication_time": None,
+        "last_replication_duration": None,
+        "replicated_count": None,
+        "snaps": None,
+        "tasks": None,
+    }
+    for task in db_controller.get_job_tasks(node.cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+
+            if snap.lvol.get_id() != lvol_id:
+                continue
+            snaps.append(snap)
+            tasks.append(task)
+
+    if tasks:
+        tasks = sorted(tasks, key=lambda x: x.date)
+        snaps = sorted(snaps, key=lambda x: x.creation_dt)
+        out["snaps"] = snaps
+        out["tasks"] = tasks
+        out["replicated_count"] = len(snaps)
+        last_task = tasks[-1]
+        last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
+        out["last_snapshot_id"] = last_snap.get_id()
+        out["last_replication_time"] = last_task.updated_at
+        duration = 0
+        if "start_time" in last_task.function_params:
+            if "end_time" in last_task.function_params:
+                duration = utils.strfdelta_seconds(
+                    last_task.function_params["end_time"] - last_task.function_params["start_time"])
+            else:
+                duration = utils.strfdelta_seconds(int(time.time()) - last_task.function_params["start_time"])
+        out["last_replication_duration"] = duration
+
+    return out
+
+def replication_start(lvol_id):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    lvol.do_replicate = True
+    if not lvol.replication_node_id:
+        excluded_nodes = []
+        if lvol.cloned_from_snap:
+            lvol_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            if lvol_snap.source_replicated_snap_uuid:
+                org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
+                excluded_nodes.append(org_snap.lvol.node_id)
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        if not cluster.snapshot_replication_target_cluster:
+            logger.error(f"Cluster: {snode.cluster_id} not replicated")
+            return False
+        random_nodes = _get_next_3_nodes(cluster.snapshot_replication_target_cluster, lvol.size)
+        for r_node in random_nodes:
+            if r_node.get_id() not in excluded_nodes:
+                logger.info(f"Replicating on node: {r_node.get_id()}")
+                lvol.replication_node_id = r_node.get_id()
+                lvol.write_to_db()
+                break
+        if not lvol.replication_node_id:
+            logger.error(f"Replication node not found for lvol: {lvol.get_id()}")
+            return False
+    logger.info("Setting LVol do_replicate: True")
+
+    for snap in db_controller.get_snapshots():
+        if snap.lvol.uuid == lvol.uuid:
+            if not snap.target_replicated_snap_uuid:
+                task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
+                if task:
+                    snapshot_events.replication_task_created(snap)
+    return True
+
+
+def replication_stop(lvol_id, delete=False):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    logger.info("Setting LVol do_replicate: False")
+    lvol.do_replicate = False
+    lvol.write_to_db()
+
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    tasks = db_controller.get_job_tasks(snode.cluster_id)
+
+
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.status != JobSchedule.STATUS_DONE:
+            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            if snap.lvol.uuid == lvol.uuid:
+                tasks_controller.cancel_task(task.uuid)
+
+    return True
+
+
+def replicate_lvol_on_target_cluster(lvol_id):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    if not lvol.replication_node_id:
+        logger.error(f"LVol: {lvol_id} replication node id not found")
+        return False
+
+    target_node = db_controller.get_storage_node_by_id(lvol.replication_node_id)
+    if not target_node:
+        logger.error(f"Node not found: {lvol.replication_node_id}")
+        return False
+
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        logger.error(f"Node is not online!: {target_node}, status: {target_node.status}")
+        return False
+
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
+
+    snaps = []
+    snapshot_name = None
+    for task in db_controller.get_job_tasks(source_node.cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+
+            if snap.lvol.get_id() != lvol_id:
+                continue
+            snaps.append(snap)
+
+    if snaps:
+        snaps = sorted(snaps, key=lambda x: x.creation_dt)
+        last_snapshot = snaps[-1]
+        rep_snap = db_controller.get_snapshot_by_id(last_snapshot.target_replicated_snap_uuid)
+        snapshot_name = rep_snap.snap_bdev
+
+    if not snapshot_name:
+        logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
+        return False
+
+    # create lvol on target node
+    new_lvol = copy.deepcopy(lvol)
+    new_lvol.uuid = str(uuid.uuid4())
+    new_lvol.create_dt = str(datetime.now())
+    new_lvol.node_id = target_node.get_id()
+    new_lvol.nodes = [target_node.get_id(), target_node.secondary_node_id]
+    new_lvol.replication_node_id = ""
+    new_lvol.do_replicate = False
+    new_lvol.cloned_from_snap = ""
+    new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
+    new_lvol.lvs_name = target_node.lvstore
+
+    new_lvol.bdev_stack = [
+        {
+            "type": "bdev_lvol_clone",
+            "name": lvol.top_bdev,
+            "params": {
+                "snapshot_name": snapshot_name,
+                "clone_name": lvol.lvol_bdev
+            }
+        }
+    ]
+
+    if new_lvol.crypto_bdev:
+        new_lvol.bdev_stack.append({
+            "type": "crypto",
+            "name": lvol.crypto_bdev,
+            "params": {
+                "name": lvol.crypto_bdev,
+                "base_name": lvol.top_bdev,
+                "key1": lvol.crypto_key1,
+                "key2": lvol.crypto_key2,
+            }
+        })
+
+    new_lvol.write_to_db(db_controller.kv_store)
+
+    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
+    if error:
+        logger.error(error)
+        lvol.remove(db_controller.kv_store)
+        return False, error
+
+    new_lvol.lvol_uuid = lvol_bdev['uuid']
+    new_lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+    secondary_node = db_controller.get_storage_node_by_id(target_node.secondary_node_id)
+    if secondary_node.status == StorageNode.STATUS_ONLINE:
+        lvol_bdev, error = add_lvol_on_node(new_lvol, secondary_node, is_primary=False)
+        if error:
+            logger.error(error)
+            # remove lvol from primary
+            ret = delete_lvol_from_node(new_lvol, target_node)
+            if not ret:
+                logger.error("")
+            lvol.remove(db_controller.kv_store)
+            return False, error
+
+    lvol_events.lvol_replicated(lvol, new_lvol)
+
+    return new_lvol.lvol_uuid

@@ -186,3 +186,10 @@ class SNodeClient:
     def ifc_is_tcp(self, nic):
         params = {"nic": nic}
         return self._request("GET", "ifc_is_tcp", params)
+    def nvme_connect(self, ip, port, nqn):
+        params = {"ip": ip, "port": port, "nqn": nqn}
+        return self._request("POST", "nvme_connect", params)
+
+    def disconnect_nqn(self, nqn):
+        params = {"nqn": nqn}
+        return self._request("POST", "disconnect_nqn", params)

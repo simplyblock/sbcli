@@ -46,6 +46,9 @@ class _CreateParams(BaseModel):
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
+    fabric: str = "tcp"
+    max_namespace_per_subsys: int = 1
+    do_replicate: bool = False
 
 
 class _CloneParams(BaseModel):
@@ -88,6 +91,10 @@ def add(
             pvc_name=data.pvc_name,
             ndcs=data.ndcs,
             npcs=data.npcs,
+            fabric=data.fabric,
+            max_namespace_per_subsys=data.max_namespace_per_subsys,
+            do_replicate=data.do_replicate,
+
         )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(
@@ -129,7 +136,8 @@ def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -
     ret = db.get_lvol_stats(volume, 1)
     if ret:
         stat_obj = ret[0]
-    return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj)
+    rep_info = lvol_controller.get_replication_info(volume.get_id())
+    return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj, rep_info)
 
 
 class UpdatableLVolParams(BaseModel):
@@ -178,6 +186,19 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
     return Response(status_code=204)
 
+@instance_api.post('/replication_start', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
+def replication_start(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    if not lvol_controller.replication_trigger(volume.get_id()):
+        raise ValueError('Failed to start volume snapshot replication')
+
+    return Response(status_code=204)
+    
+@instance_api.post('/replication_stop', name='clusters:storage-pools:volumes:replication_stop', status_code=204, responses={204: {"content": None}})
+def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    if not lvol_controller.replication_stop(volume.get_id()):
+        raise ValueError('Failed to stop volume snapshot replication')
+
+    return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
 def connect(cluster: Cluster, pool: StoragePool, volume: Volume):
@@ -239,3 +260,8 @@ def create_snapshot(
             cluster_id=cluster.get_id(), pool_id=pool.get_id(), snapshot_id=snapshot_id,
     )
     return Response(status_code=201, headers={'Location': entity_url})
+
+
+@instance_api.post('/replicate_lvol', name='clusters:storage-pools:volumes:replicate_lvol')
+def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume: Volume):
+    return lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())

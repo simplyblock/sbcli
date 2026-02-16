@@ -3,6 +3,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events, \
     cluster_events
@@ -13,6 +14,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
+
 
 # get DB controller
 db = db_controller.DBController()
@@ -75,7 +77,7 @@ def get_next_cluster_status(cluster_id):
             # check for jm rep tasks:
             if node.rpc_client().bdev_lvol_get_lvstores(node.lvstore):
                 try:
-                    ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
+                    ret = node.rpc_client(timeout=5).jc_get_jm_status(node.jm_vuid)
                     for jm in ret:
                         if ret[jm] is False: # jm is not ready (has active replication task)
                             jm_replication_tasks = True

@@ -76,6 +76,13 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
 
+    elif function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+        task_id = get_snapshot_replication_task(
+            cluster_id, function_params['snapshot_id'], function_params['replicate_to_source'])
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+
     task_obj = JobSchedule()
     task_obj.uuid = str(uuid.uuid4())
     task_obj.cluster_id = cluster_id
@@ -177,6 +184,7 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
     for task in tasks:
         if task.function_name == JobSchedule.FN_DEV_MIG:
             continue
+        logger.debug(task)
         if task.max_retry > 0:
             retry = f"{task.retry}/{task.max_retry}"
         else:
@@ -423,3 +431,40 @@ def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
                     return task.uuid
     return False
 
+def get_snapshot_replication_task(cluster_id, snapshot_id, replicate_to_source):
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.function_params["snapshot_id"] == snapshot_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                if task.function_params["replicate_to_source"] == replicate_to_source:
+                    return task.uuid
+    return False
+
+
+def _check_snap_instance_on_node(snapshot_id: str , node_id: str):
+    snapshot = db.get_snapshot_by_id(snapshot_id)
+    for sn_inst in snapshot.instances:
+        if sn_inst.lvol.node_id == node_id:
+            logger.info("Snapshot instance found on node, skip adding replication task")
+            return
+
+    if snapshot.snap_ref_id:
+        prev_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
+        _check_snap_instance_on_node(prev_snap.get_id(), node_id)
+
+    _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, snapshot.cluster_id, node_id, "",
+              function_params={"snapshot_id": snapshot.get_id(), "replicate_to_source": False,
+                               "replicate_as_snap_instance": True},
+              send_to_cluster_log=False)
+
+
+def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to_source=False):
+    if not replicate_to_source:
+        snapshot = db.get_snapshot_by_id(snapshot_id)
+        if snapshot.snap_ref_id:
+            prev_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
+            _check_snap_instance_on_node(prev_snap.get_id(), node_id)
+
+    return _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, cluster_id, node_id, "",
+                     function_params={"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source},
+                     send_to_cluster_log=False)

@@ -850,12 +850,14 @@ def check_snap(snap_id):
         return False
 
     snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
-
-    ret = rpc_client.get_bdevs(snap.snap_bdev)
-    return ret
+    check_primary = snode.rpc_client().get_bdevs(snap.snap_bdev)
+    logger.info(f"Checking snap bdev: {snap.snap_bdev} on node: {snap.lvol.node_id} is {bool(check_primary)}")
+    if snode.secondary_node_id:
+        secondary_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        check_secondary = secondary_node.rpc_client().get_bdevs(snap.snap_bdev)
+        logger.info(f"Checking snap bdev: {snap.snap_bdev} on node: {snode.secondary_node_id} is {bool(check_secondary)}")
+        return check_primary and check_secondary
+    return check_primary
 
 
 def check_jm_device(device_id):

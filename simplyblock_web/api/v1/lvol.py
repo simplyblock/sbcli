@@ -158,6 +158,7 @@ def add_lvol():
     ndcs = utils.get_value_or_default(cl_data, "ndcs", 0)
     npcs = utils.get_value_or_default(cl_data, "npcs", 0)
     fabric = utils.get_value_or_default(cl_data, "fabric", "tcp")
+    do_replicate = utils.get_value_or_default(cl_data, "do_replicate", False)
 
     ret, error = lvol_controller.add_lvol_ha(
         name=name,
@@ -186,7 +187,8 @@ def add_lvol():
         max_namespace_per_subsys=max_namespace_per_subsys,
         ndcs=ndcs,
         npcs=npcs,
-        fabric=fabric
+        fabric=fabric,
+        do_replicate=do_replicate
     )
 
     return utils.get_response(ret, error, http_code=400)
@@ -306,3 +308,24 @@ def inflate_lvol(uuid):
 
     ret = lvol_controller.inflate_lvol(uuid)
     return utils.get_response(ret)
+
+@bp.route('/lvol/replication_start/<string:uuid>', methods=['PUT'])
+def replication_start(uuid):
+    try:
+        db.get_lvol_by_id(uuid)
+    except KeyError as e:
+        return utils.get_response_error(str(e), 404)
+
+    ret = lvol_controller.replication_trigger(uuid)
+    return utils.get_response(ret)
+
+@bp.route('/lvol/replication_stop/<string:uuid>', methods=['PUT'])
+def replication_stop(uuid):
+    try:
+        db.get_lvol_by_id(uuid)
+    except KeyError as e:
+        return utils.get_response_error(str(e), 404)
+
+    ret = lvol_controller.replication_stop(uuid)
+    return utils.get_response(ret)
+    

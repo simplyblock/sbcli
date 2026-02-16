@@ -444,6 +444,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
+        assigned["lvol_poller_core"] = vcpu
         # assigned["alceml_worker_cpu_cores"] = vcpu
         vcpu = reserve_n(1)
         assigned["alceml_cpu_cores"] = vcpu
@@ -452,6 +453,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu
         vcpu = reserve_n(1)
         assigned["jc_singleton_core"] = vcpu
+        vcpu = reserve_n(1)
+        assigned["lvol_poller_core"] = vcpu
         # vcpus = reserve_n(1)
         # assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(2)
@@ -465,6 +468,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         # assigned["alceml_worker_cpu_cores"] = vcpus
         vcpus = reserve_n(alceml_count)
         assigned["alceml_cpu_cores"] = vcpus
+        vcpus = reserve_n(2)
+        assigned["lvol_poller_core"] = vcpus
     dp = int(len(remaining) / 2)
     if 17 > dp >= 12:
         poller_n = len(remaining) - 12
@@ -496,7 +501,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned.get("alceml_cpu_cores", []),
         assigned.get("alceml_worker_cpu_cores", []),
         assigned.get("distrib_cpu_cores", []),
-        assigned.get("jc_singleton_core", [])
+        assigned.get("jc_singleton_core", []),
+        assigned.get("lvol_poller_core", []),
     )
 
 
@@ -755,7 +761,10 @@ def nearest_upper_power_of_2(n):
 
 
 def strfdelta(tdelta):
-    remainder = int(tdelta.total_seconds())
+    return strfdelta_seconds(int(tdelta.total_seconds()))
+
+
+def strfdelta_seconds(remainder: int) -> str:
     possible_fields = ('W', 'D', 'H', 'M', 'S')
     constants = {'W': 604800, 'D': 86400, 'H': 3600, 'M': 60, 'S': 1}
     values = {}
@@ -1550,7 +1559,8 @@ def regenerate_config(new_config, old_config, force=False):
                 "alceml_cpu_cores": get_core_indexes(core_to_index, distribution[3]),
                 "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
                 "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
-                "jc_singleton_core": get_core_indexes(core_to_index, distribution[6])}
+                "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
+                "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
 
         isolated_cores = old_config["nodes"][i]["isolated"]
         number_of_distribs = 2
@@ -1703,7 +1713,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     # "alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
                     #                                            core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
-                    "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6])
+                    "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6]),
+                    "lvol_poller_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][7])
                 },
                 "ssd_pcis": [],
                 "nic_ports": system_info[nid]["nics"]

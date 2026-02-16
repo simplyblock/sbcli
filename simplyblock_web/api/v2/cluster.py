@@ -17,6 +17,11 @@ api = APIRouter(prefix='/clusters')
 db = DBController()
 
 
+class _ReplicationParams(BaseModel):
+    snapshot_replication_target_cluster: Optional[str]
+    snapshot_replication_timeout: Optional[str]
+    target_pool: Optional[str]
+
 class _UpdateParams(BaseModel):
     management_image: Optional[str]
     spdk_image: Optional[str]
@@ -166,6 +171,16 @@ def activate(cluster: Cluster) -> Response:
     ).start()
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
+@instance_api.post('/addreplication', name='clusters:addreplication', status_code=202, responses={202: {"content": None}})
+def cluster_add_replication(cluster: Cluster, parameters: _ReplicationParams) -> Response:
+    cluster_ops.add_replication(
+        source_cl_id=cluster.get_id(), 
+        target_cl_id=parameters.snapshot_replication_target_cluster, 
+        timeout=parameters.snapshot_replication_timeout, 
+        target_pool=parameters.target_pool
+    )
+    return Response(status_code=202)
+    
 @instance_api.post('/expand', name='clusters:expand', status_code=202, responses={202: {"content": None}})
 def expand(cluster: Cluster) -> Response:
     Thread(
