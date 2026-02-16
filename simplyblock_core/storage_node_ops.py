@@ -1274,7 +1274,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.warning(f"Failed to set nvmf max subsystems {constants.NVMF_MAX_SUBSYSTEMS}")
 
         # 2- set socket implementation options
-        ret = rpc_client.sock_impl_set_options()
+        bind_to_device = None
+        if snode.data_nics and len(snode.data_nics) == 1:
+            bind_to_device = snode.data_nics[0].if_name
+        ret = rpc_client.sock_impl_set_options(bind_to_device)
         if not ret:
             logger.error("Failed to set optimized socket options")
             return False
@@ -1838,7 +1841,10 @@ def restart_storage_node(
     rpc_client.accel_set_options()
 
     # 2- set socket implementation options
-    ret = rpc_client.sock_impl_set_options()
+    bind_to_device = None
+    if snode.data_nics and len(snode.data_nics) == 1:
+        bind_to_device = snode.data_nics[0].if_name
+    ret = rpc_client.sock_impl_set_options(bind_to_device)
     if not ret:
         logger.error("Failed socket implement set options")
         return False
