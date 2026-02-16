@@ -1743,7 +1743,7 @@ def inflate_lvol(lvol_id):
 def list_by_node(node_id=None, is_json=False):
     db_controller = DBController()
     lvols = db_controller.get_lvols()
-    lvols = sorted(lvols, key=lambda l: l.create_dt)
+    lvols = sorted(lvols, key=lambda x: x.create_dt)
     data = []
     for lvol in lvols:
         if node_id:
