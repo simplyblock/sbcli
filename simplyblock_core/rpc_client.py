@@ -1249,8 +1249,8 @@ class RPCClient:
         }
         return self._request("bdev_raid_get_bdevs", params)
 
- 
-
-    
-
-
+    def bdev_lvs_dump_tree(self, lvstore_uuid):
+        params = {
+            "uuid": lvstore_uuid
+        }
+        return self._request("bdev_lvs_dump_tree", params)
