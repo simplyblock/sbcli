@@ -1269,7 +1269,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         # 2- set socket implementation options
         bind_to_device = None
-        if snode.data_nics:
+        if snode.data_nics and len(snode.data_nics) == 1:
             bind_to_device = snode.data_nics[0].if_name
         ret = rpc_client.sock_impl_set_options(bind_to_device)
         if not ret:
@@ -1836,7 +1836,7 @@ def restart_storage_node(
 
     # 2- set socket implementation options
     bind_to_device = None
-    if snode.data_nics:
+    if snode.data_nics and len(snode.data_nics) == 1:
         bind_to_device = snode.data_nics[0].if_name
     ret = rpc_client.sock_impl_set_options(bind_to_device)
     if not ret:
