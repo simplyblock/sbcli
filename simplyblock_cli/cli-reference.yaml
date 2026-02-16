@@ -724,6 +724,60 @@ commands:
             help: "Device id"
             dest: device_id
             type: str
+      - name: list-snapshots
+        help: "List snapshots on a storage node"
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
+          - name: "--json"
+            help: "Print json output"
+            dest: json
+            type: bool
+            action: store_true
+      - name: list-lvols
+        help: "List lvols on a storage node"
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
+          - name: "--json"
+            help: "Print json output"
+            dest: json
+            type: bool
+            action: store_true
+      - name: repair-lvstore
+        help: "Try repair any inconsistencies in lvstore on a storage node"
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
+          - name: "--validate-only"
+            help: "Validate only, do not perform any repair actions"
+            dest: validate_only
+            type: bool
+            action: store_true
+          - name: "--force-remove-inconsistent"
+            help: "Force remove any inconsistent lvols or snapshots"
+            dest: force_remove_inconsistent
+            type: bool
+            action: store_true
+          - name: "--force_remove_wrong_ref"
+            help: "Force remove lvols or snapshots with wrong reference count"
+            dest: force_remove_wrong_ref
+            type: bool
+            action: store_true
+      - name: lvs-dump-tree
+        help: "dump lvstore tree for debugging"
+        private: true
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
   - name: "cluster"
     help: "Cluster commands"
     weight: 200

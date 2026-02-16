@@ -341,6 +341,19 @@ class CLIWrapperBase:
     def storage_node__new_device_from_failed(self, sub_command, args):
         return device_controller.new_device_from_failed(args.device_id)
 
+    def storage_node__list_snapshots(self, sub_command, args):
+        return snapshot_controller.list_by_node(args.node_id, args.json)
+
+    def storage_node__list_lvols(self, sub_command, args):
+        return lvol_controller.list_by_node(args.node_id, args.json)
+
+    def storage_node__repair_lvstore(self, sub_command, args):
+        return storage_ops.auto_repair(
+            args.node_id, args.validate_only, args.force_remove_inconsistent, args.force_remove_wrong_ref)
+
+    def storage_node__lvs_dump_tree(self, sub_command, args):
+        return storage_ops.lvs_dump_tree(args.node_id)
+
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 
