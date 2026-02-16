@@ -1947,6 +1947,31 @@ def replicate_lvol_on_target_cluster(lvol_id):
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
     source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
+
+    snaps = []
+    snapshot_name = None
+    for task in db_controller.get_job_tasks(source_node.cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+
+            if snap.lvol.get_id() != lvol_id:
+                continue
+            snaps.append(snap)
+
+    if snaps:
+        snaps = sorted(snaps, key=lambda x: x.creation_dt)
+        last_snapshot = snaps[-1]
+        rep_snap = db_controller.get_snapshot_by_id(last_snapshot.target_replicated_snap_uuid)
+        snapshot_name = rep_snap.snap_bdev
+
+    if not snapshot_name:
+        logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
+        return False
+
     # create lvol on target node
     new_lvol = copy.deepcopy(lvol)
     new_lvol.uuid = str(uuid.uuid4())
@@ -1957,12 +1982,30 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.do_replicate = False
     new_lvol.cloned_from_snap = ""
     new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
+    new_lvol.lvs_name = target_node.lvstore
 
-    lvol.lvs_name = target_node.lvstore
-    for stack in lvol.bdev_stack:
-        if stack["type"] == "bdev_lvol":
-            stack["params"]["lvs_name"] = new_lvol.lvs_name
-            break
+    new_lvol.bdev_stack = [
+        {
+            "type": "bdev_lvol_clone",
+            "name": lvol.top_bdev,
+            "params": {
+                "snapshot_name": snapshot_name,
+                "clone_name": lvol.lvol_bdev
+            }
+        }
+    ]
+
+    if new_lvol.crypto_bdev:
+        new_lvol.bdev_stack.append({
+            "type": "crypto",
+            "name": lvol.crypto_bdev,
+            "params": {
+                "name": lvol.crypto_bdev,
+                "base_name": lvol.top_bdev,
+                "key1": lvol.crypto_key1,
+                "key2": lvol.crypto_key2,
+            }
+        })
 
     new_lvol.write_to_db(db_controller.kv_store)
 
