@@ -1963,7 +1963,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
             snaps.append(snap)
 
     if snaps:
-        snaps = sorted(snaps, key=lambda x: x.creation_dt)
+        snaps = sorted(snaps, key=lambda x: x.created_at)
         last_snapshot = snaps[-1]
         rep_snap = db_controller.get_snapshot_by_id(last_snapshot.target_replicated_snap_uuid)
         snapshot_name = rep_snap.snap_bdev
