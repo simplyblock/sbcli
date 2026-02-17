@@ -1954,7 +1954,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
             return lv.get_id()
 
     snaps = []
-    snapshot_name = None
+    snapshot = None
     for task in db_controller.get_job_tasks(source_node.cluster_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
@@ -1971,9 +1971,9 @@ def replicate_lvol_on_target_cluster(lvol_id):
         snaps = sorted(snaps, key=lambda x: x.created_at)
         last_snapshot = snaps[-1]
         rep_snap = db_controller.get_snapshot_by_id(last_snapshot.target_replicated_snap_uuid)
-        snapshot_name = rep_snap.snap_bdev
+        snapshot = rep_snap
 
-    if not snapshot_name:
+    if not snapshot:
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
         return False
 
@@ -1985,11 +1985,11 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.nodes = [target_node.get_id(), target_node.secondary_node_id]
     new_lvol.replication_node_id = ""
     new_lvol.do_replicate = False
-    new_lvol.cloned_from_snap = snapshot_name
+    new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
     new_lvol.lvs_name = target_node.lvstore
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
-    new_lvol.snapshot_name = snapshot_name
+    new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.status = LVol.STATUS_IN_CREATION
 
     new_lvol.bdev_stack = [
@@ -1997,7 +1997,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
             "type": "bdev_lvol_clone",
             "name": lvol.top_bdev,
             "params": {
-                "snapshot_name": snapshot_name,
+                "snapshot_name": snapshot.snap_bdev,
                 "clone_name": lvol.lvol_bdev
             }
         }
