@@ -1984,6 +1984,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
     new_lvol.lvs_name = target_node.lvstore
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
+    new_lvol.snapshot_name = snapshot_name
 
     new_lvol.bdev_stack = [
         {
