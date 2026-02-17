@@ -1948,6 +1948,11 @@ def replicate_lvol_on_target_cluster(lvol_id):
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
     source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
 
+    for lv in db_controller.get_lvols(source_cluster.snapshot_replication_target_cluster):
+        if lv.nqn == lvol.nqn:
+            logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+            return lv.get_id()
+
     snaps = []
     snapshot_name = None
     for task in db_controller.get_job_tasks(source_node.cluster_id):
@@ -1980,11 +1985,12 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.nodes = [target_node.get_id(), target_node.secondary_node_id]
     new_lvol.replication_node_id = ""
     new_lvol.do_replicate = False
-    new_lvol.cloned_from_snap = ""
+    new_lvol.cloned_from_snap = snapshot_name
     new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
     new_lvol.lvs_name = target_node.lvstore
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     new_lvol.snapshot_name = snapshot_name
+    new_lvol.status = LVol.STATUS_IN_CREATION
 
     new_lvol.bdev_stack = [
         {
@@ -2014,7 +2020,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
     if error:
         logger.error(error)
-        lvol.remove(db_controller.kv_store)
+        new_lvol.remove(db_controller.kv_store)
         return False, error
 
     new_lvol.lvol_uuid = lvol_bdev['uuid']
@@ -2029,9 +2035,11 @@ def replicate_lvol_on_target_cluster(lvol_id):
             ret = delete_lvol_from_node(new_lvol, target_node)
             if not ret:
                 logger.error("")
-            lvol.remove(db_controller.kv_store)
+            new_lvol.remove(db_controller.kv_store)
             return False, error
 
+    new_lvol.status = LVol.STATUS_ONLINE
+    new_lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_replicated(lvol, new_lvol)
 
     return new_lvol.lvol_uuid
