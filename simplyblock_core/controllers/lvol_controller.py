@@ -14,6 +14,7 @@ from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
@@ -1344,6 +1345,16 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
     except KeyError as e:
         logger.error(e)
         return False
+
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    cluster = db_controller.get_cluster_by_id(node.cluster_id)
+    if cluster.status == Cluster.STATUS_SUSPENDED and cluster.snapshot_replication_target_cluster:
+        logger.error("Cluster is suspended, looking for replicated lvol")
+        for lv in db_controller.get_lvols(cluster.snapshot_replication_target_cluster):
+            if lv.nqn == lvol.nqn:
+                logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+                lvol = lv
+                break
 
     out = []
     nodes_ids = []
