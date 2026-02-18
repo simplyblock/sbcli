@@ -2145,7 +2145,7 @@ def patch_cr_status(
             body=body,
         )
     except ApiException as e:
-        raise RuntimeError(
+        logger.error(
             f"Failed to patch status for {name}: {e.reason} {e.body}"
         )
 
@@ -2251,7 +2251,7 @@ def patch_cr_node_status(
         )
 
     except ApiException as e:
-        raise RuntimeError(
+        logger.error(
             f"Failed to patch node for {name}: {e.reason} {e.body}"
         )
 
@@ -2358,7 +2358,7 @@ def patch_cr_lvol_status(
         )
 
     except ApiException as e:
-        raise RuntimeError(
+        logger.error(
             f"Failed to patch lvol status for {name}: {e.reason} {e.body}"
         )
 

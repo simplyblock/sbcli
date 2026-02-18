@@ -16,11 +16,11 @@ observability:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "improved_user_experience"
+    tag: "snapshot_replication_operator_support"
     pullPolicy: "Always"
 
 ports:
-  lvolNvmfPortStart:
+  lvolNvmfPortStart: 9100
 
 storageclass:  
   allowedTopologyZones: []
@@ -58,7 +58,7 @@ opensearch:
   persistence:
     enabled: true
     storageClass: local-hostpath
-    size: 10Gi
+    size: 20Gi
 
   resources:
     requests:
@@ -205,7 +205,7 @@ ingress:
 
 simplyblock:
   cluster:
-    clusterName: demo-cluster
+    clusterName: simplyblock-cluster
     mgmtIfc: eth0
     fabric: tcp
     isSingleNode: false
@@ -217,29 +217,29 @@ simplyblock:
     provCapCrit: 150
 
   pool:
-    name: demo-pool
+    name: simplyblock-pool
     capacityLimit: 100Gi
 
   lvol:
-    name: demo-lvol
+    name: simplyblock-lvol
     
   storageNodes:
-    name: demo-node
-    clusterImage: public.ecr.aws/simply-block/simplyblock:improved_user_experience
+    name: simplyblock-node
+    clusterImage: public.ecr.aws/simply-block/simplyblock:snapshot_replication_operator_support
     mgmtIfc: eth0
     maxLVol: 10
-    maxSize: 150G
+    maxSize: 0
     partitions: 0
     corePercentage: 65
     spdkDebug: false
     coreIsolation: false
     workerNodes:
-      - vm02.simplyblock3.localdomain
-      - vm03.simplyblock3.localdomain
-      - vm04.simplyblock3.localdomain
+      - israel-storage-node-1
+      - israel-storage-node-2
+      - israel-storage-node-3
 
   devices:
-    name: demo-devices
+    name: simplyblock-devices
 
   tasks:
-    name: demo-task
+    name: simplyblock-task

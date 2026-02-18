@@ -261,6 +261,7 @@ class VolumeDTO(BaseModel):
     crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
     lvol_priority_class: util.Unsigned
+    do_replicate: bool = False
     max_namespace_per_subsys: int
     max_rw_iops: util.Unsigned
     max_rw_mbytes: util.Unsigned
@@ -310,6 +311,7 @@ class VolumeDTO(BaseModel):
             blobid=model.blobid,
             ns_id=model.ns_id,
             lvol_priority_class=model.lvol_priority_class,
+            do_replicate=model.do_replicate,
             max_namespace_per_subsys=model.max_namespace_per_subsys,
             max_rw_iops=model.rw_ios_per_sec,
             max_rw_mbytes=model.rw_mbytes_per_sec,

@@ -18,7 +18,7 @@ spec:
   # No attacher needed.
   attachRequired: false
   storageCapacity: false
-  # Kubernetes may use fsGroup to change permissions and ownership
+  # Kubernetes may use fsGroup to change permissions and ownership 
   # of the volume to match user requested fsGroup in the pod's SecurityPolicy
   fsGroupPolicy: File
   
