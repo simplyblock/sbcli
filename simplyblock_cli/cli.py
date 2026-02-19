@@ -93,7 +93,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node')
         argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=True)
-        argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=False)
+        argument = subcommand.add_argument('--max-size', help='Maximum amount of Huge Pages to be set on the node', type=str, dest='max_prov', required=False)
         argument = subcommand.add_argument('--nodes-per-socket', help='number of each node to be added per each socket.', type=int, default=1, dest='nodes_per_socket')
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes', type=str, default='0', dest='sockets_to_use')
         argument = subcommand.add_argument('--cores-percentage', help='The percentage of cores to be used for spdk (0-99)', type=range_type(0, 99), default=0, dest='cores_percentage')
