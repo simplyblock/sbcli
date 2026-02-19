@@ -38,13 +38,9 @@ commands:
             type: int
             required: true
           - name: "--max-size"
-            help: "Maximum amount of GB to be utilized on this storage node"
+            help: "Maximum amount of Huge Pages to be set on the node"
             description: >
-              Maximum amount of GB to be utilized on this storage node. This cannot be larger than the total effective
-              cluster capacity. A safe value is `1/n * 2.0` of effective cluster capacity. Meaning, if you have three
-              storage nodes, each with 100 TiB of raw capacity and a cluster with erasure coding scheme 1+1
-              (two replicas), the effective cluster capacity is _100 TiB * 3 / 2 = 150 TiB_. Setting this parameter to
-              _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
+              Maximum amount of Huge Pages to be set on the node, it will override the auto-calculated value.
             dest: max_prov
             type: str
             required: false
