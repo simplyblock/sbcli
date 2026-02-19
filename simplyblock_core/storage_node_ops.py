@@ -1650,11 +1650,12 @@ def restart_storage_node(
             snode.mgmt_ip = node_ip.split(":")[0]
             data_nics = []
             for nic in snode.data_nics:
-                device = node_info['network_interface'][nic.if_name]
+                if_name = nic["if_name"]
+                device = node_info['network_interface'][if_name]
                 data_nics.append(
                     IFace({
                         'uuid': str(uuid.uuid4()),
-                        'if_name': nic,
+                        'if_name': if_name,
                         'ip4_address': device['ip'],
                         'status': device['status'],
                         'net_type': device['net_type']}))
