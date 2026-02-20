@@ -541,7 +541,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
     jm_devices = []
     bdevs_names = [d['name'] for d in snode.rpc_client().get_bdevs()]
     for nvme in new_devices:
-        if nvme.status == NVMeDevice.STATUS_ONLINE:
+        if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
             dev_part = f"{nvme.nvme_bdev[:-2]}p1"
             if dev_part in bdevs_names:
                 if dev_part not in jm_devices:
