@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import string
 import random
-
+import json
 
 
 def generate_random_sequence(length):
@@ -507,7 +507,7 @@ class TestClusterBase:
 
             if not container_name:
                 self.logger.info(
-                    f"[DEBUG][SPDK-MEM] No SPDK container found, skipping node"
+                    "[DEBUG][SPDK-MEM] No SPDK container found, skipping node"
                 )
                 return
 
@@ -537,7 +537,7 @@ class TestClusterBase:
             container_txt = "/tmp/spdk_mem_dump.txt"  # DEFAULT
 
             self.logger.info(
-                f"[DEBUG][SPDK-MEM] Reading RPC JSON file"
+                "[DEBUG][SPDK-MEM] Reading RPC JSON file"
             )
 
             json_out, _ = self.ssh_obj.exec_command(
@@ -619,7 +619,7 @@ class TestClusterBase:
             # 8. Cleanup container temp files
             # ---------------------------------------------------------------
             self.logger.info(
-                f"[DEBUG][SPDK-MEM] Cleaning container temp files"
+                "[DEBUG][SPDK-MEM] Cleaning container temp files"
             )
 
             self.ssh_obj.exec_command(

@@ -431,7 +431,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             cur_node_details = self.sbcli_utils.get_storage_node_details(node)
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
             status = self.ssh_obj.fetch_distrib_logs(
-            status = self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
                 logs_path=self.docker_logs_path

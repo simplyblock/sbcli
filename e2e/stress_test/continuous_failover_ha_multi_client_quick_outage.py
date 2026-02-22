@@ -448,7 +448,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             sleep_n_sec(200)
             try:
                 self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, ["offline", "down"], timeout=130)
-            except Exception as exp:
+            except Exception as _:
                 self.logger.info("Node might have not aborted! Checking if online.")
 
         return outage_type

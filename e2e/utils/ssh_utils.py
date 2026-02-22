@@ -17,8 +17,8 @@ import shlex
 import socket
 from collections import defaultdict
 from typing import Optional, List
-import importlib
-from glob import glob
+# import importlib
+# from glob import glob
 from utils.placement_dump_check import PlacementDump
 
 
@@ -1102,7 +1102,7 @@ class SshUtils:
         return output.strip()
 
     def get_snapshot_id_delete(self, node, snapshot_name):
-        snapshot_id = ""
+        # snapshot_id = ""
 
         cmd = "%s snapshot list | grep -i '%s ' | awk '{print $2}'" % (self.base_cmd, snapshot_name)
         output, error = self.exec_command(node=node, command=cmd)

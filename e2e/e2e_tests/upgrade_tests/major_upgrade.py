@@ -283,10 +283,11 @@
         
 
 import os
-import threading
+# import threading
 import time
-import re
-from pathlib import Path
+# import re
+# from pathlib import Path
+import random
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
@@ -344,7 +345,7 @@ class TestMajorUpgrade(TestClusterBase):
         self.clone_name = "upgrade_clone"
         self.test_name = "major_upgrade_test"
 
-        self.base_mount_root = f"/mnt/test_location/"
+        self.base_mount_root = "/mnt/test_location/"
         self.base_log_root = f"{self.docker_logs_path}/upgrade_fio_logs"
         self.fio_debug = getattr(self, "fio_debug", False)
         self.test_name = "test_major_upgrade"
@@ -568,7 +569,7 @@ class TestMajorUpgrade(TestClusterBase):
             self.ssh_obj.exec_command(self.mgmt_nodes[0], f"{self.sbctl_cmd} --dev -d sn restart {node_id} --spdk-image {self.spdk_image}")
             try:
                 self.sbcli_utils.wait_for_storage_node_status(node_id, "online", timeout=1000)
-            except Exception as e:
+            except Exception as _:
                 self.logger.info(f"[SN {snode}] Restart failed!!")
             finally:
                 if not self.k8s_test:
