@@ -111,6 +111,15 @@ commands:
             dest: force
             type: bool
             action: store_true
+          - name: "--calculate-hp-only"
+            help: "Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-lvol, --nodes-per-socket, --number-of-devices', dest='calculate_hp_only"
+            dest: calculate_hp_only
+            type: bool
+            action: store_true
+          - name: "--number-of-devices"
+            help: "number of devices that will be used on this host, For calculating huge pages memory only"
+            dest: number_of_devices
+            type: int
       - name: configure-upgrade
         help: "Upgrade the automated configuration file with new changes of cpu mask or storage devices"
         description: >

@@ -1557,7 +1557,7 @@ def regenerate_config(new_config, old_config, force=False):
         number_of_poller_cores = len(old_config["nodes"][i]["distribution"]["poller_cpu_cores"])
         if 12 >= number_of_distribs_cores > 2:
             number_of_distribs = number_of_distribs_cores
-        else:
+        elif number_of_distribs_cores > 12:
             number_of_distribs = 12
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]

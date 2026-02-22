@@ -103,6 +103,10 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together', type=str, default='', dest='size_range', required=False)
         argument = subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1...', type=str, default='', dest='nvme_names', required=False)
         argument = subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions', dest='force', action='store_true')
+        argument = subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-lvol, --nodes-per-socket, --number-of-devices', dest='calculate_hp_only', action='store_true')
+        argument = subcommand.add_argument('--number-of-devices', help='number of devices that will be used on this host, For calculating huge pages memory only', type=int, dest='number_of_devices')
+
+
 
     def init_storage_node__configure_upgrade(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure-upgrade', 'Upgrade the automated configuration file with new changes of cpu mask or storage devices')
