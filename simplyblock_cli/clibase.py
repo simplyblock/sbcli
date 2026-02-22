@@ -89,6 +89,7 @@ class CLIWrapperBase:
         if not args.max_lvol:
             self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
         max_size = getattr(args, "max_prov") or 0
+        number_of_devices = getattr(args, "number_of_devices") or 0
         sockets_to_use = [0]
         if args.sockets_to_use:
             try:
@@ -122,11 +123,17 @@ class CLIWrapperBase:
                 "(--device-model with --size-range) are mutually exclusive; choose only one."
             )
         cores_percentage = int(args.cores_percentage)
+        if args.calculate_hp_only:
+            if not args.number_of_devices:
+                self.parser.error("For calculating huge pages memory, you must provide the --number-of-devices")
+            else:
+                number_of_devices = args.number_of_devices
 
         return storage_ops.generate_automated_deployment_config(
             args.max_lvol, max_prov, sockets_to_use,args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
-            size_range=args.size_range, cores_percentage=cores_percentage, nvme_names=nvme_names)
+            size_range=args.size_range, cores_percentage=cores_percentage, nvme_names=nvme_names,
+            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
