@@ -455,10 +455,10 @@ class CommonUtils:
 
     def get_all_node_versions(self):
         """
-        Fetches sbcli version from all storage nodes.
+        Fetches running Simplyblock version from Docker image tag on all nodes.
 
         Returns:
-            dict: Dictionary mapping node IPs to their sbcli version strings.
+            dict: node_ip -> simplyblock image tag (e.g. "25.10.4")
         """
         versions = {}
         mgmt_nodes, storage_nodes = self.sbcli_utils.get_all_nodes_ip()
