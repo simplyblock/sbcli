@@ -68,7 +68,6 @@ class PlacementDump:
 
                 # Unknown line. Placement dump broken?
                 print("Unknown line in placement dump: {}".format(line))
-                print("Unknown line in placement File: {}".format(file_path))
                 exit(1)
                     
 

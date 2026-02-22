@@ -1,4 +1,4 @@
-o# import os
+# import os
 # import time
 # import threading
 # from collections import deque
@@ -1373,4 +1373,3 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             raise Exception(f"Test stopped due to failure: {failure_info}")
 
         raise Exception("Test stopped without failure (graceful stop).")
-

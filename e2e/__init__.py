@@ -56,6 +56,7 @@ from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailo
 from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import RandomRapidFailoverNoGap
+from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvolSnapshotCloneAPI
 
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade
@@ -149,6 +150,7 @@ def get_stress_tests():
         RandomMultiClient2NodeFailoverTest,
         RandomRDMAFailoverTest,
         RandomRapidFailoverNoGap,
+        TestParallelLvolSnapshotCloneAPI,
     ]
     return tests
 

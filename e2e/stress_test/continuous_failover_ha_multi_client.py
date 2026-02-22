@@ -1,12 +1,14 @@
 from utils.common_utils import sleep_n_sec
 from datetime import datetime
 from collections import defaultdict
+from collections import defaultdict
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 from exceptions.custom_exception import LvolNotConnectException
 import threading
 import string
 import random
 import os
+import time
 import time
 
 
@@ -422,12 +424,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
         sleep_n_sec(5)
         for node in self.sn_nodes_with_sec:
-            # self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-            #                          storage_node_id=node)
-            self.logger.info("Skipping lvstore dump!!")
+            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
+                                     storage_node_id=node)
+            self.logger.info(f"Skipping lvstore dump!!")
         for node in self.sn_nodes_with_sec:
             cur_node_details = self.sbcli_utils.get_storage_node_details(node)
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
+            status = self.ssh_obj.fetch_distrib_logs(
             status = self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
@@ -874,9 +877,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             # sleep_n_sec(30)
 
         for node in self.sn_nodes_with_sec:
-            # self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-            #                          storage_node_id=node)
-            self.logger.info("Skipping lvstore dump!!")
+            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
+                                     storage_node_id=node)
+            self.logger.info(f"Skipping lvstore dump!!")
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage."""
