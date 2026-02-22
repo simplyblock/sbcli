@@ -83,6 +83,7 @@ def cleanup_remote_logs(ssh, node):
         "sudo rm -rf /etc/simplyblock/[0-9]*",  # Remove dump logs
         "sudo rm -rf /etc/simplyblock/*core*.zst",  # Remove dump logs
         "sudo rm -rf /etc/simplyblock/LVS*",  # Remove dump logs
+        "sudo rm -rf /etc/simplyblock/alceml_placement_maps/*",
         f"sudo rm -rf {HOME_DIR}/upload_to_minio.py"  # Remove temporary upload script
     ]
 

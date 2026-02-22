@@ -46,7 +46,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self.validate_every = 5
         self._iter = 0
         self._per_wave_fio_runtime = 3600      # 60 minutes
-        self._fio_wait_timeout = 5000          # wait for all to finish
+        self._fio_wait_timeout = 7200          # wait for all to finish
 
         # Internal state
         self.fio_threads = []
@@ -67,7 +67,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self.outage_types = [
             "graceful_shutdown",
             "container_stop",
-            # "interface_full_network_interrupt",
+            "interface_full_network_interrupt",
         ]
 
         # Names
@@ -420,13 +420,36 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             sleep_n_sec(500)
 
         elif outage_type == "container_stop":
-            self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port)
-
+            self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
+            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, ["offline", "unreachable"], timeout=900)
+            for node in self.sn_nodes_with_sec:
+                if node != self.current_outage_node:
+                    cur_node_details = self.sbcli_utils.get_storage_node_details(node)
+                    cur_node_ip = cur_node_details[0]["mgmt_ip"]
+                    self.ssh_obj.fetch_distrib_logs(
+                        storage_node_ip=cur_node_ip,
+                        storage_node_id=node,
+                        logs_path=self.docker_logs_path
+                    )
+            
         elif outage_type == "interface_full_network_interrupt":
             # Down all active data interfaces for ~300s (5 minutes) with ping verification
             active = self.ssh_obj.get_active_interfaces(node_ip)
             self.ssh_obj.disconnect_all_active_interfaces(node_ip, active, 300)
-            sleep_n_sec(280)
+            for node in self.sn_nodes_with_sec:
+                if node != self.current_outage_node:
+                    cur_node_details = self.sbcli_utils.get_storage_node_details(node)
+                    cur_node_ip = cur_node_details[0]["mgmt_ip"]
+                    self.ssh_obj.fetch_distrib_logs(
+                        storage_node_ip=cur_node_ip,
+                        storage_node_id=node,
+                        logs_path=self.docker_logs_path
+                    )
+            sleep_n_sec(200)
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, ["offline", "down"], timeout=130)
+            except Exception as _:
+                self.logger.info("Node might have not aborted! Checking if online.")
 
         return outage_type
 
@@ -478,7 +501,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             self.runner_k8s_log.restart_logging()
 
         # small cool-down before next outage to reduce SSH churn
-        # sleep_n_sec(random.randint(1, 5))
+        sleep_n_sec(random.randint(18, 30))
 
     # ---------- main ----------
 

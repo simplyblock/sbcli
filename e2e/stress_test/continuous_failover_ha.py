@@ -289,7 +289,7 @@ class RandomFailoverTest(TestLvolHACluster):
                         self.logger.info("Max retries reached. Failed to shutdown node.")
                         raise  # Rethrow the last exception
         elif outage_type == "container_stop":
-            self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port)
+            self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
         elif outage_type == "port_network_interrupt":
             # cmd = (
             #     'nohup sh -c "sudo nmcli dev disconnect eth0 && sleep 300 && '

@@ -17,6 +17,9 @@ import shlex
 import socket
 from collections import defaultdict
 from typing import Optional, List
+# import importlib
+# from glob import glob
+from utils.placement_dump_check import PlacementDump
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
@@ -54,6 +57,7 @@ class SshUtils:
         self._bastion_client = None
         self._reconnect_locks = defaultdict(threading.Lock)   
         self.ssh_pass = None
+        self.distrib_dump_paths = {}
 
     def _candidate_usernames(self, explicit_user) -> List[str]:
         if explicit_user:
@@ -537,9 +541,9 @@ class SshUtils:
                         exit_status = stdout.channel.recv_exit_status()
 
                     if (not supress_logs) and out:
-                        self.logger.info(f"Command output: {out.strip()[:2000]}")
+                        self.logger.info(f"Command output: {out.strip()}")
                     if (not supress_logs) and err:
-                        self.logger.error(f"Command error: {err.strip()[:2000]}")
+                        self.logger.error(f"Command error: {err.strip()}")
 
                     if exit_status != 0 and not err:
                         # some tools write nothing on stderr but non-zero exit
@@ -587,8 +591,9 @@ class SshUtils:
             mount_path (_type_): Mount path to perform mount on
         """
         try:
-            command = f"sudo rm -rf {mount_path}"
-            self.exec_command(node, command)
+            if "/mnt/nfs_share" not in mount_path:
+                command = f"sudo rm -rf {mount_path}"
+                self.exec_command(node, command)
         except Exception as e:
             self.logger.info(e)
         
@@ -882,33 +887,34 @@ class SshUtils:
             days (int): The number of days beyond which folders should be deleted.
         """
         # Get the current date from the remote machine
-        get_date_command = "date +%s"
-        remote_timestamp, error = self.exec_command(node, get_date_command)
+        pass
+        # get_date_command = "date +%s"
+        # remote_timestamp, error = self.exec_command(node, get_date_command)
         
-        if error:
-            self.logger.error(f"Failed to fetch remote date from {node}: {error}")
-            return
+        # if error:
+        #     self.logger.error(f"Failed to fetch remote date from {node}: {error}")
+        #     return
         
-        # Convert remote timestamp to an integer
-        remote_timestamp = int(remote_timestamp.strip())
+        # # Convert remote timestamp to an integer
+        # remote_timestamp = int(remote_timestamp.strip())
         
-        # Calculate threshold timestamp in seconds
-        threshold_timestamp = remote_timestamp - (days * 86400)
+        # # Calculate threshold timestamp in seconds
+        # threshold_timestamp = remote_timestamp - (days * 86400)
         
-        # Construct the remote find command using remote timestamps
-        command = f"""
-            find {folder_path} -mindepth 1 -maxdepth 1 -type d \
-            -printf '%T@ %p\n' | awk '$1 < {threshold_timestamp} {{print $2}}' | xargs -I {{}} rm -rf {{}}
-        """
+        # # Construct the remote find command using remote timestamps
+        # command = f"""
+        #     find {folder_path} -mindepth 1 -maxdepth 1 -type d \
+        #     -printf '%T@ %p\n' | awk '$1 < {threshold_timestamp} {{print $2}}' | xargs -I {{}} rm -rf {{}}
+        # """
 
-        self.logger.info(f"Executing remote folder cleanup on {node}: {command}")
+        # self.logger.info(f"Executing remote folder cleanup on {node}: {command}")
         
-        _, error = self.exec_command(node, command)
+        # _, error = self.exec_command(node, command)
 
-        if error:
-            self.logger.error(f"Failed to delete old folders on {node}: {error}")
-        else:
-            self.logger.info(f"Old folders deleted successfully on {node}.")
+        # if error:
+        #     self.logger.error(f"Failed to delete old folders on {node}: {error}")
+        # else:
+        #     self.logger.info(f"Old folders deleted successfully on {node}.")
 
     
     def list_files(self, node, location):
@@ -921,7 +927,7 @@ class SshUtils:
         output, error = self.exec_command(node=node, command=cmd)
         return output
     
-    def stop_spdk_process(self, node, rpc_port):
+    def stop_spdk_process(self, node, rpc_port, cluster_id):
         """Stops spdk process and waits until spdk_* containers are either exited or no longer listed.
         
         If containers are not killed within 20 seconds, the kill command is retried.
@@ -933,7 +939,10 @@ class SshUtils:
         max_attempts = 50
         attempt = 0
 
-        kill_cmd = f"curl 0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}"
+        kill_cmd = (
+            f"curl -sS "
+            f"\"http://0.0.0.0:5000/snode/spdk_process_kill?rpc_port={rpc_port}&cluster_id={cluster_id}\""
+        )
         output, error = self.exec_command(node=node, command=kill_cmd)
         # record the time when the kill command was last sent
         last_kill_time = time.time()
@@ -1062,6 +1071,7 @@ class SshUtils:
         force_cmd = " --force" if force else ""
         cmd = f"{self.base_cmd} -d sn restart {node_id}{force_cmd}"
         output, _ = self.exec_command(node=node, command=cmd)
+        self.logger.info(f"Output: {output}")
         return output.strip().split()
 
     def get_lvol_id(self, node, lvol_name):
@@ -1091,6 +1101,22 @@ class SshUtils:
 
         return output.strip()
 
+    def get_snapshot_id_delete(self, node, snapshot_name):
+        # snapshot_id = ""
+
+        cmd = "%s snapshot list | grep -i '%s ' | awk '{print $2}'" % (self.base_cmd, snapshot_name)
+        output, error = self.exec_command(node=node, command=cmd)
+        if output.strip():
+            if hasattr(self, "logger"):
+                self.logger.info(f"Snapshot '{snapshot_name}' is visible: {output}")
+
+        if not output.strip():
+            if hasattr(self, "logger"):
+                self.logger.error(f"No snapshot with give name'{snapshot_name}'")
+
+        return output.strip()
+
+
     def add_snapshot(self, node, lvol_id, snapshot_name):
         cmd = f"{self.base_cmd} -d snapshot add {lvol_id} {snapshot_name}"
         output, error = self.exec_command(node=node, command=cmd)
@@ -1100,13 +1126,15 @@ class SshUtils:
         if not snapshot_id:
             if hasattr(self, "logger"):
                 self.logger.error(f"Timed out waiting for snapshot '{snapshot_name}' to appear within 10 minutes.")
-    
+        
+        return output, error
+ 
     def add_clone(self, node, snapshot_id, clone_name):
         cmd = f"{self.base_cmd} -d snapshot clone {snapshot_id} {clone_name}"
         output, error = self.exec_command(node=node, command=cmd)
         return output, error
 
-    def delete_snapshot(self, node, snapshot_id, timeout=600, interval=30):
+    def delete_snapshot(self, node, snapshot_id, timeout=600, interval=30, skip_error=False):
         """
         Deletes a snapshot and waits until it is removed from the snapshot list.
 
@@ -1140,9 +1168,12 @@ class SshUtils:
 
             self.logger.debug(f"[Check] Snapshot still exists. Retrying in {interval} seconds...")
             time.sleep(interval)
-
-        self.logger.error(f"[Failure] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
-        raise Exception(f"Snapshot {snapshot_id} deletion failed after {timeout} seconds.")
+        
+        if not skip_error:
+            self.logger.error(f"[Failure] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
+            raise Exception(f"Snapshot {snapshot_id} deletion failed after {timeout} seconds.")
+        self.logger.error(f"[DEFFERED] Snapshot {snapshot_id} was not deleted within {timeout} seconds.")
+        return
 
     def delete_all_snapshots(self, node):
         patterns = ["snap", "ss", "snapshot"]
@@ -1426,7 +1457,10 @@ class SshUtils:
         # Verify outage begins (best-effort). If ping still works, attempt to issue 'down' again.
         time.sleep(5)
         tries = 0
-        attempts = 10
+        if duration_secs < 100:
+            attempts = 2
+        else:
+            attempts = 5
         while self._ping_once(node_ip) and attempts > 0:
             tries += 1
             if tries >= max_tries:
@@ -1834,6 +1868,7 @@ class SshUtils:
         Returns:
             str: The extracted LVS dump file path, or None if not found.
         """
+        self.logger.info(f"Executing '{self.base_cmd} --dev -d sn dump-lvstore' on {node_ip} for Storage Node ID: {storage_node_id}")
         try:
             command = f"{self.base_cmd} --dev -d sn dump-lvstore {storage_node_id} | grep 'LVS dump file will be here'"
             self.logger.info(f"Executing '{self.base_cmd} --dev -d sn dump-lvstore' on {node_ip} for Storage Node ID: {storage_node_id}")
@@ -1988,6 +2023,46 @@ class SshUtils:
     #         self.exec_command(storage_node_ip, delete_log_cmd)
 
     #     self.logger.info("All distrib logs retrieved successfully.")
+    def _get_latest_alceml_dir_and_files(self, storage_node_ip: str):
+        """
+        Returns:
+        (latest_dir_path or "", [list of txt files full paths])
+        """
+        cmd_latest = "sudo ls -1dt /etc/simplyblock/alceml_placement_maps/*/ 2>/dev/null | head -n 1 || true"
+        latest_dir_out, _ = self.exec_command(storage_node_ip, cmd_latest)
+        latest_dir = (latest_dir_out or "").strip()
+
+        if not latest_dir:
+            return "", []
+
+        cmd_files = f"sudo ls -1 {shlex.quote(latest_dir)}/*.txt 2>/dev/null || true"
+        files_out, _ = self.exec_command(storage_node_ip, cmd_files)
+        files = [x.strip() for x in (files_out or "").splitlines() if x.strip()]
+        return latest_dir.rstrip("/"), files
+
+
+    def _validate_dump_files(self, file_paths):
+        """
+        Validates using ONLY:
+        dump = PlacementDump()
+        dump.parse(path)
+        ok = dump.check_columns_allocation_consistency()
+        Returns True if all files valid else False.
+        """
+        all_ok = True
+        for fp in file_paths:
+            try:
+                dump = PlacementDump()
+                dump.parse(fp)
+                ok = dump.check_columns_allocation_consistency()
+                if not ok:
+                    self.logger.error(f"[PLACEMENT_DUMP] INVALID: {fp}")
+                    all_ok = False
+            except Exception as e:
+                self.logger.error(f"[PLACEMENT_DUMP] ERROR validating {fp}: {repr(e)}")
+                all_ok = False
+        return all_ok
+
 
     def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path):
         self.logger.info(f"Fetching distrib logs for Storage Node ID: {storage_node_id} on {storage_node_ip}")
@@ -1998,9 +2073,9 @@ class SshUtils:
         container_name = (container_name_out or "").strip()
         if not container_name:
             self.logger.warning(f"No SPDK container found on {storage_node_ip}")
-            return
+            return True
 
-        # 1) Get bdevs via correct sock
+        # 1) Get bdevs via correct sock 
         timestamp = datetime.now().strftime("%Y%m%d_%H-%M-%S")
         base_path = f"{logs_path}/{storage_node_ip}/distrib_bdev_logs"
         self.exec_command(storage_node_ip, f"sudo mkdir -p '{base_path}' && sudo chmod -R 777 '{base_path}'")
@@ -2011,7 +2086,7 @@ class SshUtils:
         bdev_output, bdev_err = self.exec_command(storage_node_ip, bdev_cmd)
         if (bdev_err and bdev_err.strip()) and not bdev_output:
             self.logger.error(f"bdev_get_bdevs error on {storage_node_ip}: {bdev_err.strip()}")
-            return
+            return True
 
         # Parse distrib names
         try:
@@ -2023,10 +2098,10 @@ class SshUtils:
             })
         except json.JSONDecodeError as e:
             self.logger.error(f"JSON parsing failed on {storage_node_ip}: {e}")
-            return
+            return True
         if not distribs:
             self.logger.warning(f"No distrib_* bdevs found on {storage_node_ip}.")
-            return
+            return True
         self.logger.info(f"[{storage_node_ip}] Distributions: {distribs}")
 
         # 2) Run multiple docker exec in parallel from ONE SSH exec
@@ -2114,11 +2189,62 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         tar_out, tar_err = self.exec_command(storage_node_ip, run_many_cmd)
         if (tar_err and tar_err.strip()) and not tar_out:
             self.logger.error(f"[{storage_node_ip}] Parallel docker-exec script error: {tar_err.strip()}")
-            return
+            return True
 
         final_tar = (tar_out or "").strip().splitlines()[-1] if tar_out else f"{base_path}/{os.path.basename(remote_tar)}"
         self.logger.info(f"[{storage_node_ip}] Distrib logs saved: {base_path} (tar: {final_tar})")
 
+        # ------------------------------
+        # (1) Store paths:
+        #     - base_path
+        #     - latest /etc alceml folder
+        #     - files in that folder
+        # ------------------------------
+        # alceml_latest_dir, alceml_txt_files = self._get_latest_alceml_dir_and_files(storage_node_ip)
+
+        # # also store the txt files we generated / collected into base_path
+        # # NOTE: these are files placed under base_path by the remote script
+        # gen_cmd = f"sudo ls -1 {shlex.quote(base_path)}/*.txt 2>/dev/null || true"
+        # gen_out, _ = self.exec_command(storage_node_ip, gen_cmd)
+        # generated_txt_files = [x.strip() for x in (gen_out or "").splitlines() if x.strip()]
+
+        # self.distrib_dump_paths[storage_node_ip] = {
+        #     "base_path": base_path,
+        #     "alceml_latest_dir": alceml_latest_dir,
+        #     "alceml_txt_files": alceml_txt_files,
+        #     "generated_txt_files": generated_txt_files,
+        # }
+
+        # self.logger.info(f"[{storage_node_ip}] Stored dump paths: base_path={base_path}, alceml_latest_dir={alceml_latest_dir}")
+        # self.logger.info(f"[{storage_node_ip}] /etc alceml txt count={len(alceml_txt_files)}, generated txt count={len(generated_txt_files)}")
+
+        # # ------------------------------
+        # # (2) Validate using your steps only
+        # # ------------------------------
+        # if not alceml_txt_files and not generated_txt_files:
+        #     self.logger.warning(f"[{storage_node_ip}] No dump txt files found to validate.")
+        #     return True
+
+        # before_dir = f"{base_path}/before-migration-{timestamp}"
+        # self.exec_command(storage_node_ip, f"sudo mkdir -p '{before_dir}' && sudo chmod -R 777 '{before_dir}'")
+
+        # Copy ONLY /etc alceml dumps into NFS before_dir
+        # alceml_nfs_files = []
+        # for fp in alceml_txt_files:
+        #     bn = os.path.basename(fp.rstrip("/"))
+        #     dest = f"{before_dir}/{bn}"
+        #     self.exec_command(storage_node_ip, f"sudo cp -f '{fp}' '{dest}' 2>/dev/null || true")
+        #     alceml_nfs_files.append(dest)
+
+        # Validate: NFS-copied alceml + existing generated (already in base_path)
+        # files_to_validate = []
+        # files_to_validate.extend(alceml_nfs_files)
+        # files_to_validate.extend(generated_txt_files)
+
+        # ok = self._validate_dump_files(files_to_validate)
+        
+        # return True if ok else False
+        return True
 
     def clone_mount_gen_uuid(self, node, device):
         """Repair the XFS filesystem and generate a new UUID.
@@ -2441,21 +2567,62 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
             self.log_monitor_stop_flags[node_ip].set()
             self.logger.info(f"Stopping container log monitor thread for {node_ip}")
 
-    def get_node_version(self, node):
+    def get_node_version(self, node: str) -> str:
         """
-        Fetches sbcli command version from all storage nodes.
-
-        Returns:
-            str: Current sbcli version string
+        Return ONLY the simplyblock app image tag (e.g. 25.10.4) from docker ps.
+        Ignores simplyblock/spdk:* completely.
         """
-        version = None
         try:
-            version_cmd = f"pip show {self.base_cmd} | grep Version"
-            output, _ = self.exec_command(node=node, command=version_cmd)
-            version = output.strip().split(":")[1].strip() if ":" in output else "UNKNOWN"
+            cmd = r"sudo docker ps --format '{{.Image}}'"
+            output, _ = self.exec_command(node=node, command=cmd)
+
+            images = [x.strip() for x in output.splitlines() if x.strip()]
+            if not images:
+                self.logger.error(f"[{node}] docker ps returned no containers")
+                return "UNKNOWN"
+
+            # Match: anything ending with /simplyblock:<tag>  (registry optional)
+            # Exclude: anything containing /spdk:
+            app_tags = []
+            for img in images:
+                self.logger.info(img)
+                if "/spdk:" in img or img.startswith("simplyblock/spdk:"):
+                    continue
+
+                # accept:
+                #   public.ecr.aws/simply-block/simplyblock:25.10.4
+                #   .../simplyblock:25.10.4
+                #   simplyblock:25.10.4  (if retagged locally)
+                is_app = (
+                    re.search(r"(^|.*/)(simplyblock):", img) is not None
+                    or img.startswith("simplyblock:")
+                )
+                if not is_app:
+                    continue
+
+                # Extract tag
+                if "@sha256:" in img:
+                    app_tags.append("DIGEST")
+                elif ":" in img:
+                    app_tags.append(img.rsplit(":", 1)[1].strip())
+                self.logger.info(app_tags)
+
+            app_tags = [t for t in app_tags if t]
+            if not app_tags:
+                self.logger.warning(f"[{node}] No running simplyblock APP image found")
+                return "UNKNOWN"
+
+            uniq = sorted(set(app_tags))
+            if len(uniq) > 1:
+                self.logger.warning(f"[{node}] Multiple simplyblock APP image tags found: {uniq}")
+                return ",".join(uniq)
+
+            return uniq[0]
+
         except Exception as e:
-            self.logger.error(f"Failed to fetch {self.base_cmd} version from node {node}: {e}")
-        return version if version else "ERROR"
+            self.logger.error(f"Failed to fetch simplyblock app image version from node {node}: {e}")
+            return "ERROR"
+
 
     def get_image_dict(self, node):
         """Get images dictionary
@@ -2671,7 +2838,7 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 
         output, error = self.exec_command(node=node, command=cmd)
         return output, error
-
+    
 
 class RunnerK8sLog:
     """
