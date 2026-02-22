@@ -208,7 +208,8 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
 
         self.logger.info("Stopping SPDK process on node without LVOLs")
         self.ssh_obj.stop_spdk_process(node=self.node_id_ip[node_without_lvols],
-                                       rpc_port=node_details[0]["rpc_port"])
+                                       rpc_port=node_details[0]["rpc_port"],
+                                       cluster_id=self.cluster_id)
 
         node_wait_thread = threading.Thread(
             target=self.sbcli_utils.wait_for_storage_node_status,

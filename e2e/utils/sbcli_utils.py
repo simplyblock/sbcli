@@ -3,6 +3,7 @@ from http import HTTPStatus
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
+
 class SbcliUtils:
     """Contains all API calls
     """
@@ -476,6 +477,7 @@ class SbcliUtils:
         if not lvol_id:
             self.logger.info("Lvol does not exist. Exiting!!")
             return
+        self.logger.info(f"ledoo {lvol_name}, {lvol_id}")
 
         data = self.delete_request(api_url=f"/lvol/{lvol_id}")
         self.logger.info(f"Delete lvol resp: {data}")
@@ -758,56 +760,56 @@ class SbcliUtils:
                 sec_nodes.append(result["uuid"])
         return node_id in sec_nodes
     
-    def add_snapshot(self, lvol_id, snapshot_name, retry=3):
-        """Adds snapshot with given params
-        """
+    # def add_snapshot(self, lvol_id, snapshot_name, retry=3):
+    #     """Adds snapshot with given params
+    #     """
         
-        body = {
-            "lvol_id": lvol_id,
-            "snapshot_name": snapshot_name,
-        }
+    #     body = {
+    #         "lvol_id": lvol_id,
+    #         "snapshot_name": snapshot_name,
+    #     }
         
-        self.post_request(api_url="/snapshot", body=body, retry=retry)
+    #     self.post_request(api_url="/snapshot", body=body, retry=retry)
 
-    def add_clone(self, snapshot_id, clone_name, retry=3):
-        """Adds clone with given params
-        """
+    # def add_clone(self, snapshot_id, clone_name, retry=3):
+    #     """Adds clone with given params
+    #     """
         
-        body = {
-            "snapshot_id": snapshot_id,
-            "clone_name": clone_name,
-        }
+    #     body = {
+    #         "snapshot_id": snapshot_id,
+    #         "clone_name": clone_name,
+    #     }
         
-        self.post_request(api_url="/snapshot/clone", body=body, retry=retry)
+    #     self.post_request(api_url="/snapshot/clone", body=body, retry=retry)
 
-    def list_snapshot(self):
-        """Return all snapshots
-        """
-        snap_data = dict()
-        data = self.get_request(api_url="/snapshot")
-        for snap_info in data["results"]:
-            snap_data[snap_info["snap_name"]] = snap_info["id"]
-        self.logger.info(f"Snap List: {snap_data}")
-        return snap_data
+    # def list_snapshot(self):
+    #     """Return all snapshots
+    #     """
+    #     snap_data = dict()
+    #     data = self.get_request(api_url="/snapshot")
+    #     for snap_info in data["results"]:
+    #         snap_data[snap_info["snap_name"]] = snap_info["id"]
+    #     self.logger.info(f"Snap List: {snap_data}")
+    #     return snap_data
 
-    def get_snapshot_id(self, snap_name):
-        """Get snapshot id
-        """
-        snap_list = self.list_snapshot()
-        return snap_list.get(snap_name, None)
+    # def get_snapshot_id(self, snap_name):
+    #     """Get snapshot id
+    #     """
+    #     snap_list = self.list_snapshot()
+    #     return snap_list.get(snap_name, None)
 
 
-    def delete_snapshot(self, snap_name):
-        """Deletes lvol with given name
-        """
-        snap_id = self.get_snapshot_id(snap_name=snap_name)
+    # def delete_snapshot(self, snap_name):
+    #     """Deletes lvol with given name
+    #     """
+    #     snap_id = self.get_snapshot_id(snap_name=snap_name)
 
-        if not snap_id:
-            self.logger.info("Snap does not exist. Exiting")
-            return
+    #     if not snap_id:
+    #         self.logger.info("Snap does not exist. Exiting")
+    #         return
 
-        data = self.delete_request(api_url=f"/snapshot/{snap_id}")
-        self.logger.info(f"Delete snap resp: {data}")
+    #     data = self.delete_request(api_url=f"/snapshot/{snap_id}")
+    #     self.logger.info(f"Delete snap resp: {data}")
     
     def get_cluster_capacity(self):
         """Get cluster capacity
@@ -822,3 +824,112 @@ class SbcliUtils:
             cluster_id (str): Activates the given cluster
         """
         self.put_request(api_url=f"/cluster/activate/{cluster_id}")
+
+        # ---------------------------------------------------------
+    # Snapshot + Clone APIs
+    # ---------------------------------------------------------
+    def add_snapshot(self, lvol_id: str, snapshot_name: str, retry: int = 10):
+        """
+        Create snapshot from LVOL (API).
+        Endpoint: POST /snapshot
+        Body: { "lvol_id": "...", "snapshot_name": "..." }
+        """
+        body = {
+            "lvol_id": lvol_id,
+            "snapshot_name": snapshot_name
+        }
+        return self.post_request(api_url="/snapshot", body=body, retry=retry)
+
+    def add_clone(self, snapshot_id: str, clone_name: str, retry: int = 10):
+        """
+        Create clone from snapshot (API).
+        Endpoint: POST /snapshot/clone
+        Body: { "snapshot_id": "...", "clone_name": "..." }
+        """
+        body = {
+            "snapshot_id": snapshot_id,
+            "clone_name": clone_name
+        }
+        return self.post_request(api_url="/snapshot/clone", body=body, retry=retry)
+
+    def list_snapshots(self):
+        """
+        List snapshots (API).
+        Endpoint: GET /snapshot
+        Returns dict: { snap_name: snap_id }
+        """
+        data = self.get_request(api_url="/snapshot")
+        snap_data = {}
+
+        for item in data.get("results", []):
+            # Different builds sometimes expose snap name fields differently.
+            # Handle both to avoid breakages.
+            name = (
+                item.get("snap_name")
+                or item.get("snapshot_name")
+                or item.get("name")
+            )
+            sid = item.get("id") or item.get("uuid")
+            if name and sid:
+                snap_data[name] = sid
+
+        self.logger.info(f"Snapshot List: {snap_data}")
+        return snap_data
+
+    def get_snapshot_id(self, snap_name: str):
+        """
+        Get snapshot id by name using list_snapshots().
+        """
+        return self.list_snapshots().get(snap_name)
+
+    def delete_snapshot(self, snap_name: str = None, snap_id: str = None, max_attempt: int = 60, skip_error: bool = False):
+        """
+        Delete snapshot by name or id (API).
+        Endpoint: DELETE /snapshot/{snap_id}
+        Also waits until snapshot disappears from list.
+        """
+        if not snap_id:
+            if not snap_name:
+                raise ValueError("delete_snapshot requires snap_name or snap_id")
+            snap_id = self.get_snapshot_id(snap_name=snap_name)
+
+        if not snap_id:
+            if skip_error:
+                self.logger.info(f"Snapshot not found (skip_error=True). snap_name={snap_name}")
+                return
+            raise Exception(f"Snapshot not found. snap_name={snap_name}")
+
+        resp = self.delete_request(api_url=f"/snapshot/{snap_id}")
+        self.logger.info(f"Delete snapshot resp: {resp}")
+
+        # wait for removal
+        attempt = 0
+        while attempt < max_attempt:
+            cur = self.list_snapshots()
+            # if deleting by name, use name check; else id check
+            if snap_name:
+                if snap_name not in cur:
+                    return
+            else:
+                if snap_id not in cur.values():
+                    return
+
+            attempt += 1
+            sleep_n_sec(5)
+
+        if skip_error:
+            return
+        raise Exception(f"Snapshot did not get deleted in time. snap_name={snap_name}, snap_id={snap_id}")
+
+    def delete_all_snapshots(self):
+        """
+        Convenience cleanup via API.
+        """
+        snaps = self.list_snapshots()
+        for snap_name in list(snaps.keys()):
+            try:
+                self.delete_snapshot(snap_name=snap_name, skip_error=True)
+            except Exception as e:
+                self.logger.info(f"Snapshot delete failed (continuing): {snap_name}, err={e}")
+
+
