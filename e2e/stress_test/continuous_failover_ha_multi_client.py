@@ -1,14 +1,12 @@
 from utils.common_utils import sleep_n_sec
 from datetime import datetime
 from collections import defaultdict
-from collections import defaultdict
 from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 from exceptions.custom_exception import LvolNotConnectException
 import threading
 import string
 import random
 import os
-import time
 import time
 
 
@@ -426,7 +424,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         for node in self.sn_nodes_with_sec:
             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                      storage_node_id=node)
-            self.logger.info(f"Skipping lvstore dump!!")
+            # self.logger.info("Skipping lvstore dump!!")
         for node in self.sn_nodes_with_sec:
             cur_node_details = self.sbcli_utils.get_storage_node_details(node)
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
@@ -689,7 +687,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         self.runner_k8s_log.restart_logging()
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=60)
                     self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=2)
-                except Exception as e:
+                except Exception as _:
                     max_retries = 10
                     retry_delay = 10  # seconds
 
@@ -764,7 +762,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         self.runner_k8s_log.restart_logging()
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=100)
                     self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=(self.outage_dur//60)+1)
-                except Exception as e:
+                except Exception as _:
                     # Retry mechanism for restarting the node
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=100)
                     for attempt in range(max_retries):
@@ -878,7 +876,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         for node in self.sn_nodes_with_sec:
             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                      storage_node_id=node)
-            self.logger.info(f"Skipping lvstore dump!!")
+            # self.logger.info(f"Skipping lvstore dump!!")
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage."""
@@ -1242,7 +1240,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             cur_node_details = self.sbcli_utils.get_storage_node_details(node)
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
             
-            staus = self.ssh_obj.fetch_distrib_logs(
+            status = self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
                 logs_path=self.docker_logs_path
