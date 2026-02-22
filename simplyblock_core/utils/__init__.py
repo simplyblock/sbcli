@@ -1557,7 +1557,7 @@ def regenerate_config(new_config, old_config, force=False):
         number_of_poller_cores = len(old_config["nodes"][i]["distribution"]["poller_cpu_cores"])
         if 12 >= number_of_distribs_cores > 2:
             number_of_distribs = number_of_distribs_cores
-        else:
+        elif number_of_distribs_cores > 12:
             number_of_distribs = 12
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
@@ -2635,3 +2635,32 @@ def create_rpc_socket_mount():
         subprocess.run(["df", "-h", mount_point])
     except Exception as e:
         logger.error(e)
+
+def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage):
+    minimum_hp_memory = 0
+    cores_by_numa = get_numa_cores()
+    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage)
+    node_index = 0
+    number_of_alcemls = number_of_devices//(nodes_per_socket * len(sockets_to_use))
+    if number_of_alcemls < 2:
+        number_of_alcemls = 2
+    for nid in sockets_to_use:
+        for idx, core_group in enumerate(node_cores.get(nid, [])):
+            distribution = calculate_core_allocations(core_group["isolated"], number_of_alcemls + 1)
+            number_of_distribs = 2
+            number_of_distribs_cores = len(distribution[5])
+
+            number_of_poller_cores = len(distribution[2])
+            if 12 >= number_of_distribs_cores > 2:
+                number_of_distribs = number_of_distribs_cores
+            elif number_of_poller_cores > 12:
+                number_of_distribs = 12
+            small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls +1, 2 * number_of_distribs,
+                                                                      len(core_group["isolated"]),
+                                                                      number_of_poller_cores or len(
+                                                                          core_group["isolated"]))
+            minimum_hp_memory += calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol,
+                                                            0, len(core_group["isolated"])) + 1000000000
+
+            node_index += 1
+    return convert_size(minimum_hp_memory, 'MB')

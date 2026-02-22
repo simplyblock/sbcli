@@ -2758,35 +2758,41 @@ def upgrade_automated_deployment_config():
 
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                                         cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False):
-    # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
-    total_cores = os.cpu_count() or 0
-    if total_cores < 6:
-        raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
+                                         cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
+                                         calculate_hp_only=False, number_of_devices=0):
+    if calculate_hp_only:
+        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage)
+        logger.info(f"The minimum required huge pages on this host is: {minimum_hp_memory} MB")
+        return True
+    else:
+        # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
+        total_cores = os.cpu_count() or 0
+        if total_cores < 6:
+            raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
 
-    # load vfio_pci and uio_pci_generic
-    utils.load_kernel_module("vfio_pci")
-    utils.load_kernel_module("uio_pci_generic")
+        # load vfio_pci and uio_pci_generic
+        utils.load_kernel_module("vfio_pci")
+        utils.load_kernel_module("uio_pci_generic")
 
-    nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
-                                                       pci_allowed, pci_blocked, cores_percentage, force=force,
-                                                       device_model=device_model, size_range=size_range, nvme_names=nvme_names)
-    if not nodes_config or not nodes_config.get("nodes"):
-        return False
-    utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
-    if system_info:
-        utils.store_config_file(system_info, constants.SYSTEM_INFO_FILE)
-    huge_page_memory_dict: dict = {}
+        nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
+                                                           pci_allowed, pci_blocked, cores_percentage, force=force,
+                                                           device_model=device_model, size_range=size_range, nvme_names=nvme_names)
+        if not nodes_config or not nodes_config.get("nodes"):
+            return False
+        utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
+        if system_info:
+            utils.store_config_file(system_info, constants.SYSTEM_INFO_FILE)
+        huge_page_memory_dict: dict = {}
 
-    # Set Huge page memory
-    for node_config in nodes_config["nodes"]:
-        numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-    if not k8s:
-        utils.create_rpc_socket_mount()
-    # for numa, huge_page_memory in huge_page_memory_dict.items():
-    #    num_pages = huge_page_memory // (2048 * 1024)
-    #    utils.set_hugepages_if_needed(numa, num_pages)
+        # Set Huge page memory
+        for node_config in nodes_config["nodes"]:
+            numa = node_config["socket"]
+            huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+        if not k8s:
+            utils.create_rpc_socket_mount()
+        # for numa, huge_page_memory in huge_page_memory_dict.items():
+        #    num_pages = huge_page_memory // (2048 * 1024)
+        #    utils.set_hugepages_if_needed(numa, num_pages)
     return True
 
 
