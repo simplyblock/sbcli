@@ -121,6 +121,16 @@ on:
         description: "bootstrap: --ha-type"
         required: true
         default: "ha"
+      BOOTSTRAP_IS_SINGLE_NODE:
+        description: "Bootstrap: deploy as single-node (--is-single-node)"
+        type: boolean
+        required: false
+        default: false
+      BOOTSTRAP_ENABLE_NODE_AFFINITY:
+        description: "Bootstrap: enable node affinity (--enable-node-affinity)"
+        type: boolean
+        required: false
+        default: false
 
       # =========================
       # Stress test inputs
@@ -497,6 +507,14 @@ jobs:
           extra_args=()
           if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
             extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
+          fi
+          # Checkbox flags
+          if [[ "${{ inputs.BOOTSTRAP_IS_SINGLE_NODE }}" == "true" ]]; then
+            extra_args+=( --is-single-node )
+          fi
+
+          if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
+            extra_args+=( --enable-node-affinity )
           fi
 
           set +e
