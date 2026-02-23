@@ -715,3 +715,20 @@ def ifc_is_tcp(query: NicQuery):
 })
 def is_alive():
     return utils.get_response(True)
+
+
+class PingQuery(BaseModel):
+    ip: str
+
+@api.get('/ping_ip', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def ping_ip(query: NicQuery):
+    try:
+        response = os.system(f"ping -c 3 -W 1 {query.ip} > /dev/null 2>&1")
+        return utils.get_response(response == 0)
+    except Exception as e:
+        logger.error(e)
+        return utils.get_response(False, str(e))
