@@ -71,7 +71,7 @@ on:
       KEY_PATH:
         description: "SSH private key path on runner (default: ~/.ssh/simplyblock-us-east-2.pem)"
         required: true
-        default: "~/.ssh/simplyblock-us-east-2.pem"
+        default: "/.ssh/simplyblock-us-east-2.pem"
       CLIENTNODES:
         description: "Space-separated client node IPs (CLIENT_IP is same)"
         required: true
@@ -285,7 +285,10 @@ jobs:
               "${SSH_USER}@${ip}" "bash -lc \"$cmd\""
           }
 
-          for ip in $STORAGE_PRIVATE_IPS; do
+          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          for ip in $uniq_targets; do
             echo "---- storage destroy/clean: $ip ----"
             run_remote "$ip" "set -euxo pipefail;
               systemctl stop firewalld || true;
