@@ -570,7 +570,7 @@ jobs:
         run: |
           set -euxo pipefail
           rm -rf sbcli
-          git clone --branch "${SBCLI_BRANCH}" https://github.com/simplyblock-io/sbcli.git sbcli
+          git clone https://github.com/simplyblock-io/sbcli.git sbcli
           test -f sbcli/e2e/stress.py
           test -f sbcli/e2e/logs/cleanup.py
 
