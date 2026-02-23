@@ -19,17 +19,9 @@ on:
         description: "API invoke URL"
         required: true
         default: "http://192.168.10.211/"
-      API_BASE_URL:
-        description: "API base URL"
-        required: true
-        default: "http://192.168.10.211/"
 
       BASTION_IP:
         description: "Bastion IP"
-        required: true
-        default: "192.168.10.211"
-      BASTION_SERVER:
-        description: "Bastion server"
         required: true
         default: "192.168.10.211"
 
@@ -155,9 +147,9 @@ jobs:
       STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
       SEC_STORAGE_PRIVATE_IPS: ${{ inputs.SEC_STORAGE_PRIVATE_IPS }}
       API_INVOKE_URL: ${{ inputs.API_INVOKE_URL }}
-      API_BASE_URL: ${{ inputs.API_BASE_URL }}
+      API_BASE_URL: ${{ inputs.API_INVOKE_URL }}
       BASTION_IP: ${{ inputs.BASTION_IP }}
-      BASTION_SERVER: ${{ inputs.BASTION_SERVER }}
+      BASTION_SERVER: ${{ inputs.BASTION_IP }}
       MNODES: ${{ inputs.MNODES }}
       NR_HUGEPAGES: ${{ inputs.NR_HUGEPAGES }}
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT }}
