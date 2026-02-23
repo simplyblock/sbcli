@@ -502,11 +502,11 @@ jobs:
           fi
           # Checkbox flags
           if [[ "${{ inputs.BOOTSTRAP_IS_SINGLE_NODE }}" == "true" ]]; then
-            extra_args+=( --is-single-node )
+            extra_args+=( --is-single-node true )
           fi
 
           if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
-            extra_args+=( --enable-node-affinity )
+            extra_args+=( --enable-node-affinity true )
           fi
 
           set +e
