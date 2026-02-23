@@ -221,15 +221,35 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve KEY_PATH (~ expansion) and validate key exists
+      - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash
         run: |
           set -euxo pipefail
+
           kp="${KEY_PATH}"
-          if [[ "$kp" == "~/"* ]]; then
+
+          # Strip wrapping quotes if user typed "~/.ssh/..." with quotes
+          kp="${kp%\"}"; kp="${kp#\"}"
+          kp="${kp%\'}"; kp="${kp#\'}"
+
+          # Normalize ".ssh/..." -> "$HOME/.ssh/..."
+          if [[ "$kp" == .ssh/* ]]; then
+            kp="${HOME}/${kp}"
+          fi
+
+          # Normalize "~/" -> "$HOME/"
+          if [[ "$kp" == ~/* ]]; then
             kp="${HOME}/${kp#~/}"
           fi
+
+          # Also handle "~.ssh/.." (unlikely, but safe)
+          if [[ "$kp" == "~.ssh/"* ]]; then
+            kp="${HOME}/.${kp#~.}"
+          fi
+
+          echo "Resolved KEY_PATH=$kp"
           echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
+
           test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
           chmod 600 "$kp" || true
 
