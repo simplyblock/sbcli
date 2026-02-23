@@ -270,11 +270,11 @@ jobs:
 
           run_remote() {
             local ip="$1"
-            local cmd="$2"
+            local script="$2"
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${ip}" "bash -lc \"$cmd\""
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
           targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
@@ -298,11 +298,11 @@ jobs:
 
           run_remote() {
             local ip="$1"
-            local cmd="$2"
+            local script="$2"
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${ip}" "bash -lc \"$cmd\""
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
           targets="$MNODES $STORAGE_PRIVATE_IPS"
@@ -338,11 +338,11 @@ jobs:
 
           run_remote() {
             local ip="$1"
-            local cmd="$2"
+            local script="$2"
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${ip}" "bash -lc \"$cmd\""
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
           # disconnect lvol subsystems on clients
@@ -384,11 +384,11 @@ jobs:
 
           run_remote() {
             local ip="$1"
-            local cmd="$2"
+            local script="$2"
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${ip}" "bash -lc \"$cmd\""
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
           # remove /etc/simplyblock on MNODES + storage
