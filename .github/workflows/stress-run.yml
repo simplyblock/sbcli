@@ -486,7 +486,7 @@ jobs:
           chmod +x ./bootstrap-cluster.sh
 
           extra_args=()
-          if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" ]]; then
+          if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
             extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
           fi
 
