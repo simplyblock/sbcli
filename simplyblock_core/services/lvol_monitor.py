@@ -126,8 +126,7 @@ def process_lvol_delete_finish(lvol):
     # 3-1 async delete lvol bdev from primary
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                                            StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+        if sec_node and sec_node.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
             primary_node.lvol_del_sync_lock()
         ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
         if not ret:

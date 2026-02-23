@@ -68,8 +68,7 @@ def process_snap_delete_finish(snap, leader_node):
         non_leader_id = snode.get_id()
     non_leader = db.get_storage_node_by_id(non_leader_id)
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        if non_leader and non_leader.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                                                StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+        if non_leader and non_leader.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
             primary_node.lvol_del_sync_lock()
         ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
         if not ret:

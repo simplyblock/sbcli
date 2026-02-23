@@ -38,13 +38,9 @@ commands:
             type: int
             required: true
           - name: "--max-size"
-            help: "Maximum amount of GB to be utilized on this storage node"
+            help: "Maximum amount of Huge Pages to be set on the node"
             description: >
-              Maximum amount of GB to be utilized on this storage node. This cannot be larger than the total effective
-              cluster capacity. A safe value is `1/n * 2.0` of effective cluster capacity. Meaning, if you have three
-              storage nodes, each with 100 TiB of raw capacity and a cluster with erasure coding scheme 1+1
-              (two replicas), the effective cluster capacity is _100 TiB * 3 / 2 = 150 TiB_. Setting this parameter to
-              _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
+              Maximum amount of Huge Pages to be set on the node, it will override the auto-calculated value.
             dest: max_prov
             type: str
             required: false
@@ -115,6 +111,15 @@ commands:
             dest: force
             type: bool
             action: store_true
+          - name: "--calculate-hp-only"
+            help: "Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-lvol, --nodes-per-socket, --number-of-devices"
+            dest: calculate_hp_only
+            type: bool
+            action: store_true
+          - name: "--number-of-devices"
+            help: "number of devices that will be used on this host, For calculating huge pages memory only"
+            dest: number_of_devices
+            type: int
       - name: configure-upgrade
         help: "Upgrade the automated configuration file with new changes of cpu mask or storage devices"
         description: >
@@ -724,6 +729,60 @@ commands:
             help: "Device id"
             dest: device_id
             type: str
+      - name: list-snapshots
+        help: "List snapshots on a storage node"
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
+          - name: "--json"
+            help: "Print json output"
+            dest: json
+            type: bool
+            action: store_true
+      - name: list-lvols
+        help: "List lvols on a storage node"
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
+          - name: "--json"
+            help: "Print json output"
+            dest: json
+            type: bool
+            action: store_true
+      - name: repair-lvstore
+        help: "Try repair any inconsistencies in lvstore on a storage node"
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
+          - name: "--validate-only"
+            help: "Validate only, do not perform any repair actions"
+            dest: validate_only
+            type: bool
+            action: store_true
+          - name: "--force-remove-inconsistent"
+            help: "Force remove any inconsistent lvols or snapshots"
+            dest: force_remove_inconsistent
+            type: bool
+            action: store_true
+          - name: "--force_remove_wrong_ref"
+            help: "Force remove lvols or snapshots with wrong reference count"
+            dest: force_remove_wrong_ref
+            type: bool
+            action: store_true
+      - name: lvs-dump-tree
+        help: "dump lvstore tree for debugging"
+        private: true
+        arguments:
+          - name: "node_id"
+            help: "Node id"
+            dest: node_id
+            type: str
   - name: "cluster"
     help: "Cluster commands"
     weight: 200
@@ -923,6 +982,11 @@ commands:
                 min: 0
                 max: 128
             default: 3
+          - name: "--client-data-nic"
+            help: >
+              Network interface name from client to use for LVol connection.
+            dest: client_data_nic
+            type: str
       - name: add
         help: "Adds a new cluster"
         arguments:
@@ -1049,6 +1113,11 @@ commands:
             dest: name
             aliases:
               - "-n"
+            type: str
+          - name: "--client-data-nic"
+            help: >
+              Network interface name from client to use for LVol connection.
+            dest: client_data_nic
             type: str
       - name: activate
         help: >

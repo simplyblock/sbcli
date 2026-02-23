@@ -1,6 +1,7 @@
 # coding=utf- 8
 import datetime
 import json
+import math
 import os
 import platform
 import socket
@@ -541,7 +542,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
     jm_devices = []
     bdevs_names = [d['name'] for d in snode.rpc_client().get_bdevs()]
     for nvme in new_devices:
-        if nvme.status == NVMeDevice.STATUS_ONLINE:
+        if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
             dev_part = f"{nvme.nvme_bdev[:-2]}p1"
             if dev_part in bdevs_names:
                 if dev_part not in jm_devices:
@@ -1268,7 +1269,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.warning(f"Failed to set nvmf max subsystems {constants.NVMF_MAX_SUBSYSTEMS}")
 
         # 2- set socket implementation options
-        ret = rpc_client.sock_impl_set_options()
+        bind_to_device = None
+        if snode.data_nics and len(snode.data_nics) == 1:
+            bind_to_device = snode.data_nics[0].if_name
+        ret = rpc_client.sock_impl_set_options(bind_to_device)
         if not ret:
             logger.error("Failed to set optimized socket options")
             return False
@@ -1640,11 +1644,12 @@ def restart_storage_node(
             snode.mgmt_ip = node_ip.split(":")[0]
             data_nics = []
             for nic in snode.data_nics:
-                device = node_info['network_interface'][nic.if_name]
+                if_name = nic["if_name"]
+                device = node_info['network_interface'][if_name]
                 data_nics.append(
                     IFace({
                         'uuid': str(uuid.uuid4()),
-                        'if_name': nic,
+                        'if_name': if_name,
                         'ip4_address': device['ip'],
                         'status': device['status'],
                         'net_type': device['net_type']}))
@@ -1832,7 +1837,10 @@ def restart_storage_node(
     rpc_client.accel_set_options()
 
     # 2- set socket implementation options
-    ret = rpc_client.sock_impl_set_options()
+    bind_to_device = None
+    if snode.data_nics and len(snode.data_nics) == 1:
+        bind_to_device = snode.data_nics[0].if_name
+    ret = rpc_client.sock_impl_set_options(bind_to_device)
     if not ret:
         logger.error("Failed socket implement set options")
         return False
@@ -2061,6 +2069,19 @@ def restart_storage_node(
             ret = recreate_lvstore(snode, force=force_lvol_recreate)
         except Exception as e:
             logger.error(e)
+            storage_events.snode_restart_failed(snode)
+            snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+            snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+            set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            if sec_node:
+                if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                    fw_api = FirewallClient(sec_node, timeout=5, retry=2)
+                    port_type = "tcp"
+                    if sec_node.active_rdma:
+                        port_type = "udp"
+                    fw_api.firewall_set_port(snode.lvol_subsys_port, port_type, "allow", sec_node.rpc_port)
+                    tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
             return False
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if not ret:
@@ -2738,35 +2759,42 @@ def upgrade_automated_deployment_config():
 
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                                         cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False):
-    # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
-    total_cores = os.cpu_count() or 0
-    if total_cores < 6:
-        raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
+                                         cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
+                                         calculate_hp_only=False, number_of_devices=0):
+    if calculate_hp_only:
+        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage)
+        hp_number = math.ceil(minimum_hp_memory / 2)
+        logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
+        return True
+    else:
+        # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
+        total_cores = os.cpu_count() or 0
+        if total_cores < 6:
+            raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
 
-    # load vfio_pci and uio_pci_generic
-    utils.load_kernel_module("vfio_pci")
-    utils.load_kernel_module("uio_pci_generic")
+        # load vfio_pci and uio_pci_generic
+        utils.load_kernel_module("vfio_pci")
+        utils.load_kernel_module("uio_pci_generic")
 
-    nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
-                                                       pci_allowed, pci_blocked, cores_percentage, force=force,
-                                                       device_model=device_model, size_range=size_range, nvme_names=nvme_names)
-    if not nodes_config or not nodes_config.get("nodes"):
-        return False
-    utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
-    if system_info:
-        utils.store_config_file(system_info, constants.SYSTEM_INFO_FILE)
-    huge_page_memory_dict: dict = {}
+        nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
+                                                           pci_allowed, pci_blocked, cores_percentage, force=force,
+                                                           device_model=device_model, size_range=size_range, nvme_names=nvme_names)
+        if not nodes_config or not nodes_config.get("nodes"):
+            return False
+        utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
+        if system_info:
+            utils.store_config_file(system_info, constants.SYSTEM_INFO_FILE)
+        huge_page_memory_dict: dict = {}
 
-    # Set Huge page memory
-    for node_config in nodes_config["nodes"]:
-        numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
-    if not k8s:
-        utils.create_rpc_socket_mount()
-    # for numa, huge_page_memory in huge_page_memory_dict.items():
-    #    num_pages = huge_page_memory // (2048 * 1024)
-    #    utils.set_hugepages_if_needed(numa, num_pages)
+        # Set Huge page memory
+        for node_config in nodes_config["nodes"]:
+            numa = node_config["socket"]
+            huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + node_config["huge_page_memory"]
+        if not k8s:
+            utils.create_rpc_socket_mount()
+        # for numa, huge_page_memory in huge_page_memory_dict.items():
+        #    num_pages = huge_page_memory // (2048 * 1024)
+        #    utils.set_hugepages_if_needed(numa, num_pages)
     return True
 
 
@@ -3915,3 +3943,262 @@ def set_value(node_id, attr, value):
             pass
 
     return True
+
+
+def safe_delete_bdev(name, node_id):
+    # On primary node
+    #./ rpc.py bdev_lvol_delete lvsname / name
+    # check the statue code of the following command it must be 0
+    #./ rpc.py bdev_lvol_get_lvol_delete_status lvsname / name
+    # #./ rpc.py bdev_lvol_delete lvsname / name - s
+
+    # On secondary:
+    #./ rpc.py bdev_lvol_delete lvsname / name - s
+
+    db_controller = DBController()
+    primary_node = db_controller.get_storage_node_by_id(node_id)
+    secondary_node = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+    bdev_name = f"{primary_node.lvstore}/{name}"
+    logger.info(f"deleting from primary: {bdev_name}")
+    ret, _ = primary_node.rpc_client().delete_lvol(bdev_name)
+    if not ret:
+        logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}")
+        return False
+
+    time.sleep(1)
+
+    while True:
+        try:
+            ret = primary_node.rpc_client().bdev_lvol_get_lvol_delete_status(bdev_name)
+        except Exception as e:
+            logger.error(e)
+            return False
+
+        if ret == 1:  # Async lvol deletion is in progress or queued
+            logger.info(f"deletion in progress: {bdev_name}")
+            time.sleep(1)
+
+        elif ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
+            ret, _ = primary_node.rpc_client().delete_lvol(bdev_name, del_async=True)
+            if not ret:
+                logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}")
+                return False
+
+            logger.info(f"deletion completed on primary: {bdev_name}")
+            logger.info(f"deleting from secondary: {bdev_name}")
+            ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name, del_async=True)
+            if not ret:
+                logger.error(f"Failed to delete bdev: {bdev_name} from node: {secondary_node.get_id()}")
+                return False
+            else:
+                logger.info(f"deletion completed on secondary: {bdev_name}")
+            return True
+        else:
+            logger.error(f"failed to delete bdev: {bdev_name}, status code: {ret}")
+            return False
+
+
+def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, force_remove_worng_ref=False):
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.error("Can not find storage node")
+        return False
+
+    if snode.status != StorageNode.STATUS_ONLINE:
+        logger.error("Storage node is not online")
+        return False
+
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cluster.status not in [Cluster.STATUS_DEGRADED, Cluster.STATUS_ACTIVE]:
+        logger.error("Cluster is not in degraded or active state")
+        return False
+
+    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+    if not ret:
+        logger.error("Failed to get LVol info")
+        return False
+    lvs_info = ret[0]
+    if "uuid" in lvs_info and lvs_info['uuid']:
+        lvs_uuid =  lvs_info['uuid']
+    else:
+        logger.error("Failed to get lvstore uuid")
+        return False
+
+    # get the lvstore uuid
+    # ./spdk/scripts/rpc.py -s /mnt/ramdisk/spdk_8080/spdk.sock bdev_lvs_dump_tree  --uuid=1dc5fb34-5ff6-4be6-ab46-eb9f006f5d47 > out_8080.json
+    lvstore_dump = snode.rpc_client().bdev_lvs_dump_tree(lvs_uuid)
+
+    # #sbctl sn list-lvols d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > lvols_8080.json
+    # with open('lvols_8082.json', 'r') as file:
+    #     lvols = json.load(file)
+    lvols = lvol_controller.list_by_node(node_id, is_json=True)
+    if lvols:
+        lvols = json.loads(lvols)
+
+    # #sbctl sn list-snapshots d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > snaps_8080.json
+    # with open('snaps_8082.json', 'r') as file:
+    #     snaps = json.load(file)
+    snaps = snapshot_controller.list_by_node(node_id, is_json=True)
+    if snaps:
+        snaps = json.loads(snaps)
+
+    out_blobid_dict = {}
+    lvols_blobid_dict = {}
+    snaps_blobid_dict = {}
+    diff_list = []
+    diff_lvol_dict = {}
+    diff_snap_dict = {}
+    diff_clone_dict = {}
+    manual_del = {}
+    inconsistent_dict = {}
+    mgmt_diff_dict = {}
+
+
+    for dump in lvstore_dump["lvols"]:
+        out_blobid_dict[dump["blobid"]] = {"uuid": dump["uuid"], "name": dump["name"], "ref": dump["ref"]}
+
+    for lvol in lvols:
+        lvols_blobid_dict[lvol["BlobID"]] = {"uuid": lvol["BDdev UUID"], "name": lvol["BDev"]}
+    for snap in snaps:
+        snaps_blobid_dict[snap["BlobID"]] = {"uuid": snap["BDdev UUID"], "name": snap["BDev"]}
+
+    out_blobid_dict_keys = list(out_blobid_dict.keys())
+    lvols_blobid_dict_keys = list(lvols_blobid_dict.keys())
+    snaps_blobid_dict_keys = list(snaps_blobid_dict.keys())
+
+    for blob in out_blobid_dict_keys:
+        if blob not in (lvols_blobid_dict_keys + snaps_blobid_dict_keys):
+            if out_blobid_dict[blob]["name"] == "hublvol":
+                continue
+            else:
+                # all blob ID in spdk but not in mgmt
+                diff_list.append(blob)
+        else:
+            if blob  in lvols_blobid_dict_keys:
+                if out_blobid_dict[blob]["name"] != lvols_blobid_dict[blob]["name"] or out_blobid_dict[blob]["uuid"] != lvols_blobid_dict[blob]["uuid"]:
+                    inconsistent_dict[blob] = out_blobid_dict[blob]
+                    inconsistent_dict[blob]["type"] = "lvol|clone"
+            if blob in snaps_blobid_dict_keys:
+                if out_blobid_dict[blob]["name"] != snaps_blobid_dict[blob]["name"] or out_blobid_dict[blob]["uuid"] != snaps_blobid_dict[blob]["uuid"]:
+                    inconsistent_dict[blob] = out_blobid_dict[blob]
+                    inconsistent_dict[blob]["type"] = "snap"
+
+
+    for blob in lvols_blobid_dict_keys:
+        if blob not in out_blobid_dict_keys:
+            # All blob in mgmt but not in SPDK
+            mgmt_diff_dict[blob] = lvols_blobid_dict[blob]
+            mgmt_diff_dict[blob]["type"] = "lvol|clone"
+
+    for blob in snaps_blobid_dict_keys:
+        if blob not in out_blobid_dict_keys:
+            # All blob in mgmt but not in SPDK
+            mgmt_diff_dict[blob] = snaps_blobid_dict[blob]
+            mgmt_diff_dict[blob]["type"] = "snap"
+
+    print(f"All diff count is: {len(diff_list)}")
+    print(f"All mgmt diff count is: {len(mgmt_diff_dict.keys())}")
+
+    for blob in diff_list:
+        if "LVOL" in out_blobid_dict[blob]["name"]:
+            if out_blobid_dict[blob]["ref"] !=1:
+                manual_del[blob] = out_blobid_dict[blob]
+            else:
+                diff_lvol_dict[blob] = out_blobid_dict[blob]
+        elif "SNAP" in out_blobid_dict[blob]["name"]:
+            if out_blobid_dict[blob]["ref"] != 2:
+                manual_del[blob] = out_blobid_dict[blob]
+            else:
+                diff_snap_dict[blob] = out_blobid_dict[blob]
+        elif "CLN" in out_blobid_dict[blob]["name"]:
+            if out_blobid_dict[blob]["ref"] !=1:
+                manual_del[blob] = out_blobid_dict[blob]
+            else:
+                diff_clone_dict[blob] = out_blobid_dict[blob]
+
+    if not validate_only:
+        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_ACTIVATION)
+        time.sleep(3)
+
+    print(f"safe lvols to be deleted count is {len(diff_lvol_dict.keys())}")
+    print(f"safe snaps to be deleted count is {len(diff_snap_dict.keys())}")
+    print(f"safe clone to be deleted count is {len(diff_clone_dict.keys())}")
+    print(f"manual bdevs to be deleted count is {len(manual_del.keys())}")
+    print(f"inconsistent bdevs to be checked count is {len(inconsistent_dict.keys())}")
+    print("#########################################")
+    print("Safe lvols to be deleted:")
+    for blob, value in diff_lvol_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only:
+            safe_delete_bdev(value['name'], node_id)
+    print("#########################################")
+    print("Safe snaps to be deleted:")
+    for blob, value in diff_snap_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only:
+            safe_delete_bdev(value['name'], node_id)
+    print("#########################################")
+    print("Safe clones to be deleted:")
+    for blob, value in diff_clone_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only:
+            safe_delete_bdev(value['name'], node_id)
+    print("#########################################")
+    print("Manual bdeves to be deleted that have wrong ref number:")
+    for blob, value in manual_del.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only and force_remove_worng_ref:
+            safe_delete_bdev(value['name'], node_id)
+    print("#########################################")
+    print("Inconsistent bdeves to be checked:")
+    for blob, value in inconsistent_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['ref']}")
+        if not validate_only and force_remove_inconsistent:
+            safe_delete_bdev(value['name'], node_id)
+
+    if not validate_only:
+        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_ACTIVE)
+
+    print("#########################################")
+    print("All mgmt bdeves to be checked:")
+    print(mgmt_diff_dict)
+    for blob, value in mgmt_diff_dict.items():
+        print(f"{blob}, {value['uuid']}, {value['name']}, {value['type']}")
+
+    if validate_only:
+        return not(diff_lvol_dict or diff_snap_dict or diff_clone_dict or manual_del or inconsistent_dict or mgmt_diff_dict)
+
+    return True
+
+
+def lvs_dump_tree(node_id):
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.error("Can not find storage node")
+        return False
+
+    if snode.status != StorageNode.STATUS_ONLINE:
+        logger.error("Storage node is not online")
+        return False
+
+    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+    if not ret:
+        logger.error("Failed to get LVol info")
+        return False
+    lvs_info = ret[0]
+    if "uuid" in lvs_info and lvs_info['uuid']:
+        lvs_uuid =  lvs_info['uuid']
+    else:
+        logger.error("Failed to get lvstore uuid")
+        return False
+
+    ret = snode.rpc_client().bdev_lvs_dump_tree(lvs_uuid)
+    if not ret:
+        logger.error("Failed to dump lvstore tree")
+        return False
+
+    return json.dumps(ret, indent=2)

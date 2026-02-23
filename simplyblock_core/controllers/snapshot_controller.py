@@ -1,5 +1,7 @@
 # coding=utf-8
+import json
 import logging as lg
+import math
 import time
 import uuid
 
@@ -227,23 +229,31 @@ def add(lvol_id, snapshot_name):
     return snap.uuid, False
 
 
-def list(all=False):
+def list(node_id=None):
     snaps = db_controller.get_snapshots()
+    snaps = sorted(snaps, key=lambda snap: snap.created_at)
     data = []
     for snap in snaps:
+        if node_id:
+            if snap.lvol.node_id != node_id:
+                continue
         logger.debug(snap)
-        if snap.deleted is True and all is False:
-            continue
+        clones = []
+        for lvol in db_controller.get_lvols():
+            if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
+                clones.append(lvol.get_id())
         data.append({
             "UUID": snap.uuid,
+            "BDdev UUID": snap.snap_uuid,
+            "BlobID": snap.blobid,
             "Name": snap.snap_name,
             "Size": utils.humanbytes(snap.used_size),
-            "ProvSize": utils.humanbytes(snap.size),
             "BDev": snap.snap_bdev,
+            "Node ID": snap.lvol.node_id,
             "LVol ID": snap.lvol.get_id(),
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
-            "Health": snap.health_check,
-            "Status": snap.status,
+            "Base Snapshot": snap.snap_ref_id,
+            "Clones": clones,
         })
     return utils.print_table(data)
 
@@ -496,16 +506,17 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         lvol.crypto_key2 = snap.lvol.crypto_key2
 
     if new_size:
-        if snap.lvol.size >= new_size:
-            msg = f"New size {new_size} must be higher than the original size {snap.lvol.size}"
+        conv_new_size = math.ceil(new_size / (1024 * 1024 * 1024)) * 1024 * 1024 * 1024
+        if snap.lvol.size > conv_new_size:
+            msg = f"New size {conv_new_size} must be higher than the original size {snap.lvol.size}"
             logger.error(msg)
             return False, msg
 
-        if snap.lvol.max_size < new_size:
-            msg = f"New size {new_size} must be smaller than the max size {snap.lvol.max_size}"
+        if snap.lvol.max_size < conv_new_size:
+            msg = f"New size {conv_new_size} must be smaller than the max size {snap.lvol.max_size}"
             logger.error(msg)
             return False, msg
-        lvol.size = new_size
+        lvol.size = conv_new_size
 
     lvol.write_to_db(db_controller.kv_store)
 
@@ -596,3 +607,34 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if new_size:
         lvol_controller.resize_lvol(lvol.get_id(), new_size)
     return lvol.uuid, False
+
+
+def list_by_node(node_id=None, is_json=False):
+    snaps = db_controller.get_snapshots()
+    snaps = sorted(snaps, key=lambda snap: snap.created_at)
+    data = []
+    for snap in snaps:
+        if node_id:
+            if snap.lvol.node_id != node_id:
+                continue
+        logger.debug(snap)
+        clones = []
+        for lvol in db_controller.get_lvols():
+            if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
+                clones.append(lvol.get_id())
+        data.append({
+            "UUID": snap.uuid,
+            "BDdev UUID": snap.snap_uuid,
+            "BlobID": snap.blobid,
+            "Name": snap.snap_name,
+            "Size": utils.humanbytes(snap.used_size),
+            "BDev": snap.snap_bdev.split("/")[1],
+            "Node ID": snap.lvol.node_id,
+            "LVol ID": snap.lvol.get_id(),
+            "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
+            "Base Snapshot": snap.snap_ref_id,
+            "Clones": clones,
+        })
+    if is_json:
+        return json.dumps(data, indent=2)
+    return utils.print_table(data)

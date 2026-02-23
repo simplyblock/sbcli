@@ -41,6 +41,7 @@ class ClusterParams(BaseModel):
     inflight_io_threshold: int = 4
     enable_node_affinity: bool = False
     strict_node_anti_affinity: bool = False
+    client_data_nic: str = ""
 
 
 @api.get('/', name='clusters:list')

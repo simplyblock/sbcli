@@ -89,6 +89,7 @@ class CLIWrapperBase:
         if not args.max_lvol:
             self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
         max_size = getattr(args, "max_prov") or 0
+        number_of_devices = getattr(args, "number_of_devices") or 0
         sockets_to_use = [0]
         if args.sockets_to_use:
             try:
@@ -122,11 +123,17 @@ class CLIWrapperBase:
                 "(--device-model with --size-range) are mutually exclusive; choose only one."
             )
         cores_percentage = int(args.cores_percentage)
+        if args.calculate_hp_only:
+            if not args.number_of_devices:
+                self.parser.error("For calculating huge pages memory, you must provide the --number-of-devices")
+            else:
+                number_of_devices = args.number_of_devices
 
         return storage_ops.generate_automated_deployment_config(
             args.max_lvol, max_prov, sockets_to_use,args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
-            size_range=args.size_range, cores_percentage=cores_percentage, nvme_names=nvme_names)
+            size_range=args.size_range, cores_percentage=cores_percentage, nvme_names=nvme_names,
+            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
@@ -341,6 +348,19 @@ class CLIWrapperBase:
 
     def storage_node__new_device_from_failed(self, sub_command, args):
         return device_controller.new_device_from_failed(args.device_id)
+
+    def storage_node__list_snapshots(self, sub_command, args):
+        return snapshot_controller.list_by_node(args.node_id, args.json)
+
+    def storage_node__list_lvols(self, sub_command, args):
+        return lvol_controller.list_by_node(args.node_id, args.json)
+
+    def storage_node__repair_lvstore(self, sub_command, args):
+        return storage_ops.auto_repair(
+            args.node_id, args.validate_only, args.force_remove_inconsistent, args.force_remove_wrong_ref)
+
+    def storage_node__lvs_dump_tree(self, sub_command, args):
+        return storage_ops.lvs_dump_tree(args.node_id)
 
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
@@ -702,11 +722,13 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         strict_node_anti_affinity = args.strict_node_anti_affinity
         is_single_node = args.is_single_node
+        client_data_nic = args.client_data_nic
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric)
+            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
+            client_data_nic)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -741,6 +763,7 @@ class CLIWrapperBase:
         dns_name = args.dns_name
         is_single_node = args.is_single_node
         fabric = args.fabric
+        client_data_nic = args.client_data_nic
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
@@ -748,7 +771,7 @@ class CLIWrapperBase:
             ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring,
-            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node)
+            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

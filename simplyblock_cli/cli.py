@@ -78,6 +78,11 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_storage_node__set(subparser)
         self.init_storage_node__new_device_from_failed(subparser)
+        self.init_storage_node__list_snapshots(subparser)
+        self.init_storage_node__list_lvols(subparser)
+        self.init_storage_node__repair_lvstore(subparser)
+        if self.developer_mode:
+            self.init_storage_node__lvs_dump_tree(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -88,7 +93,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node')
         argument = subcommand.add_argument('--max-lvol', help='Max logical volume per storage node', type=int, dest='max_lvol', required=True)
-        argument = subcommand.add_argument('--max-size', help='Maximum amount of GB to be utilized on this storage node', type=str, dest='max_prov', required=False)
+        argument = subcommand.add_argument('--max-size', help='Maximum amount of Huge Pages to be set on the node', type=str, dest='max_prov', required=False)
         argument = subcommand.add_argument('--nodes-per-socket', help='number of each node to be added per each socket.', type=int, default=1, dest='nodes_per_socket')
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes', type=str, default='0', dest='sockets_to_use')
         argument = subcommand.add_argument('--cores-percentage', help='The percentage of cores to be used for spdk (0-99)', type=range_type(0, 99), default=0, dest='cores_percentage')
@@ -98,6 +103,8 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together', type=str, default='', dest='size_range', required=False)
         argument = subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1...', type=str, default='', dest='nvme_names', required=False)
         argument = subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions', dest='force', action='store_true')
+        argument = subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-lvol, --nodes-per-socket, --number-of-devices', dest='calculate_hp_only', action='store_true')
+        argument = subcommand.add_argument('--number-of-devices', help='number of devices that will be used on this host, For calculating huge pages memory only', type=int, dest='number_of_devices')
 
     def init_storage_node__configure_upgrade(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure-upgrade', 'Upgrade the automated configuration file with new changes of cpu mask or storage devices')
@@ -312,6 +319,27 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'new-device-from-failed', 'Adds a new device to from failed device information')
         subcommand.add_argument('device_id', help='Device id', type=str)
 
+    def init_storage_node__list_snapshots(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list-snapshots', 'List snapshots on a storage node')
+        subcommand.add_argument('node_id', help='Node id', type=str)
+        argument = subcommand.add_argument('--json', help='Print json output', dest='json', action='store_true')
+
+    def init_storage_node__list_lvols(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list-lvols', 'List lvols on a storage node')
+        subcommand.add_argument('node_id', help='Node id', type=str)
+        argument = subcommand.add_argument('--json', help='Print json output', dest='json', action='store_true')
+
+    def init_storage_node__repair_lvstore(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'repair-lvstore', 'Try repair any inconsistencies in lvstore on a storage node')
+        subcommand.add_argument('node_id', help='Node id', type=str)
+        argument = subcommand.add_argument('--validate-only', help='Validate only, do not perform any repair actions', dest='validate_only', action='store_true')
+        argument = subcommand.add_argument('--force-remove-inconsistent', help='Force remove any inconsistent lvols or snapshots', dest='force_remove_inconsistent', action='store_true')
+        argument = subcommand.add_argument('--force_remove_wrong_ref', help='Force remove lvols or snapshots with wrong reference count', dest='force_remove_wrong_ref', action='store_true')
+
+    def init_storage_node__lvs_dump_tree(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'lvs-dump-tree', 'dump lvstore tree for debugging')
+        subcommand.add_argument('node_id', help='Node id', type=str)
+
 
     def init_cluster(self):
         subparser = self.add_command('cluster', 'Cluster commands')
@@ -386,6 +414,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=32, dest='qpair_count')
         argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
+        argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -413,6 +442,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts', type=int, default=4, dest='inflight_io_threshold')
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
+        argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')
@@ -943,6 +973,18 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.storage_node__set(sub_command, args)
                 elif sub_command in ['new-device-from-failed']:
                     ret = self.storage_node__new_device_from_failed(sub_command, args)
+                elif sub_command in ['list-snapshots']:
+                    ret = self.storage_node__list_snapshots(sub_command, args)
+                elif sub_command in ['list-lvols']:
+                    ret = self.storage_node__list_lvols(sub_command, args)
+                elif sub_command in ['repair-lvstore']:
+                    ret = self.storage_node__repair_lvstore(sub_command, args)
+                elif sub_command in ['lvs-dump-tree']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.storage_node__lvs_dump_tree(sub_command, args)
                 else:
                     self.parser.print_help()
 

@@ -1302,6 +1302,9 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
             else:
                 keep_alive_to = constants.LVOL_NVME_KEEP_ALIVE_TO
 
+            client_data_nic_str = ""
+            if  cluster.client_data_nic:
+                client_data_nic_str = f"--host-iface={cluster.client_data_nic}"
             out.append({
                 "ns_id": lvol.ns_id,
                 "transport": transport,
@@ -1312,11 +1315,13 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 "ctrl-loss-tmo": ctrl_loss_tmo,
                 "nr-io-queues": cluster.client_qpair_count,
                 "keep-alive-tmo": keep_alive_to,
+                "host-iface": cluster.client_data_nic,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                            f"--ctrl-loss-tmo={ctrl_loss_tmo} "
                            f"--nr-io-queues={cluster.client_qpair_count} "
                            f"--keep-alive-tmo={keep_alive_to} "
-                           f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
+                           f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn} "
+                           f"{client_data_nic_str}",
             })
     return out
 
@@ -1738,3 +1743,34 @@ def inflate_lvol(lvol_id):
     else:
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
+
+
+def list_by_node(node_id=None, is_json=False):
+    db_controller = DBController()
+    lvols = db_controller.get_lvols()
+    lvols = sorted(lvols, key=lambda x: x.create_dt)
+    data = []
+    for lvol in lvols:
+        if node_id:
+            if lvol.node_id != node_id:
+                continue
+        logger.debug(lvol)
+        cloned_from_snap = ""
+        if lvol.cloned_from_snap:
+            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            cloned_from_snap = snap.snap_uuid
+        data.append({
+            "UUID": lvol.uuid,
+            "BDdev UUID": lvol.lvol_uuid,
+            "BlobID": lvol.blobid,
+            "Name": lvol.lvol_name,
+            "Size": utils.humanbytes(lvol.size),
+            "LVS name": lvol.lvs_name,
+            "BDev": lvol.lvol_bdev,
+            "Node ID": lvol.node_id,
+            "Clone From Snap BDev": cloned_from_snap,
+            "Created At": lvol.create_dt,
+        })
+    if is_json:
+        return json.dumps(data, indent=2)
+    return utils.print_table(data)
