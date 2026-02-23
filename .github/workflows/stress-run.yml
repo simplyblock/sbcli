@@ -153,7 +153,6 @@ jobs:
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT }}
       SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
-      SIMPLY_BLOCK_SPDK_ULTRA_IMAGE: ${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}
 
       # SSH/client env
       SSH_USER: ${{ inputs.SSH_USER }}
@@ -219,6 +218,17 @@ jobs:
           else
             echo "ERROR: Cannot install sshpass (unknown package manager)."
             exit 1
+          fi
+      
+      - name: Export SPDK image env (only if provided)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ -n "${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" ]]; then
+            echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" >> "$GITHUB_ENV"
+            echo "SPDK image exported"
+          else
+            echo "SPDK image not provided; skipping export"
           fi
 
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
