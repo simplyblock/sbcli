@@ -507,21 +507,42 @@ jobs:
 
           [[ "$rc" -eq 0 ]] || (echo "ERROR: bootstrap failed (rc=$rc)" && exit "$rc")
 
-          cluster_id="$(grep -Eo 'cluster_id=[0-9a-fA-F-]+' bootstrap.log | tail -n 1 | cut -d= -f2 || true)"
-          cluster_secret="$(grep -Eo 'cluster_secret=[A-Za-z0-9]+' bootstrap.log | tail -n 1 | cut -d= -f2 || true)"
+      - name: Fetch CLUSTER_ID and CLUSTER_SECRET from MNODES (sbcli)
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-          if [[ -z "$cluster_id" || -z "$cluster_secret" ]]; then
-            echo "ERROR: Could not parse cluster_id/cluster_secret from bootstrap.log"
-            echo "Last 80 lines:"
-            tail -n 80 bootstrap.log || true
+          # Use MNODES first IP
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+
+          # SSH into mgmt and run sbcli
+          ssh_common=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "${KEY_PATH}")
+
+          # Get cluster UUID (first row that looks like UUID)
+          cluster_id="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster list" | grep -Eo '[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}' | head -n 1)"
+
+          if [[ -z "${cluster_id}" ]]; then
+            echo "ERROR: Could not extract cluster_id from '${SBCLI_CMD} cluster list' on ${mgmt_ip}"
+            ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" "${SBCLI_CMD} cluster list" || true
             exit 1
           fi
 
-          echo "CLUSTER_ID=$cluster_id" >> "$GITHUB_ENV"
-          echo "CLUSTER_SECRET=$cluster_secret" >> "$GITHUB_ENV"
-          echo "Parsed CLUSTER_ID=$cluster_id"
-          echo "Parsed CLUSTER_SECRET=***set***"
+          # Get cluster secret
+          cluster_secret="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster get-secret ${cluster_id}" | tr -d '\r' | tail -n 1 | xargs)"
 
+          if [[ -z "${cluster_secret}" ]]; then
+            echo "ERROR: Could not get cluster_secret from '${SBCLI_CMD} cluster get-secret ${cluster_id}' on ${mgmt_ip}"
+            exit 1
+          fi
+
+          echo "CLUSTER_ID=${cluster_id}" >> "$GITHUB_ENV"
+          echo "CLUSTER_SECRET=${cluster_secret}" >> "$GITHUB_ENV"
+
+          echo "Fetched CLUSTER_ID=${cluster_id}"
+          echo "Fetched CLUSTER_SECRET=***set***"
+          
       # ============================================================
       # STRESS (runner only)
       # ============================================================
