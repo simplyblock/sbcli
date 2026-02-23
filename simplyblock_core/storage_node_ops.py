@@ -1,6 +1,7 @@
 # coding=utf- 8
 import datetime
 import json
+import math
 import os
 import platform
 import socket
@@ -2762,7 +2763,8 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
                                          calculate_hp_only=False, number_of_devices=0):
     if calculate_hp_only:
         minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage)
-        logger.info(f"The minimum required huge pages on this host is: {minimum_hp_memory} MB")
+        hp_number = math.ceil(minimum_hp_memory / 2)
+        logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
         return True
     else:
         # we need minimum of 6 VPCs. RAM 4GB min. Plus 0.2% of the storage.
