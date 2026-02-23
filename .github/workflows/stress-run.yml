@@ -263,6 +263,15 @@ jobs:
           test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
           chmod 600 "$kp" || true
 
+      - name: Export KEY_NAME from KEY_PATH
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # KEY_PATH is already resolved and exported to $GITHUB_ENV in previous step
+          key_name="$(basename "${KEY_PATH}")"
+          echo "KEY_NAME=${key_name}" >> "$GITHUB_ENV"
+          echo "Exported KEY_NAME=${key_name}"
+
       - name: Validate required secrets exist
         shell: bash
         run: |
@@ -542,7 +551,7 @@ jobs:
 
           echo "Fetched CLUSTER_ID=${cluster_id}"
           echo "Fetched CLUSTER_SECRET=***set***"
-          
+
       # ============================================================
       # STRESS (runner only)
       # ============================================================
