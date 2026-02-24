@@ -463,7 +463,7 @@ class SbcliUtils:
             body["crypto_key2"] = key2
         
         if max_namespace_per_subsys is not None:
-        body["max_namespace_per_subsys"] = int(max_namespace_per_subsys)
+            body["max_namespace_per_subsys"] = int(max_namespace_per_subsys)
 
         if namespace:
             # parent lvol id
