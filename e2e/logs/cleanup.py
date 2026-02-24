@@ -4,8 +4,11 @@ import time
 
 # SSH Configuration
 BASTION_IP = os.getenv("BASTION_IP")
-KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
-USER = os.getenv("USER", "root")
+if os.environ.get("KEY_PATH", None):
+    KEY_PATH=os.environ.get("KEY_PATH")
+else:
+    KEY_PATH = os.path.expanduser(f"~/.ssh/{os.environ.get('KEY_NAME', 'simplyblock-us-east-2.pem')}")
+USER = os.getenv("SSH_USER", "root")
 
 # Node Lists
 STORAGE_PRIVATE_IPS = os.getenv("STORAGE_PRIVATE_IPS", "").split()
@@ -22,6 +25,7 @@ def connect_ssh(target_ip, bastion_ip=None, retries=3, delay=5):
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.logger.info(f"Key Path: {KEY_PATH}")
 
             if not os.path.exists(KEY_PATH):
                 raise FileNotFoundError(f"SSH private key not found at {KEY_PATH}")

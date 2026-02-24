@@ -565,12 +565,27 @@ jobs:
       # ============================================================
       # STRESS (runner only)
       # ============================================================
-      - name: Clone sbcli repo (stress lives in sbcli/e2e)
+      - name: Clone sbcli repo (prefer same branch as workflow; fallback to SBCLI_BRANCH)
         shell: bash
         run: |
           set -euxo pipefail
           rm -rf sbcli
-          git clone https://github.com/simplyblock-io/sbcli.git sbcli
+
+          wf_branch="${{ github.ref_name }}"
+          fallback_branch="${SBCLI_BRANCH}"
+
+          echo "Workflow branch: $wf_branch"
+          echo "Fallback sbcli branch: $fallback_branch"
+
+          # Try workflow branch first
+          if git ls-remote --heads https://github.com/simplyblock-io/sbcli.git "$wf_branch" | grep -q "$wf_branch"; then
+            echo "Cloning sbcli on workflow branch: $wf_branch"
+            git clone --branch "$wf_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          else
+            echo "Branch '$wf_branch' not found in sbcli; cloning fallback branch: $fallback_branch"
+            git clone --branch "$fallback_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          fi
+
           test -f sbcli/e2e/stress.py
           test -f sbcli/e2e/logs/cleanup.py
 
