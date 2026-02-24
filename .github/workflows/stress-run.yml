@@ -19,17 +19,9 @@ on:
         description: "API invoke URL"
         required: true
         default: "http://192.168.10.211/"
-      API_BASE_URL:
-        description: "API base URL"
-        required: true
-        default: "http://192.168.10.211/"
 
       BASTION_IP:
         description: "Bastion IP"
-        required: true
-        default: "192.168.10.211"
-      BASTION_SERVER:
-        description: "Bastion server"
         required: true
         default: "192.168.10.211"
 
@@ -69,9 +61,9 @@ on:
         required: true
         default: "root"
       KEY_PATH:
-        description: "SSH private key path on runner (default: ~/.ssh/simplyblock-us-east-2.pem)"
+        description: "SSH private key path on runner (default: /home/ec2-user/.ssh/simplyblock-us-east-2.pem)"
         required: true
-        default: "~/.ssh/simplyblock-us-east-2.pem"
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
       CLIENTNODES:
         description: "Space-separated client node IPs (CLIENT_IP is same)"
         required: true
@@ -121,6 +113,16 @@ on:
         description: "bootstrap: --ha-type"
         required: true
         default: "ha"
+      BOOTSTRAP_IS_SINGLE_NODE:
+        description: "Bootstrap: deploy as single-node (--is-single-node)"
+        type: boolean
+        required: false
+        default: false
+      BOOTSTRAP_ENABLE_NODE_AFFINITY:
+        description: "Bootstrap: enable node affinity (--enable-node-affinity)"
+        type: boolean
+        required: false
+        default: false
 
       # =========================
       # Stress test inputs
@@ -145,15 +147,14 @@ jobs:
       STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
       SEC_STORAGE_PRIVATE_IPS: ${{ inputs.SEC_STORAGE_PRIVATE_IPS }}
       API_INVOKE_URL: ${{ inputs.API_INVOKE_URL }}
-      API_BASE_URL: ${{ inputs.API_BASE_URL }}
+      API_BASE_URL: ${{ inputs.API_INVOKE_URL }}
       BASTION_IP: ${{ inputs.BASTION_IP }}
-      BASTION_SERVER: ${{ inputs.BASTION_SERVER }}
+      BASTION_SERVER: ${{ inputs.BASTION_IP }}
       MNODES: ${{ inputs.MNODES }}
       NR_HUGEPAGES: ${{ inputs.NR_HUGEPAGES }}
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT }}
       SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
-      SIMPLY_BLOCK_SPDK_ULTRA_IMAGE: ${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}
 
       # SSH/client env
       SSH_USER: ${{ inputs.SSH_USER }}
@@ -220,18 +221,58 @@ jobs:
             echo "ERROR: Cannot install sshpass (unknown package manager)."
             exit 1
           fi
-
-      - name: Resolve KEY_PATH (~ expansion) and validate key exists
+      
+      - name: Export SPDK image env (only if provided)
         shell: bash
         run: |
           set -euxo pipefail
+          if [[ -n "${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" ]]; then
+            echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" >> "$GITHUB_ENV"
+            echo "SPDK image exported"
+          else
+            echo "SPDK image not provided; skipping export"
+          fi
+
+      - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
+        shell: bash
+        run: |
+          set -euxo pipefail
+
           kp="${KEY_PATH}"
-          if [[ "$kp" == "~/"* ]]; then
+
+          # Strip wrapping quotes if user typed "~/.ssh/..." with quotes
+          kp="${kp%\"}"; kp="${kp#\"}"
+          kp="${kp%\'}"; kp="${kp#\'}"
+
+          # Normalize ".ssh/..." -> "$HOME/.ssh/..."
+          if [[ "$kp" == .ssh/* ]]; then
+            kp="${HOME}/${kp}"
+          fi
+
+          # Normalize "~/" -> "$HOME/"
+          if [[ "$kp" == ~/* ]]; then
             kp="${HOME}/${kp#~/}"
           fi
+
+          # Also handle "~.ssh/.." (unlikely, but safe)
+          if [[ "$kp" == "~.ssh/"* ]]; then
+            kp="${HOME}/.${kp#~.}"
+          fi
+
+          echo "Resolved KEY_PATH=$kp"
           echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
+
           test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
           chmod 600 "$kp" || true
+
+      - name: Export KEY_NAME from KEY_PATH
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # KEY_PATH is already resolved and exported to $GITHUB_ENV in previous step
+          key_name="$(basename "${KEY_PATH}")"
+          echo "KEY_NAME=${key_name}" >> "$GITHUB_ENV"
+          echo "Exported KEY_NAME=${key_name}"
 
       - name: Validate required secrets exist
         shell: bash
@@ -250,11 +291,11 @@ jobs:
 
           run_remote() {
             local ip="$1"
-            local cmd="$2"
+            local script="$2"
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${ip}" "bash -lc \"$cmd\""
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
           targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
@@ -278,14 +319,17 @@ jobs:
 
           run_remote() {
             local ip="$1"
-            local cmd="$2"
+            local script="$2"
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${ip}" "bash -lc \"$cmd\""
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
-          for ip in $STORAGE_PRIVATE_IPS; do
+          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          for ip in $uniq_targets; do
             echo "---- storage destroy/clean: $ip ----"
             run_remote "$ip" "set -euxo pipefail;
               systemctl stop firewalld || true;
@@ -315,11 +359,11 @@ jobs:
 
           run_remote() {
             local ip="$1"
-            local cmd="$2"
+            local script="$2"
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${ip}" "bash -lc \"$cmd\""
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
           # disconnect lvol subsystems on clients
@@ -361,11 +405,11 @@ jobs:
 
           run_remote() {
             local ip="$1"
-            local cmd="$2"
+            local script="$2"
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${ip}" "bash -lc \"$cmd\""
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
           # remove /etc/simplyblock on MNODES + storage
@@ -453,8 +497,16 @@ jobs:
           chmod +x ./bootstrap-cluster.sh
 
           extra_args=()
-          if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" ]]; then
+          if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
             extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
+          fi
+          # Checkbox flags
+          if [[ "${{ inputs.BOOTSTRAP_IS_SINGLE_NODE }}" == "true" ]]; then
+            extra_args+=( --is-single-node true )
+          fi
+
+          if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
+            extra_args+=( --enable-node-affinity true )
           fi
 
           set +e
@@ -474,30 +526,66 @@ jobs:
 
           [[ "$rc" -eq 0 ]] || (echo "ERROR: bootstrap failed (rc=$rc)" && exit "$rc")
 
-          cluster_id="$(grep -Eo 'cluster_id=[0-9a-fA-F-]+' bootstrap.log | tail -n 1 | cut -d= -f2 || true)"
-          cluster_secret="$(grep -Eo 'cluster_secret=[A-Za-z0-9]+' bootstrap.log | tail -n 1 | cut -d= -f2 || true)"
+      - name: Fetch CLUSTER_ID and CLUSTER_SECRET from MNODES (sbcli)
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-          if [[ -z "$cluster_id" || -z "$cluster_secret" ]]; then
-            echo "ERROR: Could not parse cluster_id/cluster_secret from bootstrap.log"
-            echo "Last 80 lines:"
-            tail -n 80 bootstrap.log || true
+          # Use MNODES first IP
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+
+          # SSH into mgmt and run sbcli
+          ssh_common=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "${KEY_PATH}")
+
+          # Get cluster UUID (first row that looks like UUID)
+          cluster_id="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster list" | grep -Eo '[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}' | head -n 1)"
+
+          if [[ -z "${cluster_id}" ]]; then
+            echo "ERROR: Could not extract cluster_id from '${SBCLI_CMD} cluster list' on ${mgmt_ip}"
+            ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" "${SBCLI_CMD} cluster list" || true
             exit 1
           fi
 
-          echo "CLUSTER_ID=$cluster_id" >> "$GITHUB_ENV"
-          echo "CLUSTER_SECRET=$cluster_secret" >> "$GITHUB_ENV"
-          echo "Parsed CLUSTER_ID=$cluster_id"
-          echo "Parsed CLUSTER_SECRET=***set***"
+          # Get cluster secret
+          cluster_secret="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster get-secret ${cluster_id}" | tr -d '\r' | tail -n 1 | xargs)"
+
+          if [[ -z "${cluster_secret}" ]]; then
+            echo "ERROR: Could not get cluster_secret from '${SBCLI_CMD} cluster get-secret ${cluster_id}' on ${mgmt_ip}"
+            exit 1
+          fi
+
+          echo "CLUSTER_ID=${cluster_id}" >> "$GITHUB_ENV"
+          echo "CLUSTER_SECRET=${cluster_secret}" >> "$GITHUB_ENV"
+
+          echo "Fetched CLUSTER_ID=${cluster_id}"
+          echo "Fetched CLUSTER_SECRET=***set***"
 
       # ============================================================
       # STRESS (runner only)
       # ============================================================
-      - name: Clone sbcli repo (stress lives in sbcli/e2e)
+      - name: Clone sbcli repo (prefer same branch as workflow; fallback to SBCLI_BRANCH)
         shell: bash
         run: |
           set -euxo pipefail
           rm -rf sbcli
-          git clone --branch "${SBCLI_BRANCH}" https://github.com/simplyblock-io/sbcli.git sbcli
+
+          wf_branch="${{ github.ref_name }}"
+          fallback_branch="${SBCLI_BRANCH}"
+
+          echo "Workflow branch: $wf_branch"
+          echo "Fallback sbcli branch: $fallback_branch"
+
+          # Try workflow branch first
+          if git ls-remote --heads https://github.com/simplyblock-io/sbcli.git "$wf_branch" | grep -q "$wf_branch"; then
+            echo "Cloning sbcli on workflow branch: $wf_branch"
+            git clone --branch "$wf_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          else
+            echo "Branch '$wf_branch' not found in sbcli; cloning fallback branch: $fallback_branch"
+            git clone --branch "$fallback_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          fi
+
           test -f sbcli/e2e/stress.py
           test -f sbcli/e2e/logs/cleanup.py
 

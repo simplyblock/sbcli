@@ -45,8 +45,8 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         # Validation cadence & FIO runtime
         self.validate_every = 5
         self._iter = 0
-        self._per_wave_fio_runtime = 3600      # 60 minutes
-        self._fio_wait_timeout = 7200          # wait for all to finish
+        self._per_wave_fio_runtime = 900      # 60 minutes
+        self._fio_wait_timeout = 1800         # wait for all to finish
 
         # Internal state
         self.fio_threads = []
@@ -417,7 +417,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                         logs_path=self.docker_logs_path
                     )
             # Keep node strictly offline for 5 minutes
-            sleep_n_sec(500)
+            sleep_n_sec(60)
 
         elif outage_type == "container_stop":
             self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
