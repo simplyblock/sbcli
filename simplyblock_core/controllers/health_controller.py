@@ -173,7 +173,8 @@ def _check_node_ping(ip):
 def _check_ping_from_node(ip, node):
     snodeapi = SNodeClient(node.api_endpoint, timeout=3, retry=3)
     try:
-        return snodeapi.ping_ip(ip)
+        ret, _ = snodeapi.ping_ip(ip)
+        return bool(ret)
     except Exception as e:
         logger.error(e)
         return False
