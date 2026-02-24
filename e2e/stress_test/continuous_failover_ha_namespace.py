@@ -72,6 +72,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
         deadline = time.time() + timeout
         while time.time() < deadline:
             cur = set(self._list_nvme_ns_devices(node=node, ctrl_dev=ctrl_dev))
+            self.logger.info(f"Current: {cur}, Old:{ctrl_dev}")
             diff = sorted(cur - before_set)
             if diff:
                 return diff[-1], cur
