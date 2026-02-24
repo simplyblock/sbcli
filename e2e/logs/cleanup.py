@@ -25,7 +25,6 @@ def connect_ssh(target_ip, bastion_ip=None, retries=3, delay=5):
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            self.logger.info(f"Key Path: {KEY_PATH}")
 
             if not os.path.exists(KEY_PATH):
                 raise FileNotFoundError(f"SSH private key not found at {KEY_PATH}")
