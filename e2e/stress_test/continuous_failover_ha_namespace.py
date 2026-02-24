@@ -34,7 +34,7 @@ from utils.common_utils import sleep_n_sec
 from utils.ssh_utils import get_parent_device
 from exceptions.custom_exception import LvolNotConnectException
 
-from stress_test.continuous_random_failover_multi_client_ha_multi_client import (
+from stress_test.continuous_failover_ha_multi_client import (
     RandomMultiClientFailoverTest,
     generate_random_sequence,
 )
