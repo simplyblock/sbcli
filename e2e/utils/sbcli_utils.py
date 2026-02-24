@@ -426,7 +426,8 @@ class SbcliUtils:
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
-                 crypto=False, key1=None, key2=None, fabric="tcp", cluster_id=None):
+                 crypto=False, key1=None, key2=None, fabric="tcp", cluster_id=None,
+                 max_namespace_per_subsys=None, namespace=None):
         """Adds lvol with given params
         """
 
@@ -460,6 +461,13 @@ class SbcliUtils:
             body["crypto"] = True
             body["crypto_key1"] = key1
             body["crypto_key2"] = key2
+        
+        if max_namespace_per_subsys is not None:
+        body["max_namespace_per_subsys"] = int(max_namespace_per_subsys)
+
+        if namespace:
+            # parent lvol id
+            body["namespace"] = namespace
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 

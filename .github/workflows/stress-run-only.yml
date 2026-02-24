@@ -1,0 +1,360 @@
+name: Stress Run on existing cluster Until Failure
+
+on:
+  workflow_dispatch:
+    inputs:
+      # =========================
+      # Cluster / Lab inputs
+      # =========================
+      STORAGE_PRIVATE_IPS:
+        description: "Space-separated storage node IPs (also used for cleanup)"
+        required: true
+        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+
+      SEC_STORAGE_PRIVATE_IPS:
+        description: "Secondary storage IPs (optional)"
+        required: false
+        default: ""
+
+      API_INVOKE_URL:
+        description: "API invoke URL"
+        required: true
+        default: "http://192.168.10.211/"
+
+      BASTION_IP:
+        description: "Bastion IP"
+        required: true
+        default: "192.168.10.211"
+
+      MNODES:
+        description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
+        required: true
+        default: "192.168.10.211"
+
+      SBCLI_CMD:
+        description: "sbcli command name"
+        required: true
+        default: "sbctl"
+
+      CLUSTER_ID:
+        description: "Cluster id to run test on"
+        required: true
+
+      CLUSTER_SECRET:
+        description: "Cluster secret to run test on"
+        required: true    
+
+      # =========================
+      # SSH / client inputs
+      # =========================
+      SSH_USER:
+        description: "SSH user"
+        required: true
+        default: "root"
+      KEY_PATH:
+        description: "SSH private key path on runner (default: /home/ec2-user/.ssh/simplyblock-us-east-2.pem)"
+        required: true
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+      CLIENTNODES:
+        description: "Space-separated client node IPs (CLIENT_IP is same)"
+        required: true
+        default: "192.168.10.165 192.168.10.166"
+
+      # =========================
+      # Cleanup inputs
+      # =========================
+      NFS_MOUNTPOINT:
+        description: "NFS mountpoint to unmount everywhere"
+        required: true
+        default: "/mnt/nfs_share"
+
+      BOOTSTRAP_DATA_CHUNKS:
+        description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
+        required: true
+        default: "2"
+
+      BOOTSTRAP_PARITY_CHUNKS:
+        description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
+        required: true
+        default: "2"
+
+      # =========================
+      # Stress test inputs
+      # =========================
+      TEST_CLASS:
+        description: "Stress test class name (--testname)"
+        required: true
+        default: "RandomMultiClientMultiFailoverTest"
+
+concurrency:
+  group: simplyblock-lab-stress
+  cancel-in-progress: false
+
+jobs:
+  bootstrap-and-stress:
+    name: Pre-clean -> Bootstrap -> Stress
+    runs-on: [self-hosted]
+    timeout-minutes: 4320
+
+    env:
+      # Cluster/lab env
+      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
+      SEC_STORAGE_PRIVATE_IPS: ${{ inputs.SEC_STORAGE_PRIVATE_IPS }}
+      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL }}
+      API_BASE_URL: ${{ inputs.API_INVOKE_URL }}
+      BASTION_IP: ${{ inputs.BASTION_IP }}
+      BASTION_SERVER: ${{ inputs.BASTION_IP }}
+      MNODES: ${{ inputs.MNODES }}
+      SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
+
+      # SSH/client env
+      SSH_USER: ${{ inputs.SSH_USER }}
+      KEY_PATH: ${{ inputs.KEY_PATH }}
+      CLIENTNODES: ${{ inputs.CLIENTNODES }}
+      CLIENT_IP: ${{ inputs.CLIENTNODES }}
+
+      # Cleanup
+      NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT }}
+
+      # Bootstrap params
+      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
+      BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
+
+      # Stress derived from bootstrap chunks
+      NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
+      NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
+      TEST_CLASS: ${{ inputs.TEST_CLASS }}
+
+      # Secrets
+      SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+      MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+      # Filled after bootstrap parsing
+      CLUSTER_ID: ${{ inputs.CLUSTER_ID }}
+      CLUSTER_SECRET: ${{ inputs.CLUSTER_SECRET }}
+
+    steps:
+      - name: Runner diagnostics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          whoami
+          pwd
+          python3 --version || true
+          git --version
+
+      - name: Install prereqs (sshpass)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if command -v sshpass >/dev/null 2>&1; then
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y sshpass
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y epel-release || true
+            sudo yum install -y sshpass
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y sshpass
+          else
+            echo "ERROR: Cannot install sshpass (unknown package manager)."
+            exit 1
+          fi
+      
+      - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          kp="${KEY_PATH}"
+
+          # Strip wrapping quotes if user typed "~/.ssh/..." with quotes
+          kp="${kp%\"}"; kp="${kp#\"}"
+          kp="${kp%\'}"; kp="${kp#\'}"
+
+          # Normalize ".ssh/..." -> "$HOME/.ssh/..."
+          if [[ "$kp" == .ssh/* ]]; then
+            kp="${HOME}/${kp}"
+          fi
+
+          # Normalize "~/" -> "$HOME/"
+          if [[ "$kp" == ~/* ]]; then
+            kp="${HOME}/${kp#~/}"
+          fi
+
+          # Also handle "~.ssh/.." (unlikely, but safe)
+          if [[ "$kp" == "~.ssh/"* ]]; then
+            kp="${HOME}/.${kp#~.}"
+          fi
+
+          echo "Resolved KEY_PATH=$kp"
+          echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
+
+          test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
+          chmod 600 "$kp" || true
+
+      - name: Export KEY_NAME from KEY_PATH
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # KEY_PATH is already resolved and exported to $GITHUB_ENV in previous step
+          key_name="$(basename "${KEY_PATH}")"
+          echo "KEY_NAME=${key_name}" >> "$GITHUB_ENV"
+          echo "Exported KEY_NAME=${key_name}"
+
+      - name: Validate required secrets exist
+        shell: bash
+        run: |
+          set -euxo pipefail
+          [[ -n "${SSH_PASSWORD}" ]] || (echo "ERROR: secrets.SSH_PASSWORD required" && exit 1)
+
+      # ============================================================
+      # PRE-BOOTSTRAP CLEANUP (remote ops only)
+      # Targets = MNODES + STORAGE_PRIVATE_IPS + CLIENTNODES
+      # ============================================================
+      - name: Pre-clean kill fio/tmux and unmount NFS on MNODES + storage + clients
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
+          }
+
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          for ip in $uniq_targets; do
+            echo "---- $ip: kill fio/tmux + umount ${NFS_MOUNTPOINT} ----"
+            run_remote "$ip" "set -euxo pipefail;
+              pkill -9 fio || true;
+              pkill -9 tmux || true;
+              mp='${NFS_MOUNTPOINT}';
+              if mountpoint -q \"\$mp\"; then umount -f \"\$mp\" || umount \"\$mp\"; else
+                if mount | grep -q \" \$mp \"; then umount -f \"\$mp\" || umount \"\$mp\" || true; fi
+              fi"
+          done
+
+
+      - name: Client cleanup disconnect lvols; ensure NFS not mounted anywhere; unmount all /mnt; remove /mnt dirs
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
+          }
+
+          # disconnect lvol subsystems on clients
+          for ip in $CLIENTNODES; do
+            echo "---- client disconnect lvols: $ip ----"
+            run_remote "$ip" "set -euxo pipefail;
+              subsystems=\$(nvme list-subsys | grep -i lvol | awk '{print \$3}' | cut -d '=' -f 2 || true);
+              for s in \$subsystems; do nvme disconnect -n \"\$s\" || true; done"
+          done
+
+          # fail if NFS still mounted anywhere
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          still=0
+          for ip in $uniq_targets; do
+            if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+              "mount | grep -q \" ${NFS_MOUNTPOINT} \""; then
+              echo "ERROR: ${NFS_MOUNTPOINT} still mounted on $ip"
+              still=1
+            fi
+          done
+          [[ "$still" -eq 0 ]] || exit 1
+
+          # unmount all /mnt and remove dirs on clients
+          for ip in $CLIENTNODES; do
+            echo "---- client unmount all /mnt and remove dirs: $ip ----"
+            run_remote "$ip" "set -euxo pipefail;
+              mps=\$(mount | grep ' /mnt' | awk '{print \$3}' || true);
+              for mp in \$mps; do umount -f \"\$mp\" || umount \"\$mp\" || true; done;
+              dirs=\$(find /mnt -mindepth 1 -type d 2>/dev/null || true);
+              for d in \$dirs; do rm -rf \"\$d\" || true; done"
+          done
+
+      # ============================================================
+      # STRESS (runner only)
+      # ============================================================
+      - name: Clone sbcli repo (prefer same branch as workflow; fallback to SBCLI_BRANCH)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf sbcli
+
+          wf_branch="${{ github.ref_name }}"
+          fallback_branch="${SBCLI_BRANCH}"
+
+          echo "Workflow branch: $wf_branch"
+          echo "Fallback sbcli branch: $fallback_branch"
+
+          # Try workflow branch first
+          if git ls-remote --heads https://github.com/simplyblock-io/sbcli.git "$wf_branch" | grep -q "$wf_branch"; then
+            echo "Cloning sbcli on workflow branch: $wf_branch"
+            git clone --branch "$wf_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          else
+            echo "Branch '$wf_branch' not found in sbcli; cloning fallback branch: $fallback_branch"
+            git clone --branch "$fallback_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          fi
+
+          test -f sbcli/e2e/stress.py
+          test -f sbcli/e2e/logs/cleanup.py
+
+      - name: Install Python deps (best-effort)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --upgrade pip
+          if [[ -f "sbcli/e2e/requirements.txt" ]]; then
+            pip install -r sbcli/e2e/requirements.txt
+          fi
+
+      - name: Cleanup logs before stress
+        shell: bash
+        working-directory: sbcli/e2e
+        run: |
+          set -euxo pipefail
+          python3 logs/cleanup.py
+
+      - name: Run stress (foreground; runs until failure)
+        shell: bash
+        working-directory: sbcli/e2e
+        run: |
+          set -euxo pipefail
+          python3 -u stress.py \
+            --testname "${TEST_CLASS}" \
+            --ndcs "${NDCS}" \
+            --npcs "${NPCS}" \
+            --send_debug_notification true \
+            2>&1 | tee output.log
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simplyblock-stress-logs-${{ github.run_id }}
+          path: |
+            simplyBlockDeploy/bare-metal/bootstrap.log
+            sbcli/e2e/output.log
+            sbcli/e2e/logs/**
+          if-no-files-found: warn
