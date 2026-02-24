@@ -725,7 +725,7 @@ class PingQuery(BaseModel):
         'type': 'boolean',
     })}}},
 })
-def ping_ip(query: NicQuery):
+def ping_ip(query: PingQuery):
     try:
         response = os.system(f"ping -c 3 -W 1 {query.ip} > /dev/null 2>&1")
         return utils.get_response(response == 0)
