@@ -31,7 +31,7 @@ def generate_random_string(length=6):
 
 def get_parent_device(partition_path: str) -> str:
     # Match typical partition patterns (e.g. /dev/nvme1n1 -> /dev/nvme1)
-    match = re.match(r"(/dev/nvme\d+)", partition_path)
+    match = re.match(r"(/dev/nvme\d+)Q", partition_path)
     if match:
         return match.group(1)
     elif partition_path.startswith("/dev/"):
@@ -2838,6 +2838,17 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 
         output, error = self.exec_command(node=node, command=cmd)
         return output, error
+    
+    def list_nvme_ns_devices(self, node, ctrl_dev: str) -> list[str]:
+        """
+        ctrl_dev: /dev/nvme32 (NOT nvme32n1)
+        returns: ['/dev/nvme32n1', '/dev/nvme32n2', ...] present on host
+        """
+        ctrl = get_parent_device(ctrl_dev)  # returns /dev/nvme32 if passed /dev/nvme32n1 by mistake
+        # list block namespaces for this controller
+        cmd = f"ls -1 {ctrl}n* 2>/dev/null | sort -V || true"
+        out, _ = self.exec_command(node=node, command=f"bash -lc \"{cmd}\"", supress_logs=True)
+        return [x.strip() for x in (out or "").splitlines() if x.strip()]
     
 
 class RunnerK8sLog:
