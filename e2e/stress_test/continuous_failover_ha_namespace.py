@@ -64,14 +64,17 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
         returns: ['/dev/nvme32n1', '/dev/nvme32n2', ...]
         """
         ctrl = get_parent_device(ctrl_dev)  # safe if /dev/nvme32n1 passed accidentally
+        self.logger.info(f"ctrl dev : {ctrl_dev}, ctrl:{ctrl}")
         cmd = f"bash -lc \"ls -1 {ctrl}n* 2>/dev/null | sort -V || true\""
         out, _ = self.ssh_obj.exec_command(node=node, command=cmd, supress_logs=True)
+        self.logger.info(f"cmd: {cmd}, out:{out}")
         return [x.strip() for x in (out or "").splitlines() if x.strip()]
 
     def _wait_for_new_namespace_device(self, node, ctrl_dev: str, before_set: set, timeout=120, interval=2):
         deadline = time.time() + timeout
         while time.time() < deadline:
             cur = set(self._list_nvme_ns_devices(node=node, ctrl_dev=ctrl_dev))
+            self.logger.info(f"Current: {cur}, Old:{ctrl_dev}")
             diff = sorted(cur - before_set)
             if diff:
                 return diff[-1], cur
@@ -264,6 +267,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
             self.lvol_mount_details[parent_name]["Device"] = parent_ns_dev
 
             ctrl_dev = get_parent_device(parent_ns_dev)   # /dev/nvmeX
+            self.logger.info(f"Parent: {parent_ns_dev}, ctrl_dev: {ctrl_dev}")
             self.parent_ctrl[parent_name] = ctrl_dev
             self.lvol_mount_details[parent_name]["ctrl_dev"] = ctrl_dev
 
