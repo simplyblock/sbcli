@@ -640,6 +640,14 @@ jobs:
           echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV"
           echo "Detected RUN_BASE_DIR=${RUN_BASE_DIR}"
 
+      - name: Mark test end time (always)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+          echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
+
       - name: Collect mgmt snapshots into RUN_BASE_DIR (on failure)
         if: always()
         shell: bash
@@ -661,15 +669,15 @@ jobs:
           os.makedirs(f"{outdir}/subtasks", exist_ok=True)
           os.makedirs(f"{outdir}/storage_nodes", exist_ok=True)
 
-          script = f"""set -euo pipefail
-          SBCLI="{sbcli}"
-          CLUSTER_ID="{cluster_id}"
-          OUTDIR="{outdir}"
+          script = r"""set -euo pipefail
+          SBCLI="__SBCLI__"
+          CLUSTER_ID="__CLUSTER_ID__"
+          OUTDIR="__OUTDIR__"
 
-          mkdir -p "$OUTDIR"/{{mgmt,subtasks,storage_nodes}}
+          mkdir -p "$OUTDIR"/{mgmt,subtasks,storage_nodes}
 
-          log(){{ printf '[%(%F %T)T] %s\\n' -1 "$*" >&2; }}
-          run_local(){{ local cmd="$1" out="$2"; log "LOCAL: $cmd -> $out"; bash -lc "$cmd" > "$out" 2>&1 || true; }}
+          log(){ printf '[%(%F %T)T] %s\n' -1 "$*" >&2; }
+          run_local(){ local cmd="$1" out="$2"; log "LOCAL: $cmd -> $out"; bash -lc "$cmd" > "$out" 2>&1 || true; }
 
           run_local "$SBCLI cluster list"                               "$OUTDIR/mgmt/cluster_list.txt"
           run_local "$SBCLI cluster status $CLUSTER_ID"                 "$OUTDIR/mgmt/cluster_status.txt"
@@ -689,9 +697,9 @@ jobs:
             mapfile -t SN_UUIDS < <(jq -r '.[]?|.UUID // .uuid // .Id // .id // empty' "$OUTDIR/mgmt/sn_list.json" | awk 'NF')
           else
             mapfile -t SN_UUIDS < <(
-              awk 'BEGIN{{FS="|"}} /^\\|/ && !/UUID/ && !/^\\+-/ {{
-                if (NF>=3) {{ gsub(/^[ \\t]+|[ \\t]+$/, "", $3); if ($3 ~ /[0-9a-f-]{{8,}}/) print $3; }}
-              }}' "$OUTDIR/mgmt/sn_list.txt" | sort -u
+              awk 'BEGIN{FS="|"} /^\|/ && !/UUID/ && !/^\+-/ {
+                if (NF>=3) { gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /[0-9a-f-]{8,}/) print $3; }
+              }' "$OUTDIR/mgmt/sn_list.txt" | sort -u
             )
           fi
 
@@ -707,13 +715,13 @@ jobs:
 
           BAL_IDS=()
           while IFS= read -r line; do
-            [[ "$line" =~ ^\\+ ]] && continue
-            [[ "$line" =~ Task\\ ID ]] && continue
-            [[ "$line" =~ ^\\|[[:space:]]*$ ]] && continue
+            [[ "$line" =~ ^\+ ]] && continue
+            [[ "$line" =~ Task\ ID ]] && continue
+            [[ "$line" =~ ^\|[[:space:]]*$ ]] && continue
 
-            func=$(awk -F'|' '{{gsub(/^[ \\t]+|[ \\t]+$/, "", $4); print $4}}' <<<"$line")
+            func=$(awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4}' <<<"$line")
             if [[ "$func" == "balancing_on_restart" ]]; then
-              task_id=$(awk -F'|' '{{gsub(/^[ \\t]+|[ \\t]+$/, "", $2); print $2}}' <<<"$line")
+              task_id=$(awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' <<<"$line")
               [[ -n "$task_id" ]] && BAL_IDS+=("$task_id")
             fi
           done < "$OUTDIR/mgmt/cluster_list_tasks.txt"
@@ -723,6 +731,11 @@ jobs:
           done
           """
 
+          script = (script
+                    .replace("__SBCLI__", sbcli)
+                    .replace("__CLUSTER_ID__", cluster_id)
+                    .replace("__OUTDIR__", outdir))
+
           ssh_cmd = [
               "ssh",
               "-i", key,
@@ -730,12 +743,11 @@ jobs:
               "-o", "UserKnownHostsFile=/dev/null",
               "-o", "ConnectTimeout=10",
               f"{user}@{mgmt_ip}",
-              "bash", "-s"
+              "bash", "-s",
           ]
 
           subprocess.run(ssh_cmd, input=script.encode(), check=False)
           PY
-
 
       - name: Collect docker logs into RUN_BASE_DIR (on failure)
         if: always()
