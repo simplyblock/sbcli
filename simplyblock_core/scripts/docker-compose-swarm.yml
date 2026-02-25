@@ -15,10 +15,10 @@ services:
       - IPC_LOCK
     user: root
     volumes:
-      - $DIR/kms_config.hcl:/vault/config/config.hcl
-      - /etc/simplyblock/kms/data:/vault/data
+      - "$DIR/kms_config.hcl:/vault/config/config.hcl"
+      - "/etc/simplyblock/kms/data:/vault/data"
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: ${CLUSTER_SECRET}
+      VAULT_DEV_ROOT_TOKEN_ID: "${CLUSTER_SECRET}"
     ports:
       - "8200:8200"
     networks:
