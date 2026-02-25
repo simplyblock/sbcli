@@ -186,3 +186,7 @@ class SNodeClient:
     def ifc_is_tcp(self, nic):
         params = {"nic": nic}
         return self._request("GET", "ifc_is_tcp", params)
+
+    def ping_ip(self, ip_address):
+        params = {"ip": ip_address}
+        return self._request("GET", "ping_ip", params)
