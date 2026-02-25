@@ -19,8 +19,7 @@ services:
       - "/etc/simplyblock/kms/data:/vault/data"
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: "${CLUSTER_SECRET}"
-    ports:
-      - "8200:8200"
+      VAULT_ADDR: "http://127:0:0:1:8200"
     networks:
       - hostnet
     deploy:
