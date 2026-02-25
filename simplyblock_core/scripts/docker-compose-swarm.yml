@@ -8,6 +8,24 @@ x-service-base: &service-base
 
 
 services:
+  kms:
+    image: hashicorp/vault:1.13.3
+    container_name: kms
+    hostname: kms
+    command: server
+    cap_add:
+      - IPC_LOCK
+    user: root
+    volumes:
+      - $DIR/kms_config.hcl:/vault/config/config.hcl
+      - /etc/simplyblock/kms/data:/vault/data
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${CLUSTER_SECRET}
+
+    ports:
+      - "8200:8200"
+    networks:
+      - hostnet
 
   fdb-server:
     <<: *service-base
