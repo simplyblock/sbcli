@@ -506,8 +506,9 @@ jobs:
           done
 
 
-      - name: Collect distrib debug dumps into RUN_BASE_DIR (on failure)
+      - name: Collect distrib debug dumps into RUN_BASE_DIR
         if: always()
+        timeout-minutes: 35
         shell: bash
         run: |
           set -euxo pipefail
