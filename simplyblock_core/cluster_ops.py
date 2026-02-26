@@ -352,6 +352,31 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring DB > Done")
         monitoring_secret = cluster.secret
 
+        # configure kms vault
+        container = utils.get_kms_cont()
+        if container:
+            environment = [
+                "VAULT_ADDR=http://127.0.0.1:8200",
+                "VAULT_SKIP_VERIFY=true"]
+            res = container.exec_run(
+                cmd="vault operator init -key-shares=1 -key-threshold=1 -format=json > /vault/data/init.json",
+                environment=environment
+            )
+            out = res.output.decode("utf-8")
+            logger.debug(out)
+            with open("/vault/data/init.json", "r") as f:
+                init_file = json.loads(f.read())
+                res = container.exec_run(
+                    cmd=f"vault operator unseal ${init_file['unseal_keys_b64'][0]}",
+                    environment=environment)
+                out = res.output.decode("utf-8")
+                logger.debug(out)
+                res = container.exec_run(
+                    cmd=f"vault login ${init_file['root_token'][0]}",
+                    environment=environment)
+                out = res.output.decode("utf-8")
+                logger.debug(out)
+
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
