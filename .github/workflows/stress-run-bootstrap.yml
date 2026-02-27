@@ -520,6 +520,7 @@ jobs:
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
             --ha-jm-count "${BOOTSTRAP_HA_JM_COUNT}" \
             --ha-type "${BOOTSTRAP_HA_TYPE}" \
+            --data-nics eth1 \
             "${extra_args[@]}" | tee bootstrap.log
           rc=${PIPESTATUS[0]}
           set -e
