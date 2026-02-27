@@ -516,7 +516,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             msg = f"New size {conv_new_size} must be smaller than the max size {snap.lvol.max_size}"
             logger.error(msg)
             return False, msg
-        lvol.size = conv_new_size
 
     lvol.write_to_db(db_controller.kv_store)
 
