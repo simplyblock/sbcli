@@ -722,6 +722,7 @@ def is_alive():
 
 class PingQuery(BaseModel):
     ip: str
+    ifname: str
 
 @api.get('/ping_ip', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
@@ -730,8 +731,11 @@ class PingQuery(BaseModel):
 })
 def ping_ip(query: PingQuery):
     try:
-        response = os.system(f"ping -c 3 -W 1 {query.ip} > /dev/null 2>&1")
-        return utils.get_response(response == 0)
+        ping_response = os.system(f"ping -c 3 -W 1 {query.ip} > /dev/null 2>&1")
+        link_is_up = False
+        with open(f"/sys/class/net/{query.ifname}/carrier") as f:
+            link_is_up = f.read().strip() == "1"
+        return utils.get_response(ping_response == 0 and link_is_up)
     except Exception as e:
         logger.error(e)
         return utils.get_response(False, str(e))
