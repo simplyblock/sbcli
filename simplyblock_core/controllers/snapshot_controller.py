@@ -603,7 +603,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
-    if new_size:
+    if new_size > snap.lvol.size:
         lvol_controller.resize_lvol(lvol.get_id(), new_size)
     return lvol.uuid, False
 
