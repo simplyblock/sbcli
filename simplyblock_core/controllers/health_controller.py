@@ -170,10 +170,10 @@ def _check_node_ping(ip):
         return False
 
 
-def _check_ping_from_node(ip, node):
+def _check_ping_from_node(ip, ifname, node):
     snodeapi = SNodeClient(node.api_endpoint, timeout=3, retry=3)
     try:
-        ret, _ = snodeapi.ping_ip(ip)
+        ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)
     except Exception as e:
         logger.error(e)
@@ -554,7 +554,7 @@ def check_node(node_id, with_devices=True):
     data_nics_check = True
     for data_nic in snode.data_nics:
         if data_nic.ip4_address:
-            ping_check = _check_ping_from_node(data_nic.ip4_address, node=snode)
+            ping_check = _check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=snode)
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 
