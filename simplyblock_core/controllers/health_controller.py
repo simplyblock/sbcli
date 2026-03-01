@@ -177,7 +177,8 @@ def _check_ping_from_node(ip, ifname, node):
         return bool(ret)
     except Exception as e:
         logger.error(e)
-        return False
+        logger.info("using fallback ping method")
+        return utils.ping_host(ip)
 
 
 def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None) -> bool:
