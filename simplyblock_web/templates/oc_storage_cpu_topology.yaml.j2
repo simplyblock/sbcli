@@ -89,7 +89,7 @@ spec:
                   cpuManagerPolicy: static
                   cpuManagerReconcilePeriod: 5s
                   topologyManagerPolicy: single-numa-node
-                  reservedSystemCPUs: { RESERVED_SYSTEM_CPUS }
+                  reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
               EOF
 
               echo "[INFO] Marking node as configured."
