@@ -90,7 +90,7 @@ spec:
               set_key "cpuManagerReconcilePeriod" "5s"
               set_key "topologyManagerPolicy" "single-numa-node"
               set_key "topologyManagerScope" "pod"
-              set_key "reservedSystemCPUs" { RESERVED_SYSTEM_CPUS }
+              set_key "reservedSystemCPUs" {{ RESERVED_SYSTEM_CPUS }}
 
               echo "[INFO] kubelet config updated:"
               grep -E "^(cpuManagerPolicy|cpuManagerReconcilePeriod|topologyManagerPolicy|topologyManagerScope|reservedSystemCPUs):" "$KUBELET_CFG" || true

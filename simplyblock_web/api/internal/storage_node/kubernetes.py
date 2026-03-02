@@ -414,7 +414,7 @@ def spdk_process_start(body: SPDKParams):
             )
         )
         logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
-        if (cpu_topology_enabled and not skip_kubelet_configuration) or core_isolate:
+        if (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled):
             if cpu_topology_enabled and not skip_kubelet_configuration:
                 if not openshift:
                     template_name = 'storage_cpu_topology.yaml.j2'
