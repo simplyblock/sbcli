@@ -2054,3 +2054,21 @@ def replicate_lvol_on_target_cluster(lvol_id):
     lvol_events.lvol_replicated(lvol, new_lvol)
 
     return new_lvol.lvol_uuid
+
+
+def list_replication_tasks(lvol_id):
+    db_controller = DBController()
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    node = db_controller.get_storage_node_by_id(lvol.node_id)
+    tasks = []
+    for task in db_controller.get_job_tasks(node.cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+            if snap.lvol.get_id() != lvol_id:
+                continue
+            tasks.append(task)
+
+    return tasks

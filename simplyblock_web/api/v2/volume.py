@@ -11,7 +11,7 @@ from simplyblock_core.models.lvol_model import LVol
 
 from .cluster import Cluster
 from .pool import StoragePool
-from .dtos import VolumeDTO, SnapshotDTO
+from .dtos import VolumeDTO, SnapshotDTO, TaskDTO
 from . import util
 
 
@@ -265,3 +265,9 @@ def create_snapshot(
 @instance_api.post('/replicate_lvol', name='clusters:storage-pools:volumes:replicate_lvol')
 def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume: Volume):
     return lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
+
+
+@api.get('/', name='clusters:storage-pools:volumes:list_replication_tasks')
+def list(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+    tasks = lvol_controller.list_replication_tasks(volume.get_id())
+    return [TaskDTO.from_model(task) for task in tasks]
