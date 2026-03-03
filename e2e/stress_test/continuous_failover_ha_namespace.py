@@ -29,6 +29,7 @@ import random
 import threading
 import time
 from collections import defaultdict
+import string
 
 from utils.common_utils import sleep_n_sec
 from utils.ssh_utils import get_parent_device
@@ -46,7 +47,10 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
 
         # Namespace config
         self.max_namespace_per_subsys = 10
+        self.total_lvols = 20
         self.children_per_parent = 2
+        self.parent_lvols = set()
+        self.child_lvols = set()   # optional but recommended
 
         # Tracking
         self.parent_ctrl = {}                    # parent_name -> "/dev/nvmeX"
@@ -54,6 +58,70 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
         self.parent_to_children = defaultdict(list)
 
         self.test_name = "continuous_random_failover_multi_client_ha_namespace"
+    
+    def _rand_suffix(self, n=3) -> str:
+        return "".join(random.choices(string.ascii_uppercase + string.digits, k=n))
+
+    def _shuffle_name(self, name: str) -> str:
+        chars = list(name)
+        random.shuffle(chars)
+        return "".join(chars)
+
+    def _name_exists_in_cluster(self, name: str) -> bool:
+        """
+        Best-effort: if get_lvol_id succeeds, name exists.
+        """
+        try:
+            _ = self.sbcli_utils.get_lvol_id(name)
+            return True
+        except Exception:
+            return False
+
+    def _gen_unique_parent_name(self, base: str) -> str:
+        """
+        base: already random-ish (e.g., lvl{generate_random_sequence(15)} or similar)
+        Rules:
+        - if collision: shuffle once
+        - if still collision: append +3 chars (repeat) until unique
+        """
+        candidate = base
+
+        # 1) direct collision check
+        if candidate in self.parent_lvols or candidate in self.lvol_mount_details or self._name_exists_in_cluster(candidate):
+            # 2) shuffle once
+            candidate = self._shuffle_name(candidate)
+
+        # 3) if still colliding, append +3 chars until unique
+        while (
+            candidate in self.parent_lvols
+            or candidate in self.lvol_mount_details
+            or self._name_exists_in_cluster(candidate)
+        ):
+            candidate = f"{candidate}{self._rand_suffix(3)}"
+
+        self.parent_lvols.add(candidate)
+        return candidate
+
+    def _gen_unique_child_name(self, parent_name: str, ns_idx: int) -> str:
+        """
+        Child naming:
+        - start with parent-based name (readable)
+        - if collision (old leftovers), apply same shuffle/append logic using child_lvols set
+        """
+        candidate = f"{parent_name}_ns{ns_idx}"
+
+        if candidate in self.child_lvols or candidate in self.lvol_mount_details or self._name_exists_in_cluster(candidate):
+            candidate = self._shuffle_name(candidate)
+
+        while (
+            candidate in self.child_lvols
+            or candidate in self.lvol_mount_details
+            or self._name_exists_in_cluster(candidate)
+        ):
+            candidate = f"{candidate}{self._rand_suffix(3)}"
+
+        self.child_lvols.add(candidate)
+        return candidate
 
     # -------------------------
     # Namespace helpers
@@ -134,7 +202,8 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
 
             parent_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
             while parent_name in self.lvol_mount_details:
-                self.lvol_name = f"lvl{generate_random_sequence(15)}"
+                base = f"lvl{generate_random_sequence(15)}"
+                self.lvol_name = self._gen_unique_parent_name(base)
                 parent_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
 
             self.logger.info(
@@ -290,7 +359,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
             before_set = set(self._list_nvme_ns_devices(node=client_node, ctrl_dev=ctrl_dev))
 
             for k in range(1, self.children_per_parent + 1):
-                child_name = f"{parent_name}_ns{k+1}"
+                child_name = self._gen_unique_child_name(parent_name, k+1)
 
                 self.logger.info(
                     f"[NS] Creating CHILD {child_name}: namespace={parent_id}, host_id={parent_host_id_used}, size={self.lvol_size}"
@@ -377,6 +446,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
         skip_nodes.append(self.sn_primary_secondary_map[self.current_outage_node])
         skip_nodes = []
         self.logger.info(f"[NS] Skipping Nodes: {skip_nodes}")
+        count = count * 3
 
         available = list(self.lvol_mount_details.keys())
         self.logger.info(f"[NS] Available LVOLs for random delete: {available}")
