@@ -504,6 +504,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         lvol.crypto_key1 = snap.lvol.crypto_key1
         lvol.crypto_key2 = snap.lvol.crypto_key2
 
+    conv_new_size = 0  
     if new_size:
         conv_new_size = math.ceil(new_size / (1024 * 1024 * 1024)) * 1024 * 1024 * 1024
         if snap.lvol.size > conv_new_size:
@@ -515,7 +516,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             msg = f"New size {conv_new_size} must be smaller than the max size {snap.lvol.max_size}"
             logger.error(msg)
             return False, msg
-        lvol.size = conv_new_size
 
     lvol.write_to_db(db_controller.kv_store)
 
@@ -603,7 +603,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
-    if new_size:
+    if new_size and conv_new_size > snap.lvol.size:
         lvol_controller.resize_lvol(lvol.get_id(), new_size)
     return lvol.uuid, False
 
