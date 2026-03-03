@@ -68,8 +68,8 @@ def task_runner(task):
         if "migration_devices" in task.function_params:
             migration_devices = task.function_params["migration_devices"]
 
-        if len(current_online_devices) < len(migration_devices):
-            task.function_result = f"only {current_online_devices} devices online, waiting for more devices to be online"
+        if current_online_devices == migration_devices:
+            task.function_result = f"Waiting for more devices to be online"
             task.status = JobSchedule.STATUS_SUSPENDED
             task.retry += 1
             task.write_to_db(db.kv_store)
