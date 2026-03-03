@@ -508,7 +508,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     conv_new_size = 0
     if new_size:
         conv_new_size = math.ceil(new_size / (1024 * 1024 * 1024)) * 1024 * 1024 * 1024
-        if snap.lvol.size > conv_new_size:
+        if snap.lvol.size > conv_new_size and snap.lvol.size > new_size:
             msg = f"New size {conv_new_size} must be higher than the original size {snap.lvol.size}"
             logger.error(msg)
             return False, msg
