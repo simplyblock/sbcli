@@ -68,14 +68,11 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
         return "".join(chars)
 
     def _name_exists_in_cluster(self, name: str) -> bool:
-        """
-        Best-effort: if get_lvol_id succeeds, name exists.
-        """
         try:
-            _ = self.sbcli_utils.get_lvol_id(name)
-            return True
+            return self.sbcli_utils.lvol_exists(name)
         except Exception:
-            return False
+            # if API temporarily fails, treat as "exists" to avoid collisions
+            return True
 
     def _gen_unique_parent_name(self, base: str) -> str:
         """
@@ -200,11 +197,10 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
             fs_type = random.choice(["ext4", "xfs"])
             is_crypto = random.choice([True, False])
 
-            parent_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
-            while parent_name in self.lvol_mount_details:
-                base = f"lvl{generate_random_sequence(15)}"
-                self.lvol_name = self._gen_unique_parent_name(base)
-                parent_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
+            base = f"lvl{generate_random_sequence(15)}"
+            base = self._gen_unique_parent_name(base)   # returns final unique base string
+            parent_name = f"c{base}" if is_crypto else base
+            self.lvol_name = parent_name
 
             self.logger.info(
                 f"[NS] Creating PARENT lvol: {parent_name}, fs={fs_type}, crypto={is_crypto}, "
