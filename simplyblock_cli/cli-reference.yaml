@@ -1304,11 +1304,6 @@ commands:
             dest: mgmt_only
             type: bool
             default: false
-          - name: "--restart"
-            help: "Restart the management services"
-            dest: restart
-            type: bool
-            default: false
           - name: "--spdk-image"
             help: "Restart the storage nodes using the provided image"
             dest: spdk_image
