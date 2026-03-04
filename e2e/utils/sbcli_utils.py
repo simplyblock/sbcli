@@ -530,6 +530,16 @@ class SbcliUtils:
         """
         lvols = self.list_lvols()
         return lvols.get(lvol_name, None)
+    
+    def lvol_exists(self, lvol_name):
+        """Return if lvol exists or not
+        """
+        lvols = self.list_lvols()
+        lvol_exists = lvols.get(lvol_name, None)
+        if lvol_exists:
+            return True
+        else:
+            return False
 
     def get_lvol_connect_str(self, lvol_name):
         """Return list of formatted connect strings for the lvol"""
