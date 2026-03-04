@@ -50,6 +50,7 @@ spec:
               fi
 
               KUBELET_CFG="/host/var/lib/kubelet/config.yaml"
+              CPU_MNG="/host/var/lib/kubelet/cpu_manager_state"
               KUBELET_ENV1="/host/etc/default/kubelet"   # Debian/Ubuntu
               KUBELET_ENV2="/host/etc/sysconfig/kubelet" # RHEL/CentOS
               SYSTEMD_UNIT_DIR="/host/etc/systemd/system/kubelet.service.d"
@@ -108,6 +109,9 @@ spec:
               fi
 
               # Restart kubelet
+              echo "removing old cpu_manager_state..."
+              rm -rf $KUBELET_CFG
+
               echo "[INFO] Restarting kubelet via host systemd..."
               nsenter --target 1 --mount --uts --ipc --net --pid -- sh -c "systemctl daemon-reload && systemctl restart kubelet"
 
