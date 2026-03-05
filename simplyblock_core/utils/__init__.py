@@ -2681,3 +2681,15 @@ def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_soc
 
             node_index += 1
     return convert_size(minimum_hp_memory, 'MB')
+
+def recalculate_cores_distribution(cores, number_of_alcemls):
+    distribution = calculate_core_allocations(cores, number_of_alcemls)
+    core_to_index = {core: idx for idx, core in enumerate(cores)}
+    return {
+        "app_thread_core": get_core_indexes(core_to_index, distribution[0]),
+        "jm_cpu_core": get_core_indexes(core_to_index, distribution[1]),
+        "poller_cpu_cores": get_core_indexes(core_to_index, distribution[2]),
+        "alceml_cpu_cores": get_core_indexes(core_to_index, distribution[3]),
+        "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
+        "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
+        "jc_singleton_core": get_core_indexes(core_to_index, distribution[6])}
