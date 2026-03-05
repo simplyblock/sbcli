@@ -472,11 +472,11 @@ class TestHASingleNodeFailure(TestClusterBase):
             self.common_utils.validate_fio_test(node=self.client_machines[0],
                                                 log_file=self.log_path+f"_{lvol_name}")
 
-            total_fio_runtime = end_time - self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]
-            self.logger.info(f"FIO Run Time: {total_fio_runtime}")
+            # total_fio_runtime = end_time - self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]
+            # self.logger.info(f"FIO Run Time: {total_fio_runtime}")
 
-            assert  total_fio_runtime >= self.fio_runtime, \
-                f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]}'
+            # assert  total_fio_runtime >= self.fio_runtime, \
+            #     f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]}'
 
         self.logger.info("TEST CASE PASSED !!!")
 

@@ -957,7 +957,7 @@ jobs:
           # --- Failure reason: prefer MultipleExceptions summary line ---
           failure_reason=""
           if [[ -f "${out_log}" ]]; then
-            multi="$(grep 'MultipleExceptions:' "${out_log}" | tail -n1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            multi="$(grep 'MultipleExceptions:' "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
             if [[ -n "${multi}" ]]; then
               failure_reason="${multi}"
             elif grep -Eqi 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${out_log}"; then
