@@ -178,10 +178,10 @@ spec:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: fluent-pod-{{ RPC_PORT }}-{{ CLUSTER_ID }}
+  name: simplyblock-fluentd-{{ RPC_PORT }}-{{ CLUSTER_ID }}
   namespace: {{ NAMESPACE }}
   labels:
-    app: fluent-app-{{ RPC_PORT }}
+    app: simplyblock-fluentd-app-{{ RPC_PORT }}
 spec:
   serviceAccountName: simplyblock-storage-node-sa
   nodeSelector:
