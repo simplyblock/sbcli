@@ -1207,7 +1207,8 @@ class SshUtils:
 
             list_snapshot = output.strip().split()
             for snapshot_id in list_snapshot:
-                self.delete_snapshot(node=node, snapshot_id=snapshot_id)
+                if "uuid" not in snapshot_id.lower():
+                    self.delete_snapshot(node=node, snapshot_id=snapshot_id)
 
     def find_files(self, node, directory):
         command = f"sudo find {directory} -maxdepth 1 -type f"
