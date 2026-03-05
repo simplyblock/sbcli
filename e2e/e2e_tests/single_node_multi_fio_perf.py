@@ -106,7 +106,7 @@ class TestLvolFioBase(TestClusterBase):
                 "bs": 4096,
                 "size": "2G",
                 "time_based": True,
-                "runtime": 100,
+                "runtime": 300,
                 "output_format": "json",
                 "output_file": f"{Path.home()}/{lvol_name}_log.json",
                 "nrfiles": 5,

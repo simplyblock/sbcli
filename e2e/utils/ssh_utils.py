@@ -830,14 +830,14 @@ class SshUtils:
 
         # Ensure process is up: check tmux & pgrep
         for i in range(8):
-            out, _ = self.exec_command(node=node, command=f"pgrep -fa 'fio.*{name}' || true", max_retries=1, supress_logs=True)
-            tmux_ok, _ = self.exec_command(node=node, command=f"sudo tmux has-session -t {session} 2>/dev/null || echo MISSING", max_retries=1, supress_logs=True)
+            out, _ = self.exec_command(node=node, command=f"pgrep -fa 'fio.*{name}' || true", max_retries=1, supress_logs=False)
+            tmux_ok, _ = self.exec_command(node=node, command=f"sudo tmux has-session -t {session} 2>/dev/null || echo MISSING", max_retries=1, supress_logs=False)
             if out.strip() and "MISSING" not in tmux_ok:
                 self.logger.info(f"FIO is running for {name}: {out.strip().splitlines()[0]}")
                 return
             if i >= 2:
-                self.logger.warning(f"FIO not detected yet for {name}; re-issuing start (try {i-1}/5)")
-                self.exec_command(node=node, command=start_cmd, max_retries=1, supress_logs=True)
+                self.logger.warning(f"FIO not detected yet for {name}; re-issuing start (try {i-1}/8)")
+                self.exec_command(node=node, command=start_cmd, max_retries=1, supress_logs=False)
             time.sleep(2 + i)
 
         raise RuntimeError(f"FIO failed to stay running for job {name} on {node}")
