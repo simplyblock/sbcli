@@ -686,7 +686,7 @@ api.get('/ifc_is_roce')(snode_ops.ifc_is_roce)
 
 api.post('/format_device_with_4k')(snode_ops.format_device_with_4k)
 
-api.post('/read_allowed_list')(snode_ops.read_allowed_list)
+api.get('/read_allowed_list')(snode_ops.read_allowed_list)
 
 api.post('/recalculate_cores_distribution')(snode_ops.recalculate_cores_distribution)
 

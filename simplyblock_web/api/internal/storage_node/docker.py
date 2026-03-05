@@ -73,7 +73,7 @@ def get_amazon_cloud_info():
         import ec2_metadata
         import requests
         session = requests.session()
-        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document # type: ignore[call-arg]
+        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document  # type: ignore[call-arg]
         return {
             "id": data["instanceId"],
             "type": data["instanceType"],
@@ -269,7 +269,7 @@ def spdk_process_is_up(query: utils.RPCPortParams):
     except Exception as e:
         logger.error(e)
     logger.debug(f"function:spdk_process_is_up end f{req_unique_id}")
-    total_time = int(( time.time_ns()-req_unique_id)/(1000*1000*1000))
+    total_time = int((time.time_ns() - req_unique_id) / (1000 * 1000 * 1000))
     logger.debug(f"function:spdk_process_is_up total time {total_time}")
     return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
 
@@ -523,7 +523,7 @@ def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
     cmd = f"parted -fs /dev/{device_name} mklabel gpt"
     out, err, ret_code = shell_utils.run_command(cmd)
     logger.info(f"out: {out}, err: {err}, ret_code: {ret_code}")
-    return utils.get_response(ret_code==0, error=err)
+    return utils.get_response(ret_code == 0, error=err)
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
@@ -727,18 +727,19 @@ def is_alive():
     })}}},
 })
 def read_allowed_list():
-    cores = []
     try:
         with open("/etc/simplyblock/allowed_list") as f:
             cores = [int(line.strip()) for line in f if line.strip()]
     except Exception:
-        return []
-    return cores
+        cores = []
+    resp = utils.get_response(cores)
+    return resp
 
 
 class CoresParams(BaseModel):
     cores: Optional[List[int]] = Field(default=None)
     number_of_alceml_devices: Optional[int] = Field(None, ge=0)
+
 
 @api.post('/recalculate_cores_distribution', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
@@ -751,11 +752,11 @@ def recalculate_cores_distribution(body: CoresParams):
     distribution = init_utils.recalculate_cores_distribution(cores, number_of_alceml_devices)
 
     resp = utils.get_response({
-            "app_thread_core": distribution["distribution"],
-            "jm_cpu_core": distribution["jm_cpu_core"] ,
-            "poller_cpu_cores": distribution["poller_cpu_cores"],
-            "alceml_cpu_cores": distribution["alceml_cpu_cores"],
-            "alceml_worker_cpu_cores": distribution["alceml_worker_cpu_cores"],
-            "distrib_cpu_cores": distribution["distrib_cpu_cores"],
-            "jc_singleton_core": distribution["jc_singleton_core"]})
+        "app_thread_core": distribution["distribution"],
+        "jm_cpu_core": distribution["jm_cpu_core"],
+        "poller_cpu_cores": distribution["poller_cpu_cores"],
+        "alceml_cpu_cores": distribution["alceml_cpu_cores"],
+        "alceml_worker_cpu_cores": distribution["alceml_worker_cpu_cores"],
+        "distrib_cpu_cores": distribution["distrib_cpu_cores"],
+        "jc_singleton_core": distribution["jc_singleton_core"]})
     return resp
