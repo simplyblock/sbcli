@@ -96,9 +96,9 @@ ALL_TESTS = [
 def get_all_tests(custom=True, ha_test=False):
     tests = [
         TestLvolFioNpcsCustom,
-        # TestLvolFioNpcs0,
-        # TestLvolFioNpcs1,
-        # TestLvolFioNpcs2,
+        TestLvolFioNpcs0,
+        TestLvolFioNpcs1,
+        TestLvolFioNpcs2,
         # TestLvolFioQOSBW,
         # TestLvolFioQOSIOPS,
         TestSingleNodeOutage,
