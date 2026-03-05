@@ -465,7 +465,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
     lvol.guid = utils.generate_hex_string(16)
-    lvol.vuid = snap.lvol.vuid
+    lvol.vuid = utils.get_random_vuid()
     lvol.snapshot_name = snap.snap_bdev
     lvol.subsys_port = snap.lvol.subsys_port
     lvol.fabric = snap.fabric
