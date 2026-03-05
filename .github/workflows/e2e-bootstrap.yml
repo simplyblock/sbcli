@@ -604,7 +604,7 @@ jobs:
         run: |
           set -euxo pipefail
           RUN_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-          RUN_BASE_DIR="/mnt/nfs_share/e2e-run-${RUN_TIMESTAMP}-${GITHUB_RUN_ID}"
+          RUN_BASE_DIR="${NFS_MOUNTPOINT}/e2e-run-${RUN_TIMESTAMP}-${GITHUB_RUN_ID}"
           echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV"
           mkdir -p "${RUN_BASE_DIR}"
 
