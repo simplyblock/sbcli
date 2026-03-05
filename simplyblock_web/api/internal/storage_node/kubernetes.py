@@ -688,6 +688,6 @@ api.post('/format_device_with_4k')(snode_ops.format_device_with_4k)
 
 api.get('/ping_ip')(snode_ops.ping_ip)
 
-api.post('/read_allowed_list')(snode_ops.read_allowed_list)
+api.get('/read_allowed_list')(snode_ops.read_allowed_list)
 
 api.post('/recalculate_cores_distribution')(snode_ops.recalculate_cores_distribution)
