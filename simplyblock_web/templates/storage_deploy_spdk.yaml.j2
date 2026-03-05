@@ -172,7 +172,33 @@ spec:
           cpu: 1
           memory: "128Mi"
       {% endif %}
-    {% if MODE == "docker" %}
+
+---
+{% if MODE == "docker" %}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fluent-pod-{{ RPC_PORT }}-{{ CLUSTER_ID }}
+  namespace: {{ NAMESPACE }}
+  labels:
+    app: fluent-app-{{ RPC_PORT }}
+spec:
+  serviceAccountName: simplyblock-storage-node-sa
+  nodeSelector:
+    kubernetes.io/hostname: {{ HOSTNAME }}
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+  volumes:
+    - name: varlog
+      hostPath:
+        path: /var/log
+    - name: dockercontainerlogdirectory
+      hostPath:
+        path: /var/log/pods
+  containers:
     - name: fluentd
       image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
       imagePullPolicy: "Always"
@@ -189,6 +215,8 @@ spec:
           value: "tcp"
         - name: FLUENTD_SYSTEMD_CONF
           value: "disable"
+        - name: FLUENT_CONTAINER_TAIL_PATH
+          value: "/var/log/pods/{{ NAMESPACE }}_snode-spdk-pod-{{ RPC_PORT }}-{{ CLUSTER_ID }}_*/*/*.log"
         - name: FLUENT_CONTAINER_TAIL_EXCLUDE_PATH
           value: /var/log/pods/fluent*
         - name: FLUENT_CONTAINER_TAIL_PARSER_TYPE
