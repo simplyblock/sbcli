@@ -110,7 +110,7 @@ spec:
 
               # Restart kubelet
               echo "removing old cpu_manager_state..."
-              rm -rf $KUBELET_CFG
+              rm -rf $CPU_MNG
 
               echo "[INFO] Restarting kubelet via host systemd..."
               nsenter --target 1 --mount --uts --ipc --net --pid -- sh -c "systemctl daemon-reload && systemctl restart kubelet"
