@@ -471,12 +471,13 @@ def spdk_process_start(body: SPDKParams):
 
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
-        dep = yaml.safe_load(template.render(values))
-        logger.debug(dep)
+        docs = yaml.safe_load_all(template.render(values))
         k8s_core_v1 = core_utils.get_k8s_core_client()
-        resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
-        msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}"
-        logger.info(msg)
+        for dep in docs:
+            logger.debug(dep)
+            resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
+            msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}'"
+            logger.info(msg)
     except Exception:
         return utils.get_response(False, f"Pod failed:\n{traceback.format_exc()}")
 
