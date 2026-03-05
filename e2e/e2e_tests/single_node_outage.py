@@ -457,9 +457,9 @@ class TestHASingleNodeOutage(TestClusterBase):
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
                                      new_size="25G")
 
-        end_time = self.common_utils.manage_fio_threads(node=self.client_machines[0],
-                                                        threads=self.fio_threads,
-                                                        timeout=1000)
+        self.common_utils.manage_fio_threads(node=self.client_machines[0],
+                                             threads=self.fio_threads,
+                                             timeout=1000)
 
         for i in range(3):
             lvol_name = f"LVOL_{i}"
