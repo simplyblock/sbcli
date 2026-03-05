@@ -718,3 +718,44 @@ def ifc_is_tcp(query: NicQuery):
 })
 def is_alive():
     return utils.get_response(True)
+
+
+@api.get('/read_allowed_list', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'additionalProperties': True,
+    })}}},
+})
+def read_allowed_list():
+    cores = []
+    try:
+        with open("/etc/simplyblock/allowed_list") as f:
+            cores = [int(line.strip()) for line in f if line.strip()]
+    except Exception:
+        return []
+    return cores
+
+
+class CoresParams(BaseModel):
+    cores: Optional[List[int]] = Field(default=None)
+    number_of_alceml_devices: Optional[int] = Field(None, ge=0)
+
+@api.post('/recalculate_cores_distribution', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def recalculate_cores_distribution(body: CoresParams):
+    cores = body.cores
+    number_of_alceml_devices = body.number_of_alceml_devices
+    distribution = init_utils.recalculate_cores_distribution(cores, number_of_alceml_devices)
+
+    resp = utils.get_response({
+            "app_thread_core": distribution["distribution"],
+            "jm_cpu_core": distribution["jm_cpu_core"] ,
+            "poller_cpu_cores": distribution["poller_cpu_cores"],
+            "alceml_cpu_cores": distribution["alceml_cpu_cores"],
+            "alceml_worker_cpu_cores": distribution["alceml_worker_cpu_cores"],
+            "distrib_cpu_cores": distribution["distrib_cpu_cores"],
+            "jc_singleton_core": distribution["jc_singleton_core"]})
+    return resp

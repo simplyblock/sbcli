@@ -80,6 +80,16 @@ class SNodeClient:
     def info(self):
         return self._request("GET", "info")
 
+    def read_allowed_list(self):
+        return self._request("GET", "read_allowed_list")
+
+    def recalculate_cores_distribution(self, cores, number_of_alceml_devices):
+        params = {
+            "cores": cores,
+            "number_of_alceml_devices": number_of_alceml_devices
+        }
+        return self._request("POST", "recalculate_cores_distribution", params)
+
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,

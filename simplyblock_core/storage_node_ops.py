@@ -981,21 +981,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error(
                 f"ERROR: The provided cpu mask {req_cpu_count} has values greater than 63, which is not allowed")
             return False
-        poller_cpu_cores = node_config.get("distribution").get("poller_cpu_cores")
-        alceml_cpu_cores = node_config.get("distribution").get("alceml_cpu_cores")
-        distrib_cpu_cores = node_config.get("distribution").get("distrib_cpu_cores")
-        alceml_worker_cpu_cores = node_config.get("distribution").get("alceml_worker_cpu_cores")
-        jc_singleton_core = node_config.get("distribution").get("jc_singleton_core")
-        app_thread_core = node_config.get("distribution").get("app_thread_core")
-        jm_cpu_core = node_config.get("distribution").get("jm_cpu_core")
-        number_of_distribs = node_config.get("number_of_distribs")
-
-        pollers_mask = utils.generate_mask(poller_cpu_cores)
-        app_thread_mask = utils.generate_mask(app_thread_core)
-
-        if jc_singleton_core:
-            jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
-        jm_cpu_mask = utils.generate_mask(jm_cpu_core)
 
         # Calculate pool count
         max_prov = 0
@@ -1004,12 +989,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if max_prov < 0:
             logger.error(f"Incorrect max-prov value {max_prov}")
             return False
-
-        number_of_alceml_devices = node_config.get("number_of_alcemls")
-        # for jm
-        number_of_alceml_devices += 1
-        small_pool_count = node_config.get("small_pool_count")
-        large_pool_count = node_config.get("large_pool_count")
 
         minimum_hp_memory = node_config.get("huge_page_memory")
 
@@ -1030,16 +1009,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         # Calculate minimum sys memory
         minimum_sys_memory = node_config.get("sys_memory")
-
-        # satisfied, spdk_mem = utils.calculate_spdk_memory(minimum_hp_memory,
-        #                                                  minimum_sys_memory,
-        #                                                  int(memory_details['free']),
-        #                                                  int(memory_details['huge_total']))
         max_lvol = node_config.get("max_lvol")
-
-        # if not satisfied:
-        #    logger.warning(
-        #        f"Not enough memory for the provided max_lvo: {max_lvol}, max_prov: {max_prov}..")
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
@@ -1120,6 +1090,40 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if not results:
             logger.error(f"Failed to start spdk: {err}")
             return False
+        number_of_alceml_devices = node_config.get("number_of_alcemls")
+        # Increase number of alcemls by one for the JM
+        number_of_alceml_devices += 1
+        small_pool_count = node_config.get("small_pool_count")
+        large_pool_count = node_config.get("large_pool_count")
+
+        cores = snode_api.read_allowed_list()
+
+        if len(cores) == req_cpu_count:
+            new_distribution = snode_api.recalculate_cores_distribution(cores, number_of_alceml_devices)
+            poller_cpu_cores = new_distribution.get("poller_cpu_cores")
+            alceml_cpu_cores = new_distribution.get("alceml_cpu_cores")
+            distrib_cpu_cores = new_distribution.get("distrib_cpu_cores")
+            alceml_worker_cpu_cores = new_distribution.get("alceml_worker_cpu_cores")
+            jc_singleton_core = new_distribution.get("jc_singleton_core")
+            app_thread_core = new_distribution.get("app_thread_core")
+            jm_cpu_core = new_distribution.get("jm_cpu_core")
+        else:
+            poller_cpu_cores = node_config.get("distribution").get("poller_cpu_cores")
+            alceml_cpu_cores = node_config.get("distribution").get("alceml_cpu_cores")
+            distrib_cpu_cores = node_config.get("distribution").get("distrib_cpu_cores")
+            alceml_worker_cpu_cores = node_config.get("distribution").get("alceml_worker_cpu_cores")
+            jc_singleton_core = node_config.get("distribution").get("jc_singleton_core")
+            app_thread_core = node_config.get("distribution").get("app_thread_core")
+            jm_cpu_core = node_config.get("distribution").get("jm_cpu_core")
+        number_of_distribs = node_config.get("number_of_distribs")
+
+        pollers_mask = utils.generate_mask(poller_cpu_cores)
+        app_thread_mask = utils.generate_mask(app_thread_core)
+
+        if jc_singleton_core:
+            jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
+        jm_cpu_mask = utils.generate_mask(jm_cpu_core)
+
 
         data_nics = []
 
@@ -1805,6 +1809,25 @@ def restart_storage_node(
     except Exception as e:
         logger.error(e)
         return False
+    req_cpu_count = len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask))
+
+    cores = snode_api.read_allowed_list()
+
+    if len(cores) == req_cpu_count:
+        new_distribution = snode_api.recalculate_cores_distribution(cores, snode.number_of_alceml_devices)
+        poller_cpu_cores = new_distribution.get("poller_cpu_cores")
+        snode.alceml_cpu_cores = new_distribution.get("alceml_cpu_cores")
+        snode.distrib_cpu_cores = new_distribution.get("distrib_cpu_cores")
+        snode.alceml_worker_cpu_cores = new_distribution.get("alceml_worker_cpu_cores")
+        jc_singleton_core = new_distribution.get("jc_singleton_core")
+        app_thread_core = new_distribution.get("app_thread_core")
+        jm_cpu_core = new_distribution.get("jm_cpu_core")
+        snode.pollers_mask = utils.generate_mask(poller_cpu_cores)
+        snode.app_thread_mask = utils.generate_mask(app_thread_core)
+
+        if jc_singleton_core:
+            snode.jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
+        snode.jm_cpu_mask = utils.generate_mask(jm_cpu_core)
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")
@@ -1886,7 +1909,6 @@ def restart_storage_node(
         return False
 
     qpair = cluster.qpair_count
-    req_cpu_count = len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask))
     if cluster.fabric_tcp:
         ret = rpc_client.transport_create("TCP", qpair, 512 * (req_cpu_count + 1))
         if not ret:
