@@ -16,7 +16,7 @@ observability:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "snapshot_replication_operator_support"
+    tag: "main-sfam-2359"
     pullPolicy: "Always"
 
 ports:
@@ -225,7 +225,7 @@ simplyblock:
     
   storageNodes:
     name: simplyblock-node
-    clusterImage: public.ecr.aws/simply-block/simplyblock:snapshot_replication_operator_support
+    clusterImage: public.ecr.aws/simply-block/simplyblock:main-sfam-2359
     mgmtIfc: eth0
     maxLVol: 10
     maxSize: 0

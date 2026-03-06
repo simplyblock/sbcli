@@ -267,7 +267,7 @@ def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume
     return lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
 
 
-@api.get('/', name='clusters:storage-pools:volumes:list_replication_tasks')
-def list(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+@api.get('/list_replication_tasks', name='clusters:storage-pools:volumes:list_replication_tasks')
+def list_replication_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
     tasks = lvol_controller.list_replication_tasks(volume.get_id())
     return [TaskDTO.from_model(task) for task in tasks]
