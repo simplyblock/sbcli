@@ -749,7 +749,7 @@ def ping_ip(query: PingQuery):
 def read_allowed_list():
     try:
         with open("/etc/simplyblock/allowed_list") as f:
-            cores = [int(line.strip()) for line in f if line.strip()]
+            cores = [int(line.strip()) for line in f.read().split(' ')]
     except Exception:
         cores = []
     resp = utils.get_response(cores)
@@ -772,7 +772,7 @@ def recalculate_cores_distribution(body: CoresParams):
     distribution = init_utils.recalculate_cores_distribution(cores, number_of_alceml_devices)
 
     resp = utils.get_response({
-        "app_thread_core": distribution["distribution"],
+        "app_thread_core": distribution["app_thread_core"],
         "jm_cpu_core": distribution["jm_cpu_core"],
         "poller_cpu_cores": distribution["poller_cpu_cores"],
         "alceml_cpu_cores": distribution["alceml_cpu_cores"],
