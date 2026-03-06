@@ -1,4 +1,4 @@
-name: Stress Run on existing cluster Until Failure
+name: Run E2E Tests on Existing Cluster
 
 on:
   workflow_dispatch:
@@ -36,13 +36,18 @@ on:
         required: true
         default: "sbctl"
 
+      SBCLI_BRANCH:
+        description: "sbcli repo branch to clone for tests"
+        required: true
+        default: "R25.10-Hotfix"
+
       CLUSTER_ID:
-        description: "Cluster id to run test on"
+        description: "Cluster ID to run tests on"
         required: true
 
       CLUSTER_SECRET:
-        description: "Cluster secret to run test on"
-        required: true    
+        description: "Cluster secret to run tests on"
+        required: true
 
       # =========================
       # SSH / client inputs
@@ -69,32 +74,32 @@ on:
         default: "/mnt/nfs_share"
 
       BOOTSTRAP_DATA_CHUNKS:
-        description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
+        description: "Number of data chunks (ndcs)"
         required: true
         default: "2"
 
       BOOTSTRAP_PARITY_CHUNKS:
-        description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
+        description: "Number of parity chunks (npcs)"
         required: true
         default: "2"
 
       # =========================
-      # Stress test inputs
+      # E2E test inputs
       # =========================
       TEST_CLASS:
-        description: "Stress test class name (--testname)"
-        required: true
-        default: "RandomMultiClientMultiFailoverTest"
+        description: "E2E test class name (--testname); leave empty to run all tests"
+        required: false
+        type: string
 
 concurrency:
-  group: simplyblock-lab-stress
+  group: simplyblock-lab-e2e
   cancel-in-progress: false
 
 jobs:
-  bootstrap-and-stress:
-    name: Pre-clean -> Bootstrap -> Stress
+  e2e:
+    name: Pre-clean -> E2E
     runs-on: [self-hosted]
-    timeout-minutes: 4320
+    timeout-minutes: 240
 
     env:
       # Cluster/lab env
@@ -106,6 +111,7 @@ jobs:
       BASTION_SERVER: ${{ inputs.BASTION_IP }}
       MNODES: ${{ inputs.MNODES }}
       SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
+      SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
 
       # SSH/client env
       SSH_USER: ${{ inputs.SSH_USER }}
@@ -116,11 +122,7 @@ jobs:
       # Cleanup
       NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT }}
 
-      # Bootstrap params
-      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
-      BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
-
-      # Stress derived from bootstrap chunks
+      # E2E derived from chunks
       NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
       TEST_CLASS: ${{ inputs.TEST_CLASS }}
@@ -132,7 +134,7 @@ jobs:
       MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-      # Filled after bootstrap parsing
+      # Pre-existing cluster
       CLUSTER_ID: ${{ inputs.CLUSTER_ID }}
       CLUSTER_SECRET: ${{ inputs.CLUSTER_SECRET }}
 
@@ -166,7 +168,7 @@ jobs:
             echo "ERROR: Cannot install sshpass (unknown package manager)."
             exit 1
           fi
-      
+
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash
         run: |
@@ -215,7 +217,7 @@ jobs:
           [[ -n "${SSH_PASSWORD}" ]] || (echo "ERROR: secrets.SSH_PASSWORD required" && exit 1)
 
       # ============================================================
-      # PRE-BOOTSTRAP CLEANUP (remote ops only)
+      # PRE-RUN CLEANUP (remote ops only)
       # Targets = MNODES + STORAGE_PRIVATE_IPS + CLIENTNODES
       # ============================================================
       - name: Pre-clean kill fio/tmux and unmount NFS on MNODES + storage + clients
@@ -245,7 +247,6 @@ jobs:
                 if mount | grep -q \" \$mp \"; then umount -f \"\$mp\" || umount \"\$mp\" || true; fi
               fi"
           done
-
 
       - name: Client cleanup disconnect lvols; ensure NFS not mounted anywhere; unmount all /mnt; remove /mnt dirs
         shell: bash
@@ -294,7 +295,7 @@ jobs:
           done
 
       # ============================================================
-      # STRESS (runner only)
+      # E2E TESTS (runner only)
       # ============================================================
       - name: Clone sbcli repo (prefer same branch as workflow; fallback to SBCLI_BRANCH)
         shell: bash
@@ -317,7 +318,7 @@ jobs:
             git clone --branch "$fallback_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
           fi
 
-          test -f sbcli/e2e/stress.py
+          test -f sbcli/e2e/e2e.py
           test -f sbcli/e2e/logs/cleanup.py
 
       - name: Install Python deps (best-effort)
@@ -329,17 +330,21 @@ jobs:
             pip install -r sbcli/e2e/requirements.txt
           fi
 
-      - name: Cleanup logs before stress
+      - name: Cleanup logs before e2e
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
           python3 logs/cleanup.py
-      
-      - name: Set RUN_DIR_FILE
+
+      - name: Set RUN_BASE_DIR
         shell: bash
         run: |
-          echo "RUN_DIR_FILE=/tmp/sb_run_dir_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.txt" >> "$GITHUB_ENV"
+          set -euxo pipefail
+          RUN_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+          RUN_BASE_DIR="${NFS_MOUNTPOINT}/e2e-run-${RUN_TIMESTAMP}-${GITHUB_RUN_ID}"
+          echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV"
+          mkdir -p "${RUN_BASE_DIR}"
 
       - name: Record test start time
         shell: bash
@@ -348,18 +353,22 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
-      - name: Run stress (foreground; runs until failure)
+      - name: Run e2e tests
         shell: bash
         working-directory: sbcli/e2e
         run: |
           set -euxo pipefail
-          python3 -u stress.py \
-            --testname "${TEST_CLASS}" \
+          TESTNAME_ARGS=()
+          if [[ -n "${TEST_CLASS:-}" ]]; then
+            TESTNAME_ARGS=(--testname "${TEST_CLASS}")
+          fi
+          python3 -u e2e.py \
+            "${TESTNAME_ARGS[@]}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
             --send_debug_notification false \
             2>&1 | tee output.log
-      
+
       - name: Mark test end time (always)
         if: always()
         shell: bash
@@ -368,14 +377,14 @@ jobs:
           echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
-      - name: Collect mgmt snapshots into RUN_BASE_DIR (on failure)
+      - name: Collect mgmt snapshots into RUN_BASE_DIR (always)
         if: always()
         shell: bash
         run: |
           set -euxo pipefail
 
           python3 - <<'PY'
-          import os, subprocess
+          import os, subprocess, json
 
           mgmt_ip = os.environ["MNODES"].split()[0]
           key = os.environ["KEY_PATH"]
@@ -389,87 +398,73 @@ jobs:
           os.makedirs(f"{outdir}/subtasks", exist_ok=True)
           os.makedirs(f"{outdir}/storage_nodes", exist_ok=True)
 
-          script = r"""set -euo pipefail
-          SBCLI="__SBCLI__"
-          CLUSTER_ID="__CLUSTER_ID__"
-          OUTDIR="__OUTDIR__"
-
-          mkdir -p "$OUTDIR"/{mgmt,subtasks,storage_nodes}
-
-          log(){ printf '[%(%F %T)T] %s\n' -1 "$*" >&2; }
-          run_local(){ local cmd="$1" out="$2"; log "LOCAL: $cmd -> $out"; bash -lc "$cmd" > "$out" 2>&1 || true; }
-
-          run_local "$SBCLI cluster list"                               "$OUTDIR/mgmt/cluster_list.txt"
-          run_local "$SBCLI cluster status $CLUSTER_ID"                 "$OUTDIR/mgmt/cluster_status.txt"
-          run_local "$SBCLI cluster show $CLUSTER_ID"                   "$OUTDIR/mgmt/cluster_show.txt"
-          run_local "$SBCLI cluster get-capacity $CLUSTER_ID"           "$OUTDIR/mgmt/cluster_capacity.txt"
-          run_local "$SBCLI cluster get-logs $CLUSTER_ID --limit 0"     "$OUTDIR/mgmt/cluster_get_logs.txt"
-
-          run_local "$SBCLI pool list"                                  "$OUTDIR/mgmt/pool_list.txt"
-          run_local "$SBCLI lvol list"                                  "$OUTDIR/mgmt/lvol_list.txt"
-          run_local "$SBCLI snapshot list"                              "$OUTDIR/mgmt/snapshot_list.txt"
-
-          run_local "$SBCLI sn list"                                    "$OUTDIR/mgmt/sn_list.txt"
-          run_local "$SBCLI sn list --json"                             "$OUTDIR/mgmt/sn_list.json"
-
-          SN_UUIDS=()
-          if [[ -s "$OUTDIR/mgmt/sn_list.json" ]] && command -v jq >/dev/null 2>&1; then
-            mapfile -t SN_UUIDS < <(jq -r '.[]?|.UUID // .uuid // .Id // .id // empty' "$OUTDIR/mgmt/sn_list.json" | awk 'NF')
-          else
-            mapfile -t SN_UUIDS < <(
-              awk 'BEGIN{FS="|"} /^\|/ && !/UUID/ && !/^\+-/ {
-                if (NF>=3) { gsub(/^[ \t]+|[ \t]+$/, "", $3); if ($3 ~ /[0-9a-f-]{8,}/) print $3; }
-              }' "$OUTDIR/mgmt/sn_list.txt" | sort -u
-            )
-          fi
-
-          idx=1
-          for uuid in "${SN_UUIDS[@]}"; do
-            run_local "$SBCLI sn list-devices $uuid"  "$OUTDIR/storage_nodes/node${idx}_list_devices.txt"
-            run_local "$SBCLI sn check $uuid"         "$OUTDIR/storage_nodes/node${idx}_check.txt"
-            run_local "$SBCLI sn get $uuid"           "$OUTDIR/storage_nodes/node${idx}_get.txt"
-            idx=$((idx+1))
-          done
-
-          run_local "$SBCLI cluster list-tasks $CLUSTER_ID --limit 0"   "$OUTDIR/mgmt/cluster_list_tasks.txt"
-
-          BAL_IDS=()
-          while IFS= read -r line; do
-            [[ "$line" =~ ^\+ ]] && continue
-            [[ "$line" =~ Task\ ID ]] && continue
-            [[ "$line" =~ ^\|[[:space:]]*$ ]] && continue
-
-            func=$(awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4}' <<<"$line")
-            if [[ "$func" == "balancing_on_restart" ]]; then
-              task_id=$(awk -F'|' '{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' <<<"$line")
-              [[ -n "$task_id" ]] && BAL_IDS+=("$task_id")
-            fi
-          done < "$OUTDIR/mgmt/cluster_list_tasks.txt"
-
-          for tid in "${BAL_IDS[@]:-}"; do
-            run_local "$SBCLI cluster get-subtasks $tid" "$OUTDIR/subtasks/${tid}_subtasks.txt"
-          done
-          """
-
-          script = (script
-                    .replace("__SBCLI__", sbcli)
-                    .replace("__CLUSTER_ID__", cluster_id)
-                    .replace("__OUTDIR__", outdir))
-
-          ssh_cmd = [
-              "ssh",
-              "-i", key,
+          ssh_base = [
+              "ssh", "-i", key,
               "-o", "StrictHostKeyChecking=no",
               "-o", "UserKnownHostsFile=/dev/null",
               "-o", "ConnectTimeout=10",
               f"{user}@{mgmt_ip}",
-              "bash", "-s",
           ]
 
-          subprocess.run(ssh_cmd, input=script.encode(), check=False)
+          def run_cmd(cmd, out_file):
+              print(f"  {cmd} -> {out_file}", flush=True)
+              try:
+                  with open(out_file, "w") as f:
+                      subprocess.run(ssh_base + [cmd], stdout=f, stderr=subprocess.STDOUT, check=False, timeout=60)
+              except Exception as e:
+                  print(f"  WARN: failed: {e}", flush=True)
+
+          run_cmd(f"{sbcli} cluster list",                               f"{outdir}/mgmt/cluster_list.txt")
+          run_cmd(f"{sbcli} cluster status {cluster_id}",                f"{outdir}/mgmt/cluster_status.txt")
+          run_cmd(f"{sbcli} cluster show {cluster_id}",                  f"{outdir}/mgmt/cluster_show.txt")
+          run_cmd(f"{sbcli} cluster get-capacity {cluster_id}",          f"{outdir}/mgmt/cluster_capacity.txt")
+          run_cmd(f"{sbcli} cluster get-logs {cluster_id} --limit 0",    f"{outdir}/mgmt/cluster_get_logs.txt")
+
+          run_cmd(f"{sbcli} pool list",                                   f"{outdir}/mgmt/pool_list.txt")
+          run_cmd(f"{sbcli} lvol list",                                   f"{outdir}/mgmt/lvol_list.txt")
+          run_cmd(f"{sbcli} snapshot list",                               f"{outdir}/mgmt/snapshot_list.txt")
+
+          run_cmd(f"{sbcli} sn list",                                     f"{outdir}/mgmt/sn_list.txt")
+          run_cmd(f"{sbcli} sn list --json",                              f"{outdir}/mgmt/sn_list.json")
+
+          # Parse SN UUIDs
+          sn_uuids = []
+          try:
+              with open(f"{outdir}/mgmt/sn_list.json") as f:
+                  data = json.load(f)
+              for item in (data if isinstance(data, list) else []):
+                  uid = item.get("UUID") or item.get("uuid") or item.get("Id") or item.get("id")
+                  if uid:
+                      sn_uuids.append(uid)
+          except Exception:
+              pass
+
+          for idx, uuid in enumerate(sn_uuids, 1):
+              run_cmd(f"{sbcli} sn list-devices {uuid}", f"{outdir}/storage_nodes/node{idx}_list_devices.txt")
+              run_cmd(f"{sbcli} sn check {uuid}",        f"{outdir}/storage_nodes/node{idx}_check.txt")
+              run_cmd(f"{sbcli} sn get {uuid}",          f"{outdir}/storage_nodes/node{idx}_get.txt")
+
+          run_cmd(f"{sbcli} cluster list-tasks {cluster_id} --limit 0",  f"{outdir}/mgmt/cluster_list_tasks.txt")
+
+          # Parse balancing task IDs and get subtasks
+          bal_ids = []
+          try:
+              with open(f"{outdir}/mgmt/cluster_list_tasks.txt") as f:
+                  for line in f:
+                      if line.startswith("+") or "Task ID" in line or "|" not in line:
+                          continue
+                      cols = [c.strip() for c in line.split("|")]
+                      # cols[1] = task_id, cols[3] = function name
+                      if len(cols) >= 5 and cols[3] == "balancing_on_restart" and cols[1]:
+                          bal_ids.append(cols[1])
+          except Exception:
+              pass
+
+          for tid in bal_ids:
+              run_cmd(f"{sbcli} cluster get-subtasks {tid}", f"{outdir}/subtasks/{tid}_subtasks.txt")
           PY
 
-      - name: Collect docker logs into RUN_BASE_DIR (on failure)
+      - name: Collect docker logs into RUN_BASE_DIR (always)
         if: always()
         shell: bash
         run: |
@@ -482,31 +477,33 @@ jobs:
 
           for NODE in ${NODES}; do
             echo ">>> Node: ${NODE}"
-            REMOTE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
+            LOCAL_NODE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
+            mkdir -p "${LOCAL_NODE_DIR}"
 
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "sudo mkdir -p '${REMOTE_DIR}' && sudo chmod -R 0777 '${RUN_BASE_DIR}/${NODE}'" || true
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a > '${REMOTE_DIR}/docker_ps_a_${NODE}.txt' 2>&1 || true\"" || true
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "docker ps -a 2>&1 || true" \
+              > "${LOCAL_NODE_DIR}/docker_ps_a_${NODE}.txt" || true
 
-            CONTAINERS="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a --format '{{.Names}}' || true\"" || true)"
+            CONTAINERS="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
+              "docker ps -a --format '{{.Names}}' 2>/dev/null || true" 2>/dev/null || true)"
 
             if [[ -z "${CONTAINERS}" ]]; then
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"echo 'No containers found' > '${REMOTE_DIR}/_NO_CONTAINERS_${NODE}.txt'\"" || true
+              echo "No containers found on ${NODE}" > "${LOCAL_NODE_DIR}/_NO_CONTAINERS_${NODE}.txt"
               continue
             fi
 
             while IFS= read -r C; do
               [[ -z "${C}" ]] && continue
               echo "    dumping: ${C}"
-              LOG_FILE="${REMOTE_DIR}/${C}.txt"
-              INSPECT_FILE="${REMOTE_DIR}/${C}_inspect.json"
-
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps --details '${C}' > '${LOG_FILE}' 2>&1 || true\"" || true
-              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker inspect '${C}' > '${INSPECT_FILE}' 2>&1 || true\"" || true
+              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
+                "docker logs --timestamps --details '${C}' 2>&1 || true" \
+                > "${LOCAL_NODE_DIR}/${C}.txt" || true
+              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
+                "docker inspect '${C}' 2>&1 || true" \
+                > "${LOCAL_NODE_DIR}/${C}_inspect.json" || true
             done <<< "${CONTAINERS}"
           done
 
-
-      - name: Collect distrib debug dumps into RUN_BASE_DIR
+      - name: Collect distrib debug dumps into RUN_BASE_DIR (always)
         if: always()
         timeout-minutes: 35
         shell: bash
@@ -560,7 +557,7 @@ jobs:
           if command -v jq >/dev/null 2>&1; then
             mapfile -t DISTRIBS < <(printf '%s' "$BDEV_JSON" | jq -r '.[] | select(.name|startswith("distrib_")) | .name' | sort -u)
           else
-            mapfile -t DISTRIBS < <(printf '%s\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
+            mapfile -t DISTRIBS < <(printf '%s\\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
           fi
 
           if [[ ${#DISTRIBS[@]} -eq 0 ]]; then echo "NO_DISTRIBS"; exit 0; fi
@@ -581,7 +578,7 @@ jobs:
             sudo docker exec "$CN" bash -lc "python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
             sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/rpc_${d}.log" 2>/dev/null || true
 
-            for f in $(sudo docker exec "$CN" bash -lc "ls /tmp 2>/dev/null | grep -F \\"$d\\" || true"); do
+            for f in $(sudo docker exec "$CN" bash -lc "ls /tmp 2>/dev/null | grep -F \\\"$d\\\" || true"); do
               sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
             done
 
@@ -619,14 +616,13 @@ jobs:
               scp_cmd = scp_base + [f"{ssh_user}@{ip}:{last}", dest_dir + "/"]
               subprocess.run(scp_cmd, check=False)
 
-              print(f"[{ip}] ✓ Saved → {dest_dir}/{os.path.basename(last)}", flush=True)
+              print(f"[{ip}] Saved -> {dest_dir}/{os.path.basename(last)}", flush=True)
           PY
-        
+
       # =========================
-      # SUMMARY (always): test run, outages, failure reason, mgmt files, duration
-      # Assumes outages are in sbcli/e2e/logs/outage*
+      # SUMMARY (always)
       # =========================
-      - name: Write Job Summary (test/outages/failure/mgmt/duration)
+      - name: Write Job Summary
         if: always()
         shell: bash
         run: |
@@ -635,104 +631,152 @@ jobs:
           mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
           out_log="sbcli/e2e/output.log"
 
+          # --- Timing ---
           start="${TEST_START_EPOCH:-0}"
           end="${TEST_END_EPOCH:-0}"
           dur_sec=0
           if [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ && "$end" -ge "$start" ]]; then
             dur_sec=$((end-start))
           fi
-          dur_h=$((dur_sec/3600))
-          dur_m=$(((dur_sec%3600)/60))
-          dur_s=$((dur_sec%60))
+          dur_h=$((dur_sec/3600)); dur_m=$(((dur_sec%3600)/60)); dur_s=$((dur_sec%60))
           dur_fmt="${dur_h}h ${dur_m}m ${dur_s}s"
 
-          outage_dir="sbcli/e2e/logs"
-          outage_count=0
-          outage_latest=""
-          outage_lines=0
-          outage_tail=""
-          if compgen -G "${outage_dir}/outage*" > /dev/null; then
-            outage_count="$(ls -1 ${outage_dir}/outage* 2>/dev/null | wc -l | awk '{print $1}')"
-            outage_latest="$(ls -1t ${outage_dir}/outage* 2>/dev/null | head -n 1 || true)"
-            outage_lines="$(cat ${outage_dir}/outage* 2>/dev/null | wc -l | awk '{print $1}')"
-            [[ -n "${outage_latest}" && -f "${outage_latest}" ]] && outage_tail="$(tail -n 20 "${outage_latest}" 2>/dev/null || true)"
+          # --- Parse test counts from output.log ---
+          total_cases=0; passed_cases=0; failed_cases=0; skipped_cases=0
+          if [[ -f "${out_log}" ]]; then
+            v="$(grep -m1 'Number of Total Cases:'   "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && total_cases="${v}"
+            v="$(grep -m1 'Number of Passed Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && passed_cases="${v}"
+            v="$(grep -m1 'Number of Failed Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && failed_cases="${v}"
+            v="$(grep -m1 'Number of Skipped Cases:' "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && skipped_cases="${v}"
           fi
 
-          failure_reason="(unknown)"
+          pass_pct=0; fail_pct=0; skip_pct=0
+          if [[ "${total_cases}" -gt 0 ]]; then
+            pass_pct=$(( (passed_cases  * 100) / total_cases ))
+            fail_pct=$(( (failed_cases  * 100) / total_cases ))
+            skip_pct=$(( (skipped_cases * 100) / total_cases ))
+          fi
+
+          # --- Parse NFS log paths in run order (1 per test, sequential execution) ---
+          mapfile -t log_path_arr < <(grep 'Logs Path:' "${out_log}" 2>/dev/null \
+            | sed 's/.*Logs Path: *//' | sed 's/\x1b\[[0-9;]*m//g' | sed 's/[[:space:]]*$//' || true)
+
+          # --- Parse per-test status lines in run order ---
+          test_names=(); test_statuses=()
           if [[ -f "${out_log}" ]]; then
-            if grep -Eqi 'Traceback \(most recent call last\)|Exception:|ERROR|AssertionError|Input/output error|FAILED|FATAL' "${out_log}"; then
-              failure_reason="$(grep -Ein 'Traceback \(most recent call last\)|Exception:|ERROR|AssertionError|Input/output error|FAILED|FATAL' "${out_log}" | tail -n 3 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-              failure_reason="$(printf '%s' "${failure_reason}" | tr '\r' ' ' | sed 's/[[:space:]]\+/ /g')"
-            else
-              failure_reason="$(tail -n 20 "${out_log}" | tr '\r' ' ' | sed 's/[[:space:]]\+/ /g' | tail -n 3)"
+            while IFS= read -r line; do
+              clean="$(printf '%s' "${line}" | sed 's/\x1b\[[0-9;]*m//g')"
+              test_name="$(printf '%s' "${clean}" | grep -oE 'Test[A-Za-z0-9]+' | head -n1 || true)"
+              [[ -z "${test_name}" ]] && continue
+              if   printf '%s' "${clean}" | grep -q 'PASSED CASE';  then test_names+=("${test_name}"); test_statuses+=("PASSED")
+              elif printf '%s' "${clean}" | grep -q 'FAILED CASE';  then test_names+=("${test_name}"); test_statuses+=("FAILED")
+              elif printf '%s' "${clean}" | grep -q 'SKIPPED CASE'; then test_names+=("${test_name}"); test_statuses+=("SKIPPED")
+              fi
+            done < <(grep -E ' (PASSED|FAILED|SKIPPED) CASE\.' "${out_log}" 2>/dev/null || true)
+          fi
+
+          # --- Build per-test details table: associate by position ---
+          # Tests run sequentially → log_path_arr[i] belongs to test_names[i]
+          test_details_table=""
+          for i in "${!test_names[@]}"; do
+            name="${test_names[$i]}"
+            status="${test_statuses[$i]}"
+            path="${log_path_arr[$i]:-N/A}"
+            case "${status}" in
+              PASSED)  icon="✅" ;;
+              FAILED)  icon="❌" ;;
+              SKIPPED) icon="⏭" ;;
+              *)       icon="❓" ;;
+            esac
+            test_details_table+="| \`${name}\` | ${icon} ${status} | \`${path}\` |"$'\n'
+          done
+
+          # --- Failure reason: prefer MultipleExceptions summary line ---
+          failure_reason=""
+          if [[ -f "${out_log}" ]]; then
+            multi="$(grep 'MultipleExceptions:' "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -n "${multi}" ]]; then
+              failure_reason="${multi}"
+            elif grep -Eqi 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${out_log}"; then
+              failure_reason="$(grep -Ei 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${out_log}" | tail -n 3 | sed 's/\x1b\[[0-9;]*m//g' || true)"
             fi
           fi
 
-          mgmt_dir="${RUN_BASE_DIR:-}/$(echo "${MNODES}" | awk '{print $1}')/mgmt_details/mgmt"
+          # --- Mgmt artifacts list (collapsed) ---
+          mgmt_dir="${RUN_BASE_DIR:-}/${mgmt_ip}/mgmt_details/mgmt"
           mgmt_files="(not found)"
           if [[ -n "${RUN_BASE_DIR:-}" && -d "${mgmt_dir}" ]]; then
             mgmt_files="$(find "${mgmt_dir}" -maxdepth 1 -type f -printf '%f (%s bytes)\n' 2>/dev/null | sort || true)"
             [[ -n "${mgmt_files}" ]] || mgmt_files="(empty)"
           fi
 
-          conclusion="SUCCESS"
+          # --- Overall result ---
+          conclusion="✅ SUCCESS"
           if [[ "${{ job.status }}" != "success" ]]; then
-            conclusion="FAILED"
+            conclusion="❌ FAILED"
           fi
 
           {
-            echo "## SimplyBlock Stress Run Summary"
+            echo "## SimplyBlock E2E Run Summary"
             echo ""
-            echo "**Result:** ${conclusion}"
+            echo "**Result:** ${conclusion} &nbsp;|&nbsp; **Duration:** ${dur_fmt}"
             echo ""
+
+            echo "### Test Results"
+            echo "| | Count | % |"
+            echo "|---|---|---|"
+            echo "| ✅ Passed  | ${passed_cases}  | ${pass_pct}% |"
+            echo "| ❌ Failed  | ${failed_cases}  | ${fail_pct}% |"
+            echo "| ⏭ Skipped | ${skipped_cases} | ${skip_pct}% |"
+            echo "| **Total**  | **${total_cases}** | |"
+            echo ""
+
+            if [[ -n "${test_details_table}" ]]; then
+              echo "### Test Case Details"
+              echo "| Test | Result | Log Path |"
+              echo "|---|---|---|"
+              printf '%s' "${test_details_table}"
+              echo ""
+            fi
+
             echo "### Run Info"
-            echo "- **Test class:** \`${TEST_CLASS}\`"
+            echo "- **Test class:** \`${TEST_CLASS:-all}\`"
             echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
             echo "- **Mgmt node:** \`${mgmt_ip}\`"
             echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
             echo "- **Start (UTC):** ${TEST_START_HUMAN:-unknown}"
             echo "- **End (UTC):** ${TEST_END_HUMAN:-unknown}"
-            echo "- **Duration:** ${dur_fmt}"
             echo ""
-            echo "### NFS Run Folder"
-            echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
-            echo "- Client logs: \`${RUN_BASE_DIR:-<run_dir>}/ClientLogs\`"
-            echo "- Mgmt details: \`${RUN_BASE_DIR:-<run_dir>}/${mgmt_ip}/mgmt_details\`"
-            echo ""
-            echo "### Outages"
-            echo "- Outage files matched: \`${outage_dir}/outage*\`"
-            echo "- **Outage file count:** ${outage_count}"
-            echo "- **Total outage log lines:** ${outage_lines}"
-            [[ -n "${outage_latest}" ]] && echo "- **Latest outage file:** \`${outage_latest}\`"
-            if [[ -n "${outage_tail}" ]]; then
-              echo ""
-              echo "<details><summary>Latest outage file (last 20 lines)</summary>"
-              echo ""
+
+            if [[ -n "${failure_reason}" ]]; then
+              echo "### Failure Reason"
               echo '```'
-              printf '%s\n' "${outage_tail}"
+              printf '%s\n' "${failure_reason}"
               echo '```'
-              echo "</details>"
+              echo ""
             fi
+
+            if [[ -n "${RUN_BASE_DIR:-}" ]]; then
+              echo "<details><summary>Run Artifacts (NFS)</summary>"
+              echo ""
+              echo "- **Run dir:** \`${RUN_BASE_DIR}/\`"
+              echo "- Mgmt details: \`${RUN_BASE_DIR}/${mgmt_ip}/mgmt_details/\`"
+              echo "- Docker logs: \`${RUN_BASE_DIR}/<node_ip>/containers-final-*/\`"
+              echo "- Distrib dumps: \`${RUN_BASE_DIR}/<storage_ip>/finaldistrib_bdev_logs/\`"
+              echo ""
+              echo "</details>"
+              echo ""
+            fi
+
+            echo "<details><summary>Mgmt Artifacts (cluster state at end of run)</summary>"
             echo ""
-            echo "### Failure Reason (best-effort)"
-            echo '```'
-            printf '%s\n' "${failure_reason}"
-            echo '```'
-            echo ""
-            echo "### Mgmt Artifacts (mgmt_details/mgmt)"
-            echo "- Path: \`${mgmt_dir}\`"
-            echo "<details><summary>Files</summary>"
+            echo "Path: \`${mgmt_dir}\`"
             echo ""
             echo '```'
             printf '%s\n' "${mgmt_files}"
             echo '```'
-            echo "</details>"
             echo ""
-            echo "### Key Logs"
-            echo "- Runner stress log: \`${out_log}\`"
-            echo "- Outage logs: \`${outage_dir}/outage*\`"
-            echo "- Docker logs: \`${RUN_BASE_DIR:-<run_dir>}/<node_ip>/containers-final-*\`"
-            echo "- Distrib dumps: \`${RUN_BASE_DIR:-<run_dir>}/<storage_ip>/finaldistrib_bdev_logs/\`"
+            echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Slack Notification
@@ -743,7 +787,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           GITHUB_REF_NAME: ${{ github.ref_name }}
-          SLACK_WF_NAME: "Stress (No Bootstrap)"
+          SLACK_WF_NAME: "E2E (No Bootstrap)"
         run: |
           python3 - <<'PYEOF'
           import json, os, re, sys, urllib.request, urllib.error
@@ -814,9 +858,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: simplyblock-stress-logs-${{ github.run_id }}
+          name: simplyblock-e2e-logs-${{ github.run_id }}
           path: |
-            simplyBlockDeploy/bare-metal/bootstrap.log
             sbcli/e2e/output.log
             sbcli/e2e/logs/**
           if-no-files-found: warn
@@ -826,16 +869,15 @@ jobs:
         shell: bash
         run: |
           echo "MGMT_IP=$(echo "${MNODES}" | awk '{print $1}')" >> "$GITHUB_ENV"
-      
+
       - name: Upload small artifacts (always)
         if: always() && env.RUN_BASE_DIR != '' && env.MGMT_IP != ''
         uses: actions/upload-artifact@v4
         with:
-          name: simplyblock-small-logs-${{ github.run_id }}
+          name: simplyblock-e2e-small-logs-${{ github.run_id }}
           path: |
             sbcli/e2e/output.log
             ${{ env.RUN_BASE_DIR }}/${{ env.MGMT_IP }}/mgmt_details/mgmt/*.txt
             ${{ env.RUN_BASE_DIR }}/${{ env.MGMT_IP }}/mgmt_details/subtasks/*.txt
             ${{ env.RUN_BASE_DIR }}/${{ env.MGMT_IP }}/mgmt_details/storage_nodes/*.txt
           if-no-files-found: warn
-
