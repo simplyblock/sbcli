@@ -1096,7 +1096,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         small_pool_count = node_config.get("small_pool_count")
         large_pool_count = node_config.get("large_pool_count")
 
-        cores = snode_api.read_allowed_list()
+        cores, _ = snode_api.read_allowed_list()
 
         if len(cores) == req_cpu_count:
             new_distribution = snode_api.recalculate_cores_distribution(cores, number_of_alceml_devices)
@@ -1811,10 +1811,11 @@ def restart_storage_node(
         return False
     req_cpu_count = len(utils.hexa_to_cpu_list(snode.spdk_cpu_mask))
 
-    cores = snode_api.read_allowed_list()
+    cores, _ = snode_api.read_allowed_list()
+    logger.info(f"read_allowed list is {cores}")
 
     if len(cores) == req_cpu_count:
-        new_distribution = snode_api.recalculate_cores_distribution(cores, snode.number_of_alceml_devices)
+        new_distribution, _ = snode_api.recalculate_cores_distribution(cores, snode.number_of_alceml_devices)
         poller_cpu_cores = new_distribution.get("poller_cpu_cores")
         snode.alceml_cpu_cores = new_distribution.get("alceml_cpu_cores")
         snode.distrib_cpu_cores = new_distribution.get("distrib_cpu_cores")
