@@ -413,8 +413,7 @@ class SbcliUtils:
         # self.logger.info(f"LVOL List: {data}")
         for lvol_info in data["results"]:
             lvol_data[lvol_info["lvol_name"]] = lvol_info["id"]
-            self.logger.info(f"Lvol hostname: {lvol_info['hostname']}")
-        self.logger.info(f"LVOL List: {lvol_data}")
+        self.logger.debug(f"LVOL List: {lvol_data}")
         return lvol_data
 
     def get_lvol_by_id(self, lvol_id):
@@ -891,7 +890,7 @@ class SbcliUtils:
             if name and sid:
                 snap_data[name] = sid
 
-        self.logger.info(f"Snapshot List: {snap_data}")
+        self.logger.debug(f"Snapshot List: {snap_data}")
         return snap_data
 
     def get_snapshot_id(self, snap_name: str):

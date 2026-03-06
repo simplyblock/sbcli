@@ -834,7 +834,8 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
     def _pick_client(self, i: int) -> str:
         return self.client_machines[i % len(self.client_machines)]
 
-    def _wait_lvol_id(self, lvol_name: str, timeout=300, interval=5) -> str:
+    def _wait_lvol_id(self, lvol_name: str, timeout=300, interval=10) -> str:
+        sleep_n_sec(3)  # brief initial delay — lvol rarely visible immediately
         start = time.time()
         while time.time() - start < timeout:
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
@@ -843,7 +844,8 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             sleep_n_sec(interval)
         raise TimeoutError(f"LVOL id not visible for {lvol_name} after {timeout}s")
 
-    def _wait_snapshot_id(self, snap_name: str, timeout=300, interval=5) -> str:
+    def _wait_snapshot_id(self, snap_name: str, timeout=300, interval=10) -> str:
+        sleep_n_sec(3)  # brief initial delay — snapshot rarely visible immediately
         start = time.time()
         while time.time() - start < timeout:
             snap_id = self.sbcli_utils.get_snapshot_id(snap_name=snap_name)
@@ -1188,7 +1190,8 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
     def _task_delete_snapshot_tree(self, snap_name: str):
         """
         Snapshot delete tree:
-          - delete all clones for that snapshot
+          - wait for any in-flight clone creation to register
+          - delete all clones for that snapshot (from both registry and clone_registry scan)
           - delete snapshot
         """
         self._inc("attempts", "delete_snapshot_tree", 1)
@@ -1200,8 +1203,26 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                 return True
             meta["delete_state"] = "in_progress"
             snap_id = meta["snap_id"]
-            clones = list(meta["clones"])
             src_lvol = meta["src_lvol_name"]
+
+        # Wait for any in-flight clone creation (add_clone done but not yet registered)
+        for _ in range(60):
+            with self._lock:
+                m = self._snap_registry.get(snap_name)
+                if not m or m["clone_state"] != "in_progress":
+                    break
+            self.logger.info(f"[delete_snap_tree] Waiting for in-flight clone creation for snap={snap_name}")
+            sleep_n_sec(1)
+
+        # Collect clones from both the snapshot's tracked set and a full registry scan
+        # (the scan catches clones that finished add_clone but haven't registered yet)
+        with self._lock:
+            m = self._snap_registry.get(snap_name)
+            tracked = set(m["clones"]) if m else set()
+            extra = {cn for cn, cm in self._clone_registry.items() if cm["snap_name"] == snap_name and cn not in tracked}
+            clones = list(tracked | extra)
+            if extra:
+                self.logger.warning(f"[delete_snap_tree] Found {len(extra)} untracked clones for snap={snap_name}: {extra}")
 
         for cn in clones:
             self._delete_clone_lvol(cn)
@@ -1230,6 +1251,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
     def _task_delete_lvol_tree(self, lvol_name: str):
         """
         LVOL delete tree:
+          - wait for any in-flight snapshot creation to register
           - delete all snapshots (each snapshot-tree deletes clones then snapshot)
           - delete lvol
         """
@@ -1241,7 +1263,24 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                 self._inc("success", "delete_lvol_tree", 1)
                 return True
             meta["delete_state"] = "in_progress"
-            snap_names = list(meta["snapshots"])
+
+        # Wait for any in-flight snapshot creation to register in meta["snapshots"]
+        for _ in range(60):
+            with self._lock:
+                m = self._lvol_registry.get(lvol_name)
+                if not m or m["snap_state"] != "in_progress":
+                    break
+            self.logger.info(f"[delete_lvol_tree] Waiting for in-flight snapshot creation for lvol={lvol_name}")
+            sleep_n_sec(1)
+
+        # Collect snapshots from both the lvol's tracked set and a full registry scan
+        with self._lock:
+            m = self._lvol_registry.get(lvol_name)
+            tracked = set(m["snapshots"]) if m else set()
+            extra = {sn for sn, sm in self._snap_registry.items() if sm["src_lvol_name"] == lvol_name and sn not in tracked}
+            snap_names = list(tracked | extra)
+            if extra:
+                self.logger.warning(f"[delete_lvol_tree] Found {len(extra)} untracked snapshots for lvol={lvol_name}: {extra}")
 
         for sn in snap_names:
             self._task_delete_snapshot_tree(sn)
@@ -1336,10 +1375,16 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             candidate = None
             with self._lock:
                 for sn, sm in self._snap_registry.items():
-                    if sm["clone_state"] == "pending":
-                        sm["clone_state"] = "in_progress"
-                        candidate = (sn, sm["snap_id"])
-                        break
+                    if sm["clone_state"] != "pending":
+                        continue
+                    if sm["delete_state"] != "not_queued":
+                        continue  # snapshot is scheduled/in-progress for deletion
+                    lm = self._lvol_registry.get(sm["src_lvol_name"])
+                    if lm and lm["delete_state"] != "not_queued":
+                        continue  # parent lvol is scheduled/in-progress for deletion
+                    sm["clone_state"] = "in_progress"
+                    candidate = (sn, sm["snap_id"])
+                    break
             if not candidate:
                 return
 
