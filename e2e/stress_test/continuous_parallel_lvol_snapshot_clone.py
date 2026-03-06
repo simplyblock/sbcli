@@ -1152,9 +1152,37 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
     def _delete_snapshot_only(self, snap_name: str, snap_id: str):
         ctx = {"snap_name": snap_name, "snap_id": snap_id}
         self._inc("attempts", "delete_snapshot", 1)
-        self._api("delete_snapshot", ctx, lambda: self.sbcli_utils.delete_snapshot(
-            snap_id=snap_id, snap_name=snap_name, skip_error=False
-        ))
+
+        for attempt in range(2):
+            try:
+                self.sbcli_utils.delete_snapshot(snap_id=snap_id, snap_name=snap_name, skip_error=False)
+                break  # success
+
+            except Exception as e:
+                if attempt == 0:
+                    # Snapshot may have been soft-deleted by the cluster because clones still exist.
+                    # Find clones referencing this snapshot in our registry, delete them, then retry.
+                    with self._lock:
+                        orphan_clones = [cn for cn, cm in self._clone_registry.items() if cm["snap_name"] == snap_name]
+
+                    if orphan_clones:
+                        self.logger.warning(
+                            f"[delete_snapshot] {snap_name} delete failed; "
+                            f"found {len(orphan_clones)} orphan clone(s): {orphan_clones} — deleting and retrying"
+                        )
+                        for cn in orphan_clones:
+                            self._delete_clone_lvol(cn)
+                            with self._lock:
+                                m = self._snap_registry.get(snap_name)
+                                if m:
+                                    m["clones"].discard(cn)
+                        continue  # retry snapshot delete
+
+                # Final attempt failed or no clones to clear — propagate as test failure
+                api_err = self._extract_api_error(e)
+                self._inc("failures", "delete_snapshot", 1)
+                self._set_failure(op="delete_snapshot", exc=e, details="snapshot delete failed", ctx=ctx, api_err=api_err)
+                raise
 
         with self._lock:
             self._metrics["counts"]["snapshots_deleted"] += 1
@@ -1176,7 +1204,37 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
         ctx = {"lvol_name": lvol_name, "lvol_id": lvol_id, "client": client}
         self._inc("attempts", "delete_lvol", 1)
-        self._api("delete_lvol", ctx, lambda: self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=False))
+
+        for attempt in range(2):
+            try:
+                self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=False)
+                break  # success
+
+            except Exception as e:
+                if attempt == 0:
+                    # Lvol may have stalled in deletion because snapshots still exist on the cluster.
+                    # Find snapshots referencing this lvol in our registry, delete their trees, then retry.
+                    with self._lock:
+                        orphan_snaps = [sn for sn, sm in self._snap_registry.items() if sm["src_lvol_name"] == lvol_name]
+
+                    if orphan_snaps:
+                        self.logger.warning(
+                            f"[delete_lvol] {lvol_name} delete failed; "
+                            f"found {len(orphan_snaps)} orphan snapshot(s): {orphan_snaps} — deleting and retrying"
+                        )
+                        for sn in orphan_snaps:
+                            self._task_delete_snapshot_tree(sn)
+                            with self._lock:
+                                m = self._lvol_registry.get(lvol_name)
+                                if m:
+                                    m["snapshots"].discard(sn)
+                        continue  # retry lvol delete
+
+                # Final attempt failed or no snapshots to clear — propagate as test failure
+                api_err = self._extract_api_error(e)
+                self._inc("failures", "delete_lvol", 1)
+                self._set_failure(op="delete_lvol", exc=e, details="lvol delete failed", ctx=ctx, api_err=api_err)
+                raise
 
         with self._lock:
             self._metrics["counts"]["lvols_deleted"] += 1
