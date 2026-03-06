@@ -277,7 +277,7 @@ def delete(snapshot_uuid, force_delete=False):
             clones.append(lvol)
 
     if len(clones) >= 1:
-        logger.warning("Soft delete snapshot with clones")
+        logger.warning(f"Soft delete snapshot with clones: {snapshot_uuid}")
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.deleted = True
         snap.write_to_db(db_controller.kv_store)
