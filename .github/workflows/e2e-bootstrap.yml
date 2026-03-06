@@ -1,6 +1,80 @@
 name: Bootstrap Cluster + Run E2E Tests
 
 on:
+  workflow_call:
+    inputs:
+      STORAGE_PRIVATE_IPS:
+        type: string
+        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+      SEC_STORAGE_PRIVATE_IPS:
+        type: string
+        default: ""
+      API_INVOKE_URL:
+        type: string
+        default: "http://192.168.10.211/"
+      BASTION_IP:
+        type: string
+        default: "192.168.10.211"
+      MNODES:
+        type: string
+        default: "192.168.10.211"
+      NR_HUGEPAGES:
+        type: string
+        default: "2048"
+      GRAFANA_ENDPOINT:
+        type: string
+        default: "http://192.168.10.211/grafana"
+      SBCLI_CMD:
+        type: string
+        default: "sbctl"
+      SBCLI_BRANCH:
+        type: string
+        default: "R25.10-Hotfix"
+      SIMPLY_BLOCK_SPDK_ULTRA_IMAGE:
+        type: string
+        default: ""
+      SSH_USER:
+        type: string
+        default: "root"
+      KEY_PATH:
+        type: string
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+      CLIENTNODES:
+        type: string
+        default: "192.168.10.165 192.168.10.166"
+      NFS_MOUNTPOINT:
+        type: string
+        default: "/mnt/nfs_share"
+      BOOTSTRAP_MAX_LVOL:
+        type: string
+        default: "300"
+      BOOTSTRAP_DATA_CHUNKS:
+        type: string
+        default: "2"
+      BOOTSTRAP_PARITY_CHUNKS:
+        type: string
+        default: "2"
+      BOOTSTRAP_JOURNAL_PARTITION:
+        type: string
+        default: "1"
+      BOOTSTRAP_HA_JM_COUNT:
+        type: string
+        default: "3"
+      BOOTSTRAP_HA_TYPE:
+        type: string
+        default: "ha"
+      BOOTSTRAP_DATA_NIC:
+        type: string
+        default: "eth1"
+      BOOTSTRAP_IS_SINGLE_NODE:
+        type: boolean
+        default: false
+      BOOTSTRAP_ENABLE_NODE_AFFINITY:
+        type: boolean
+        default: false
+      TEST_CLASS:
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       # =========================
@@ -136,44 +210,44 @@ jobs:
   bootstrap-and-e2e:
     name: Pre-clean -> Bootstrap -> E2E
     runs-on: [self-hosted]
-    timeout-minutes: 4320
+    timeout-minutes: 240
 
     env:
       # Cluster/lab env
-      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
-      SEC_STORAGE_PRIVATE_IPS: ${{ inputs.SEC_STORAGE_PRIVATE_IPS }}
-      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL }}
-      API_BASE_URL: ${{ inputs.API_INVOKE_URL }}
-      BASTION_IP: ${{ inputs.BASTION_IP }}
-      BASTION_SERVER: ${{ inputs.BASTION_IP }}
-      MNODES: ${{ inputs.MNODES }}
-      NR_HUGEPAGES: ${{ inputs.NR_HUGEPAGES }}
-      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT }}
-      SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
-      SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
+      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208' }}
+      SEC_STORAGE_PRIVATE_IPS: ${{ inputs.SEC_STORAGE_PRIVATE_IPS || '' }}
+      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
+      API_BASE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
+      BASTION_IP: ${{ inputs.BASTION_IP || '192.168.10.211' }}
+      BASTION_SERVER: ${{ inputs.BASTION_IP || '192.168.10.211' }}
+      MNODES: ${{ inputs.MNODES || '192.168.10.211' }}
+      NR_HUGEPAGES: ${{ inputs.NR_HUGEPAGES || '2048' }}
+      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
+      SBCLI_CMD: ${{ inputs.SBCLI_CMD || 'sbctl' }}
+      SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'R25.10-Hotfix' }}
 
       # SSH/client env
-      SSH_USER: ${{ inputs.SSH_USER }}
-      KEY_PATH: ${{ inputs.KEY_PATH }}
-      CLIENTNODES: ${{ inputs.CLIENTNODES }}
-      CLIENT_IP: ${{ inputs.CLIENTNODES }}
+      SSH_USER: ${{ inputs.SSH_USER || 'root' }}
+      KEY_PATH: ${{ inputs.KEY_PATH || '/home/ec2-user/.ssh/simplyblock-us-east-2.pem' }}
+      CLIENTNODES: ${{ inputs.CLIENTNODES || '192.168.10.165 192.168.10.166' }}
+      CLIENT_IP: ${{ inputs.CLIENTNODES || '192.168.10.165 192.168.10.166' }}
 
       # Cleanup
-      NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT }}
+      NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}
 
       # Bootstrap params
-      BOOTSTRAP_MAX_LVOL: ${{ inputs.BOOTSTRAP_MAX_LVOL }}
-      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
-      BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
-      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION }}
-      BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT }}
-      BOOTSTRAP_HA_TYPE: ${{ inputs.BOOTSTRAP_HA_TYPE }}
-      BOOTSTRAP_DATA_NIC: ${{ inputs.BOOTSTRAP_DATA_NIC }}
+      BOOTSTRAP_MAX_LVOL: ${{ inputs.BOOTSTRAP_MAX_LVOL || '300' }}
+      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
+      BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
+      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
+      BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '3' }}
+      BOOTSTRAP_HA_TYPE: ${{ inputs.BOOTSTRAP_HA_TYPE || 'ha' }}
+      BOOTSTRAP_DATA_NIC: ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
 
       # E2E derived from bootstrap chunks
-      NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
-      NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
-      TEST_CLASS: ${{ inputs.TEST_CLASS }}
+      NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
+      NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
+      TEST_CLASS: ${{ inputs.TEST_CLASS || '' }}
 
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -629,7 +703,7 @@ jobs:
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
             --run_ha true \
-            --send_debug_notification true \
+            --send_debug_notification false \
             2>&1 | tee output.log
 
       - name: Mark test end time (always)
@@ -1041,6 +1115,81 @@ jobs:
             echo ""
             echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Slack Notification
+        if: always()
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "E2E (Bootstrap)"
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+          out_log = "sbcli/e2e/output.log"
+          total = passed = failed = skipped = 0
+          if os.path.isfile(out_log):
+              content = open(out_log).read()
+              def px(pat):
+                  m = re.search(pat, content)
+                  return int(m.group(1)) if m else 0
+              total   = px(r'Number of Total Cases:\s*(\d+)')
+              passed  = px(r'Number of Passed Cases:\s*(\d+)')
+              failed  = px(r'Number of Failed Cases:\s*(\d+)')
+              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+          s    = int(os.environ.get("TEST_START_EPOCH", "0") or "0")
+          e    = int(os.environ.get("TEST_END_EPOCH",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url  = os.environ.get("SLACK_RUN_URL",   "")
+          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
+          ndcs     = os.environ.get("NDCS",            "?")
+          npcs     = os.environ.get("NPCS",            "?")
+          test_cls = os.environ.get("TEST_CLASS",      "") or "all"
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+          icon    = ":white_check_mark:" if ok else ":x:"
+          status  = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
+              "",
+          ]
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+              f":file_folder: *Final Logs:* `{log_dir}`",
+          ]
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF
 
       - name: Upload logs (always)
         if: always()
