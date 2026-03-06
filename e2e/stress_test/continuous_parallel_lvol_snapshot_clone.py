@@ -792,6 +792,11 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         msg = (api_err.get("msg") or "").lower()
         return "max lvols reached" in text or "max lvols reached" in msg
 
+    def _is_bdev_error(self, api_err: dict) -> bool:
+        text = (api_err.get("text") or "").lower()
+        msg = (api_err.get("msg") or "").lower()
+        return "failed to create bdev" in text or "failed to create bdev" in msg
+
     def _force_enqueue_deletes(self):
         """Aggressively enqueue lvol tree deletes when the cluster hits its max-lvol limit."""
         with self._lock:
@@ -903,19 +908,49 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
     # ----------------------------
     def _task_create_lvol(self, idx: int, lvol_name: str):
         self._inc("attempts", "create_lvol", 1)
-        ctx = {"lvol_name": lvol_name, "idx": idx, "client": self._pick_client(idx)}
-        self.logger.info(f"[create_lvol] ctx={ctx}")
 
-        self._api("create_lvol", ctx, lambda: self.sbcli_utils.add_lvol(
-            lvol_name=lvol_name,
-            pool_name=self.pool_name,
-            size=self.LVOL_SIZE,
-            distr_ndcs=self.ndcs,
-            distr_npcs=self.npcs,
-            distr_bs=self.bs,
-            distr_chunk_bs=self.chunk_bs,
-            retry=1,
-        ))
+        BDEV_RETRY_MAX = 7
+        ctx = None
+
+        for attempt in range(BDEV_RETRY_MAX):
+            if attempt > 0:
+                lvol_name = f"lvl{generate_random_sequence(15)}_{idx}_{int(time.time())}"
+                sleep_n_sec(2)
+
+            ctx = {"lvol_name": lvol_name, "idx": idx, "client": self._pick_client(idx), "attempt": attempt + 1}
+            self.logger.info(f"[create_lvol] ctx={ctx}")
+
+            try:
+                self.sbcli_utils.add_lvol(
+                    lvol_name=lvol_name,
+                    pool_name=self.pool_name,
+                    size=self.LVOL_SIZE,
+                    distr_ndcs=self.ndcs,
+                    distr_npcs=self.npcs,
+                    distr_bs=self.bs,
+                    distr_chunk_bs=self.chunk_bs,
+                    retry=1,
+                )
+                break  # success — exit retry loop
+
+            except Exception as e:
+                api_err = self._extract_api_error(e)
+
+                if self._is_max_lvols_error(api_err):
+                    self._inc("failures", "create_lvol", 1)
+                    self.logger.warning(f"[max_lvols] op=create_lvol ctx={ctx}: cluster hit max-lvol limit; triggering forced deletes and continuing")
+                    self._force_enqueue_deletes()
+                    raise
+
+                if self._is_bdev_error(api_err) and attempt < BDEV_RETRY_MAX - 1:
+                    self.logger.warning(f"[bdev_retry] create_lvol attempt {attempt + 1}/{BDEV_RETRY_MAX}: bdev creation failed for {lvol_name}, retrying with new name")
+                    continue
+
+                # Final bdev retry exhausted or unrecognised error — fail the test
+                self._inc("failures", "create_lvol", 1)
+                details = f"bdev creation failed after {attempt + 1} attempts" if self._is_bdev_error(api_err) else "api call failed"
+                self._set_failure(op="create_lvol", exc=e, details=details, ctx=ctx, api_err=api_err)
+                raise
 
         lvol_id = self._wait_lvol_id(lvol_name)
         client = self._pick_client(idx)
@@ -968,14 +1003,44 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
     def _task_create_clone(self, snap_name: str, snap_id: str, idx: int, clone_name: str):
         self._inc("attempts", "create_clone", 1)
-        ctx = {"snap_name": snap_name, "snapshot_id": snap_id, "clone_name": clone_name, "client": self._pick_client(idx)}
-        self.logger.info(f"[create_clone] ctx={ctx}")
 
-        self._api("create_clone", ctx, lambda: self.sbcli_utils.add_clone(
-            snapshot_id=snap_id,
-            clone_name=clone_name,
-            retry=1,
-        ))
+        BDEV_RETRY_MAX = 7
+        ctx = None
+
+        for attempt in range(BDEV_RETRY_MAX):
+            if attempt > 0:
+                clone_name = f"cln{generate_random_sequence(15)}_{idx}_{int(time.time())}"
+                sleep_n_sec(2)
+
+            ctx = {"snap_name": snap_name, "snapshot_id": snap_id, "clone_name": clone_name, "client": self._pick_client(idx), "attempt": attempt + 1}
+            self.logger.info(f"[create_clone] ctx={ctx}")
+
+            try:
+                self.sbcli_utils.add_clone(
+                    snapshot_id=snap_id,
+                    clone_name=clone_name,
+                    retry=1,
+                )
+                break  # success — exit retry loop
+
+            except Exception as e:
+                api_err = self._extract_api_error(e)
+
+                if self._is_max_lvols_error(api_err):
+                    self._inc("failures", "create_clone", 1)
+                    self.logger.warning(f"[max_lvols] op=create_clone ctx={ctx}: cluster hit max-lvol limit; triggering forced deletes and continuing")
+                    self._force_enqueue_deletes()
+                    raise
+
+                if self._is_bdev_error(api_err) and attempt < BDEV_RETRY_MAX - 1:
+                    self.logger.warning(f"[bdev_retry] create_clone attempt {attempt + 1}/{BDEV_RETRY_MAX}: bdev creation failed for {clone_name}, retrying with new name")
+                    continue
+
+                # Final bdev retry exhausted or unrecognised error — fail the test
+                self._inc("failures", "create_clone", 1)
+                details = f"bdev creation failed after {attempt + 1} attempts" if self._is_bdev_error(api_err) else "api call failed"
+                self._set_failure(op="create_clone", exc=e, details=details, ctx=ctx, api_err=api_err)
+                raise
 
         clone_lvol_id = self._wait_lvol_id(clone_name)
         client = self._pick_client(idx)
