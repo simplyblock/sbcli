@@ -703,7 +703,6 @@ jobs:
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
             --run_ha true \
-            --send_debug_notification false \
             2>&1 | tee output.log
 
       - name: Mark test end time (always)
@@ -1125,46 +1124,84 @@ jobs:
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           GITHUB_REF_NAME: ${{ github.ref_name }}
           SLACK_WF_NAME: "E2E (Bootstrap)"
+          SBCLI_BRANCH: ${{ env.SBCLI_BRANCH }}
+          SIMPLY_BLOCK_SPDK_ULTRA_IMAGE: ${{ env.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}
         run: |
           python3 - <<'PYEOF'
           import json, os, re, sys, urllib.request, urllib.error
+
           webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
           if not webhook:
               print("No SLACK_WEBHOOK_URL set, skipping.")
               sys.exit(0)
+
           out_log = "sbcli/e2e/output.log"
-          total = passed = failed = skipped = 0
-          if os.path.isfile(out_log):
-              content = open(out_log).read()
-              def px(pat):
-                  m = re.search(pat, content)
-                  return int(m.group(1)) if m else 0
-              total   = px(r'Number of Total Cases:\s*(\d+)')
-              passed  = px(r'Number of Passed Cases:\s*(\d+)')
-              failed  = px(r'Number of Failed Cases:\s*(\d+)')
-              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          content = open(out_log).read() if os.path.isfile(out_log) else ""
+
+          # --- Counts ---
+          def px(pat):
+              m = re.search(pat, content)
+              return int(m.group(1)) if m else 0
+          total   = px(r'Number of Total Cases:\s*(\d+)')
+          passed  = px(r'Number of Passed Cases:\s*(\d+)')
+          failed  = px(r'Number of Failed Cases:\s*(\d+)')
+          skipped = px(r'Number of Skipped Cases:\s*(\d+)')
           pass_pct = (passed * 100 // total) if total > 0 else 0
+
+          # --- Per-test results ---
+          ansi = re.compile(r'\x1b\[[0-9;]*m')
+          test_results = []  # list of (status, name)
+          for line in content.splitlines():
+              clean = ansi.sub('', line)
+              if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', clean):
+                  continue
+              m = re.search(r'Test[A-Za-z0-9_]+', clean)
+              if not m:
+                  continue
+              name = m.group(0)
+              if   'PASSED CASE'  in clean: test_results.append(('PASSED',  name))
+              elif 'FAILED CASE'  in clean: test_results.append(('FAILED',  name))
+              elif 'SKIPPED CASE' in clean: test_results.append(('SKIPPED', name))
+
+          # --- Failure reason ---
+          failure_reason = ""
+          multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
+          if multi:
+              failure_reason = multi[0][:600]
+          elif content:
+              exc_lines = [ansi.sub('', l) for l in content.splitlines()
+                           if re.search(r'(Exception:|AssertionError|Input/output error)', l)]
+              if exc_lines:
+                  failure_reason = '\n'.join(exc_lines[-3:])[:600]
+
+          # --- Env ---
           s    = int(os.environ.get("TEST_START_EPOCH", "0") or "0")
           e    = int(os.environ.get("TEST_END_EPOCH",   "0") or "0")
           secs = max(0, e - s) if e >= s > 0 else 0
           dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
-          run_url  = os.environ.get("SLACK_RUN_URL",   "")
-          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
-          ndcs     = os.environ.get("NDCS",            "?")
-          npcs     = os.environ.get("NPCS",            "?")
-          test_cls = os.environ.get("TEST_CLASS",      "") or "all"
-          branch   = os.environ.get("GITHUB_REF_NAME", "?")
-          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
-          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+          run_url     = os.environ.get("SLACK_RUN_URL",                  "")
+          log_dir     = os.environ.get("RUN_BASE_DIR",                   "N/A")
+          ndcs        = os.environ.get("NDCS",                           "?")
+          npcs        = os.environ.get("NPCS",                           "?")
+          test_cls    = os.environ.get("TEST_CLASS",                     "") or "all"
+          branch      = os.environ.get("GITHUB_REF_NAME",                "?")
+          sbcli_branch= os.environ.get("SBCLI_BRANCH",                   "?")
+          spdk_image  = os.environ.get("SIMPLY_BLOCK_SPDK_ULTRA_IMAGE",  "")
+          wf_name     = os.environ.get("SLACK_WF_NAME",                  "Run")
+          ok          = os.environ.get("JOB_STATUS",                     "") == "success"
+
           icon    = ":white_check_mark:" if ok else ":x:"
           status  = "SUCCESS" if ok else "FAILURE"
           mention = "" if ok else " <!channel>"
+
           lines = [
               f"{icon} *SimplyBlock {wf_name}*{mention}",
               f"*Status:* {status}  |  *Duration:* {dur}",
               f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
+              f"*SBCLI Branch:* `{sbcli_branch}`" + (f"  |  *SPDK Image:* `{spdk_image}`" if spdk_image else ""),
               "",
           ]
+
           if total > 0:
               lines += [
                   f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
@@ -1173,11 +1210,23 @@ jobs:
               ]
           else:
               lines.append("_(test counts not found in log)_")
+
+          if test_results:
+              lines.append("")
+              lines.append("*Test Results:*")
+              icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
+              for st, nm in test_results:
+                  lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+
+          if failure_reason:
+              lines += ["", "*Failure:*", f"```{failure_reason}```"]
+
           lines += [
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",
               f":file_folder: *Final Logs:* `{log_dir}`",
           ]
+
           payload = {"text": "\n".join(lines)}
           req = urllib.request.Request(
               webhook,
