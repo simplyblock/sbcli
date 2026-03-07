@@ -2891,13 +2891,8 @@ def create_rpc_socket_mount():
     except Exception as e:
         logger.error(e)
 
-def get_kms_cont():
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-    snode = db_controller.get_mgmt_nodes()[0]
-    if not snode:
-        return
-    node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
+def get_kms_cont(dev_ip):
+    node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}", version="auto")
     for container in node_docker.containers.list():
         if container.name.startswith("app_kms"): # type: ignore[union-attr]
             return container

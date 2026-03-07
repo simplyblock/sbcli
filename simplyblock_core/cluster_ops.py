@@ -353,7 +353,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         monitoring_secret = cluster.secret
 
         # configure kms vault
-        container = utils.get_kms_cont()
+        container = utils.get_kms_cont(f"{dev_ip}:2375")
         if container:
             environment = [
                 "VAULT_ADDR=http://127.0.0.1:8200",
