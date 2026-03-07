@@ -444,8 +444,8 @@ class TestMajorUpgrade(TestClusterBase):
         node_ctx = {}  # per client node context
 
         self.logger.info("Step 3-7: Pre-upgrade per-node: LVOL -> fio -> snapshot+clone -> md5 check")
-        for snode in storage:
-            tag = "upg"
+        for idx, snode in enumerate(storage):
+            tag = f"upg_{idx}"
             lvol_name = f"{self.lvol_name}_{tag}"
             snap_name = f"{self.snapshot_name}_{tag}_pre"
             clone_name = f"{self.clone_name}_{tag}_pre"
@@ -456,10 +456,10 @@ class TestMajorUpgrade(TestClusterBase):
 
             client_node = random.choice(self.fio_node)
 
-            self.logger.info(f"[{node}] Creating LVOL: {lvol_name}")
+            self.logger.info(f"[{snode}] Creating LVOL: {lvol_name}")
             self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size="5G")
 
-            self.logger.info(f"[{node}] Connect LVOL, format, mount")
+            self.logger.info(f"[{snode}] Connect LVOL, format, mount")
             before = self.ssh_obj.get_devices(client_node)
             for cmd in self.sbcli_utils.get_lvol_connect_str(lvol_name):
                 self.ssh_obj.exec_command(client_node, cmd)
@@ -501,6 +501,7 @@ class TestMajorUpgrade(TestClusterBase):
 
             node_ctx[snode] = {
                 "tag": tag,
+                "client_node": client_node,
                 "lvol_name": lvol_name,
                 "mount_path": mount_path,
                 "snapshot_name": snap_name,
@@ -517,13 +518,14 @@ class TestMajorUpgrade(TestClusterBase):
         self.logger.info("Step 8: Start fio (long) on all client nodes and keep it running during upgrade")
         for snode in self.storage_nodes:
             client_node = random.choice(self.fio_node)
-            tag = node_ctx[node]["tag"]
-            mount_path = node_ctx[node]["mount_path"]
+            tag = node_ctx[snode]["tag"]
+            mount_path = node_ctx[snode]["mount_path"]
             long_log = f"{self.base_log_root}/fio_during_upgrade_{tag}.log"
             fio_name = f"fio_upgrade_{tag}"
             session = self._start_fio_tmux(client_node, mount_path, long_log, fio_name, runtime=3600)  # 30 min
-            node_ctx[node]["fio_upgrade_session"] = session
-            node_ctx[node]["fio_upgrade_log"] = long_log
+            node_ctx[snode]["fio_upgrade_session"] = session
+            node_ctx[snode]["fio_upgrade_log"] = long_log
+            node_ctx[snode]["fio_client_node"] = client_node
 
         # ------------------------------------------------------------
         # Step 9: Upgrade flow (MATCH MANUAL)
@@ -598,24 +600,26 @@ class TestMajorUpgrade(TestClusterBase):
         # Step 13: Wait fio to finish and check logs
         # ------------------------------------------------------------
         self.logger.info("Step 13: Wait for fio during upgrade to finish + verify logs are clean")
-        for node in self.fio_node:
-            session = node_ctx[node]["fio_upgrade_session"]
-            logf = node_ctx[node]["fio_upgrade_log"]
-            self._wait_tmux_gone(node, session, timeout=3600)
-            self._assert_fio_log_clean(node, logf)
+        for snode, ctx in node_ctx.items():
+            session = ctx["fio_upgrade_session"]
+            logf = ctx["fio_upgrade_log"]
+            client_node = ctx["fio_client_node"]
+            self._wait_tmux_gone(client_node, session, timeout=3600)
+            self._assert_fio_log_clean(client_node, logf)
 
         # ------------------------------------------------------------
         # Step 14: Post-upgrade md5 check on PRE-upgrade clone mount
         # (clone was derived from pre-upgrade snapshot; it should remain stable)
         # ------------------------------------------------------------
         self.logger.info("Step 14: Post-upgrade md5 check on pre-upgrade clones")
-        for node in self.fio_node:
-            clone_mount = node_ctx[node]["clone_mount"]
-            pre_clone_md5 = node_ctx[node]["clone_md5"]
+        for snode, ctx in node_ctx.items():
+            clone_mount = ctx["clone_mount"]
+            pre_clone_md5 = ctx["clone_md5"]
+            client_node = ctx["client_node"]
 
-            files = self.ssh_obj.find_files(node, clone_mount)
-            post_md5 = self.ssh_obj.generate_checksums(node, files)
+            files = self.ssh_obj.find_files(client_node, clone_mount)
+            post_md5 = self.ssh_obj.generate_checksums(client_node, files)
 
-            assert set(pre_clone_md5.values()) == set(post_md5.values()), f"[{node}] Post-upgrade clone md5 mismatch!"
+            assert set(pre_clone_md5.values()) == set(post_md5.values()), f"[{snode}] Post-upgrade clone md5 mismatch!"
 
         self.logger.info("TEST CASE PASSED !!!")

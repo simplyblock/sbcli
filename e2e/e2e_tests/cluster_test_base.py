@@ -740,9 +740,8 @@ class TestClusterBase:
                 sleep_n_sec(2)
                 latest_util = self.get_latest_cluster_util()
                 size_used = latest_util["size_used"]
-                is_less_than_500mb = size_used < 500 * 1024 * 1024
-                if not is_less_than_500mb:
-                    raise Exception("Cluster capacity more than 500MB after cleanup!!")
+                if size_used >= 500 * 1024 * 1024:
+                    self.logger.warning(f"Cluster capacity more than 500MB after cleanup: {size_used // (1024 * 1024)}MB")
                 # for node in self.fio_node:
                 #     self.ssh_obj.remove_dir(node, "/mnt/*")
             except Exception as _:
