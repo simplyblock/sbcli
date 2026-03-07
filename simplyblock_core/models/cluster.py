@@ -73,6 +73,8 @@ class Cluster(BaseModel):
     full_page_unmap: bool = True
     is_single_node: bool = False
     client_data_nic: str = ""
+    kms_unseal_key: str = ""
+    kms_root_token: str = ""
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

@@ -374,13 +374,18 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                     cmd=f"vault operator unseal {init_file['unseal_keys_b64'][0]}",
                     environment=environment)
                 out = res.output.decode("utf-8")
+                logger.debug(res.exit_code)
                 logger.debug(out)
+                if res.exit_code == 0:
+                    cluster.kms_unseal_key = init_file['unseal_keys_b64'][0]
                 logger.debug(f"vault login {init_file['root_token']}")
                 res = container.exec_run(
                     cmd=f"vault login {init_file['root_token']}",
                     environment=environment)
                 out = res.output.decode("utf-8")
                 logger.debug(out)
+                if res.exit_code == 0:
+                    cluster.kms_root_token = init_file['root_token']
 
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
