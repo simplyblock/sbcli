@@ -349,6 +349,7 @@ class TestMajorUpgrade(TestClusterBase):
         self.base_log_root = f"{self.docker_logs_path}/upgrade_fio_logs"
         self.fio_debug = getattr(self, "fio_debug", False)
         self.test_name = "test_major_upgrade"
+        self.fio_during_upgrade = True  # set False in subclass to skip FIO during upgrade
 
         self.logger.info(f"Running upgrade test from {self.base_version} to {self.target_version}")
 
@@ -515,17 +516,20 @@ class TestMajorUpgrade(TestClusterBase):
         # ------------------------------------------------------------
         # Step 8: Start fio DURING upgrade on each node (long)
         # ------------------------------------------------------------
-        self.logger.info("Step 8: Start fio (long) on all client nodes and keep it running during upgrade")
-        for snode in self.storage_nodes:
-            client_node = random.choice(self.fio_node)
-            tag = node_ctx[snode]["tag"]
-            mount_path = node_ctx[snode]["mount_path"]
-            long_log = f"{self.base_log_root}/fio_during_upgrade_{tag}.log"
-            fio_name = f"fio_upgrade_{tag}"
-            session = self._start_fio_tmux(client_node, mount_path, long_log, fio_name, runtime=3600)  # 30 min
-            node_ctx[snode]["fio_upgrade_session"] = session
-            node_ctx[snode]["fio_upgrade_log"] = long_log
-            node_ctx[snode]["fio_client_node"] = client_node
+        if self.fio_during_upgrade:
+            self.logger.info("Step 8: Start fio (long) on all client nodes and keep it running during upgrade")
+            for snode in self.storage_nodes:
+                client_node = random.choice(self.fio_node)
+                tag = node_ctx[snode]["tag"]
+                mount_path = node_ctx[snode]["mount_path"]
+                long_log = f"{self.base_log_root}/fio_during_upgrade_{tag}.log"
+                fio_name = f"fio_upgrade_{tag}"
+                session = self._start_fio_tmux(client_node, mount_path, long_log, fio_name, runtime=3600)  # 30 min
+                node_ctx[snode]["fio_upgrade_session"] = session
+                node_ctx[snode]["fio_upgrade_log"] = long_log
+                node_ctx[snode]["fio_client_node"] = client_node
+        else:
+            self.logger.info("Step 8: Skipping FIO during upgrade (single-node / non-HA mode)")
 
         # ------------------------------------------------------------
         # Step 9: Upgrade flow (MATCH MANUAL)
@@ -599,13 +603,16 @@ class TestMajorUpgrade(TestClusterBase):
         # ------------------------------------------------------------
         # Step 13: Wait fio to finish and check logs
         # ------------------------------------------------------------
-        self.logger.info("Step 13: Wait for fio during upgrade to finish + verify logs are clean")
-        for snode, ctx in node_ctx.items():
-            session = ctx["fio_upgrade_session"]
-            logf = ctx["fio_upgrade_log"]
-            client_node = ctx["fio_client_node"]
-            self._wait_tmux_gone(client_node, session, timeout=3600)
-            self._assert_fio_log_clean(client_node, logf)
+        if self.fio_during_upgrade:
+            self.logger.info("Step 13: Wait for fio during upgrade to finish + verify logs are clean")
+            for snode, ctx in node_ctx.items():
+                session = ctx["fio_upgrade_session"]
+                logf = ctx["fio_upgrade_log"]
+                client_node = ctx["fio_client_node"]
+                self._wait_tmux_gone(client_node, session, timeout=3600)
+                self._assert_fio_log_clean(client_node, logf)
+        else:
+            self.logger.info("Step 13: Skipping FIO wait (single-node / non-HA mode)")
 
         # ------------------------------------------------------------
         # Step 14: Post-upgrade md5 check on PRE-upgrade clone mount
@@ -623,3 +630,17 @@ class TestMajorUpgrade(TestClusterBase):
             assert set(pre_clone_md5.values()) == set(post_md5.values()), f"[{snode}] Post-upgrade clone md5 mismatch!"
 
         self.logger.info("TEST CASE PASSED !!!")
+
+
+class TestMajorUpgradeSingleNode(TestMajorUpgrade):
+    """
+    Single-node upgrade variant: identical to TestMajorUpgrade but skips continuous
+    FIO during the upgrade window (single-node has no HA, so the device goes offline
+    during node restart and FIO would error out).
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.fio_during_upgrade = False
+        self.test_name = "test_major_upgrade_single"
+        self.logger.info("Single-node upgrade mode: FIO will NOT run during the upgrade window")

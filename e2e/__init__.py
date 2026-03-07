@@ -60,7 +60,7 @@ from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvol
 from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
 
 
-from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade
+from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
 
 
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
@@ -158,7 +158,8 @@ def get_stress_tests():
 
 def get_upgrade_tests():
     tests = [
-        TestMajorUpgrade
+        TestMajorUpgrade,
+        TestMajorUpgradeSingleNode
     ]
     return tests
 
