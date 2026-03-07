@@ -1,0 +1,107 @@
+{
+  "cluster": {},
+  "nodes": [
+    {
+      "id": "n1",
+      "hostname": "host-n1",
+      "mgmt_ip": "127.0.0.1",
+      "rpc_port": 9901,
+      "rpc_username": "spdkuser",
+      "rpc_password": "spdkpass",
+      "lvstore": "lvs_n1",
+      "lvol_subsys_port": 9090,
+      "status": "online",
+      "data_nics": [
+        {"if_name": "eth0", "ip": "127.0.0.1", "trtype": "TCP"}
+      ]
+    },
+    {
+      "id": "n2",
+      "hostname": "host-n2",
+      "mgmt_ip": "127.0.0.1",
+      "rpc_port": 9902,
+      "rpc_username": "spdkuser",
+      "rpc_password": "spdkpass",
+      "lvstore": "lvs_n2",
+      "lvol_subsys_port": 9090,
+      "status": "online",
+      "data_nics": [
+        {"if_name": "eth0", "ip": "127.0.0.1", "trtype": "TCP"}
+      ]
+    },
+    {
+      "id": "n3",
+      "hostname": "host-n3",
+      "mgmt_ip": "127.0.0.1",
+      "rpc_port": 9910,
+      "lvstore": "lvs_n3",
+      "lvol_subsys_port": 9090,
+      "status": "online",
+      "data_nics": [
+        {"if_name": "eth0", "ip": "127.0.0.1", "trtype": "TCP"}
+      ]
+    },
+    {
+      "id": "n4",
+      "hostname": "host-n4",
+      "mgmt_ip": "127.0.0.1",
+      "rpc_port": 9911,
+      "lvstore": "lvs_n4",
+      "lvol_subsys_port": 9090,
+      "status": "online",
+      "data_nics": [
+        {"if_name": "eth0", "ip": "127.0.0.1", "trtype": "TCP"}
+      ]
+    }
+  ],
+  "pools": [
+    {
+      "id": "pool1",
+      "name": "default-pool",
+      "status": "active"
+    }
+  ],
+  "volumes": [
+    {
+      "id": "l1",
+      "name": "vol1",
+      "size": "2G",
+      "max_size": "1000T",
+      "node_id": "n1",
+      "pool_id": "pool1",
+      "ha_type": "single",
+      "fabric": "tcp",
+      "status": "online"
+    }
+  ],
+  "snapshots": [
+    {
+      "id": "s1",
+      "name": "snap1",
+      "lvol_id": "l1",
+      "snap_ref_id": "",
+      "status": "online"
+    },
+    {
+      "id": "s2",
+      "name": "snap2",
+      "lvol_id": "l1",
+      "snap_ref_id": "s1",
+      "status": "online"
+    },
+    {
+      "id": "s3",
+      "name": "snap3",
+      "lvol_id": "l1",
+      "snap_ref_id": "s2",
+      "status": "online"
+    },
+    {
+      "id": "s4",
+      "name": "snap4",
+      "lvol_id": "l1",
+      "snap_ref_id": "s3",
+      "status": "online"
+    }
+  ]
+}

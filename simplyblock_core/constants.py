@@ -223,6 +223,11 @@ qos_class_meta_and_migration_weight_percent = 25
 MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
 
+# Live volume migration constants
+LVOL_MIG_MAX_RETRIES = 5          # max retry attempts before aborting
+LVOL_MIG_DEADLINE_SEC = 360  # default 4-hour deadline (0 = no deadline)
+LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3  # max recursive "shrink" snapshot rounds
+
 # ports ranges
 RPC_PORT_RANGE_START = 8080
 NODE_NVMF_PORT_START=9060

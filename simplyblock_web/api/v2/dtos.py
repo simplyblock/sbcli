@@ -130,10 +130,17 @@ class SnapshotDTO(BaseModel):
     health_check: bool
     size: util.Unsigned
     used_size: util.Unsigned
+    migrating: bool
     lvol: Optional[util.UrlPath]
 
     @staticmethod
     def from_model(model: SnapShot, request: Request, cluster_id, pool_id, volume_id=None):
+        from simplyblock_core.controllers import migration_controller
+        is_migrating = False
+        if model.lvol is not None:
+            active_mig = migration_controller.get_active_migration_for_lvol(model.lvol.uuid)
+            is_migrating = active_mig is not None
+
         return SnapshotDTO(
             id=model.get_id(),
             name=model.snap_name,
@@ -141,6 +148,7 @@ class SnapshotDTO(BaseModel):
             health_check=model.health_check,
             size=model.size,
             used_size=model.used_size,
+            migrating=is_migrating,
             lvol=str(request.url_for(
                 'clusters:pools:volumes:detail',
                 cluster_id=cluster_id,
@@ -193,6 +201,7 @@ class VolumeDTO(BaseModel):
     name: str
     status: str
     health_check: bool
+    migrating: bool
     nqn: str
     nodes: List[util.UrlPath]
     port: util.Port
@@ -207,11 +216,14 @@ class VolumeDTO(BaseModel):
 
     @staticmethod
     def from_model(model: LVol, request: Request, cluster_id: str):
+        from simplyblock_core.controllers import migration_controller
+        active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
         return VolumeDTO(
             id=UUID(model.get_id()),
             name=model.lvol_name,
             status=model.status,
             health_check=model.health_check,
+            migrating=active_mig is not None,
             nqn=model.nqn,
             nodes=[
                 str(request.url_for(

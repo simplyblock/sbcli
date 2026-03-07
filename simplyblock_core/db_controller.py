@@ -13,6 +13,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.port_stat import PortStat
+from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.qos import QOSClass
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
@@ -259,6 +260,14 @@ class DBController(metaclass=Singleton):
     def get_job_tasks(self, cluster_id, reverse=True, limit=0) -> List[JobSchedule]:
         return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
 
+    def get_active_migration_tasks(self, cluster_id: str) -> List[JobSchedule]:
+        """Return all non-done FN_LVOL_MIG tasks for the given cluster (single FDB scan)."""
+        return [
+            t for t in self.get_job_tasks(cluster_id, reverse=False)
+            if t.function_name == JobSchedule.FN_LVOL_MIG
+            and t.status != JobSchedule.STATUS_DONE
+        ]
+
     def get_task_by_id(self, task_id) -> JobSchedule:
         for task in self.get_job_tasks(" "):
             if task.uuid == task_id:
@@ -308,6 +317,23 @@ class DBController(metaclass=Singleton):
         else:
             classes = QOSClass().read_from_db(self.kv_store)
         return sorted(classes, key=lambda x: x.class_id)
+
+    def get_migrations(self, cluster_id=None) -> List[LVolMigration]:
+        """Return all LVolMigration records, optionally filtered by cluster."""
+        prefix = cluster_id if cluster_id else " "
+        return LVolMigration().read_from_db(self.kv_store, id=prefix)
+
+    def get_migration_by_id(self, migration_id) -> LVolMigration:
+        for m in self.get_migrations():
+            if m.uuid == migration_id:
+                return m
+        raise KeyError(f'LVolMigration {migration_id} not found')
+
+    def get_migration_by_lvol_id(self, lvol_id) -> Optional[LVolMigration]:
+        for m in self.get_migrations():
+            if m.lvol_id == lvol_id and m.is_active():
+                return m
+        return None
 
     def get_lvol_del_lock(self, node_id) -> Optional[NodeLVolDelLock]:
         ret = NodeLVolDelLock().read_from_db(self.kv_store, id=node_id)

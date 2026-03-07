@@ -232,6 +232,14 @@ def add(lvol_id, snapshot_name):
 def list(node_id=None):
     snaps = db_controller.get_snapshots()
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
+
+    # Build set of lvol UUIDs with active migrations (single DB scan)
+    from simplyblock_core.controllers import migration_controller
+    migrating_lvols = set()
+    for m in db_controller.get_migrations():
+        if m.is_active():
+            migrating_lvols.add(m.lvol_id)
+
     data = []
     for snap in snaps:
         if node_id:
@@ -251,6 +259,7 @@ def list(node_id=None):
             "BDev": snap.snap_bdev,
             "Node ID": snap.lvol.node_id,
             "LVol ID": snap.lvol.get_id(),
+            "M": "M" if snap.lvol and snap.lvol.uuid in migrating_lvols else "",
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
             "Base Snapshot": snap.snap_ref_id,
             "Clones": clones,
@@ -263,6 +272,16 @@ def delete(snapshot_uuid, force_delete=False):
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
     except KeyError:
         logger.error(f"Snapshot not found {snapshot_uuid}")
+        return False
+
+    # Block deletion if the snapshot's parent volume is being migrated
+    from simplyblock_core.controllers import migration_controller
+    active_mig = migration_controller.get_active_migration_for_lvol(
+        snap.lvol.uuid, snap.cluster_id)
+    if active_mig and not force_delete:
+        logger.error(
+            f"Cannot delete snapshot {snapshot_uuid}: parent volume "
+            f"{snap.lvol.uuid} has active migration {active_mig.uuid}")
         return False
 
     try:
