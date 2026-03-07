@@ -500,6 +500,7 @@ class CLIWrapperBase:
         return True
 
     def volume__add(self, sub_command, args):
+        import json as _json
         name = args.name
         size = args.size
         max_size = args.max_size
@@ -513,6 +514,20 @@ class CLIWrapperBase:
         lvol_priority_class = args.lvol_priority_class
         ndcs = args.ndcs
         npcs = args.npcs
+
+        allowed_hosts = None
+        if args.allowed_hosts:
+            with open(args.allowed_hosts, 'r') as f:
+                allowed_hosts = _json.load(f)
+            if not isinstance(allowed_hosts, list):
+                print("Error: --allowed-hosts JSON must be a list of host NQN strings")
+                return False
+
+        sec_options = None
+        if args.sec_options:
+            with open(args.sec_options, 'r') as f:
+                sec_options = _json.load(f)
+
         results, error = lvol_controller.add_lvol_ha(
             name, size, host_id, ha_type, pool, comp, crypto,
             distr_vuid,
@@ -525,12 +540,42 @@ class CLIWrapperBase:
             crypto_key1=args.crypto_key1,
             crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
-            uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace, 
-            max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric)
+            uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace,
+            max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
+            allowed_hosts=allowed_hosts, sec_options=sec_options)
         if results:
             return results
         else:
             return error
+
+    def volume__add_host(self, sub_command, args):
+        import json as _json
+        sec_options = None
+        if args.sec_options:
+            with open(args.sec_options, 'r') as f:
+                sec_options = _json.load(f)
+        result, error = lvol_controller.add_host_to_lvol(args.volume_id, args.host_nqn, sec_options)
+        if error:
+            print(f"Error: {error}")
+            return False
+        print(_json.dumps(result, indent=2))
+        return True
+
+    def volume__remove_host(self, sub_command, args):
+        result, error = lvol_controller.remove_host_from_lvol(args.volume_id, args.host_nqn)
+        if error:
+            print(f"Error: {error}")
+            return False
+        return True
+
+    def volume__get_secret(self, sub_command, args):
+        import json as _json
+        result, error = lvol_controller.get_host_secret(args.volume_id, args.host_nqn)
+        if error:
+            print(f"Error: {error}")
+            return False
+        print(_json.dumps(result, indent=2))
+        return True
 
     def volume__qos_set(self, sub_command, args):
         return lvol_controller.set_lvol(
@@ -755,6 +800,7 @@ class CLIWrapperBase:
             client_data_nic)
 
     def cluster_create(self, args):
+        import json as _json
         page_size_in_blocks = args.page_size
         blk_size = 4096
         CLI_PASS = args.CLI_PASS
@@ -789,13 +835,24 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
 
+        nvmeof_tls_config = None
+        if args.nvmeof_tls:
+            with open(args.nvmeof_tls, 'r') as f:
+                nvmeof_tls_config = _json.load(f)
+            from simplyblock_core.utils import validate_tls_config
+            ok, err = validate_tls_config(nvmeof_tls_config)
+            if not ok:
+                print(f"Error: {err}")
+                return False
+
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring,
-            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic)
+            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
+            nvmeof_tls_config=nvmeof_tls_config)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

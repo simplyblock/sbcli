@@ -415,6 +415,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=32, dest='qpair_count')
         argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
+        argument = subcommand.add_argument('--tls', help='Path to JSON file with NVMe-oF TLS config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)', type=str, dest='nvmeof_tls')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -559,6 +560,9 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical volume commands', aliases=['lvol',])
         self.init_volume__add(subparser)
+        self.init_volume__add_host(subparser)
+        self.init_volume__remove_host(subparser)
+        self.init_volume__get_secret(subparser)
         self.init_volume__qos_set(subparser)
         self.init_volume__list(subparser)
         if self.developer_mode:
@@ -607,6 +611,24 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=0, dest='ndcs')
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=0, dest='npcs')
+        argument = subcommand.add_argument('--allowed-hosts', help='Path to JSON file with host NQNs allowed to access this volume\'s subsystem', type=str, dest='allowed_hosts')
+        argument = subcommand.add_argument('--sec-options', help='Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated)', type=str, dest='sec_options')
+
+    def init_volume__add_host(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add-host', 'Add an allowed host NQN to a volume\'s subsystem')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('host_nqn', help='Host NQN to allow access', type=str)
+        argument = subcommand.add_argument('--sec-options', help='Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated)', type=str, dest='sec_options')
+
+    def init_volume__remove_host(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'remove-host', 'Remove an allowed host NQN from a volume\'s subsystem')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('host_nqn', help='Host NQN to remove', type=str)
+
+    def init_volume__get_secret(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-secret', 'Get security credentials for a host on a volume')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('host_nqn', help='Host NQN to get credentials for', type=str)
 
     def init_volume__qos_set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'qos-set', 'Changes QoS settings for an active logical volume')
@@ -1134,6 +1156,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
+                elif sub_command in ['add-host']:
+                    ret = self.volume__add_host(sub_command, args)
+                elif sub_command in ['remove-host']:
+                    ret = self.volume__remove_host(sub_command, args)
+                elif sub_command in ['get-secret']:
+                    ret = self.volume__get_secret(sub_command, args)
                 elif sub_command in ['migrate']:
                     ret = self.volume__migrate(sub_command, args)
                 elif sub_command in ['migrate-list']:

@@ -1312,7 +1312,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 return False
 
         # 6- set nvme bdev options
-        ret = rpc_client.bdev_nvme_set_options()
+        tls_cfg = cluster.tls_config if cluster.tls else {}
+        tls_params = tls_cfg.get("params", tls_cfg) if tls_cfg else {}
+        ret = rpc_client.bdev_nvme_set_options(
+            dhchap_digests=tls_params.get("dhchap_digests"),
+            dhchap_dhgroups=tls_params.get("dhchap_dhgroups"),
+        )
         if not ret:
             logger.error("Failed to set nvme options")
             return False
@@ -1904,7 +1909,12 @@ def restart_storage_node(
             return False
 
     # 6- set nvme bdev options
-    ret = rpc_client.bdev_nvme_set_options()
+    tls_cfg = cluster.tls_config if cluster.tls else {}
+    tls_params = tls_cfg.get("params", tls_cfg) if tls_cfg else {}
+    ret = rpc_client.bdev_nvme_set_options(
+        dhchap_digests=tls_params.get("dhchap_digests"),
+        dhchap_dhgroups=tls_params.get("dhchap_dhgroups"),
+    )
     if not ret:
         logger.error("Failed to set nvme options")
         return False

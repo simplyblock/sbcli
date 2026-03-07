@@ -1083,6 +1083,56 @@ def generate_hex_string(length):
     return _generate_string(length).encode('utf-8').hex()
 
 
+def generate_psk_key(bits=256):
+    """Generate a random TLS-PSK in hex format for NVMe-oF TLS 1.3."""
+    import secrets
+    return secrets.token_hex(bits // 8)
+
+
+def generate_dhchap_key(length=32):
+    """Generate a random DH-HMAC-CHAP key in base64 format."""
+    import secrets
+    import base64
+    return base64.b64encode(secrets.token_bytes(length)).decode()
+
+
+def validate_tls_config(config):
+    """Validate the TLS JSON config for bdev_nvme_set_options.
+
+    Returns (True, None) on success or (False, error_message) on failure.
+    """
+    from simplyblock_core import constants
+    params = config.get("params", config)
+
+    digests = params.get("dhchap_digests", [])
+    for d in digests:
+        if d.lower().replace("-", "") not in constants.VALID_DHCHAP_DIGESTS:
+            return False, f"Invalid dhchap digest: {d}. Valid: {constants.VALID_DHCHAP_DIGESTS}"
+
+    groups = params.get("dhchap_dhgroups", [])
+    for g in groups:
+        if g.lower() not in constants.VALID_DHCHAP_DHGROUPS:
+            return False, f"Invalid dhchap dhgroup: {g}. Valid: {constants.VALID_DHCHAP_DHGROUPS}"
+
+    return True, None
+
+
+def validate_sec_options(sec_options):
+    """Validate security options dict for host access control.
+
+    Returns (True, None) on success or (False, error_message) on failure.
+    """
+    valid_keys = {"dhchap_key", "dhchap_ctrlr_key", "psk"}
+    for k in sec_options:
+        if k not in valid_keys:
+            return False, f"Invalid sec_option key: {k}. Valid: {valid_keys}"
+
+    if "dhchap_ctrlr_key" in sec_options and "dhchap_key" not in sec_options:
+        return False, "dhchap_ctrlr_key requires dhchap_key to also be specified"
+
+    return True, None
+
+
 def addNvmeDevices(rpc_client, snode, devs):
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()

@@ -33,6 +33,7 @@ class ClusterDTO(BaseModel):
     node_affinity: bool
     anti_affinity: bool
     secret: str
+    tls_enabled: bool
 
     @staticmethod
     def from_model(model: Cluster):
@@ -52,6 +53,7 @@ class ClusterDTO(BaseModel):
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
             secret=model.secret,
+            tls_enabled=model.tls,
         )
 
 
@@ -213,6 +215,7 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
+    allowed_hosts: List[str]
 
     @staticmethod
     def from_model(model: LVol, request: Request, cluster_id: str):
@@ -251,4 +254,5 @@ class VolumeDTO(BaseModel):
             max_rw_mbytes=model.rw_mbytes_per_sec,
             max_r_mbytes=model.r_mbytes_per_sec,
             max_w_mbytes=model.w_mbytes_per_sec,
+            allowed_hosts=[h["nqn"] for h in (model.allowed_hosts or [])],
         )
