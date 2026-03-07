@@ -248,7 +248,8 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp, use_crypto,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0):
+                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
+                allowed_hosts=None, sec_options=None):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -518,6 +519,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.crypto_key1 = crypto_key1
         lvol.crypto_key2 = crypto_key2
 
+    # Process allowed hosts for TLS-secured clusters
+    if allowed_hosts and cl.tls and not namespace:
+        host_entries = _build_host_entries(allowed_hosts, sec_options)
+        if isinstance(host_entries, tuple):
+            return host_entries  # (False, error_message)
+        lvol.allowed_hosts = host_entries
+
     lvol.write_to_db(db_controller.kv_store)
 
     if ha_type == "single":
@@ -683,9 +691,22 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
             min_cntlid = 1
         else:
             min_cntlid =  1000
-        logger.info("creating subsystem %s", lvol.nqn)
+        allow_any = not bool(lvol.allowed_hosts)
+        logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
         ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                          max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                                          max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                          allow_any_host=allow_any)
+
+        # add allowed hosts to subsystem
+        if lvol.allowed_hosts:
+            for host_entry in lvol.allowed_hosts:
+                logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
+                rpc_client.subsystem_add_host(
+                    lvol.nqn, host_entry["nqn"],
+                    psk=host_entry.get("psk"),
+                    dhchap_key=host_entry.get("dhchap_key"),
+                    dhchap_ctrlr_key=host_entry.get("dhchap_ctrlr_key"),
+                )
 
         ana_state = "non_optimized"
         if lvol.node_id == snode.get_id():
@@ -752,9 +773,22 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
             return False, msg
 
     min_cntlid = 1 + 1000 * ha_inode_self
-    logger.info("creating subsystem %s", lvol.nqn)
+    allow_any = not bool(lvol.allowed_hosts)
+    logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
     rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                allow_any_host=allow_any)
+
+    # Re-apply allowed hosts on subsystem recreate
+    if lvol.allowed_hosts:
+        for host_entry in lvol.allowed_hosts:
+            logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
+            rpc_client.subsystem_add_host(
+                lvol.nqn, host_entry["nqn"],
+                psk=host_entry.get("psk"),
+                dhchap_key=host_entry.get("dhchap_key"),
+                dhchap_ctrlr_key=host_entry.get("dhchap_ctrlr_key"),
+            )
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
@@ -1323,7 +1357,21 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
             client_data_nic_str = ""
             if  cluster.client_data_nic:
                 client_data_nic_str = f"--host-iface={cluster.client_data_nic}"
-            out.append({
+
+            tls_str = ""
+            if cluster.tls and lvol.allowed_hosts:
+                tls_str = " --tls"
+
+            connect_cmd = (
+                f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
+                f"--ctrl-loss-tmo={ctrl_loss_tmo} "
+                f"--nr-io-queues={cluster.client_qpair_count} "
+                f"--keep-alive-tmo={keep_alive_to} "
+                f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn} "
+                f"{client_data_nic_str}{tls_str}"
+            )
+
+            entry = {
                 "ns_id": lvol.ns_id,
                 "transport": transport,
                 "ip": ip,
@@ -1334,13 +1382,14 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 "nr-io-queues": cluster.client_qpair_count,
                 "keep-alive-tmo": keep_alive_to,
                 "host-iface": cluster.client_data_nic,
-                "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
-                           f"--ctrl-loss-tmo={ctrl_loss_tmo} "
-                           f"--nr-io-queues={cluster.client_qpair_count} "
-                           f"--keep-alive-tmo={keep_alive_to} "
-                           f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn} "
-                           f"{client_data_nic_str}",
-            })
+                "connect": connect_cmd,
+            }
+
+            if cluster.tls and lvol.allowed_hosts:
+                entry["tls"] = True
+                entry["allowed_hosts"] = [h["nqn"] for h in lvol.allowed_hosts]
+
+            out.append(entry)
     return out
 
 
@@ -1799,3 +1848,141 @@ def list_by_node(node_id=None, is_json=False):
     if is_json:
         return json.dumps(data, indent=2)
     return utils.print_table(data)
+
+
+def _build_host_entries(allowed_hosts, sec_options=None):
+    """Build the allowed_hosts list with auto-generated keys.
+
+    Args:
+        allowed_hosts: list of host NQN strings
+        sec_options: dict with optional keys 'dhchap_key', 'dhchap_ctrlr_key', 'psk'
+                     indicating which key types to generate
+
+    Returns:
+        list of dicts or (False, error_message) tuple on validation error
+    """
+    if sec_options:
+        ok, err = utils.validate_sec_options(sec_options)
+        if not ok:
+            return False, err
+
+    entries = []
+    for host_nqn in allowed_hosts:
+        entry = {"nqn": host_nqn}
+        if sec_options:
+            if "dhchap_key" in sec_options:
+                entry["dhchap_key"] = utils.generate_dhchap_key()
+            if "dhchap_ctrlr_key" in sec_options:
+                entry["dhchap_ctrlr_key"] = utils.generate_dhchap_key()
+            if "psk" in sec_options:
+                entry["psk"] = utils.generate_psk_key()
+        entries.append(entry)
+    return entries
+
+
+def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
+    """Add an allowed host to a volume's subsystem.
+
+    Returns a dict with the host NQN and any auto-generated keys, or (False, error).
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    cluster = db_controller.get_cluster_by_id(
+        db_controller.get_storage_node_by_id(lvol.node_id).cluster_id)
+    if not cluster.tls:
+        return False, "TLS is not enabled on the cluster"
+
+    # Check for duplicate
+    for h in lvol.allowed_hosts:
+        if h["nqn"] == host_nqn:
+            return False, f"Host {host_nqn} is already allowed"
+
+    entry = {"nqn": host_nqn}
+    if sec_options:
+        ok, err = utils.validate_sec_options(sec_options)
+        if not ok:
+            return False, err
+        if "dhchap_key" in sec_options:
+            entry["dhchap_key"] = utils.generate_dhchap_key()
+        if "dhchap_ctrlr_key" in sec_options:
+            entry["dhchap_ctrlr_key"] = utils.generate_dhchap_key()
+        if "psk" in sec_options:
+            entry["psk"] = utils.generate_psk_key()
+
+    # Apply to all nodes where the subsystem exists
+    for node_id in lvol.nodes:
+        snode = db_controller.get_storage_node_by_id(node_id)
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        ret = rpc_client.subsystem_add_host(
+            lvol.nqn, host_nqn,
+            psk=entry.get("psk"),
+            dhchap_key=entry.get("dhchap_key"),
+            dhchap_ctrlr_key=entry.get("dhchap_ctrlr_key"),
+        )
+        if not ret:
+            return False, f"Failed to add host {host_nqn} on node {node_id}"
+
+    lvol.allowed_hosts.append(entry)
+    lvol.write_to_db(db_controller.kv_store)
+    logger.info(f"Added host {host_nqn} to lvol {lvol_id}")
+    return entry, None
+
+
+def get_host_secret(lvol_id, host_nqn):
+    """Return the security credentials for a specific host on a volume.
+
+    Returns (dict, None) on success or (False, error) on failure.
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    for h in (lvol.allowed_hosts or []):
+        if h["nqn"] == host_nqn:
+            return h, None
+
+    return False, f"Host {host_nqn} is not in the allowed list for volume {lvol_id}"
+
+
+def remove_host_from_lvol(lvol_id, host_nqn):
+    """Remove an allowed host from a volume's subsystem."""
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    found = False
+    for h in lvol.allowed_hosts:
+        if h["nqn"] == host_nqn:
+            found = True
+            break
+
+    if not found:
+        return False, f"Host {host_nqn} is not in the allowed list"
+
+    # Remove from all nodes where the subsystem exists
+    for node_id in lvol.nodes:
+        snode = db_controller.get_storage_node_by_id(node_id)
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        ret = rpc_client.subsystem_remove_host(lvol.nqn, host_nqn)
+        if not ret:
+            return False, f"Failed to remove host {host_nqn} from node {node_id}"
+
+    lvol.allowed_hosts = [h for h in lvol.allowed_hosts if h["nqn"] != host_nqn]
+    lvol.write_to_db(db_controller.kv_store)
+    logger.info(f"Removed host {host_nqn} from lvol {lvol_id}")
+    return True, None

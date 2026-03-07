@@ -66,6 +66,7 @@ class Cluster(BaseModel):
     disable_monitoring: bool = False
     strict_node_anti_affinity: bool = False
     tls: bool = False
+    tls_config: dict = {}
     is_re_balancing: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False

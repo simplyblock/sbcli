@@ -183,20 +183,30 @@ class RPCClient:
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
 
-    def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1, max_namespaces=32):
+    def subsystem_create(self, nqn, serial_number, model_number, min_cntlid=1, max_namespaces=32, allow_any_host=True):
         params = {
             "nqn": nqn,
             "serial_number": serial_number,
-            "allow_any_host": True,
+            "allow_any_host": allow_any_host,
             "min_cntlid": min_cntlid,
             "ana_reporting": True,
             "max_namespaces": max_namespaces,
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
 
-    def subsystem_add_host(self, nqn, host):
+    def subsystem_add_host(self, nqn, host, psk=None, dhchap_key=None, dhchap_ctrlr_key=None):
         params = {"nqn": nqn, "host": host}
+        if psk:
+            params["psk"] = psk
+        if dhchap_key:
+            params["dhchap_key"] = dhchap_key
+        if dhchap_ctrlr_key:
+            params["dhchap_ctrlr_key"] = dhchap_ctrlr_key
         return self._request("nvmf_subsystem_add_host", params)
+
+    def subsystem_remove_host(self, nqn, host):
+        params = {"nqn": nqn, "host": host}
+        return self._request("nvmf_subsystem_remove_host", params)
 
     def transport_list(self, trtype=None):
         params = None
@@ -718,7 +728,7 @@ class RPCClient:
         }
         return self._request("bdev_passtest_delete", params)
 
-    def bdev_nvme_set_options(self):
+    def bdev_nvme_set_options(self, dhchap_digests=None, dhchap_dhgroups=None):
         params = {
             # "action_on_timeout": "abort",
             "bdev_retry_count": constants.BDEV_RETRY,
@@ -731,6 +741,10 @@ class RPCClient:
             "transport_ack_timeout": constants.ACK_TO,
             "action_on_timeout": "abort"
         }
+        if dhchap_digests:
+            params["dhchap_digests"] = dhchap_digests
+        if dhchap_dhgroups:
+            params["dhchap_dhgroups"] = dhchap_dhgroups
         return self._request("bdev_nvme_set_options", params)
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):

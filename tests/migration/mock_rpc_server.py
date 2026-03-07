@@ -71,6 +71,9 @@ class NodeState:
         # state is "In progress" until complete_at, then "Done" (or "Failed" in fault-inject)
         self.transfer_ops: Dict[str, dict] = {}
 
+        # NVMe bdev options (set by bdev_nvme_set_options)
+        self.nvme_options: Dict[str, Any] = {}
+
         self._blobid_counter = 1000
         self._nsid_counter: Dict[str, int] = {}  # nqn → next nsid
         self.lock = threading.Lock()
@@ -216,6 +219,9 @@ _METHOD_ERROR_CODES: Dict[str, list] = {
     "nvmf_subsystem_add_ns":         [-1, -17, -22],
     "nvmf_subsystem_remove_ns":      [-1, -2, -22],
     "nvmf_subsystem_listener_set_ana_state": [-1, -2],
+    "nvmf_subsystem_add_host":       [-1, -22, -17],
+    "nvmf_subsystem_remove_host":    [-1, -2, -22],
+    "bdev_nvme_set_options":         [-1, -22],
     "bdev_nvme_attach_controller":   [-1, -22, -5],    # -5 = EIO
     "bdev_nvme_detach_controller":   [-1, -2],
     "bdev_lvol_snapshot":            [-1, -22],
@@ -554,7 +560,8 @@ def _nvmf_create_subsystem(s: NodeState, p: dict):
         'model_number': p.get('model_number', ''),
         'namespaces': [],
         'listen_addresses': [],
-        'allow_any_host': True,
+        'hosts': [],
+        'allow_any_host': p.get('allow_any_host', True),
         'ana_reporting': True,
     }
     logger.debug("mock subsystem_create %s", nqn)
@@ -639,6 +646,56 @@ def _nvmf_subsystem_listener_set_ana_state(s: NodeState, p: dict):
     raise _RpcError(-2, "listener not found")
 
 
+# ---- NVMe-oF host access control ----
+
+def _nvmf_subsystem_add_host(s: NodeState, p: dict):
+    nqn = _req(p, 'nqn')
+    host = _req(p, 'host')
+    if nqn not in s.subsystems:
+        raise _RpcError(-2, f"subsystem {nqn} not found")
+    sub = s.subsystems[nqn]
+    for h in sub['hosts']:
+        if h['nqn'] == host:
+            raise _RpcError(-17, f"host {host} already in subsystem {nqn}")
+    entry = {'nqn': host}
+    if 'psk' in p:
+        entry['psk'] = p['psk']
+    if 'dhchap_key' in p:
+        entry['dhchap_key'] = p['dhchap_key']
+    if 'dhchap_ctrlr_key' in p:
+        entry['dhchap_ctrlr_key'] = p['dhchap_ctrlr_key']
+    sub['hosts'].append(entry)
+    logger.debug("mock subsystem_add_host %s → %s", nqn, host)
+    return True
+
+
+def _nvmf_subsystem_remove_host(s: NodeState, p: dict):
+    nqn = _req(p, 'nqn')
+    host = _req(p, 'host')
+    if nqn not in s.subsystems:
+        raise _RpcError(-2, f"subsystem {nqn} not found")
+    sub = s.subsystems[nqn]
+    before = len(sub['hosts'])
+    sub['hosts'] = [h for h in sub['hosts'] if h['nqn'] != host]
+    if len(sub['hosts']) == before:
+        raise _RpcError(-2, f"host {host} not found in subsystem {nqn}")
+    logger.debug("mock subsystem_remove_host %s ← %s", nqn, host)
+    return True
+
+
+# ---- bdev_nvme_set_options ----
+
+def _bdev_nvme_set_options(s: NodeState, p: dict):
+    """Accept and store NVMe bdev options (TLS / DH-HMAC-CHAP config)."""
+    s.nvme_options = {
+        'dhchap_digests': p.get('dhchap_digests'),
+        'dhchap_dhgroups': p.get('dhchap_dhgroups'),
+    }
+    logger.debug("mock bdev_nvme_set_options digests=%s dhgroups=%s",
+                 p.get('dhchap_digests'), p.get('dhchap_dhgroups'))
+    return True
+
+
 # ---- NVMe controller attach / detach ----
 
 def _bdev_nvme_attach_controller(s: NodeState, p: dict):
@@ -698,6 +755,9 @@ _DISPATCH = {
     'nvmf_subsystem_add_ns':                 _nvmf_subsystem_add_ns,
     'nvmf_subsystem_remove_ns':              _nvmf_subsystem_remove_ns,
     'nvmf_subsystem_listener_set_ana_state': _nvmf_subsystem_listener_set_ana_state,
+    'nvmf_subsystem_add_host':               _nvmf_subsystem_add_host,
+    'nvmf_subsystem_remove_host':            _nvmf_subsystem_remove_host,
+    'bdev_nvme_set_options':                 _bdev_nvme_set_options,
     'bdev_nvme_attach_controller':           _bdev_nvme_attach_controller,
     'bdev_nvme_detach_controller':           _bdev_nvme_detach_controller,
 }
@@ -778,5 +838,6 @@ class MockRpcServer:
             self.state.nvme_controllers.clear()
             self.state.delete_ops.clear()
             self.state.transfer_ops.clear()
+            self.state.nvme_options.clear()
             self.state._blobid_counter = 1000
             self.state._nsid_counter.clear()

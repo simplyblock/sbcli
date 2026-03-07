@@ -228,6 +228,10 @@ LVOL_MIG_MAX_RETRIES = 5          # max retry attempts before aborting
 LVOL_MIG_DEADLINE_SEC = 360  # default 4-hour deadline (0 = no deadline)
 LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3  # max recursive "shrink" snapshot rounds
 
+# NVMe-oF TLS / DH-HMAC-CHAP security
+VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
+VALID_DHCHAP_DHGROUPS = ["null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"]
+
 # ports ranges
 RPC_PORT_RANGE_START = 8080
 NODE_NVMF_PORT_START=9060

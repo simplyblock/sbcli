@@ -223,7 +223,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
-                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic) -> str:
+                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
+                   nvmeof_tls_config=None) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -334,6 +335,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.mode = mode
     cluster.full_page_unmap = False
     cluster.client_data_nic = client_data_nic or ""
+
+    if nvmeof_tls_config:
+        cluster.tls = True
+        cluster.tls_config = nvmeof_tls_config
 
     if mode == "docker":
         if not disable_monitoring:

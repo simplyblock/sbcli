@@ -43,6 +43,8 @@ class _CreateParams(BaseModel):
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
+    allowed_hosts: Optional[List[str]] = None
+    sec_options: Optional[dict] = None
 
 
 class _CloneParams(BaseModel):
@@ -85,6 +87,8 @@ def add(
             pvc_name=data.pvc_name,
             ndcs=data.ndcs,
             npcs=data.npcs,
+            allowed_hosts=data.allowed_hosts,
+            sec_options=data.sec_options,
         )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(
@@ -159,6 +163,35 @@ def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if not lvol_controller.delete_lvol(volume.get_id()):
         raise ValueError('Failed to delete volume')
 
+    return Response(status_code=204)
+
+
+class _AddHostParams(BaseModel):
+    host_nqn: str
+    sec_options: Optional[dict] = None
+
+
+@instance_api.post('/hosts', name='clusters:storage-pools:volumes:add-host', status_code=201)
+def add_host(cluster: Cluster, pool: StoragePool, volume: Volume, body: _AddHostParams):
+    result, error = lvol_controller.add_host_to_lvol(volume.get_id(), body.host_nqn, body.sec_options)
+    if error:
+        raise HTTPException(400, error)
+    return result
+
+
+@instance_api.get('/hosts/{host_nqn}/secret', name='clusters:storage-pools:volumes:get-host-secret')
+def get_host_secret(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str):
+    result, error = lvol_controller.get_host_secret(volume.get_id(), host_nqn)
+    if error:
+        raise HTTPException(404, error)
+    return result
+
+
+@instance_api.delete('/hosts/{host_nqn}', name='clusters:storage-pools:volumes:remove-host', status_code=204, responses={204: {"content": None}})
+def remove_host(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str) -> Response:
+    result, error = lvol_controller.remove_host_from_lvol(volume.get_id(), host_nqn)
+    if error:
+        raise HTTPException(400, error)
     return Response(status_code=204)
 
 
