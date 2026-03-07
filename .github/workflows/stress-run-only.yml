@@ -1,4 +1,5 @@
 name: Stress Run on existing cluster Until Failure
+run-name: "Stress | ${{ github.ref_name }} | ${{ inputs.MNODES }}"
 
 on:
   workflow_dispatch:
@@ -10,11 +11,6 @@ on:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
         default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
-
-      SEC_STORAGE_PRIVATE_IPS:
-        description: "Secondary storage IPs (optional)"
-        required: false
-        default: ""
 
       API_INVOKE_URL:
         description: "API invoke URL"
@@ -99,7 +95,6 @@ jobs:
     env:
       # Cluster/lab env
       STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
-      SEC_STORAGE_PRIVATE_IPS: ${{ inputs.SEC_STORAGE_PRIVATE_IPS }}
       API_INVOKE_URL: ${{ inputs.API_INVOKE_URL }}
       API_BASE_URL: ${{ inputs.API_INVOKE_URL }}
       BASTION_IP: ${{ inputs.BASTION_IP }}

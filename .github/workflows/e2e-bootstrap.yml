@@ -1,4 +1,5 @@
 name: Bootstrap Cluster + Run E2E Tests
+run-name: "E2E Bootstrap | ${{ github.ref_name }} | ${{ inputs.MNODES }}"
 
 on:
   workflow_call:
@@ -6,9 +7,6 @@ on:
       STORAGE_PRIVATE_IPS:
         type: string
         default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
-      SEC_STORAGE_PRIVATE_IPS:
-        type: string
-        default: ""
       API_INVOKE_URL:
         type: string
         default: "http://192.168.10.211/"
@@ -75,6 +73,10 @@ on:
       TEST_CLASS:
         type: string
         default: ""
+      RUN_LABEL:
+        type: string
+        default: ""
+        description: "Optional label appended to artifact names to avoid collisions when called multiple times in the same workflow run (e.g. 'run1', 'run2')"
   workflow_dispatch:
     inputs:
       # =========================
@@ -84,10 +86,6 @@ on:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
         default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
-      SEC_STORAGE_PRIVATE_IPS:
-        description: "Secondary storage IPs (optional)"
-        required: false
-        default: ""
 
       API_INVOKE_URL:
         description: "API invoke URL"
@@ -215,7 +213,6 @@ jobs:
     env:
       # Cluster/lab env
       STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208' }}
-      SEC_STORAGE_PRIVATE_IPS: ${{ inputs.SEC_STORAGE_PRIVATE_IPS || '' }}
       API_INVOKE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
       API_BASE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
       BASTION_IP: ${{ inputs.BASTION_IP || '192.168.10.211' }}
@@ -1244,7 +1241,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: simplyblock-e2e-logs-${{ github.run_id }}
+          name: simplyblock-e2e-logs-${{ github.run_id }}${{ inputs.RUN_LABEL != '' && format('-{0}', inputs.RUN_LABEL) || '' }}
           path: |
             simplyBlockDeploy/bare-metal/bootstrap.log
             sbcli/e2e/output.log
@@ -1261,7 +1258,7 @@ jobs:
         if: always() && env.RUN_BASE_DIR != '' && env.MGMT_IP != ''
         uses: actions/upload-artifact@v4
         with:
-          name: simplyblock-e2e-small-logs-${{ github.run_id }}
+          name: simplyblock-e2e-small-logs-${{ github.run_id }}${{ inputs.RUN_LABEL != '' && format('-{0}', inputs.RUN_LABEL) || '' }}
           path: |
             sbcli/e2e/output.log
             ${{ env.RUN_BASE_DIR }}/${{ env.MGMT_IP }}/mgmt_details/mgmt/*.txt
