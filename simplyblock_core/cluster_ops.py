@@ -359,20 +359,25 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                 "VAULT_ADDR=http://127.0.0.1:8200",
                 "VAULT_SKIP_VERIFY=true"]
             res = container.exec_run(
-                cmd="vault operator init -key-shares=1 -key-threshold=1 -format=json > /vault/data/init.json",
+                cmd="vault operator init -key-shares=1 -key-threshold=1 -format=json",
                 environment=environment
             )
             out = res.output.decode("utf-8")
             logger.debug(out)
-            with open("/vault/data/init.json", "r") as f:
+            with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
+                outfile.write(out)
+
+            with open("/etc/simplyblock/kms/data/init.json", "r") as f:
                 init_file = json.loads(f.read())
+                logger.debug(f"vault operator unseal {init_file['unseal_keys_b64'][0]}")
                 res = container.exec_run(
-                    cmd=f"vault operator unseal ${init_file['unseal_keys_b64'][0]}",
+                    cmd=f"vault operator unseal {init_file['unseal_keys_b64'][0]}",
                     environment=environment)
                 out = res.output.decode("utf-8")
                 logger.debug(out)
+                logger.debug(f"vault login {init_file['root_token']}")
                 res = container.exec_run(
-                    cmd=f"vault login ${init_file['root_token'][0]}",
+                    cmd=f"vault login {init_file['root_token']}",
                     environment=environment)
                 out = res.output.decode("utf-8")
                 logger.debug(out)
