@@ -136,6 +136,11 @@ class TestClusterBase:
         for node in self.fio_node:
             self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
         
+        run_file = os.getenv("RUN_DIR_FILE", None)
+        if run_file:
+            with open(run_file, "w") as f:
+                f.write(self.docker_logs_path)
+        
         self.runner_k8s_log = RunnerK8sLog(
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
