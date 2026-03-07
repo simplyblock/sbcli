@@ -1644,3 +1644,55 @@ spec:
         - name: config
           configMap:
             name: simplyblock-fluent-bit-config
+{{- if .Values.kms.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-kms
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-kms
+  template:
+    metadata:
+      labels:
+        app: simplyblock-kms
+    spec:
+      serviceAccountName: simplyblock-kms
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        capabilities:
+          add: ["IPC_LOCK"]
+      containers:
+      - name: simplyblock-kms
+        image: "hashicorp/vault:1.13.3"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["/bin/bash", "-c", "server"]
+        env:
+        - name: VAULT_ADDR
+          value: "http://127:0:0:1:8200"
+        volumeMounts:
+        - name: kms_config
+          mountPath: /vault/config/
+        - name: kms_data
+          mountPath: /vault/data
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "600m"
+            memory: "1Gi"
+      volumes:
+      - name: kms_config
+        configMap:
+          name: simplyblock-kms-config
+      - name: kms_data
+        hostPath: /var/simplyblock/kms/data
+{{- end }}

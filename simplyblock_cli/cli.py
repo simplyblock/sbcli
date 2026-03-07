@@ -422,6 +422,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420', type=int, default=4420, dest='nvmf_base_port')
         argument = subcommand.add_argument('--rpc-base-port', help='Base port for SPDK JSON-RPC. Default: 8080', type=int, default=8080, dest='rpc_base_port')
         argument = subcommand.add_argument('--snode-api-port', help='SNodeAPI/firewall port (one per host IP). Default: 50001', type=int, default=50001, dest='snode_api_port')
+        argument = subcommand.add_argument('--no-kms', help='Disable KMS deployment and integration', default=False, dest='no_kms', action='store_true')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')

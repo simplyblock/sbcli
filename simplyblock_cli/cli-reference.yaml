@@ -987,6 +987,12 @@ commands:
               Network interface name from client to use for LVol connection.
             dest: client_data_nic
             type: str
+          - name: "--no-kms"
+            help: "Disable KMS deployment and integration"
+            dest: no_kms
+            type: bool
+            default: false
+            action: store_true
       - name: add
         help: "Adds a new cluster"
         arguments:

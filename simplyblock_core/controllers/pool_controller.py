@@ -11,6 +11,7 @@ import uuid
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.kms_client import KMSClient
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient
@@ -88,6 +89,15 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_add(pool)
     logger.info("Done")
+
+    if cluster.deploy_kms:
+        kms_client = KMSClient(cluster.get_id())
+        ret, err = kms_client.create_pool_key(pool.get_id())
+        if ret:
+            logger.info(ret)
+        if err:
+            logger.error(err)
+
     return pool.get_id()
 
 def _generate_numeric_id(pool_list: list[Pool]):
