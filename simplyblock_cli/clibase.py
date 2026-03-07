@@ -12,7 +12,7 @@ from simplyblock_core import cluster_ops, utils, db_controller, constants
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller
+    tasks_controller, qos_controller, migration_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster
@@ -606,6 +606,30 @@ class CLIWrapperBase:
 
     def volume__inflate(self, sub_command, args):
         return lvol_controller.inflate_lvol(args.volume_id)
+
+    def volume__migrate(self, sub_command, args):
+        migration_id, error = migration_controller.start_migration(
+            args.volume_id,
+            args.target_node_id,
+            max_retries=args.max_retries,
+            deadline_seconds=args.deadline_seconds,
+        )
+        if error:
+            print(f"Error: {error}")
+            return False
+        print(f"Migration started: {migration_id}")
+        return True
+
+    def volume__migrate_list(self, sub_command, args):
+        return migration_controller.list_migrations(cluster_id=args.cluster_id, is_json=args.json)
+
+    def volume__migrate_cancel(self, sub_command, args):
+        ok, error = migration_controller.cancel_migration(args.migration_id)
+        if not ok:
+            print(f"Error: {error}")
+            return False
+        print(f"Migration {args.migration_id} cancelled")
+        return True
 
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id

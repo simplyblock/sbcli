@@ -575,6 +575,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
+        self.init_volume__migrate(subparser)
+        self.init_volume__migrate_list(subparser)
+        self.init_volume__migrate_cancel(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -680,6 +683,22 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__inflate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+
+    def init_volume__migrate(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate', 'Migrate a logical volume to a different storage node')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('target_node_id', help='Target storage node id', type=str)
+        subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting (default: 10)', type=int, default=10, dest='max_retries')
+        subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline, default: 14400)', type=int, default=14400, dest='deadline_seconds')
+
+    def init_volume__migrate_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations')
+        subcommand.add_argument('--cluster-id', help='Filter by cluster id', type=str, dest='cluster_id')
+        subcommand.add_argument('--json', help='Print output in json format', dest='json', action='store_true')
+
+    def init_volume__migrate_cancel(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancel an active volume migration')
+        subcommand.add_argument('migration_id', help='Migration id', type=str)
 
 
     def init_control_plane(self):
@@ -1115,6 +1134,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
+                elif sub_command in ['migrate']:
+                    ret = self.volume__migrate(sub_command, args)
+                elif sub_command in ['migrate-list']:
+                    ret = self.volume__migrate_list(sub_command, args)
+                elif sub_command in ['migrate-cancel']:
+                    ret = self.volume__migrate_cancel(sub_command, args)
                 else:
                     self.parser.print_help()
 

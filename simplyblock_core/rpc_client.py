@@ -377,7 +377,7 @@ class RPCClient:
         }
         return self._request("bdev_lvol_create_lvstore", params)
 
-    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0, ndcs=0, npcs=0):
+    def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0, ndcs=0, npcs=0, uuid=None):
         params = {
             "lvol_name": name,
             "size_in_mib": size_in_mib,
@@ -391,6 +391,8 @@ class RPCClient:
         #         'ndcs' : ndcs,
         #         'npcs' : npcs,
         #     })
+        if uuid:
+            params["uuid"] = uuid
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name, del_async=False):
@@ -497,7 +499,7 @@ class RPCClient:
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
-                           write_protection=False, full_page_unmap=True):
+                           write_protection=False, full_page_unmap=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -1254,3 +1256,88 @@ class RPCClient:
             "uuid": lvstore_uuid
         }
         return self._request("bdev_lvs_dump_tree", params)
+
+    # -----------------------------------------------------------------------
+    # Live volume migration RPCs
+    # -----------------------------------------------------------------------
+
+    def bdev_lvol_set_migration_flag(self, name):
+        """Mark *name* (composite lvol bdev) as a migration-target lvol."""
+        return self._request("bdev_lvol_set_migration_flag", {"name": name})
+
+    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate"):
+        """
+        Start an async blob transfer from *name* (source composite bdev) to the
+        NVMe-oF bdev *bdev_name* attached on the caller's node.
+
+        Returns the RPC result (truthy on success) or None on error.
+        Poll progress with :meth:`bdev_lvol_transfer_stat`.
+        """
+        return self._request("bdev_lvol_transfer", {
+            "name": name,
+            "offset": offset,
+            "block_size": batch_size,
+            "bdev_name": bdev_name,
+            "operation": operation,
+        })
+
+    def bdev_lvol_transfer_stat(self, name):
+        """
+        Return transfer status for *name* (source composite bdev).
+
+        Result dict keys:
+          ``transfer_state``: "No process" | "In progress" | "Failed" | "Done"
+          ``offset``:         last written byte offset
+        """
+        return self._request("bdev_lvol_transfer_stat", {"name": name})
+
+    def bdev_lvol_add_clone(self, lvol_name, parent_snapshot_name):
+        """
+        Link *lvol_name* (composite) to its predecessor snapshot
+        *parent_snapshot_name* (composite) on the same lvstore.
+
+        Must be called on the target node after a successful blob transfer,
+        before converting the lvol to a snapshot.
+        """
+        return self._request("bdev_lvol_add_clone", {
+            "lvol_name": lvol_name,
+            "parent_snapshot_name": parent_snapshot_name,
+        })
+
+    def bdev_lvol_convert(self, name):
+        """
+        Convert a writable lvol *name* (composite) into an immutable snapshot
+        in-place.  Called on the target node after :meth:`bdev_lvol_add_clone`.
+        """
+        return self._request("bdev_lvol_convert", {"name": name})
+
+    def bdev_lvol_get_lvols(self, lvs_name):
+        """
+        Return the list of lvols on *lvs_name*.
+
+        Each entry is a dict that includes at least ``name`` and ``blobid``.
+        Used during the final migration step to retrieve the target lvol's blobid.
+        """
+        return self._request("bdev_lvol_get_lvols", {"lvs_name": lvs_name})
+
+    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name):
+        """
+        Start the final (live) migration of a writable lvol from source to target.
+        The source I/O is frozen for the brief delta transfer.
+
+        Args:
+            lvol_name:     source lvol composite bdev name
+            lvol_id:       blobid of the target lvol (from :meth:`bdev_lvol_get_lvols`)
+            snapshot_name: composite name of the last transferred snapshot on source
+            block_size:    constant – pass ``2``
+            bdev_name:     bdev exposed by connecting to the target hub lvol
+
+        Poll progress with :meth:`bdev_lvol_transfer_stat` using *lvol_name*.
+        """
+        return self._request("bdev_lvol_final_migration", {
+            "lvol_name": lvol_name,
+            "lvol_id": lvol_id,
+            "snapshot_name": snapshot_name,
+            "batch_size": batch_size,
+            "bdev_name": bdev_name,
+        })

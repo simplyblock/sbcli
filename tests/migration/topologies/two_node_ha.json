@@ -1,0 +1,77 @@
+{
+  "cluster": {},
+  "nodes": [
+    {
+      "id": "src",
+      "hostname": "host-src",
+      "mgmt_ip": "127.0.0.1",
+      "rpc_port": 9901,
+      "rpc_username": "spdkuser",
+      "rpc_password": "spdkpass",
+      "lvstore": "lvs_src",
+      "lvol_subsys_port": 9090,
+      "status": "online",
+      "data_nics": [
+        {"if_name": "eth0", "ip": "127.0.0.1", "trtype": "TCP"}
+      ]
+    },
+    {
+      "id": "tgt",
+      "hostname": "host-tgt",
+      "mgmt_ip": "127.0.0.1",
+      "rpc_port": 9902,
+      "rpc_username": "spdkuser",
+      "rpc_password": "spdkpass",
+      "lvstore": "lvs_tgt",
+      "lvol_subsys_port": 9090,
+      "secondary_node_id": "tgt-sec",
+      "status": "online",
+      "data_nics": [
+        {"if_name": "eth0", "ip": "127.0.0.1", "trtype": "TCP"}
+      ]
+    },
+    {
+      "id": "tgt-sec",
+      "hostname": "host-tgt-sec",
+      "mgmt_ip": "127.0.0.1",
+      "rpc_port": 9903,
+      "rpc_username": "spdkuser",
+      "rpc_password": "spdkpass",
+      "lvstore": "lvs_tgt_sec",
+      "lvol_subsys_port": 9090,
+      "status": "online",
+      "data_nics": [
+        {"if_name": "eth0", "ip": "127.0.0.1", "trtype": "TCP"}
+      ]
+    }
+  ],
+  "pools": [
+    {
+      "id": "pool1",
+      "name": "default-pool",
+      "status": "active"
+    }
+  ],
+  "volumes": [
+    {
+      "id": "l1",
+      "name": "vol1",
+      "size": "1G",
+      "node_id": "src",
+      "pool_id": "pool1",
+      "ha_type": "ha",
+      "fabric": "tcp",
+      "max_namespace_per_subsys": 1,
+      "status": "online"
+    }
+  ],
+  "snapshots": [
+    {
+      "id": "s1",
+      "name": "snap1",
+      "lvol_id": "l1",
+      "snap_ref_id": "",
+      "status": "online"
+    }
+  ]
+}

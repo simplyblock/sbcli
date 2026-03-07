@@ -75,6 +75,11 @@ def _add_task(function_name, cluster_id, node_id, device_id,
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
+    elif function_name == JobSchedule.FN_LVOL_MIG:
+        task_id = get_active_lvol_mig_task(cluster_id, function_params.get("lvol_id"))
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
 
     task_obj = JobSchedule()
     task_obj.uuid = str(uuid.uuid4())
@@ -403,6 +408,43 @@ def get_jc_comp_task(cluster_id, node_id, jm_vuid=0):
                 if jm_vuid and "jm_vuid" in task.function_params and task.function_params["jm_vuid"] == jm_vuid:
                     return task.uuid
     return False
+
+
+def get_active_lvol_mig_task(cluster_id, lvol_id):
+    """Return the UUID of an active (non-done, non-cancelled) lvol migration task."""
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_LVOL_MIG and task.canceled is False:
+            if task.status != JobSchedule.STATUS_DONE:
+                if task.function_params.get("lvol_id") == lvol_id:
+                    return task.uuid
+    return False
+
+
+def get_active_lvol_mig_task_on_node(cluster_id, node_id):
+    """Return the UUID of an active lvol migration task on a given source node."""
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_LVOL_MIG and task.node_id == node_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                return task.uuid
+    return False
+
+
+def add_lvol_mig_task(migration):
+    """Create the JobSchedule task that drives a live volume migration."""
+    return _add_task(
+        JobSchedule.FN_LVOL_MIG,
+        migration.cluster_id,
+        migration.source_node_id,
+        "",
+        max_retry=migration.max_retries,
+        function_params={
+            "migration_id": migration.uuid,
+            "lvol_id": migration.lvol_id,
+            "target_node_id": migration.target_node_id,
+        },
+    )
 
 
 def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name, primary_node):

@@ -1,0 +1,16 @@
+services:
+  fdb-server:
+    image: foundationdb/foundationdb:7.3.63
+    entrypoint: ["/bin/bash", "/var/fdb/scripts/fdb_single.bash"]
+    environment:
+      FDB_NETWORKING_MODE: 'host'
+      FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
+      FDB_CLUSTER_FILE_CONTENTS: 'docker:docker@127.0.0.1:4500'
+    network_mode: host
+    volumes:
+      - "fdb-data:/var/fdb/data"
+      - "fdb-logs:/var/fdb/logs"
+
+volumes:
+  fdb-data:
+  fdb-logs:

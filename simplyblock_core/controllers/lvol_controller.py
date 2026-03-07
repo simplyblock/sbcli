@@ -889,6 +889,12 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error(e)
         return False
 
+    from simplyblock_core.controllers import migration_controller
+    active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
+    if active_mig and not force_delete:
+        logger.error(f"Cannot delete lvol {lvol.uuid}: active migration {active_mig.uuid}")
+        return False
+
     if lvol.status == LVol.STATUS_IN_DELETION:
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
@@ -1177,6 +1183,13 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
 
     data = []
 
+    # Build set of lvol UUIDs with active migrations (single DB scan)
+    from simplyblock_core.controllers import migration_controller
+    migrating_lvols = set()
+    for m in db_controller.get_migrations(cluster_id):
+        if m.is_active():
+            migrating_lvols.add(m.lvol_id)
+
     snap_dict : dict[str, int] = {}
     for lvol in lvols:
         logger.debug(lvol)
@@ -1205,6 +1218,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "BlobID": lvol.blobid or "",
             "LVolUUID": lvol.lvol_uuid or "",
             "Status": lvol.status,
+            "M": "M" if lvol.uuid in migrating_lvols else "",
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
@@ -1263,6 +1277,10 @@ def get_lvol(lvol_id_or_name, is_json):
     data = lvol.get_clean_dict()
 
     del data['nvme_dev']
+
+    from simplyblock_core.controllers import migration_controller
+    active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
+    data['migrating'] = active_mig.uuid if active_mig else ""
 
     if is_json:
         return json.dumps(data, indent=2)
@@ -1333,6 +1351,13 @@ def resize_lvol(id, new_size):
     except KeyError as e:
         logger.error(e)
         return False, str(e)
+
+    from simplyblock_core.controllers import migration_controller
+    active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
+    if active_mig:
+        msg = f"Cannot resize lvol {lvol.uuid}: active migration {active_mig.uuid}"
+        logger.error(msg)
+        return False, msg
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:

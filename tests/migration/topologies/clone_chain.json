@@ -1,0 +1,70 @@
+{
+  "cluster": {},
+  "nodes": [
+    {
+      "id": "src",
+      "mgmt_ip": "127.0.0.1",
+      "rpc_port": 9901,
+      "rpc_username": "spdkuser",
+      "rpc_password": "spdkpass",
+      "lvstore": "lvs_src",
+      "status": "online",
+      "data_nics": [{"if_name": "eth0", "ip": "127.0.0.1", "trtype": "TCP"}]
+    },
+    {
+      "id": "tgt",
+      "mgmt_ip": "127.0.0.1",
+      "rpc_port": 9902,
+      "rpc_username": "spdkuser",
+      "rpc_password": "spdkpass",
+      "lvstore": "lvs_tgt",
+      "status": "online",
+      "data_nics": [{"if_name": "eth0", "ip": "127.0.0.1", "trtype": "TCP"}]
+    }
+  ],
+  "pools": [
+    {"id": "pool1", "name": "default-pool", "status": "active"}
+  ],
+  "volumes": [
+    {
+      "id": "l1",
+      "name": "vol1",
+      "size": "2G",
+      "node_id": "src",
+      "pool_id": "pool1",
+      "status": "online"
+    },
+    {
+      "id": "c1",
+      "name": "clone1",
+      "size": "2G",
+      "node_id": "src",
+      "pool_id": "pool1",
+      "cloned_from_snap": "s2",
+      "status": "online"
+    }
+  ],
+  "snapshots": [
+    {
+      "id": "s1",
+      "name": "snap1",
+      "lvol_id": "l1",
+      "snap_ref_id": "",
+      "status": "online"
+    },
+    {
+      "id": "s2",
+      "name": "snap2",
+      "lvol_id": "l1",
+      "snap_ref_id": "s1",
+      "status": "online"
+    },
+    {
+      "id": "s3",
+      "name": "snap3",
+      "lvol_id": "l1",
+      "snap_ref_id": "s2",
+      "status": "online"
+    }
+  ]
+}
