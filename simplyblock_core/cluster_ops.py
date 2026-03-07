@@ -386,6 +386,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                 logger.debug(out)
                 if res.exit_code == 0:
                     cluster.kms_root_token = init_file['root_token']
+                res = container.exec_run(
+                    cmd=f"vault secrets enable -path={cluster.uuid} -version=1 kv",
+                    environment=environment)
+                out = res.output.decode("utf-8")
+                logger.debug(out)
 
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
