@@ -146,6 +146,13 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
             sleep_n_sec(interval)
         return None, set(self._list_nvme_ns_devices(node=node, ctrl_dev=ctrl_dev))
 
+    def _rescan_nvme_namespaces(self, node, ctrl_dev: str):
+        """Trigger a namespace rescan on the NVMe controller so the host refreshes its namespace list."""
+        ctrl = get_parent_device(ctrl_dev)  # ensure /dev/nvmeX not /dev/nvmeXn1
+        cmd = f"bash -lc \"nvme ns-rescan {ctrl} 2>/dev/null || true\""
+        out, err = self.ssh_obj.exec_command(node=node, command=cmd, supress_logs=True)
+        self.logger.info(f"[rescan_ns] ctrl={ctrl} out={out} err={err}")
+
     def _wait_until_namespace_device_gone(self, node, ctrl_dev: str, device: str, timeout=120, interval=2):
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -521,6 +528,10 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
             except Exception as e:
                 self.logger.warning(f"[NS] delete_lvol failed for {lvol_name}: {e}")
                 self.record_pending_lvol_delete(lvol_name, lvol_id)
+
+            # Rescan namespaces on the controller so the host drops the removed namespace device
+            if is_ns and client and ctrl_dev:
+                self._rescan_nvme_namespaces(node=client, ctrl_dev=ctrl_dev)
 
             # Verify namespace device disappearance (without disconnect)
             if is_ns and client and ctrl_dev and device:

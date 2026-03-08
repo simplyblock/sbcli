@@ -1,137 +1,250 @@
-name: Run E2E Tests on Existing Cluster
-run-name: "E2E | ${{ github.ref_name }} | ${{ inputs.MNODES }}"
+name: Upgrade Bootstrap (Single Node) + Run Upgrade Tests
+run-name: "Upgrade (Single): ${{ inputs.BASE_SBCLI_BRANCH }} → ${{ inputs.TARGET_SBCLI_BRANCH }} | ${{ github.ref_name }} | ${{ inputs.MNODES }}"
+
+# Same as upgrade-bootstrap.yml but BOOTSTRAP_IS_SINGLE_NODE is always forced to true
+# and TEST_CLASS defaults to major_upgrade_single (no continuous FIO during upgrade).
 
 on:
+  workflow_call:
+    inputs:
+      BASE_SBCLI_BRANCH:
+        type: string
+        required: true
+        description: "sbcli branch / version tag to bootstrap the cluster with (e.g. R25.10-Hotfix)"
+      BASE_SPDK_IMAGE:
+        type: string
+        default: ""
+        description: "SPDK image for the base deployment (empty = bootstrap default)"
+      TARGET_SBCLI_BRANCH:
+        type: string
+        required: true
+        description: "sbcli branch / version tag to upgrade to (e.g. main)"
+      TARGET_SPDK_IMAGE:
+        type: string
+        default: ""
+        description: "SPDK image for the target version (empty = default)"
+      STORAGE_PRIVATE_IPS:
+        type: string
+        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+      API_INVOKE_URL:
+        type: string
+        default: "http://192.168.10.211/"
+      BASTION_IP:
+        type: string
+        default: "192.168.10.211"
+      MNODES:
+        type: string
+        default: "192.168.10.211"
+      NR_HUGEPAGES:
+        type: string
+        default: "2048"
+      GRAFANA_ENDPOINT:
+        type: string
+        default: "http://192.168.10.211/grafana"
+      SBCLI_CMD:
+        type: string
+        default: "sbctl"
+      SSH_USER:
+        type: string
+        default: "root"
+      KEY_PATH:
+        type: string
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+      CLIENTNODES:
+        type: string
+        default: "192.168.10.165 192.168.10.166"
+      NFS_MOUNTPOINT:
+        type: string
+        default: "/mnt/nfs_share"
+      BOOTSTRAP_MAX_LVOL:
+        type: string
+        default: "300"
+      BOOTSTRAP_DATA_CHUNKS:
+        type: string
+        default: "2"
+      BOOTSTRAP_PARITY_CHUNKS:
+        type: string
+        default: "2"
+      BOOTSTRAP_JOURNAL_PARTITION:
+        type: string
+        default: "1"
+      BOOTSTRAP_HA_JM_COUNT:
+        type: string
+        default: "3"
+      BOOTSTRAP_HA_TYPE:
+        type: string
+        default: "single"
+      BOOTSTRAP_DATA_NIC:
+        type: string
+        default: "eth1"
+      BOOTSTRAP_ENABLE_NODE_AFFINITY:
+        type: boolean
+        default: false
+      TEST_CLASS:
+        type: string
+        default: "major_upgrade_single"
+      RUN_LABEL:
+        type: string
+        default: ""
+        description: "Optional label appended to artifact names to avoid collisions (e.g. 'run1')"
+
   workflow_dispatch:
     inputs:
-      # =========================
-      # Cluster / Lab inputs
-      # =========================
+      BASE_SBCLI_BRANCH:
+        description: "sbcli branch / version tag to bootstrap the cluster with (e.g. R25.10-Hotfix)"
+        required: true
+      BASE_SPDK_IMAGE:
+        description: "SPDK image for the base deployment (empty = bootstrap default)"
+        required: false
+        default: ""
+      TARGET_SBCLI_BRANCH:
+        description: "sbcli branch / version tag to upgrade to (e.g. main)"
+        required: true
+      TARGET_SPDK_IMAGE:
+        description: "SPDK image for the target version (empty = default)"
+        required: false
+        default: ""
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
         default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
-
       API_INVOKE_URL:
         description: "API invoke URL"
         required: true
         default: "http://192.168.10.211/"
-
       BASTION_IP:
         description: "Bastion IP"
         required: true
         default: "192.168.10.211"
-
       MNODES:
-        description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
+        description: "Management node(s) IPs"
         required: true
         default: "192.168.10.211"
-
+      NR_HUGEPAGES:
+        description: "Hugepages"
+        required: true
+        default: "2048"
+      GRAFANA_ENDPOINT:
+        description: "Grafana endpoint"
+        required: true
+        default: "http://192.168.10.211/grafana"
       SBCLI_CMD:
         description: "sbcli command name"
         required: true
         default: "sbctl"
-
-      SBCLI_BRANCH:
-        description: "sbcli repo branch to clone for tests"
-        required: true
-        default: "R25.10-Hotfix"
-
-      CLUSTER_ID:
-        description: "Cluster ID to run tests on"
-        required: true
-
-      CLUSTER_SECRET:
-        description: "Cluster secret to run tests on"
-        required: true
-
-      # =========================
-      # SSH / client inputs
-      # =========================
       SSH_USER:
         description: "SSH user"
         required: true
         default: "root"
       KEY_PATH:
-        description: "SSH private key path on runner (default: /home/ec2-user/.ssh/simplyblock-us-east-2.pem)"
+        description: "SSH private key path on runner"
         required: true
         default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
       CLIENTNODES:
-        description: "Space-separated client node IPs (CLIENT_IP is same)"
+        description: "Space-separated client node IPs"
         required: true
         default: "192.168.10.165 192.168.10.166"
-
-      # =========================
-      # Cleanup inputs
-      # =========================
       NFS_MOUNTPOINT:
         description: "NFS mountpoint to unmount everywhere"
         required: true
         default: "/mnt/nfs_share"
-
+      BOOTSTRAP_MAX_LVOL:
+        description: "bootstrap: --max-lvol"
+        required: true
+        default: "300"
       BOOTSTRAP_DATA_CHUNKS:
-        description: "Number of data chunks (ndcs)"
+        description: "bootstrap: --data-chunks-per-stripe"
         required: true
         default: "2"
-
       BOOTSTRAP_PARITY_CHUNKS:
-        description: "Number of parity chunks (npcs)"
+        description: "bootstrap: --parity-chunks-per-stripe"
         required: true
         default: "2"
-
-      # =========================
-      # E2E test inputs
-      # =========================
+      BOOTSTRAP_JOURNAL_PARTITION:
+        description: "bootstrap: --journal-partition"
+        required: true
+        default: "1"
+      BOOTSTRAP_HA_JM_COUNT:
+        description: "bootstrap: --ha-jm-count"
+        required: true
+        default: "3"
+      BOOTSTRAP_HA_TYPE:
+        description: "bootstrap: --ha-type (single-node cluster type)"
+        required: true
+        default: "single"
+      BOOTSTRAP_DATA_NIC:
+        description: "bootstrap: --data-nics"
+        required: true
+        default: "eth1"
+      BOOTSTRAP_ENABLE_NODE_AFFINITY:
+        description: "Bootstrap: enable node affinity"
+        type: boolean
+        required: false
+        default: false
       TEST_CLASS:
-        description: "E2E test class name (--testname); leave empty to run all tests"
+        description: "Upgrade test class name; defaults to single-node variant (no FIO during upgrade)"
         required: false
         type: string
+        default: "major_upgrade_single"
 
 concurrency:
-  group: simplyblock-lab-e2e
+  group: simplyblock-lab-upgrade-single
   cancel-in-progress: false
 
 jobs:
-  e2e:
-    name: Pre-clean -> E2E
+  bootstrap-and-upgrade:
+    name: Pre-clean -> Bootstrap Single (${{ inputs.BASE_SBCLI_BRANCH }}) -> Upgrade (${{ inputs.TARGET_SBCLI_BRANCH }})
     runs-on: [self-hosted]
-    timeout-minutes: 240
+    timeout-minutes: 300
 
     env:
+      # Upgrade-specific
+      BASE_SBCLI_BRANCH:  ${{ inputs.BASE_SBCLI_BRANCH }}
+      BASE_SPDK_IMAGE:    ${{ inputs.BASE_SPDK_IMAGE || '' }}
+      TARGET_SBCLI_BRANCH: ${{ inputs.TARGET_SBCLI_BRANCH }}
+      TARGET_SPDK_IMAGE:  ${{ inputs.TARGET_SPDK_IMAGE || '' }}
+
       # Cluster/lab env
-      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
-      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL }}
-      API_BASE_URL: ${{ inputs.API_INVOKE_URL }}
-      BASTION_IP: ${{ inputs.BASTION_IP }}
-      BASTION_SERVER: ${{ inputs.BASTION_IP }}
-      MNODES: ${{ inputs.MNODES }}
-      SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
-      SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
+      STORAGE_PRIVATE_IPS:     ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208' }}
+      API_INVOKE_URL:   ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
+      API_BASE_URL:     ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
+      BASTION_IP:       ${{ inputs.BASTION_IP || '192.168.10.211' }}
+      BASTION_SERVER:   ${{ inputs.BASTION_IP || '192.168.10.211' }}
+      MNODES:           ${{ inputs.MNODES || '192.168.10.211' }}
+      NR_HUGEPAGES:     ${{ inputs.NR_HUGEPAGES || '2048' }}
+      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
+      SBCLI_CMD:        ${{ inputs.SBCLI_CMD || 'sbctl' }}
 
       # SSH/client env
-      SSH_USER: ${{ inputs.SSH_USER }}
-      KEY_PATH: ${{ inputs.KEY_PATH }}
-      CLIENTNODES: ${{ inputs.CLIENTNODES }}
-      CLIENT_IP: ${{ inputs.CLIENTNODES }}
+      SSH_USER:    ${{ inputs.SSH_USER || 'root' }}
+      KEY_PATH:    ${{ inputs.KEY_PATH || '/home/ec2-user/.ssh/simplyblock-us-east-2.pem' }}
+      CLIENTNODES: ${{ inputs.CLIENTNODES || '192.168.10.165 192.168.10.166' }}
+      CLIENT_IP:   ${{ inputs.CLIENTNODES || '192.168.10.165 192.168.10.166' }}
 
       # Cleanup
-      NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT }}
+      NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}
 
-      # E2E derived from chunks
-      NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
-      NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
-      TEST_CLASS: ${{ inputs.TEST_CLASS }}
+      # Bootstrap params
+      BOOTSTRAP_MAX_LVOL:          ${{ inputs.BOOTSTRAP_MAX_LVOL || '300' }}
+      BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
+      BOOTSTRAP_PARITY_CHUNKS:     ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
+      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
+      BOOTSTRAP_HA_JM_COUNT:       ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '3' }}
+      BOOTSTRAP_HA_TYPE:           ${{ inputs.BOOTSTRAP_HA_TYPE || 'single' }}
+      BOOTSTRAP_DATA_NIC:          ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
+
+      TEST_CLASS: ${{ inputs.TEST_CLASS || 'major_upgrade_single' }}
 
       # Secrets
-      SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+      SSH_PASSWORD:      ${{ secrets.SSH_PASSWORD }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
-      MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+      MINIO_ACCESS_KEY:  ${{ secrets.MINIO_ACCESS_KEY }}
+      MINIO_SECRET_KEY:  ${{ secrets.MINIO_SECRET_KEY }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-      # Pre-existing cluster
-      CLUSTER_ID: ${{ inputs.CLUSTER_ID }}
-      CLUSTER_SECRET: ${{ inputs.CLUSTER_SECRET }}
+      # Filled after bootstrap parsing
+      CLUSTER_ID:     ""
+      CLUSTER_SECRET: ""
 
     steps:
       - name: Runner diagnostics
@@ -164,31 +277,28 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
+      - name: Export BASE_SPDK_IMAGE env (only if provided)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ -n "${BASE_SPDK_IMAGE}" ]]; then
+            echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=${BASE_SPDK_IMAGE}" >> "$GITHUB_ENV"
+            echo "Base SPDK image exported: ${BASE_SPDK_IMAGE}"
+          else
+            echo "Base SPDK image not provided; bootstrap will use its default"
+          fi
+
+      - name: Resolve KEY_PATH and validate key exists
         shell: bash
         run: |
           set -euxo pipefail
 
           kp="${KEY_PATH}"
-
-          # Strip wrapping quotes if user typed "~/.ssh/..." with quotes
           kp="${kp%\"}"; kp="${kp#\"}"
           kp="${kp%\'}"; kp="${kp#\'}"
-
-          # Normalize ".ssh/..." -> "$HOME/.ssh/..."
-          if [[ "$kp" == .ssh/* ]]; then
-            kp="${HOME}/${kp}"
-          fi
-
-          # Normalize "~/" -> "$HOME/"
-          if [[ "$kp" == ~/* ]]; then
-            kp="${HOME}/${kp#~/}"
-          fi
-
-          # Also handle "~.ssh/.." (unlikely, but safe)
-          if [[ "$kp" == "~.ssh/"* ]]; then
-            kp="${HOME}/.${kp#~.}"
-          fi
+          if [[ "$kp" == .ssh/* ]]; then kp="${HOME}/${kp}"; fi
+          if [[ "$kp" == ~/* ]]; then kp="${HOME}/${kp#~/}"; fi
+          if [[ "$kp" == "~.ssh/"* ]]; then kp="${HOME}/.${kp#~.}"; fi
 
           echo "Resolved KEY_PATH=$kp"
           echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
@@ -200,7 +310,6 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          # KEY_PATH is already resolved and exported to $GITHUB_ENV in previous step
           key_name="$(basename "${KEY_PATH}")"
           echo "KEY_NAME=${key_name}" >> "$GITHUB_ENV"
           echo "Exported KEY_NAME=${key_name}"
@@ -212,8 +321,7 @@ jobs:
           [[ -n "${SSH_PASSWORD}" ]] || (echo "ERROR: secrets.SSH_PASSWORD required" && exit 1)
 
       # ============================================================
-      # PRE-RUN CLEANUP (remote ops only)
-      # Targets = MNODES + STORAGE_PRIVATE_IPS + CLIENTNODES
+      # PRE-BOOTSTRAP CLEANUP
       # ============================================================
       - name: Pre-clean kill fio/tmux and unmount NFS on MNODES + storage + clients
         shell: bash
@@ -243,7 +351,7 @@ jobs:
               fi"
           done
 
-      - name: Client cleanup disconnect lvols; ensure NFS not mounted anywhere; unmount all /mnt; remove /mnt dirs
+      - name: Destroy/clean storage nodes (deploy-cleaner, docker prune, uninstall sbcli, k3s)
         shell: bash
         run: |
           set -euxo pipefail
@@ -257,7 +365,46 @@ jobs:
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
-          # disconnect lvol subsystems on clients
+          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          for ip in $uniq_targets; do
+            echo "---- storage destroy/clean: $ip ----"
+            run_remote "$ip" "set -euxo pipefail;
+              systemctl stop firewalld || true;
+              systemctl stop ufw || true;
+              sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true;
+
+              '${SBCLI_CMD}' sn deploy-cleaner || echo 'WARN: deploy-cleaner failed';
+
+              docker stop \$(docker ps -aq) || true;
+              docker rm -f \$(docker ps -aq) || true;
+              docker builder prune --all -f || true;
+              docker system prune -af || true;
+              docker volume prune -f || true;
+              docker rmi -f \$(docker images -aq) || true;
+
+              pip uninstall -y '${SBCLI_CMD}' || echo 'WARN: uninstall sbcli failed';
+              pip uninstall -y sbctl || echo 'WARN: uninstall sbctl failed';
+              rm -rf /usr/local/bin/sbc* || true;
+              k3s-agent-uninstall.sh || true"
+            sleep 10
+          done
+
+      - name: Client cleanup disconnect lvols; unmount all /mnt; remove /mnt dirs
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
+          }
+
           for ip in $CLIENTNODES; do
             echo "---- client disconnect lvols: $ip ----"
             run_remote "$ip" "set -euxo pipefail;
@@ -265,7 +412,6 @@ jobs:
               for s in \$subsystems; do nvme disconnect -n \"\$s\" || true; done"
           done
 
-          # fail if NFS still mounted anywhere
           targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
@@ -279,7 +425,6 @@ jobs:
           done
           [[ "$still" -eq 0 ]] || exit 1
 
-          # unmount all /mnt and remove dirs on clients
           for ip in $CLIENTNODES; do
             echo "---- client unmount all /mnt and remove dirs: $ip ----"
             run_remote "$ip" "set -euxo pipefail;
@@ -289,22 +434,172 @@ jobs:
               for d in \$dirs; do rm -rf \"\$d\" || true; done"
           done
 
+      - name: Remove /etc/simplyblock; reboot storage; disk reset + PCI rebind + mklabel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
+          }
+
+          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+          for ip in $uniq_targets; do
+            run_remote "$ip" "rm -rf /etc/simplyblock || true"
+          done
+
+          for ip in $STORAGE_PRIVATE_IPS; do
+            echo "---- reboot storage: $ip ----"
+            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+              "nohup reboot >/dev/null 2>&1 &" || true
+          done
+
+          for ip in $STORAGE_PRIVATE_IPS; do
+            echo "Waiting for $ip..."
+            for i in {1..60}; do
+              if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
+                "echo online" >/dev/null 2>&1; then
+                echo "$ip online"
+                break
+              fi
+              sleep 10
+              [[ "$i" -lt 60 ]] || (echo "ERROR: $ip did not come online" && exit 1)
+            done
+          done
+
+          for ip in $STORAGE_PRIVATE_IPS; do
+            echo "---- disk reset on $ip ----"
+            run_remote "$ip" "set -euxo pipefail;
+              for dev in /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1; do
+                if [[ -b \$dev ]]; then
+                  parted \$dev --script rm 1 || true;
+                  parted \$dev --script rm 2 || true;
+                  parted \$dev --script rm 3 || true;
+                fi
+              done;
+
+              for pci in \$(lspci -D | grep 'QEMU NVM Express' | awk '{print \$1}' || true); do
+                echo \$pci > /sys/bus/pci/drivers/nvme/unbind || true;
+              done;
+
+              for i in 2 3 4 5; do
+                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/uio_pci_generic/unbind || true;
+              done;
+              for i in 2 3 4 5; do
+                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/vfio-pci/unbind || true;
+              done;
+
+              for i in 2 3 4 5; do
+                echo nvme > /sys/bus/pci/devices/0000:00:0\${i}.0/driver_override || true;
+              done;
+              for i in 2 3 4 5; do
+                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/nvme/bind || true;
+              done;
+
+              for i in 0 1 2 3; do
+                dev=/dev/nvme\${i}n1;
+                if [[ -b \$dev ]]; then
+                  parted -fs \$dev mklabel gpt || true;
+                fi
+              done"
+          done
+
       # ============================================================
-      # E2E TESTS (runner only)
+      # BOOTSTRAP (using BASE_SBCLI_BRANCH + BASE_SPDK_IMAGE)
       # ============================================================
-      - name: Clone sbcli repo (prefer same branch as workflow; fallback to SBCLI_BRANCH)
+      - name: Clone simplyBlockDeploy (bootstrap repo)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf simplyBlockDeploy
+          git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
+          test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
+
+      - name: Bootstrap single-node cluster (BASE_SBCLI_BRANCH=${{ inputs.BASE_SBCLI_BRANCH }})
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd simplyBlockDeploy/bare-metal
+          chmod +x ./bootstrap-cluster.sh
+
+          extra_args=()
+          # BASE_SPDK_IMAGE exported as SIMPLY_BLOCK_SPDK_ULTRA_IMAGE in an earlier step
+          if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
+            extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
+          fi
+          # Always force single-node for this workflow
+          extra_args+=( --is-single-node true )
+          if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
+            extra_args+=( --enable-node-affinity true )
+          fi
+
+          set +e
+          ./bootstrap-cluster.sh \
+            --sbcli-cmd "${SBCLI_CMD}" \
+            --max-lvol "${BOOTSTRAP_MAX_LVOL}" \
+            --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
+            --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
+            --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
+            --ha-jm-count "${BOOTSTRAP_HA_JM_COUNT}" \
+            --ha-type "${BOOTSTRAP_HA_TYPE}" \
+            --data-nics "${BOOTSTRAP_DATA_NIC}" \
+            "${extra_args[@]}" | tee bootstrap.log
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          [[ "$rc" -eq 0 ]] || (echo "ERROR: bootstrap failed (rc=$rc)" && exit "$rc")
+
+      - name: Fetch CLUSTER_ID and CLUSTER_SECRET from MNODES
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          ssh_common=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "${KEY_PATH}")
+
+          cluster_id="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster list" | grep -Eo '[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}' | head -n 1)"
+
+          if [[ -z "${cluster_id}" ]]; then
+            echo "ERROR: Could not extract cluster_id from '${SBCLI_CMD} cluster list' on ${mgmt_ip}"
+            ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" "${SBCLI_CMD} cluster list" || true
+            exit 1
+          fi
+
+          cluster_secret="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster get-secret ${cluster_id}" | tr -d '\r' | tail -n 1 | xargs)"
+
+          if [[ -z "${cluster_secret}" ]]; then
+            echo "ERROR: Could not get cluster_secret from '${SBCLI_CMD} cluster get-secret ${cluster_id}' on ${mgmt_ip}"
+            exit 1
+          fi
+
+          echo "CLUSTER_ID=${cluster_id}" >> "$GITHUB_ENV"
+          echo "CLUSTER_SECRET=${cluster_secret}" >> "$GITHUB_ENV"
+          echo "Fetched CLUSTER_ID=${cluster_id}"
+          echo "Fetched CLUSTER_SECRET=***set***"
+
+      # ============================================================
+      # UPGRADE E2E TESTS (clone from TARGET_SBCLI_BRANCH)
+      # ============================================================
+      - name: Clone sbcli repo (prefer workflow branch; fallback to TARGET_SBCLI_BRANCH)
         shell: bash
         run: |
           set -euxo pipefail
           rm -rf sbcli
 
           wf_branch="${{ github.ref_name }}"
-          fallback_branch="${SBCLI_BRANCH}"
+          fallback_branch="${TARGET_SBCLI_BRANCH}"
 
           echo "Workflow branch: $wf_branch"
-          echo "Fallback sbcli branch: $fallback_branch"
+          echo "Fallback sbcli branch (TARGET_SBCLI_BRANCH): $fallback_branch"
 
-          # Try workflow branch first
           if git ls-remote --heads https://github.com/simplyblock-io/sbcli.git "$wf_branch" | grep -q "$wf_branch"; then
             echo "Cloning sbcli on workflow branch: $wf_branch"
             git clone --branch "$wf_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
@@ -313,7 +608,8 @@ jobs:
             git clone --branch "$fallback_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
           fi
 
-          test -f sbcli/e2e/e2e.py
+          test -f sbcli/e2e/upgrade_e2e.py
+          test -f sbcli/e2e/e2e_tests/upgrade_tests/major_upgrade.py
           test -f sbcli/e2e/logs/cleanup.py
 
       - name: Install Python deps (best-effort)
@@ -325,7 +621,7 @@ jobs:
             pip install -r sbcli/e2e/requirements.txt
           fi
 
-      - name: Cleanup logs before e2e
+      - name: Cleanup logs before upgrade e2e
         shell: bash
         working-directory: sbcli/e2e
         run: |
@@ -337,7 +633,7 @@ jobs:
         run: |
           set -euxo pipefail
           RUN_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-          RUN_BASE_DIR="${NFS_MOUNTPOINT}/e2e-run-${RUN_TIMESTAMP}-${GITHUB_RUN_ID}"
+          RUN_BASE_DIR="${NFS_MOUNTPOINT}/upgrade-single-run-${RUN_TIMESTAMP}-${GITHUB_RUN_ID}"
           echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV"
           mkdir -p "${RUN_BASE_DIR}"
 
@@ -348,7 +644,7 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
-      - name: Run e2e tests
+      - name: Run upgrade e2e tests (major_upgrade_single)
         shell: bash
         working-directory: sbcli/e2e
         run: |
@@ -357,10 +653,12 @@ jobs:
           if [[ -n "${TEST_CLASS:-}" ]]; then
             TESTNAME_ARGS=(--testname "${TEST_CLASS}")
           fi
-          python3 -u e2e.py \
+          python3 -u upgrade_e2e.py \
+            --base_version "${BASE_SBCLI_BRANCH}" \
+            --target_version "${TARGET_SBCLI_BRANCH}" \
+            --base_spdk_image "${BASE_SPDK_IMAGE}" \
+            --target_spdk_image "${TARGET_SPDK_IMAGE}" \
             "${TESTNAME_ARGS[@]}" \
-            --ndcs "${NDCS}" \
-            --npcs "${NPCS}" \
             2>&1 | tee output.log
 
       - name: Mark test end time (always)
@@ -421,7 +719,6 @@ jobs:
           run_cmd(f"{sbcli} sn list",                                     f"{outdir}/mgmt/sn_list.txt")
           run_cmd(f"{sbcli} sn list --json",                              f"{outdir}/mgmt/sn_list.json")
 
-          # Parse SN UUIDs
           sn_uuids = []
           try:
               with open(f"{outdir}/mgmt/sn_list.json") as f:
@@ -440,7 +737,6 @@ jobs:
 
           run_cmd(f"{sbcli} cluster list-tasks {cluster_id} --limit 0",  f"{outdir}/mgmt/cluster_list_tasks.txt")
 
-          # Parse balancing task IDs and get subtasks
           bal_ids = []
           try:
               with open(f"{outdir}/mgmt/cluster_list_tasks.txt") as f:
@@ -448,7 +744,6 @@ jobs:
                       if line.startswith("+") or "Task ID" in line or "|" not in line:
                           continue
                       cols = [c.strip() for c in line.split("|")]
-                      # cols[1] = task_id, cols[3] = function name
                       if len(cols) >= 5 and cols[3] == "balancing_on_restart" and cols[1]:
                           bal_ids.append(cols[1])
           except Exception:
@@ -505,7 +800,7 @@ jobs:
           set -euxo pipefail
 
           python3 - <<'PY'
-          import os, subprocess, sys, textwrap
+          import os, subprocess, sys
 
           ssh_user = os.environ["SSH_USER"]
           key = os.environ["KEY_PATH"]
@@ -587,13 +882,8 @@ jobs:
           echo "$TAR"
           """
 
-          # NOTE: the only heredoc above (<<'PYIN') is inside the REMOTE SCRIPT,
-          # not inside YAML. YAML never sees it (we send script via stdin).
-
           for ip in storage_ips:
               print(f"=== {ip} ===", flush=True)
-
-              # Run remote script via stdin (no YAML heredoc)
               cmd = ssh_base + [f"{ssh_user}@{ip}", "bash", "-s"]
               p = subprocess.run(cmd, input=remote_script.encode(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
               out = p.stdout.decode(errors="replace").strip().splitlines()
@@ -635,13 +925,13 @@ jobs:
           dur_h=$((dur_sec/3600)); dur_m=$(((dur_sec%3600)/60)); dur_s=$((dur_sec%60))
           dur_fmt="${dur_h}h ${dur_m}m ${dur_s}s"
 
-          # --- Parse test counts from output.log ---
+          # --- Parse test counts ---
           total_cases=0; passed_cases=0; failed_cases=0; skipped_cases=0
           if [[ -f "${out_log}" ]]; then
-            v="$(grep -m1 'Number of Total Cases:'   "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && total_cases="${v}"
-            v="$(grep -m1 'Number of Passed Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && passed_cases="${v}"
-            v="$(grep -m1 'Number of Failed Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && failed_cases="${v}"
-            v="$(grep -m1 'Number of Skipped Cases:' "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && skipped_cases="${v}"
+            v="$(grep -m1 'Total Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && total_cases="${v}"
+            v="$(grep -m1 'Passed:'       "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && passed_cases="${v}"
+            v="$(grep -m1 'Failed:'       "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && failed_cases="${v}"
+            v="$(grep -m1 'Skipped:'      "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && skipped_cases="${v}"
           fi
 
           pass_pct=0; fail_pct=0; skip_pct=0
@@ -651,41 +941,23 @@ jobs:
             skip_pct=$(( (skipped_cases * 100) / total_cases ))
           fi
 
-          # --- Parse NFS log paths in run order (1 per test, sequential execution) ---
-          mapfile -t log_path_arr < <(grep 'Logs Path:' "${out_log}" 2>/dev/null \
-            | sed 's/.*Logs Path: *//' | sed 's/\x1b\[[0-9;]*m//g' | sed 's/[[:space:]]*$//' || true)
-
-          # --- Parse per-test status lines in run order ---
-          test_names=(); test_statuses=()
+          # --- Per-test status ---
+          test_details_table=""
           if [[ -f "${out_log}" ]]; then
             while IFS= read -r line; do
               clean="$(printf '%s' "${line}" | sed 's/\x1b\[[0-9;]*m//g')"
               test_name="$(printf '%s' "${clean}" | grep -oE 'Test[A-Za-z0-9]+' | head -n1 || true)"
               [[ -z "${test_name}" ]] && continue
-              if   printf '%s' "${clean}" | grep -q 'PASSED CASE';  then test_names+=("${test_name}"); test_statuses+=("PASSED")
-              elif printf '%s' "${clean}" | grep -q 'FAILED CASE';  then test_names+=("${test_name}"); test_statuses+=("FAILED")
-              elif printf '%s' "${clean}" | grep -q 'SKIPPED CASE'; then test_names+=("${test_name}"); test_statuses+=("SKIPPED")
+              if   printf '%s' "${clean}" | grep -qi 'PASSED';  then icon="✅"; status="PASSED"
+              elif printf '%s' "${clean}" | grep -qi 'FAILED';  then icon="❌"; status="FAILED"
+              elif printf '%s' "${clean}" | grep -qi 'SKIPPED'; then icon="⏭"; status="SKIPPED"
+              else continue
               fi
-            done < <(grep -E ' (PASSED|FAILED|SKIPPED) CASE\.' "${out_log}" 2>/dev/null || true)
+              test_details_table+="| \`${test_name}\` | ${icon} ${status} |"$'\n'
+            done < <(grep -iE 'PASSED|FAILED|SKIPPED' "${out_log}" 2>/dev/null || true)
           fi
 
-          # --- Build per-test details table: associate by position ---
-          # Tests run sequentially → log_path_arr[i] belongs to test_names[i]
-          test_details_table=""
-          for i in "${!test_names[@]}"; do
-            name="${test_names[$i]}"
-            status="${test_statuses[$i]}"
-            path="${log_path_arr[$i]:-N/A}"
-            case "${status}" in
-              PASSED)  icon="✅" ;;
-              FAILED)  icon="❌" ;;
-              SKIPPED) icon="⏭" ;;
-              *)       icon="❓" ;;
-            esac
-            test_details_table+="| \`${name}\` | ${icon} ${status} | \`${path}\` |"$'\n'
-          done
-
-          # --- Failure reason: prefer MultipleExceptions summary line ---
+          # --- Failure reason ---
           failure_reason=""
           if [[ -f "${out_log}" ]]; then
             multi="$(grep 'MultipleExceptions:' "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
@@ -696,7 +968,7 @@ jobs:
             fi
           fi
 
-          # --- Mgmt artifacts list (collapsed) ---
+          # --- Mgmt artifacts ---
           mgmt_dir="${RUN_BASE_DIR:-}/${mgmt_ip}/mgmt_details/mgmt"
           mgmt_files="(not found)"
           if [[ -n "${RUN_BASE_DIR:-}" && -d "${mgmt_dir}" ]]; then
@@ -704,16 +976,22 @@ jobs:
             [[ -n "${mgmt_files}" ]] || mgmt_files="(empty)"
           fi
 
-          # --- Overall result ---
           conclusion="✅ SUCCESS"
           if [[ "${{ job.status }}" != "success" ]]; then
             conclusion="❌ FAILED"
           fi
 
           {
-            echo "## SimplyBlock E2E Run Summary"
+            echo "## SimplyBlock Upgrade E2E Run Summary (Single Node)"
             echo ""
             echo "**Result:** ${conclusion} &nbsp;|&nbsp; **Duration:** ${dur_fmt}"
+            echo ""
+
+            echo "### Upgrade"
+            echo "| | Branch | SPDK Image |"
+            echo "|---|---|---|"
+            echo "| **Base**   | \`${BASE_SBCLI_BRANCH}\`   | \`${BASE_SPDK_IMAGE:-default}\` |"
+            echo "| **Target** | \`${TARGET_SBCLI_BRANCH}\` | \`${TARGET_SPDK_IMAGE:-default}\` |"
             echo ""
 
             echo "### Test Results"
@@ -727,8 +1005,8 @@ jobs:
 
             if [[ -n "${test_details_table}" ]]; then
               echo "### Test Case Details"
-              echo "| Test | Result | Log Path |"
-              echo "|---|---|---|"
+              echo "| Test | Result |"
+              echo "|---|---|"
               printf '%s' "${test_details_table}"
               echo ""
             fi
@@ -737,7 +1015,6 @@ jobs:
             echo "- **Test class:** \`${TEST_CLASS:-all}\`"
             echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
             echo "- **Mgmt node:** \`${mgmt_ip}\`"
-            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
             echo "- **Start (UTC):** ${TEST_START_HUMAN:-unknown}"
             echo "- **End (UTC):** ${TEST_END_HUMAN:-unknown}"
             echo ""
@@ -754,15 +1031,12 @@ jobs:
               echo "<details><summary>Run Artifacts (NFS)</summary>"
               echo ""
               echo "- **Run dir:** \`${RUN_BASE_DIR}/\`"
-              echo "- Mgmt details: \`${RUN_BASE_DIR}/${mgmt_ip}/mgmt_details/\`"
-              echo "- Docker logs: \`${RUN_BASE_DIR}/<node_ip>/containers-final-*/\`"
-              echo "- Distrib dumps: \`${RUN_BASE_DIR}/<storage_ip>/finaldistrib_bdev_logs/\`"
               echo ""
               echo "</details>"
               echo ""
             fi
 
-            echo "<details><summary>Mgmt Artifacts (cluster state at end of run)</summary>"
+            echo "<details><summary>Mgmt Artifacts</summary>"
             echo ""
             echo "Path: \`${mgmt_dir}\`"
             echo ""
@@ -781,8 +1055,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           GITHUB_REF_NAME: ${{ github.ref_name }}
-          SLACK_WF_NAME: "E2E (No Bootstrap)"
-          SBCLI_BRANCH: ${{ env.SBCLI_BRANCH }}
+          SLACK_WF_NAME: "E2E (Upgrade Bootstrap Single Node)"
         run: |
           python3 - <<'PYEOF'
           import json, os, re, sys, urllib.request, urllib.error
@@ -795,32 +1068,27 @@ jobs:
           out_log = "sbcli/e2e/output.log"
           content = open(out_log).read() if os.path.isfile(out_log) else ""
 
-          # --- Counts ---
           def px(pat):
               m = re.search(pat, content)
               return int(m.group(1)) if m else 0
-          total   = px(r'Number of Total Cases:\s*(\d+)')
-          passed  = px(r'Number of Passed Cases:\s*(\d+)')
-          failed  = px(r'Number of Failed Cases:\s*(\d+)')
-          skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          total   = px(r'Total Cases:\s*(\d+)')
+          passed  = px(r'Passed:\s*(\d+)')
+          failed  = px(r'Failed:\s*(\d+)')
+          skipped = px(r'Skipped:\s*(\d+)')
           pass_pct = (passed * 100 // total) if total > 0 else 0
 
-          # --- Per-test results ---
           ansi = re.compile(r'\x1b\[[0-9;]*m')
-          test_results = []  # list of (status, name)
+          test_results = []
           for line in content.splitlines():
               clean = ansi.sub('', line)
-              if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', clean):
-                  continue
               m = re.search(r'Test[A-Za-z0-9_]+', clean)
               if not m:
                   continue
               name = m.group(0)
-              if   'PASSED CASE'  in clean: test_results.append(('PASSED',  name))
-              elif 'FAILED CASE'  in clean: test_results.append(('FAILED',  name))
-              elif 'SKIPPED CASE' in clean: test_results.append(('SKIPPED', name))
+              if   'PASSED'  in clean: test_results.append(('PASSED',  name))
+              elif 'FAILED'  in clean: test_results.append(('FAILED',  name))
+              elif 'SKIPPED' in clean: test_results.append(('SKIPPED', name))
 
-          # --- Failure reason ---
           failure_reason = ""
           multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
           if multi:
@@ -831,20 +1099,20 @@ jobs:
               if exc_lines:
                   failure_reason = '\n'.join(exc_lines[-3:])[:600]
 
-          # --- Env ---
           s    = int(os.environ.get("TEST_START_EPOCH", "0") or "0")
           e    = int(os.environ.get("TEST_END_EPOCH",   "0") or "0")
           secs = max(0, e - s) if e >= s > 0 else 0
           dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
-          run_url     = os.environ.get("SLACK_RUN_URL",   "")
-          log_dir     = os.environ.get("RUN_BASE_DIR",    "N/A")
-          ndcs        = os.environ.get("NDCS",            "?")
-          npcs        = os.environ.get("NPCS",            "?")
-          test_cls    = os.environ.get("TEST_CLASS",      "") or "all"
-          branch      = os.environ.get("GITHUB_REF_NAME", "?")
-          sbcli_branch= os.environ.get("SBCLI_BRANCH",    "?")
-          wf_name     = os.environ.get("SLACK_WF_NAME",   "Run")
-          ok          = os.environ.get("JOB_STATUS",      "") == "success"
+          run_url       = os.environ.get("SLACK_RUN_URL",       "")
+          log_dir       = os.environ.get("RUN_BASE_DIR",        "N/A")
+          base_branch   = os.environ.get("BASE_SBCLI_BRANCH",   "?")
+          base_spdk     = os.environ.get("BASE_SPDK_IMAGE",     "") or "default"
+          target_branch = os.environ.get("TARGET_SBCLI_BRANCH", "?")
+          target_spdk   = os.environ.get("TARGET_SPDK_IMAGE",   "") or "default"
+          test_cls      = os.environ.get("TEST_CLASS",          "") or "all"
+          branch        = os.environ.get("GITHUB_REF_NAME",     "?")
+          wf_name       = os.environ.get("SLACK_WF_NAME",       "Run")
+          ok            = os.environ.get("JOB_STATUS",          "") == "success"
 
           icon    = ":white_check_mark:" if ok else ":x:"
           status  = "SUCCESS" if ok else "FAILURE"
@@ -853,8 +1121,9 @@ jobs:
           lines = [
               f"{icon} *SimplyBlock {wf_name}*{mention}",
               f"*Status:* {status}  |  *Duration:* {dur}",
-              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
-              f"*SBCLI Branch:* `{sbcli_branch}`",
+              f"*Branch:* `{branch}`  |  *Test class:* `{test_cls}`",
+              f"*Upgrade:* `{base_branch}` → `{target_branch}`",
+              f"*Base SPDK:* `{base_spdk}`  |  *Target SPDK:* `{target_spdk}`",
               "",
           ]
 
@@ -900,8 +1169,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: simplyblock-e2e-logs-${{ github.run_id }}
+          name: simplyblock-upgrade-single-logs-${{ github.run_id }}${{ inputs.RUN_LABEL != '' && format('-{0}', inputs.RUN_LABEL) || '' }}
           path: |
+            simplyBlockDeploy/bare-metal/bootstrap.log
             sbcli/e2e/output.log
             sbcli/e2e/logs/**
           if-no-files-found: warn
@@ -916,7 +1186,7 @@ jobs:
         if: always() && env.RUN_BASE_DIR != '' && env.MGMT_IP != ''
         uses: actions/upload-artifact@v4
         with:
-          name: simplyblock-e2e-small-logs-${{ github.run_id }}
+          name: simplyblock-upgrade-single-small-logs-${{ github.run_id }}${{ inputs.RUN_LABEL != '' && format('-{0}', inputs.RUN_LABEL) || '' }}
           path: |
             sbcli/e2e/output.log
             ${{ env.RUN_BASE_DIR }}/${{ env.MGMT_IP }}/mgmt_details/mgmt/*.txt
