@@ -1579,11 +1579,11 @@ class SshUtils:
             # Always save a full container listing for later forensics
             self.exec_command(
                 node,
-                f"bash -lc \"docker ps -a > '{base_dir}/docker_ps_a_{_safe(node)}_{ts}.txt' 2>&1 || true\""
+                f"bash -lc \"sudo docker ps -a > '{base_dir}/docker_ps_a_{_safe(node)}_{ts}.txt' 2>&1 || true\""
             )
 
             # Discover container names (include exited)
-            out, _ = self.exec_command(node, "bash -lc \"docker ps -a --format '{{{{.Names}}}}' 2>/dev/null || true\"")
+            out, _ = self.exec_command(node, "bash -lc \"sudo docker ps -a --format '{{.Names}}' 2>/dev/null || true\"")
             containers = [c.strip() for c in (out or "").splitlines() if c.strip()]
 
             if not containers:
@@ -1602,7 +1602,7 @@ class SshUtils:
                 self.exec_command(
                     node,
                     "bash -lc "
-                    f"\"docker logs --timestamps {c} > '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' 2>&1 || true; "
+                    f"\"sudo docker logs --timestamps {c} > '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' 2>&1 || true; "
                     f"mv -f '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' '{cont_dir}/docker_logs_{sc}_{ts}.log' || true\""
                 )
 
@@ -1610,7 +1610,7 @@ class SshUtils:
                 self.exec_command(
                     node,
                     "bash -lc "
-                    f"\"docker inspect {c} > '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' 2>&1 || true; "
+                    f"\"sudo docker inspect {c} > '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' 2>&1 || true; "
                     f"mv -f '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' '{cont_dir}/docker_inspect_{sc}_{ts}.json' || true\""
                 )
 
@@ -1618,13 +1618,13 @@ class SshUtils:
                 # docker top (may fail on exited containers, so '|| true')
                 self.exec_command(
                     node,
-                    f"bash -lc \"docker top {c} > '{cont_dir}/docker_top_{sc}_{ts}.txt' 2>&1 || true\""
+                    f"bash -lc \"sudo docker top {c} > '{cont_dir}/docker_top_{sc}_{ts}.txt' 2>&1 || true\""
                 )
 
                 # container fs usage (size); harmless if unsupported
                 self.exec_command(
                     node,
-                    f"bash -lc \"docker inspect --size {c} > '{cont_dir}/docker_inspect_size_{sc}_{ts}.json' 2>&1 || true\""
+                    f"bash -lc \"sudo docker inspect --size {c} > '{cont_dir}/docker_inspect_size_{sc}_{ts}.json' 2>&1 || true\""
                 )
 
             # For convenience, also dump names list used

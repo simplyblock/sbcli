@@ -60,9 +60,9 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
     def _initialize_outage_log(self):
         """Create or initialize the outage log file."""
         with open(self.outage_log_file, 'w') as log:
-            log.write("Timestamp,Node,Outage_Type,Event\n")
+            log.write("Timestamp,Device_ID,PCIe,Outage_Type,Event\n")
 
-    def log_outage_event(self, node, outage_type, event, outage_time=0):
+    def log_outage_event(self, outage_type, event, outage_time=0):
         """Log an outage event to the outage log file."""
         if outage_time:
             base_epoch = getattr(self, "outage_start_time", None)
@@ -73,8 +73,10 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
         else:
             ts_dt = datetime.now()
         timestamp = ts_dt.strftime('%Y-%m-%d %H:%M:%S')
+        device_id = self.outage_device_id or "unknown"
+        pcie = self.outage_device_pcie or ""
         with open(self.outage_log_file, 'a') as log:
-            log.write(f"{timestamp},{node},{outage_type},{event}\n")
+            log.write(f"{timestamp},{device_id},{pcie},{outage_type},{event}\n")
 
     def create_lvols_with_fio(self, count):
         """Create lvols and start FIO with random configurations."""
@@ -218,7 +220,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
             f"Performing {outage_type} on device {self.outage_device_id} "
             f"(PCI: {self.outage_device_pcie}) on node {self.current_outage_node}"
         )
-        self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
+        self.log_outage_event(outage_type, "Outage started")
 
         if outage_type == "device_remove_logical":
             self.ssh_obj.exec_command(
@@ -239,7 +241,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
     def restart_nodes_after_failover(self, outage_type):
         """Recover the device after an outage."""
         self.logger.info(f"Recovering from {outage_type} for device {self.outage_device_id}")
-        self.log_outage_event(self.current_outage_node, outage_type, "Recovery started")
+        self.log_outage_event(outage_type, "Recovery started")
 
         if outage_type == "device_remove_logical":
             self.ssh_obj.restart_device(
@@ -266,7 +268,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
         )
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=600)
         self.outage_end_time = int(datetime.now().timestamp())
-        self.log_outage_event(self.current_outage_node, outage_type, "Device recovered")
+        self.log_outage_event(outage_type, "Device recovered")
 
         search_start_iso = datetime.fromtimestamp(self.outage_start_time - 30).isoformat(timespec='microseconds')
         search_end_iso = datetime.fromtimestamp(self.outage_end_time + 10).isoformat(timespec='microseconds')

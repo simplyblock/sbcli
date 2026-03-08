@@ -369,18 +369,39 @@ class TestClusterBase:
         cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0 >& {base_path}/cluster_list_tasks{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
-        
+
+        # Collect subtasks for balancing_on_restart tasks
+        try:
+            tasks_out, _ = self.ssh_obj.exec_command(
+                node=self.mgmt_nodes[0],
+                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0"
+            )
+            for line in (tasks_out or "").splitlines():
+                if "balancing_on_restart" not in line:
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                # Table rows have a leading empty cell from '| id | ...'
+                # Column layout: | id | function | status | ...
+                tid = next((p for p in parts if p and p != "id"), None)
+                if not tid:
+                    continue
+                sub_cmd = f"{self.base_cmd} cluster get-subtasks {tid} >& {base_path}/subtask_{tid}{suffix}.txt"
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=sub_cmd)
+        except Exception as e:
+            self.logger.warning(f"Failed to collect subtasks: {e}")
+
         cmd = f"{self.base_cmd} sn list >& {base_path}/sn_list{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
+
+        cmd = f"{self.base_cmd} sn list --json >& {base_path}/sn_list{suffix}.json"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+
         cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
-        
-        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity{suffix}.txt"
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=cmd)
-        
+
         cmd = f"{self.base_cmd} cluster show {self.cluster_id} >& {base_path}/cluster_show{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
