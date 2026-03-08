@@ -46,13 +46,13 @@ def task_runner(task):
         return False
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-        current_online_devices = 0
+        current_online_devices = []
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             if node.is_secondary_node:  # pass
                 continue
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
-                    current_online_devices += 1
+                    current_online_devices.append(dev.get_id())
             if node.status == StorageNode.STATUS_ONLINE and node.online_since:
                 try:
                     diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
@@ -64,12 +64,12 @@ def task_runner(task):
                 except Exception as e:
                     logger.error(f"Failed to get online since: {e}")
 
-        migration_devices = 0
+        migration_devices = []
         if "migration_devices" in task.function_params:
             migration_devices = task.function_params["migration_devices"]
 
-        if current_online_devices < migration_devices:
-            task.function_result = f"only {current_online_devices} devices online, waiting for more devices to be online"
+        if current_online_devices == migration_devices:
+            task.function_result = "Waiting for more devices to be online"
             task.status = JobSchedule.STATUS_SUSPENDED
             task.retry += 1
             task.write_to_db(db.kv_store)
@@ -83,11 +83,11 @@ def task_runner(task):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
     if "migration" not in task.function_params:
-        current_online_devices = 0
+        current_online_devices = []
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             for dev in node.nvme_devices:
                 if dev.status == NVMeDevice.STATUS_ONLINE:
-                    current_online_devices += 1
+                    current_online_devices.append(dev.get_id())
 
         distr_name = task.function_params["distr_name"]
 
