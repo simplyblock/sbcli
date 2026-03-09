@@ -24,6 +24,9 @@ class JobSchedule(BaseModel):
     FN_JC_COMP_RESUME = "jc_comp_resume"
     FN_LVOL_SYNC_DEL = "lvol_sync_del"
     FN_LVOL_MIG = "lvol_migration"
+    FN_BACKUP = "s3_backup"
+    FN_BACKUP_RESTORE = "s3_backup_restore"
+    FN_BACKUP_MERGE = "s3_backup_merge"
 
     canceled: bool = False
     cluster_id: str = ""

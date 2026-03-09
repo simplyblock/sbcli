@@ -251,10 +251,16 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
     return passed
 
 
-def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None, auto_fix=False) -> bool:
+def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None, auto_fix=False, primary_node_id=None) -> bool:
     db_controller = DBController()
+    # If a specific primary is given, use it; otherwise resolve from back-references
+    if not primary_node_id:
+        primary_node_id = node.lvstore_stack_secondary_1 or node.lvstore_stack_secondary_2
+    if not primary_node_id:
+        logger.error(f"No primary node reference found on secondary node {node.get_id()}")
+        return False
     try:
-        primary_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary_1)
+        primary_node = db_controller.get_storage_node_by_id(primary_node_id)
     except KeyError:
         logger.exception("Primary node not found")
         return False

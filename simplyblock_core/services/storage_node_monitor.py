@@ -285,7 +285,7 @@ def node_port_check_fun(snode):
     node_port_check = True
     if snode.lvstore_status == "ready":
         ports = [snode.nvmf_port]
-        if snode.lvstore_stack_secondary_1:
+        if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                 if n.lvstore_status == "ready":
                     ports.append(n.lvol_subsys_port)

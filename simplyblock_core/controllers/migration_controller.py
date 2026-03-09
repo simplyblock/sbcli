@@ -459,11 +459,12 @@ def apply_migration_to_db(migration):
     lvol.hostname = tgt_node.hostname
     lvol.lvs_name = tgt_node.lvstore
 
-    # Update the nodes list (primary + optional secondary)
+    # Update the nodes list (primary + all secondaries)
+    lvol.nodes = [tgt_node.get_id()]
     if tgt_node.secondary_node_id:
-        lvol.nodes = [tgt_node.get_id(), tgt_node.secondary_node_id]
-    else:
-        lvol.nodes = [tgt_node.get_id()]
+        lvol.nodes.append(tgt_node.secondary_node_id)
+    if tgt_node.secondary_node_id_2:
+        lvol.nodes.append(tgt_node.secondary_node_id_2)
 
     lvol.write_to_db(db.kv_store)
     logger.info(

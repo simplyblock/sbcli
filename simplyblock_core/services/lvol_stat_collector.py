@@ -243,15 +243,19 @@ while True:
                 except Exception as e:
                     logger.error(e)
 
-            if snode.secondary_node_id:
-                sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+                if not sec_id:
+                    continue
+                try:
+                    sec_node = db.get_storage_node_by_id(sec_id)
+                except KeyError:
+                    continue
                 if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
                     try:
                         sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
                         if sec_node.get_id() not in all_node_bdev_names or not all_node_bdev_names[sec_node.get_id()]:
                                 ret = sec_rpc_client.get_bdevs()
                                 if ret:
-                                    # node_bdev_names = {}
                                     node_bdev_names = {b['name']: b for b in ret}
                                     all_node_bdev_names[sec_node.get_id()] = node_bdev_names
                         if sec_node.get_id() not in all_node_lvols_nqns or not all_node_lvols_nqns[sec_node.get_id()]:
@@ -286,15 +290,19 @@ while True:
                     capacity_dict = all_node_bdev_names[snode.get_id()][lvol.lvol_uuid]
 
                 if lvol.ha_type == "ha":
-                    sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-                    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                        logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
-                        if lvol.lvol_uuid in all_node_lvols_stats[sec_node.get_id()]:
-                            stats.append(all_node_lvols_stats[sec_node.get_id()][lvol.lvol_uuid])
+                    for sec_id in lvol.nodes[1:]:
+                        try:
+                            sec_node = db.get_storage_node_by_id(sec_id)
+                        except KeyError:
+                            continue
+                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                            logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
+                            if sec_node.get_id() in all_node_lvols_stats and lvol.lvol_uuid in all_node_lvols_stats[sec_node.get_id()]:
+                                stats.append(all_node_lvols_stats[sec_node.get_id()][lvol.lvol_uuid])
 
-                    if not capacity_dict and sec_node.get_id() in all_node_bdev_names \
-                            and lvol.lvol_uuid in all_node_bdev_names[sec_node.get_id()]:
-                        capacity_dict = all_node_bdev_names[sec_node.get_id()][lvol.lvol_uuid]
+                        if not capacity_dict and sec_node.get_id() in all_node_bdev_names \
+                                and lvol.lvol_uuid in all_node_bdev_names[sec_node.get_id()]:
+                            capacity_dict = all_node_bdev_names[sec_node.get_id()][lvol.lvol_uuid]
 
                 record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
                 if record:

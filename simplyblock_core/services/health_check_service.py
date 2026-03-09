@@ -210,38 +210,48 @@ def check_node(snode):
             lvstore_check &= health_controller._check_node_lvstore(
                 lvstore_stack, snode, auto_fix=True, node_bdev_names=node_bdev_names)
 
+            sec_ids_to_check = []
             if snode.secondary_node_id:
+                sec_ids_to_check.append(snode.secondary_node_id)
+            if snode.secondary_node_id_2:
+                sec_ids_to_check.append(snode.secondary_node_id_2)
+
+            if sec_ids_to_check:
 
                 lvstore_check &= health_controller._check_node_hublvol(
                     snode, node_bdev_names=node_bdev_names, node_lvols_nqns=subsystems)
 
-                second_node_1 = db.get_storage_node_by_id(snode.secondary_node_id)
-                if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
-                    lvstore_check &= health_controller._check_node_lvstore(
-                        lvstore_stack, second_node_1, auto_fix=True, stack_src_node=snode)
-                    sec_node_check = health_controller._check_sec_node_hublvol(second_node_1)
-                    if not sec_node_check:
-                        if snode.status == StorageNode.STATUS_ONLINE:
-                            ret = second_node_1.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                            if ret:
-                                lvs_info = ret[0]
-                                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                    # is_sec_node_leader = True
-                                    # check jc_compression status
-                                    jc_compression_is_active = second_node_1.rpc_client().jc_compression_get_status(
-                                        snode.jm_vuid)
-                                    if not jc_compression_is_active:
-                                        lvstore_check &= health_controller._check_sec_node_hublvol(second_node_1,
-                                                                                                   auto_fix=True)
+                for sec_id in sec_ids_to_check:
+                    sec_node = db.get_storage_node_by_id(sec_id)
+                    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                        lvstore_check &= health_controller._check_node_lvstore(
+                            lvstore_stack, sec_node, auto_fix=True, stack_src_node=snode)
+                        sec_node_check = health_controller._check_sec_node_hublvol(
+                            sec_node, primary_node_id=snode.get_id())
+                        if not sec_node_check:
+                            if snode.status == StorageNode.STATUS_ONLINE:
+                                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                                if ret:
+                                    lvs_info = ret[0]
+                                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                        jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
+                                            snode.jm_vuid)
+                                        if not jc_compression_is_active:
+                                            lvstore_check &= health_controller._check_sec_node_hublvol(
+                                                sec_node, auto_fix=True, primary_node_id=snode.get_id())
 
             lvol_port_check = False
             # if node_api_check:
             ports = [snode.lvol_subsys_port]
 
-            if snode.lvstore_stack_secondary_1:
-                second_node_1 = db.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-                if second_node_1 and second_node_1.status == StorageNode.STATUS_ONLINE:
-                    ports.append(second_node_1.lvol_subsys_port)
+            for sec_stack_ref in [snode.lvstore_stack_secondary_1, snode.lvstore_stack_secondary_2]:
+                if sec_stack_ref:
+                    try:
+                        sec_ref_node = db.get_storage_node_by_id(sec_stack_ref)
+                        if sec_ref_node and sec_ref_node.status == StorageNode.STATUS_ONLINE:
+                            ports.append(sec_ref_node.lvol_subsys_port)
+                    except KeyError:
+                        pass
 
             for port in ports:
                 try:

@@ -27,6 +27,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_control_plane()
         self.init_storage_pool()
         self.init_snapshot()
+        self.init_backup()
         self.init_qos()
         super().__init__()
 
@@ -416,6 +417,11 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
         argument = subcommand.add_argument('--tls', help='Path to JSON file with NVMe-oF TLS config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)', type=str, dest='nvmeof_tls')
+        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1', type=int, default=1, dest='max_fault_tolerance', choices=[1, 2])
+        argument = subcommand.add_argument('--use-backup', help='Path to JSON file with S3/MinIO backup configuration', type=str, dest='use_backup')
+        argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420', type=int, default=4420, dest='nvmf_base_port')
+        argument = subcommand.add_argument('--rpc-base-port', help='Base port for SPDK JSON-RPC. Default: 8080', type=int, default=8080, dest='rpc_base_port')
+        argument = subcommand.add_argument('--snode-api-port', help='SNodeAPI/firewall port (one per host IP). Default: 50001', type=int, default=50001, dest='snode_api_port')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster')
@@ -444,6 +450,11 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
+        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1', type=int, default=1, dest='max_fault_tolerance', choices=[1, 2])
+        argument = subcommand.add_argument('--use-backup', help='Path to JSON file with S3/MinIO backup configuration', type=str, dest='use_backup')
+        argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420', type=int, default=4420, dest='nvmf_base_port')
+        argument = subcommand.add_argument('--rpc-base-port', help='Base port for SPDK JSON-RPC. Default: 8080', type=int, default=8080, dest='rpc_base_port')
+        argument = subcommand.add_argument('--snode-api-port', help='SNodeAPI/firewall port (one per host IP). Default: 50001', type=int, default=50001, dest='snode_api_port')
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')
@@ -822,12 +833,19 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__list(subparser)
         self.init_snapshot__delete(subparser)
         self.init_snapshot__clone(subparser)
+        self.init_snapshot__backup(subparser)
 
 
     def init_snapshot__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Creates a new snapshot')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('name', help='New snapshot name', type=str)
+        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot',
+                                dest='backup', action='store_true')
+
+    def init_snapshot__backup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'backup', 'Create an S3 backup of an existing snapshot')
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
 
     def init_snapshot__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all snapshots')
@@ -844,6 +862,64 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
 
+
+    def init_backup(self):
+        subparser = self.add_command('backup', 'Backup commands')
+        self.init_backup__list(subparser)
+        self.init_backup__delete(subparser)
+        self.init_backup__restore(subparser)
+        self.init_backup__import(subparser)
+        self.init_backup__policy_add(subparser)
+        self.init_backup__policy_remove(subparser)
+        self.init_backup__policy_list(subparser)
+        self.init_backup__policy_attach(subparser)
+        self.init_backup__policy_detach(subparser)
+
+    def init_backup__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'List all backups')
+        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+
+    def init_backup__delete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete', 'Delete all backups for a logical volume')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_backup__restore(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'restore', 'Restore a backup to a new logical volume')
+        subcommand.add_argument('backup_id', help='Backup id', type=str)
+        subcommand.add_argument('--node', help='Target node id', type=str, required=True, dest='node_id')
+        subcommand.add_argument('--lvol', help='New logical volume name', type=str, required=True, dest='lvol_name')
+        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+
+    def init_backup__import(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'import', 'Import backup metadata from a JSON file')
+        subcommand.add_argument('metadata_file', help='Path to JSON metadata file', type=str)
+
+    def init_backup__policy_add(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'policy-add', 'Create a new backup policy')
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
+        subcommand.add_argument('name', help='Policy name', type=str)
+        subcommand.add_argument('--versions', help='Maximum number of backup versions', type=int, default=None, dest='versions')
+        subcommand.add_argument('--age', help='Maximum backup age (e.g. 2d, 12h, 1w)', type=str, default=None, dest='age')
+
+    def init_backup__policy_remove(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'policy-remove', 'Remove a backup policy')
+        subcommand.add_argument('policy_id', help='Policy id', type=str)
+
+    def init_backup__policy_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'policy-list', 'List all backup policies')
+        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+
+    def init_backup__policy_attach(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'policy-attach', 'Attach a backup policy to a pool or lvol')
+        subcommand.add_argument('policy_id', help='Policy id', type=str)
+        subcommand.add_argument('target_type', help='Target type', type=str, choices=['pool', 'lvol'])
+        subcommand.add_argument('target_id', help='Target id (pool or lvol UUID)', type=str)
+
+    def init_backup__policy_detach(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'policy-detach', 'Detach a backup policy from a pool or lvol')
+        subcommand.add_argument('policy_id', help='Policy id', type=str)
+        subcommand.add_argument('target_type', help='Target type', type=str, choices=['pool', 'lvol'])
+        subcommand.add_argument('target_id', help='Target id (pool or lvol UUID)', type=str)
 
     def init_qos(self):
         subparser = self.add_command('qos', 'qos commands')
@@ -1215,6 +1291,31 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
+                elif sub_command in ['backup']:
+                    ret = self.snapshot__backup(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['backup']:
+                sub_command = args_dict['backup']
+                if sub_command in ['list']:
+                    ret = self.backup__list(sub_command, args)
+                elif sub_command in ['delete']:
+                    ret = self.backup__delete(sub_command, args)
+                elif sub_command in ['restore']:
+                    ret = self.backup__restore(sub_command, args)
+                elif sub_command in ['import']:
+                    ret = self.backup__import(sub_command, args)
+                elif sub_command in ['policy-add']:
+                    ret = self.backup__policy_add(sub_command, args)
+                elif sub_command in ['policy-remove']:
+                    ret = self.backup__policy_remove(sub_command, args)
+                elif sub_command in ['policy-list']:
+                    ret = self.backup__policy_list(sub_command, args)
+                elif sub_command in ['policy-attach']:
+                    ret = self.backup__policy_attach(sub_command, args)
+                elif sub_command in ['policy-detach']:
+                    ret = self.backup__policy_detach(sub_command, args)
                 else:
                     self.parser.print_help()
 

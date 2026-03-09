@@ -13,6 +13,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.port_stat import PortStat
+from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.qos import QOSClass
 from simplyblock_core.models.snapshot import SnapShot
@@ -304,7 +305,7 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for node in ret:
-            if node.secondary_node_id == node_id and node.lvstore:
+            if (node.secondary_node_id == node_id or node.secondary_node_id_2 == node_id) and node.lvstore:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
 
@@ -341,3 +342,70 @@ class DBController(metaclass=Singleton):
             return ret[0]
         else:
             return None
+
+    # ---- S3 Backup ----
+
+    def get_backups(self, cluster_id=None) -> List[Backup]:
+        prefix = cluster_id if cluster_id else " "
+        return Backup().read_from_db(self.kv_store, id=prefix)
+
+    def get_backup_by_id(self, backup_id) -> Backup:
+        for b in self.get_backups():
+            if b.uuid == backup_id:
+                return b
+        raise KeyError(f'Backup {backup_id} not found')
+
+    def get_backups_by_lvol_id(self, lvol_id) -> List[Backup]:
+        return [b for b in self.get_backups() if b.lvol_id == lvol_id]
+
+    def get_backups_by_snapshot_id(self, snapshot_id) -> List[Backup]:
+        return [b for b in self.get_backups() if b.snapshot_id == snapshot_id]
+
+    def get_backup_chain(self, backup_id) -> List[Backup]:
+        """Return the full backup chain ending at backup_id, oldest first."""
+        chain = []
+        current_id = backup_id
+        visited = set()
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            try:
+                backup = self.get_backup_by_id(current_id)
+            except KeyError:
+                break
+            chain.append(backup)
+            current_id = backup.prev_backup_id
+        chain.reverse()
+        return chain
+
+    def get_backup_policies(self, cluster_id=None) -> List[BackupPolicy]:
+        prefix = cluster_id if cluster_id else " "
+        return BackupPolicy().read_from_db(self.kv_store, id=prefix)
+
+    def get_backup_policy_by_id(self, policy_id) -> BackupPolicy:
+        for p in self.get_backup_policies():
+            if p.uuid == policy_id:
+                return p
+        raise KeyError(f'BackupPolicy {policy_id} not found')
+
+    def get_backup_policy_attachments(self, cluster_id=None) -> List[BackupPolicyAttachment]:
+        prefix = cluster_id if cluster_id else " "
+        return BackupPolicyAttachment().read_from_db(self.kv_store, id=prefix)
+
+    def get_policy_for_lvol(self, lvol) -> Optional[BackupPolicy]:
+        """Get the effective backup policy for an lvol.
+        LVol-level policy overrides pool-level policy."""
+        attachments = self.get_backup_policy_attachments(lvol.pool_uuid.split('/')[0] if '/' in lvol.pool_uuid else None)
+        lvol_policy_id = None
+        pool_policy_id = None
+        for att in attachments:
+            if att.target_type == "lvol" and att.target_id == lvol.get_id():
+                lvol_policy_id = att.policy_id
+            elif att.target_type == "pool" and att.target_id == lvol.pool_uuid:
+                pool_policy_id = att.policy_id
+        policy_id = lvol_policy_id or pool_policy_id
+        if policy_id:
+            try:
+                return self.get_backup_policy_by_id(policy_id)
+            except KeyError:
+                return None
+        return None

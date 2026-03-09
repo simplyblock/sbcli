@@ -246,6 +246,7 @@ def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volu
 
 class _SnapshotParams(BaseModel):
     name: str
+    backup: bool = False
 
 
 @instance_api.post('/snapshots', name='clusters:storage-pools:volumes:snapshots:create', status_code=201, responses={201: {"content": None}})
@@ -255,7 +256,7 @@ def create_snapshot(
         parameters: _SnapshotParams
 ) -> Response:
     snapshot_id, err_or_false = snapshot_controller.add(
-        volume.get_id(), parameters.name
+        volume.get_id(), parameters.name, backup=parameters.backup
     )
     if err_or_false:
         raise ValueError(err_or_false)

@@ -809,72 +809,90 @@ def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes=None, a
 logger = get_logger(__name__)
 
 
-def get_next_port(cluster_id):
+def _get_cluster_port_config(cluster_id):
+    """Get port configuration from the cluster object, falling back to constants."""
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if cluster:
+        return (
+            cluster.nvmf_base_port or constants.NVMF_BASE_PORT,
+            cluster.rpc_base_port or constants.RPC_BASE_PORT,
+            cluster.snode_api_port or constants.SNODE_API_PORT,
+        )
+    return constants.NVMF_BASE_PORT, constants.RPC_BASE_PORT, constants.SNODE_API_PORT
 
-    port = constants.LVOL_NVMF_PORT_START
-    used_ports = []
+
+def _get_all_nvmf_ports(cluster_id):
+    """Collect all NVMe-oF ports in use across the cluster (lvol, hublvol, device)."""
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    used_ports = set()
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.lvol_subsys_port > 0:
-            used_ports.append(node.lvol_subsys_port)
+            used_ports.add(node.lvol_subsys_port)
+        if node.nvmf_port > 0:
+            used_ports.add(node.nvmf_port)
+        if node.hublvol and node.hublvol.nvmf_port > 0:
+            used_ports.add(node.hublvol.nvmf_port)
+    return used_ports
 
-    next_port = port
-    while True:
-        if next_port not in used_ports:
-            return next_port
+
+def get_next_nvmf_port(cluster_id):
+    """Allocate the next free NVMe-oF port from the unified pool."""
+    nvmf_base, _, _ = _get_cluster_port_config(cluster_id)
+    used_ports = _get_all_nvmf_ports(cluster_id)
+    next_port = nvmf_base
+    while next_port in used_ports:
         next_port += 1
+    return next_port
+
+
+def get_next_port(cluster_id):
+    return get_next_nvmf_port(cluster_id)
 
 
 def get_next_rpc_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = constants.RPC_PORT_RANGE_START
+    _, rpc_base, _ = _get_cluster_port_config(cluster_id)
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.rpc_port > 0:
             used_ports.append(node.rpc_port)
 
     for i in range(1000):
-        next_port = port + i
-
+        next_port = rpc_base + i
         if next_port not in used_ports:
             return next_port
 
     return 0
 
 
-def get_next_fw_port(cluster_id):
+def get_next_fw_port(cluster_id, mgmt_ip=None):
+    """Get the SNodeAPI/firewall port. One per host IP."""
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    port = constants.FW_PORT_START
-    used_ports = []
+    if mgmt_ip:
+        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.mgmt_ip == mgmt_ip and node.firewall_port > 0:
+                return node.firewall_port
+
+    _, _, snode_api_port = _get_cluster_port_config(cluster_id)
+    used_ports = set()
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.firewall_port > 0:
-            used_ports.append(node.firewall_port)
-    next_port = port
-    while True:
-        if next_port not in used_ports:
-            return next_port
+            used_ports.add(node.firewall_port)
+    next_port = snode_api_port
+    while next_port in used_ports:
         next_port += 1
+    return next_port
 
 
 def get_next_dev_port(cluster_id):
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-
-    port = constants.NODE_NVMF_PORT_START
-    used_ports = []
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.nvmf_port > 0:
-            used_ports.append(node.nvmf_port)
-    next_port = port
-    while True:
-        if next_port not in used_ports:
-            return next_port
-        next_port += 1
+    return get_next_nvmf_port(cluster_id)
 
 
 def generate_realtime_variables_file(isolated_cores, realtime_variables_file_path="/etc/tuned/realtime-variables.conf"):
@@ -1237,20 +1255,7 @@ def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retrie
 
 
 def next_free_hublvol_port(cluster_id):
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-
-    port = constants.NODE_HUBLVOL_PORT_START
-    used_ports = []
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.hublvol and node.hublvol.nvmf_port > 0:
-            used_ports.append(node.hublvol.nvmf_port)
-
-    next_port = port
-    while True:
-        if next_port not in used_ports:
-            return next_port
-        next_port += 1
+    return get_next_nvmf_port(cluster_id)
 
 
 def validate_sockets(sockets_to_use, cores_by_numa):

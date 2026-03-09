@@ -232,11 +232,25 @@ LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3  # max recursive "shrink" snapshot rounds
 VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
 VALID_DHCHAP_DHGROUPS = ["null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"]
 
-# ports ranges
-RPC_PORT_RANGE_START = 8080
-NODE_NVMF_PORT_START=9060
-NODE_HUBLVOL_PORT_START=9030
-FW_PORT_START = 50001
-# todo(hamdy): make it configurable: sfam-2586
+# Default port ranges (configurable per-cluster via Cluster model fields)
+NVMF_BASE_PORT = 4420         # Base port for ALL NVMe-oF listeners (lvol, hublvol, device)
+RPC_BASE_PORT = 8080          # Base port for SPDK JSON-RPC
+SNODE_API_PORT = 50001        # SNodeAPI/firewall port (one per host IP)
+
+# Legacy constants kept for backward compatibility with env override
 LVOL_NVMF_PORT_ENV = os.getenv("LVOL_NVMF_PORT_START", "")
-LVOL_NVMF_PORT_START = int(LVOL_NVMF_PORT_ENV) if LVOL_NVMF_PORT_ENV else 9100
+if LVOL_NVMF_PORT_ENV:
+    NVMF_BASE_PORT = int(LVOL_NVMF_PORT_ENV)
+
+# Backward compatibility aliases
+RPC_PORT_RANGE_START = RPC_BASE_PORT
+FW_PORT_START = SNODE_API_PORT
+LVOL_NVMF_PORT_START = NVMF_BASE_PORT
+NODE_NVMF_PORT_START = NVMF_BASE_PORT
+NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT
+
+# S3 Backup constants
+BACKUP_POLL_INTERVAL_SEC = 5
+BACKUP_MAX_RETRIES = 10
+BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
+BACKUP_S3_METADATA_BUCKET = "simplyblock-backup-metadata"

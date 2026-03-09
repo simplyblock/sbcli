@@ -28,9 +28,13 @@ def process_snap_delete_finish(snap, leader_node):
 
     # check leadership
     snode = db.get_storage_node_by_id(snap.lvol.node_id)
-    sec_node = None
-    if snode.secondary_node_id:
-        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+    sec_nodes = []
+    for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+        if sec_id:
+            try:
+                sec_nodes.append(db.get_storage_node_by_id(sec_id))
+            except KeyError:
+                pass
     leader_node = None
     snode = db.get_storage_node_by_id(snode.get_id())
     if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
@@ -41,13 +45,15 @@ def process_snap_delete_finish(snap, leader_node):
         if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
             leader_node = snode
 
-    if not leader_node and sec_node:
-        ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-        if not ret:
-            raise Exception("Failed to get LVol info")
-        lvs_info = ret[0]
-        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-            leader_node = sec_node
+    if not leader_node:
+        for sec_node in sec_nodes:
+            if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                if ret:
+                    lvs_info = ret[0]
+                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                        leader_node = sec_node
+                        break
 
     if not leader_node:
         raise Exception("Failed to get leader node")
@@ -247,8 +253,13 @@ while True:
                         if "aliases" in bdev and bdev["aliases"]:
                             node_bdev_names.extend(bdev['aliases'])
 
-            if snode.secondary_node_id:
-                sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+                if not sec_id:
+                    continue
+                try:
+                    sec_node = db.get_storage_node_by_id(sec_id)
+                except KeyError:
+                    continue
                 if sec_node and sec_node.status in [
                     StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                     sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)

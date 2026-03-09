@@ -143,31 +143,35 @@ def exec_port_allow_task(task):
     logger.info("Finished sending device status and now waiting 5s for JMs to connect")
     time.sleep(5)
 
-    sec_node = db.get_storage_node_by_id(node.secondary_node_id)
     snode = db.get_storage_node_by_id(node.get_id())
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        try:
-            ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-            if ret:
-                lvs_info = ret[0]
-                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                    # is_sec_node_leader = True
-                    # check jc_compression status
-                    jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
-                    retries = 10
-                    while jc_compression_is_active:
-                        if retries <= 0:
-                            logger.warning("Timeout waiting for JC compression task to finish")
-                            break
-                        retries -= 1
-                        logger.info(
-                            f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
-                        time.sleep(60)
-                        jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
-                            snode.jm_vuid)
-        except Exception as e:
-            logger.error(e)
-            return
+    sec_ids = []
+    if node.secondary_node_id:
+        sec_ids.append(node.secondary_node_id)
+    if node.secondary_node_id_2:
+        sec_ids.append(node.secondary_node_id_2)
+    for sec_id in sec_ids:
+        sec_node = db.get_storage_node_by_id(sec_id)
+        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            try:
+                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                if ret:
+                    lvs_info = ret[0]
+                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                        jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
+                        retries = 10
+                        while jc_compression_is_active:
+                            if retries <= 0:
+                                logger.warning("Timeout waiting for JC compression task to finish")
+                                break
+                            retries -= 1
+                            logger.info(
+                                f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
+                            time.sleep(60)
+                            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
+                                snode.jm_vuid)
+            except Exception as e:
+                logger.error(e)
+                return
 
     if node.lvstore_status == "ready":
         lvstore_check = health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
@@ -179,7 +183,12 @@ def exec_port_allow_task(task):
             task.write_to_db(db.kv_store)
             return
 
+        sec_ids = []
         if node.secondary_node_id:
+            sec_ids.append(node.secondary_node_id)
+        if node.secondary_node_id_2:
+            sec_ids.append(node.secondary_node_id_2)
+        if sec_ids:
             primary_hublvol_check = health_controller._check_node_hublvol(node)
             if not primary_hublvol_check:
                 msg = "Node hublvol check fail, retry later"
@@ -189,16 +198,17 @@ def exec_port_allow_task(task):
                 task.write_to_db(db.kv_store)
                 return
 
-            sec_node = db.get_storage_node_by_id(node.secondary_node_id)
-            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True)
-                if not secondary_hublvol_check:
-                    msg = "Secondary node hublvol check fail, retry later"
-                    logger.warning(msg)
-                    task.function_result = msg
-                    task.status = JobSchedule.STATUS_SUSPENDED
-                    task.write_to_db(db.kv_store)
-                    return
+            for sec_id in sec_ids:
+                sec_node = db.get_storage_node_by_id(sec_id)
+                if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                    secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True)
+                    if not secondary_hublvol_check:
+                        msg = f"Secondary node {sec_id} hublvol check fail, retry later"
+                        logger.warning(msg)
+                        task.function_result = msg
+                        task.status = JobSchedule.STATUS_SUSPENDED
+                        task.write_to_db(db.kv_store)
+                        return
 
     if task.status != JobSchedule.STATUS_RUNNING:
         task.status = JobSchedule.STATUS_RUNNING

@@ -13,6 +13,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.backup import Backup, BackupPolicy
 
 from . import util
 
@@ -34,6 +35,8 @@ class ClusterDTO(BaseModel):
     anti_affinity: bool
     secret: str
     tls_enabled: bool
+    max_fault_tolerance: int
+    backup_enabled: bool
 
     @staticmethod
     def from_model(model: Cluster):
@@ -54,6 +57,8 @@ class ClusterDTO(BaseModel):
             anti_affinity=model.strict_node_anti_affinity,
             secret=model.secret,
             tls_enabled=model.tls,
+            max_fault_tolerance=model.max_fault_tolerance,
+            backup_enabled=bool(model.backup_config),
         )
 
 
@@ -255,4 +260,52 @@ class VolumeDTO(BaseModel):
             max_r_mbytes=model.r_mbytes_per_sec,
             max_w_mbytes=model.w_mbytes_per_sec,
             allowed_hosts=[h["nqn"] for h in (model.allowed_hosts or [])],
+        )
+
+
+class BackupDTO(BaseModel):
+    id: UUID
+    lvol_id: str
+    lvol_name: str
+    snapshot_id: str
+    snapshot_name: str
+    node_id: str
+    status: str
+    prev_backup_id: str
+    size: int
+    created_at: int
+    completed_at: int
+
+    @staticmethod
+    def from_model(model: Backup):
+        return BackupDTO(
+            id=UUID(model.uuid),
+            lvol_id=model.lvol_id,
+            lvol_name=model.lvol_name,
+            snapshot_id=model.snapshot_id,
+            snapshot_name=model.snapshot_name,
+            node_id=model.node_id,
+            status=model.status,
+            prev_backup_id=model.prev_backup_id,
+            size=model.size,
+            created_at=model.created_at,
+            completed_at=model.completed_at,
+        )
+
+
+class BackupPolicyDTO(BaseModel):
+    id: UUID
+    name: str
+    max_versions: int
+    max_age: str
+    status: str
+
+    @staticmethod
+    def from_model(model: BackupPolicy):
+        return BackupPolicyDTO(
+            id=UUID(model.uuid),
+            name=model.policy_name,
+            max_versions=model.max_versions,
+            max_age=model.max_age_display,
+            status=model.status,
         )

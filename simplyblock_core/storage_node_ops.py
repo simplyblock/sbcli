@@ -1038,8 +1038,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         else:
             cluster_ip = utils.get_k8s_node_ip()
 
-        firewall_port = utils.get_next_fw_port(cluster_id)
-        rpc_port = utils.get_next_rpc_port(cluster_id)
         rpc_user, rpc_pass = utils.generate_rpc_user_and_pass()
         mgmt_info = utils.get_mgmt_ip(node_info, iface_name)
         if not mgmt_info:
@@ -1047,6 +1045,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         mgmt_ip, mgmt_iface = mgmt_info
+        firewall_port = utils.get_next_fw_port(cluster_id, mgmt_ip=mgmt_ip)
+        rpc_port = utils.get_next_rpc_port(cluster_id)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
         if not spdk_image:
@@ -2224,7 +2224,9 @@ def list_storage_nodes(is_json, cluster_id=None):
             "MEM": utils.humanbytes(node.spdk_mem),
             "SPDK P": node.rpc_port,
             "LVOL P": node.lvol_subsys_port,
-            "HUB LVL P": node.hublvol.nvmf_port,
+            "DEV P": node.nvmf_port,
+            "HUB P": node.hublvol.nvmf_port if node.hublvol else "-",
+            "FW P": node.firewall_port,
             # "Cloud ID": node.cloud_instance_id,
             # "JM VUID": node.jm_vuid,
             # "Ext IP": node.cloud_instance_public_ip,
@@ -3184,9 +3186,14 @@ def recreate_lvstore_on_sec(secondary_node):
                 secondary_node.cluster_id, secondary_node.get_id(), jm_vuid=primary_node.jm_vuid)
 
         ### 2- create lvols nvmf subsystems
+        # Determine min_cntlid based on whether this is secondary_1 or secondary_2
+        if primary_node.secondary_node_id_2 == secondary_node.get_id():
+            min_cntlid = 2000
+        else:
+            min_cntlid = 1000
         for lvol in lvol_list:
             logger.info("creating subsystem %s", lvol.nqn)
-            secondary_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1000,
+            secondary_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
                                                   max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
         port_type = "tcp"
@@ -3561,19 +3568,22 @@ def get_node_jm_names(current_node, remote_node=None):
     return jm_list[:current_node.ha_jm_count]
 
 
-def get_secondary_nodes(current_node):
+def get_secondary_nodes(current_node, exclude_ids=None):
+    if exclude_ids is None:
+        exclude_ids = []
     db_controller = DBController()
     nodes = []
     nod_found = False
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
     if len(all_nodes) == 2:
         for node in all_nodes:
-            if node.get_id() != current_node.get_id():
+            if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
                 return [node.get_id()]
 
     for node in all_nodes:
-        if node.get_id() == current_node.get_id():
-            nod_found = True
+        if node.get_id() == current_node.get_id() or node.get_id() in exclude_ids:
+            if node.get_id() == current_node.get_id():
+                nod_found = True
             continue
         elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip:
             # elif node.status == StorageNode.STATUS_ONLINE :
@@ -3701,8 +3711,14 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
+    secondary_ids = []
     if snode.secondary_node_id:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        secondary_ids.append(snode.secondary_node_id)
+    if snode.secondary_node_id_2:
+        secondary_ids.append(snode.secondary_node_id_2)
+
+    for sec_node_id in secondary_ids:
+        sec_node = db_controller.get_storage_node_by_id(sec_node_id)
 
         # creating lvstore on secondary
         sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node)
@@ -3723,21 +3739,25 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         sec_rpc_client.bdev_examine(snode.raid)
         sec_rpc_client.bdev_wait_for_examine()
 
+        sec_node.write_to_db()
+
+    # Create hublvol on primary after all secondaries have their stacks
+    if secondary_ids:
         try:
             snode.create_hublvol()
-
         except RPCException as e:
             logger.error("Error establishing hublvol: %s", e.message)
             # return False
-        if sec_node.status == StorageNode.STATUS_ONLINE:
-            try:
-                time.sleep(1)
-                sec_node.connect_to_hublvol(snode)
-            except Exception as e:
-                logger.error("Error establishing hublvol: %s", e)
-                # return False
 
-        sec_node.write_to_db()
+        for sec_node_id in secondary_ids:
+            sec_node = db_controller.get_storage_node_by_id(sec_node_id)
+            if sec_node.status == StorageNode.STATUS_ONLINE:
+                try:
+                    time.sleep(1)
+                    sec_node.connect_to_hublvol(snode)
+                except Exception as e:
+                    logger.error("Error establishing hublvol: %s", e)
+                    # return False
 
     return True
 

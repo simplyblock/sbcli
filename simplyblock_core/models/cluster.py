@@ -71,6 +71,11 @@ class Cluster(BaseModel):
     full_page_unmap: bool = True
     is_single_node: bool = False
     client_data_nic: str = ""
+    max_fault_tolerance: int = 1
+    backup_config: dict = {}
+    nvmf_base_port: int = 4420
+    rpc_base_port: int = 8080
+    snode_api_port: int = 50001
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

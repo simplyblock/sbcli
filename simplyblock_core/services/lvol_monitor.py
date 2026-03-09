@@ -90,9 +90,12 @@ def process_lvol_delete_finish(lvol):
 
     # check leadership
     snode = db.get_storage_node_by_id(lvol.node_id)
-    sec_node = None
-    if snode.secondary_node_id:
-        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+    sec_nodes = []
+    for sec_id in lvol.nodes[1:]:
+        try:
+            sec_nodes.append(db.get_storage_node_by_id(sec_id))
+        except KeyError:
+            pass
     leader_node = None
     snode = db.get_storage_node_by_id(snode.get_id())
     if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
@@ -103,13 +106,15 @@ def process_lvol_delete_finish(lvol):
         if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
             leader_node = snode
 
-    if not leader_node and sec_node:
-        ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-        if not ret:
-            raise Exception("Failed to get LVol info")
-        lvs_info = ret[0]
-        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-            leader_node = sec_node
+    if not leader_node:
+        for sec_node in sec_nodes:
+            if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                if ret:
+                    lvs_info = ret[0]
+                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                        leader_node = sec_node
+                        break
 
     if not leader_node:
         raise Exception("Failed to get leader node")
@@ -118,22 +123,30 @@ def process_lvol_delete_finish(lvol):
         lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
         return
 
-    if snode.get_id() == leader_node.get_id():
-        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-    else:
-        sec_node = db.get_storage_node_by_id(snode.get_id())
+    # Determine non-leader nodes for sync delete
+    non_leader_nodes = []
+    for node_id in lvol.nodes:
+        if node_id != leader_node.get_id():
+            try:
+                non_leader_nodes.append(db.get_storage_node_by_id(node_id))
+            except KeyError:
+                pass
+    sec_node = non_leader_nodes[0] if non_leader_nodes else None
 
     # 3-1 async delete lvol bdev from primary
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        if sec_node and sec_node.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-            primary_node.lvol_del_sync_lock()
+        # Check if any non-leader node needs sync lock
+        for nln in non_leader_nodes:
+            if nln.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+                primary_node.lvol_del_sync_lock()
+                break
         ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
         if not ret:
             logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
     lvol_bdev_name=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-    if sec_node:
+    for sec_node in non_leader_nodes:
         if sec_node.status in [StorageNode.STATUS_ONLINE]:
             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}")
             ret, err = sec_node.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
@@ -141,12 +154,12 @@ def process_lvol_delete_finish(lvol):
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")
                 else:
-                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}, ading task..."
+                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}, adding task..."
                     logger.error(msg)
                     tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name,
                                                             primary_node.get_id())
         elif sec_node.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-            # 3-2 async delete lvol bdev from secondary
+            # async delete lvol bdev from secondary
             tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name, primary_node.get_id())
 
     lvol_events.lvol_delete(lvol)
@@ -193,9 +206,17 @@ def check_node(snode):
             for sub in ret:
                 node_lvols_nqns[sub['nqn']] = sub
 
+    sec_ids_for_check = []
     if snode.secondary_node_id:
-        sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
+        sec_ids_for_check.append(snode.secondary_node_id)
+    if snode.secondary_node_id_2:
+        sec_ids_for_check.append(snode.secondary_node_id_2)
+    first_sec_node = None
+    for sec_id in sec_ids_for_check:
+        sec_node = db.get_storage_node_by_id(sec_id)
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            if first_sec_node is None:
+                first_sec_node = sec_node
             sec_rpc_client = RPCClient(
                 sec_node.mgmt_ip, sec_node.rpc_port,
                 sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
@@ -226,13 +247,19 @@ def check_node(snode):
                 if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
                     leader_node = snode
 
-            if not leader_node and sec_node:
-                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                if not ret:
-                    raise Exception("Failed to get LVol info")
-                lvs_info = ret[0]
-                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                    leader_node = sec_node
+            if not leader_node:
+                for sec_id in lvol.nodes[1:]:
+                    try:
+                        _sec = db.get_storage_node_by_id(sec_id)
+                    except KeyError:
+                        continue
+                    if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                        ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                        if ret:
+                            lvs_info = ret[0]
+                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                leader_node = _sec
+                                break
 
             if not leader_node:
                 raise Exception("Failed to get leader node")
@@ -333,18 +360,22 @@ def check_node(snode):
             logger.error(e)
 
         if lvol.ha_type == "ha":
-            sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+            for sec_id in lvol.nodes[1:]:
                 try:
-                    ret = health_controller.check_lvol_on_node(
-                        lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
-                    if not ret:
-                        passed = False
-                    else:
-                        passed = True
-                except Exception as e:
-                    logger.error(f"Failed to check lvol: {lvol.get_id()} on node: {snode.secondary_node_id}")
-                    logger.error(e)
+                    sec_node = db.get_storage_node_by_id(sec_id)
+                except KeyError:
+                    continue
+                if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                    try:
+                        ret = health_controller.check_lvol_on_node(
+                            lvol.get_id(), sec_id, sec_node_bdev_names, sec_node_lvols_nqns)
+                        if not ret:
+                            passed = False
+                        else:
+                            passed = True
+                    except Exception as e:
+                        logger.error(f"Failed to check lvol: {lvol.get_id()} on node: {sec_id}")
+                        logger.error(e)
 
         if snode.lvstore_status == "ready":
 

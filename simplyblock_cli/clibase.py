@@ -12,7 +12,7 @@ from simplyblock_core import cluster_ops, utils, db_controller, constants
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller, migration_controller
+    tasks_controller, qos_controller, migration_controller, backup_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster
@@ -740,8 +740,17 @@ class CLIWrapperBase:
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
 
     def snapshot__add(self, sub_command, args):
-        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name)
+        backup = getattr(args, 'backup', False)
+        snapshot_id, error = snapshot_controller.add(args.volume_id, args.name, backup=backup)
         return snapshot_id if not error else error
+
+    def snapshot__backup(self, sub_command, args):
+        backup_id, error = backup_controller.backup_snapshot(args.snapshot_id)
+        if error:
+            print(f"Error: {error}")
+            return False
+        print(f"Backup task created: {backup_id}")
+        return True
 
     def snapshot__list(self, sub_command, args):
         return snapshot_controller.list(args.all)
@@ -763,6 +772,93 @@ class CLIWrapperBase:
 
     def qos__delete(self, sub_command, args):
         return qos_controller.delete_class(args.name, args.cluster_id)
+
+    def backup__list(self, sub_command, args):
+        cluster_id = getattr(args, 'cluster_id', None)
+        data = backup_controller.list_backups(cluster_id)
+        if data:
+            utils.print_table(data)
+            return True
+        print("No backups found")
+        return True
+
+    def backup__delete(self, sub_command, args):
+        success, error = backup_controller.delete_backups(args.lvol_id)
+        if error:
+            print(f"Error: {error}")
+            return False
+        print("Backups deleted")
+        return True
+
+    def backup__restore(self, sub_command, args):
+        result, error = backup_controller.restore_backup(
+            args.backup_id, args.node_id, args.lvol_name,
+            cluster_id=getattr(args, 'cluster_id', None))
+        if error:
+            print(f"Error: {error}")
+            return False
+        print(f"Restore task created for backup: {result}")
+        return True
+
+    def backup__import(self, sub_command, args):
+        import json as _json
+        try:
+            with open(args.metadata_file, 'r') as f:
+                metadata_list = _json.load(f)
+        except Exception as e:
+            print(f"Error reading metadata file: {e}")
+            return False
+        if not isinstance(metadata_list, list):
+            metadata_list = [metadata_list]
+        count = backup_controller.import_backups(metadata_list)
+        print(f"Imported {count} backup(s)")
+        return True
+
+    def backup__policy_add(self, sub_command, args):
+        policy_id, error = backup_controller.add_policy(
+            args.cluster_id, args.name,
+            max_versions=args.versions or 0,
+            max_age=args.age or "")
+        if error:
+            print(f"Error: {error}")
+            return False
+        print(f"Policy created: {policy_id}")
+        return True
+
+    def backup__policy_remove(self, sub_command, args):
+        success, error = backup_controller.remove_policy(args.policy_id)
+        if error:
+            print(f"Error: {error}")
+            return False
+        print("Policy removed")
+        return True
+
+    def backup__policy_list(self, sub_command, args):
+        cluster_id = getattr(args, 'cluster_id', None)
+        data = backup_controller.list_policies(cluster_id)
+        if data:
+            utils.print_table(data)
+            return True
+        print("No policies found")
+        return True
+
+    def backup__policy_attach(self, sub_command, args):
+        att_id, error = backup_controller.attach_policy(
+            args.policy_id, args.target_type, args.target_id)
+        if error:
+            print(f"Error: {error}")
+            return False
+        print(f"Policy attached: {att_id}")
+        return True
+
+    def backup__policy_detach(self, sub_command, args):
+        success, error = backup_controller.detach_policy(
+            args.policy_id, args.target_type, args.target_id)
+        if error:
+            print(f"Error: {error}")
+            return False
+        print("Policy detached")
+        return True
 
     def storage_node_list_devices(self, args):
         node_id = args.node_id
@@ -793,11 +889,20 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
 
+        max_fault_tolerance = args.max_fault_tolerance
+
+        backup_config = None
+        if args.use_backup:
+            import json as _json
+            with open(args.use_backup, 'r') as f:
+                backup_config = _json.load(f)
+
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
-            client_data_nic)
+            client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
 
     def cluster_create(self, args):
         import json as _json
@@ -845,6 +950,13 @@ class CLIWrapperBase:
                 print(f"Error: {err}")
                 return False
 
+        max_fault_tolerance = args.max_fault_tolerance
+
+        backup_config = None
+        if args.use_backup:
+            with open(args.use_backup, 'r') as f:
+                backup_config = _json.load(f)
+
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
             CLI_PASS, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
@@ -852,7 +964,9 @@ class CLIWrapperBase:
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring,
             strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
-            nvmeof_tls_config=nvmeof_tls_config)
+            nvmeof_tls_config=nvmeof_tls_config, max_fault_tolerance=max_fault_tolerance,
+            backup_config=backup_config,
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

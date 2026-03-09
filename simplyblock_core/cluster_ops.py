@@ -15,7 +15,7 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import cluster_events, device_controller, qos_controller, tasks_controller
+from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -224,10 +224,17 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
-                   nvmeof_tls_config=None) -> str:
+                   nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
+                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+
+    if max_fault_tolerance > 1:
+        if ha_type != "ha":
+            raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
+        if distr_npcs < 2:
+            raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
         if not dns_name:
@@ -335,10 +342,17 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.mode = mode
     cluster.full_page_unmap = False
     cluster.client_data_nic = client_data_nic or ""
+    cluster.max_fault_tolerance = max_fault_tolerance
+    cluster.nvmf_base_port = nvmf_base_port
+    cluster.rpc_base_port = rpc_base_port
+    cluster.snode_api_port = snode_api_port
 
     if nvmeof_tls_config:
         cluster.tls = True
         cluster.tls_config = nvmeof_tls_config
+
+    if backup_config:
+        cluster.backup_config = backup_config
 
     if mode == "docker":
         if not disable_monitoring:
@@ -444,7 +458,8 @@ def _run_fio(mount_point) -> None:
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
-                client_data_nic="") -> str:
+                client_data_nic="", max_fault_tolerance=1, backup_config=None,
+                nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
 
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -452,6 +467,12 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+
+    if max_fault_tolerance > 1:
+        if ha_type != "ha":
+            raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
+        if distr_npcs < 2:
+            raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
     
@@ -496,6 +517,12 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.fabric_rdma = protocols["rdma"]
     cluster.full_page_unmap = False
     cluster.client_data_nic = client_data_nic or ""
+    cluster.max_fault_tolerance = max_fault_tolerance
+    cluster.nvmf_base_port = nvmf_base_port
+    cluster.rpc_base_port = rpc_base_port
+    cluster.snode_api_port = snode_api_port
+    if backup_config:
+        cluster.backup_config = backup_config
 
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
@@ -567,19 +594,35 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 sec_node.lvstore_stack_secondary_1 = snode.get_id()
                 sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
-                continue
-            secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
-            if not secondary_nodes:
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to activate cluster, No enough secondary nodes")
+            else:
+                secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
+                if not secondary_nodes:
+                    set_cluster_status(cl_id, ols_status)
+                    raise ValueError("Failed to activate cluster, No enough secondary nodes")
 
-            snode = db_controller.get_storage_node_by_id(snode.get_id())
-            snode.secondary_node_id = secondary_nodes[0]
-            snode.write_to_db()
-            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            sec_node.lvstore_stack_secondary_1 = snode.get_id()
-            sec_node.write_to_db()
-            used_nodes_as_sec.append(snode.secondary_node_id)
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
+                snode.secondary_node_id = secondary_nodes[0]
+                snode.write_to_db()
+                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                sec_node.lvstore_stack_secondary_1 = snode.get_id()
+                sec_node.write_to_db()
+                used_nodes_as_sec.append(snode.secondary_node_id)
+
+            # Assign second secondary when max_fault_tolerance >= 2
+            if cluster.max_fault_tolerance >= 2 and not snode.secondary_node_id_2:
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
+                secondary_nodes_2 = storage_node_ops.get_secondary_nodes(
+                    snode, exclude_ids=[snode.secondary_node_id] + used_nodes_as_sec)
+                if not secondary_nodes_2:
+                    set_cluster_status(cl_id, ols_status)
+                    raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
+
+                snode.secondary_node_id_2 = secondary_nodes_2[0]
+                snode.write_to_db()
+                sec_node_2 = db_controller.get_storage_node_by_id(snode.secondary_node_id_2)
+                sec_node_2.lvstore_stack_secondary_2 = snode.get_id()
+                sec_node_2.write_to_db()
+                used_nodes_as_sec.append(snode.secondary_node_id_2)
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
@@ -602,6 +645,10 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         if ret:
             snode.lvstore_status = "ready"
             snode.write_to_db()
+
+            # Create S3 bdev for backup support (only if backup is configured)
+            if cluster.backup_config:
+                backup_controller.create_s3_bdev(snode, cluster.backup_config)
 
         else:
             snode.lvstore_status = "failed"
@@ -703,6 +750,21 @@ def cluster_expand(cl_id) -> None:
             sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
             sec_node.lvstore_stack_secondary_1 = snode.get_id()
             sec_node.write_to_db()
+
+        if cluster.ha_type == "ha" and cluster.max_fault_tolerance >= 2 and not snode.secondary_node_id_2:
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            secondary_nodes_2 = storage_node_ops.get_secondary_nodes(
+                snode, exclude_ids=[snode.secondary_node_id])
+            if not secondary_nodes_2:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError("A minimum of 3 new nodes are required to expand cluster with dual fault tolerance")
+
+            snode.secondary_node_id_2 = secondary_nodes_2[0]
+            snode.write_to_db()
+
+            sec_node_2 = db_controller.get_storage_node_by_id(snode.secondary_node_id_2)
+            sec_node_2.lvstore_stack_secondary_2 = snode.get_id()
+            sec_node_2.write_to_db()
 
         ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
                                               cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)

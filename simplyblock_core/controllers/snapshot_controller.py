@@ -21,7 +21,7 @@ logger = lg.getLogger()
 db_controller = DBController()
 
 
-def add(lvol_id, snapshot_name):
+def add(lvol_id, snapshot_name, backup=False):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
@@ -117,10 +117,15 @@ def add(lvol_id, snapshot_name):
 
     if lvol.ha_type == "ha":
         primary_node = None
-        secondary_node = None
+        secondary_nodes = []
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
+
+        # Build nodes list with all secondaries
+        secondary_ids = [host_node.secondary_node_id]
+        if host_node.secondary_node_id_2:
+            secondary_ids.append(host_node.secondary_node_id_2)
+        lvol.nodes = [host_node.get_id()] + secondary_ids
 
         if host_node.status == StorageNode.STATUS_ONLINE:
             if lvol_controller.is_node_leader(host_node, lvol.lvs_name):
@@ -131,25 +136,24 @@ def add(lvol_id, snapshot_name):
                     lvol.remove(db_controller.kv_store)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_node = sec_node
+                    secondary_nodes.append(sec_node)
 
             elif sec_node.status == StorageNode.STATUS_ONLINE:
                 if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
                     primary_node = sec_node
-                    secondary_node = host_node
+                    if host_node.status == StorageNode.STATUS_ONLINE:
+                        secondary_nodes.append(host_node)
                 else:
                     # both nodes are non leaders and online, set primary as leader
                     primary_node = host_node
-                    secondary_node = sec_node
+                    secondary_nodes.append(sec_node)
 
             else:
                 # sec node is not online, set primary as leader
                 primary_node = host_node
-                secondary_node = None
 
         elif sec_node.status == StorageNode.STATUS_ONLINE:
             # create on secondary and set leader if needed,
-            secondary_node = None
             primary_node = sec_node
 
         else:
@@ -157,6 +161,15 @@ def add(lvol_id, snapshot_name):
             msg = "Host nodes are not online"
             logger.error(msg)
             return False, msg
+
+        # Add additional secondaries if online
+        for extra_sec_id in secondary_ids[1:]:
+            try:
+                extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
+                if extra_sec.status == StorageNode.STATUS_ONLINE and extra_sec.get_id() != (primary_node.get_id() if primary_node else None):
+                    secondary_nodes.append(extra_sec)
+            except KeyError:
+                pass
 
         if primary_node:
             rpc_client = RPCClient(
@@ -177,15 +190,14 @@ def add(lvol_id, snapshot_name):
             else:
                 return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
-
-        if secondary_node:
+        for sec in secondary_nodes:
             sec_rpc_client = RPCClient(
-                secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username, secondary_node.rpc_password)
+                sec.mgmt_ip, sec.rpc_port, sec.rpc_username, sec.rpc_password)
 
             ret = sec_rpc_client.bdev_lvol_snapshot_register(
                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
             if not ret:
-                msg = f"Failed to register snapshot on node: {sec_node.get_id()}"
+                msg = f"Failed to register snapshot on node: {sec.get_id()}"
                 logger.error(msg)
                 logger.info(f"Removing snapshot from {primary_node.get_id()}")
                 rpc_client = RPCClient(
@@ -226,6 +238,13 @@ def add(lvol_id, snapshot_name):
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
+
+    if backup:
+        from simplyblock_core.controllers import backup_controller
+        backup_id, backup_err = backup_controller.backup_snapshot(snap.uuid)
+        if backup_err:
+            logger.warning(f"Snapshot created but backup failed: {backup_err}")
+
     return snap.uuid, False
 
 
@@ -549,9 +568,14 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     if lvol.ha_type == "ha":
         host_node = snode
-        lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
+        # Build nodes list with all secondaries
+        secondary_ids = [host_node.secondary_node_id]
+        if host_node.secondary_node_id_2:
+            secondary_ids.append(host_node.secondary_node_id_2)
+        lvol.nodes = [host_node.get_id()] + secondary_ids
+
         primary_node = None
-        secondary_node = None
+        secondary_nodes = []
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
         if host_node.status == StorageNode.STATUS_ONLINE:
 
@@ -564,25 +588,24 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     return False, msg
 
                 if sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_node = sec_node
+                    secondary_nodes.append(sec_node)
 
             elif sec_node.status == StorageNode.STATUS_ONLINE:
                 if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
                     primary_node = sec_node
-                    secondary_node = host_node
+                    if host_node.status == StorageNode.STATUS_ONLINE:
+                        secondary_nodes.append(host_node)
                 else:
                     # both nodes are non leaders and online, set primary as leader
                     primary_node = host_node
-                    secondary_node = sec_node
+                    secondary_nodes.append(sec_node)
 
             else:
                 # sec node is not online, set primary as leader
                 primary_node = host_node
-                secondary_node = None
 
         elif sec_node.status == StorageNode.STATUS_ONLINE:
             # create on secondary and set leader if needed,
-            secondary_node = None
             primary_node = sec_node
 
         else:
@@ -592,6 +615,14 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             lvol.remove(db_controller.kv_store)
             return False, msg
 
+        # Add additional secondaries if online
+        for extra_sec_id in secondary_ids[1:]:
+            try:
+                extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
+                if extra_sec.status == StorageNode.STATUS_ONLINE and extra_sec.get_id() != (primary_node.get_id() if primary_node else None):
+                    secondary_nodes.append(extra_sec)
+            except KeyError:
+                pass
 
         if primary_node:
             lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
@@ -603,8 +634,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             lvol.lvol_uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-        if secondary_node:
-            lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, secondary_node, is_primary=False)
+        for sec in secondary_nodes:
+            lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, sec, is_primary=False)
             if error:
                 logger.error(error)
                 lvol.remove(db_controller.kv_store)

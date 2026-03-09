@@ -1355,3 +1355,107 @@ class RPCClient:
             "batch_size": batch_size,
             "bdev_name": bdev_name,
         })
+
+    # ---- S3 Backup RPCs ----
+
+    def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
+                       snapshot_backups=True, local_testing=False, local_endpoint="",
+                       access_key_id="", secret_access_key=""):
+        """Create the S3 bdev device.
+        Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
+        Args:
+            name: Bdev name
+            secondary_target: 0=S3, 1=FileSystem
+            with_compression: Enable ISA-L compression
+            snapshot_backups: Snapshot backup mode
+            local_testing: Use local endpoint (e.g. MinIO)
+            local_endpoint: Local endpoint URL
+            access_key_id: AWS access key (optional if using IAM roles)
+            secret_access_key: AWS secret key (optional if using IAM roles)
+        """
+        params = {
+            "name": name,
+            "secondary_target": secondary_target,
+            "with_compression": with_compression,
+            "snapshot_backups": snapshot_backups,
+        }
+        if local_testing:
+            params["local_testing"] = True
+        if local_endpoint:
+            params["local_endpoint"] = local_endpoint
+        if access_key_id:
+            params["access_key_id"] = access_key_id
+        if secret_access_key:
+            params["secret_access_key"] = secret_access_key
+        return self._request("bdev_s3_create", params)
+
+    def bdev_lvol_s3_bdev(self, lvs_name, bdev_name):
+        """Attach an S3 bdev to the given lvstore.
+        The S3 bdev must already exist (created via bdev_s3_create).
+        Called once per lvstore at setup time (cluster activate, node restart)."""
+        return self._request("bdev_lvol_s3_bdev", {
+            "lvs_name": lvs_name,
+            "bdev_name": bdev_name,
+        })
+
+    def bdev_lvol_s3_backup(self, s3_id, snapshot_names):
+        """Start an async backup of snapshots to S3.
+        Args:
+            s3_id: unique backup identifier
+            snapshot_names: list of snapshot composite bdev names
+        Returns RPC result (truthy on success). Poll with bdev_lvol_s3_backup_stat.
+        """
+        return self._request("bdev_lvol_s3_backup", {
+            "s3_id": s3_id,
+            "snapshot_names": " ".join(snapshot_names),
+        })
+
+    def bdev_lvol_s3_backup_stat(self, s3_id):
+        """Poll async backup status.
+        Returns dict with transfer_state and progress info."""
+        # Polling RPC definition missing on data plane — use dummy
+        return self._request("bdev_lvol_s3_backup_stat", {
+            "s3_id": s3_id,
+        })
+
+    def bdev_lvol_s3_merge(self, s3_id, old_s3_id):
+        """Merge two backups: keep s3_id and merge old_s3_id into it.
+        This shortens the backup chain."""
+        return self._request("bdev_lvol_s3_merge", {
+            "s3_id": s3_id,
+            "old_s3_id": old_s3_id,
+        })
+
+    def bdev_lvol_s3_merge_stat(self, s3_id):
+        """Poll async merge status."""
+        # Polling RPC definition missing on data plane — use dummy
+        return self._request("bdev_lvol_s3_merge_stat", {
+            "s3_id": s3_id,
+        })
+
+    def bdev_lvol_s3_recovery(self, lvol_name, offset, s3_backup_ids):
+        """Restore a chain of S3 backups into a new lvol.
+        Args:
+            lvol_name: target lvol name to restore into
+            offset: byte offset to resume from (0 for fresh restore)
+            s3_backup_ids: list of S3 backup IDs forming the chain (oldest first)
+        """
+        return self._request("bdev_lvol_s3_recovery", {
+            "lvol_name": lvol_name,
+            "offset": offset,
+            "s3_backup_ids": " ".join(s3_backup_ids),
+        })
+
+    def bdev_lvol_s3_recovery_stat(self, lvol_name):
+        """Poll async recovery status."""
+        # Polling RPC definition missing on data plane — use dummy
+        return self._request("bdev_lvol_s3_recovery_stat", {
+            "lvol_name": lvol_name,
+        })
+
+    def bdev_lvol_s3_delete(self, s3_ids):
+        """Delete all S3 backups for the given IDs."""
+        # RPC still missing on data plane — use dummy
+        return self._request("bdev_lvol_s3_delete", {
+            "s3_ids": " ".join(s3_ids),
+        })

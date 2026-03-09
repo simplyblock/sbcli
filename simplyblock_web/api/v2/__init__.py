@@ -3,6 +3,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from . import backup
 from . import cluster
 from . import device
 from . import volume
@@ -49,6 +50,9 @@ pool.api.include_router(pool.instance_api)
 
 cluster.instance_api.include_router(pool.api)
 
+
+backup.api.include_router(backup.policy_api)
+cluster.instance_api.include_router(backup.api)
 
 cluster.api.include_router(cluster.instance_api)
 management_node.api.include_router(management_node.instance_api)

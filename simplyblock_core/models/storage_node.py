@@ -86,6 +86,7 @@ class StorageNode(BaseNodeObject):
     rpc_port: int = -1
     rpc_username: str = ""
     secondary_node_id: str = ""
+    secondary_node_id_2: str = ""
     sequential_number: int = 0  # Unused
     jm_ids: List[str] = []
     spdk_cpu_mask: str = ""
@@ -351,9 +352,12 @@ class StorageNode(BaseNodeObject):
         from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         task_found = False
+        sec_ids = [self.secondary_node_id]
+        if self.secondary_node_id_2:
+            sec_ids.append(self.secondary_node_id_2)
         tasks = db_controller.get_job_tasks(self.cluster_id)
         for task in tasks:
-            if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL and task.node_id == self.secondary_node_id:
+            if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL and task.node_id in sec_ids:
                 if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                     task_found = True
                     break

@@ -463,3 +463,48 @@ def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
                     return task.uuid
     return False
 
+
+def add_backup_task(backup):
+    """Create the task that performs an S3 backup."""
+    return _add_task(
+        JobSchedule.FN_BACKUP,
+        backup.cluster_id,
+        backup.node_id,
+        "",
+        max_retry=constants.BACKUP_MAX_RETRIES,
+        function_params={
+            "backup_id": backup.uuid,
+        },
+    )
+
+
+def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids):
+    """Create the task that restores an S3 backup chain into a new lvol."""
+    return _add_task(
+        JobSchedule.FN_BACKUP_RESTORE,
+        cluster_id,
+        node_id,
+        "",
+        max_retry=constants.BACKUP_MAX_RETRIES,
+        function_params={
+            "backup_id": backup_id,
+            "lvol_name": lvol_name,
+            "chain_ids": chain_ids,
+        },
+    )
+
+
+def add_backup_merge_task(cluster_id, node_id, keep_backup_id, old_backup_id):
+    """Create the task that merges two S3 backups."""
+    return _add_task(
+        JobSchedule.FN_BACKUP_MERGE,
+        cluster_id,
+        node_id,
+        "",
+        max_retry=constants.BACKUP_MAX_RETRIES,
+        function_params={
+            "keep_backup_id": keep_backup_id,
+            "old_backup_id": old_backup_id,
+        },
+    )
+

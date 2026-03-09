@@ -214,6 +214,32 @@ def _get_target_secondary_node(tgt_node):
     )
 
 
+def _get_target_secondary_nodes(tgt_node):
+    """
+    Return ``(sec_nodes_list, error_string)`` for all secondaries on the target.
+    Checks both secondary_node_id and secondary_node_id_2.
+    """
+    sec_nodes = []
+    for sec_id in [tgt_node.secondary_node_id, tgt_node.secondary_node_id_2]:
+        if not sec_id:
+            continue
+        try:
+            sec = db.get_storage_node_by_id(sec_id)
+        except KeyError:
+            continue
+
+        if sec.status == StorageNode.STATUS_ONLINE:
+            sec_nodes.append(sec)
+        elif sec.status == StorageNode.STATUS_OFFLINE:
+            continue
+        else:
+            return [], (
+                f"Target secondary node {sec_id} is in state "
+                f"'{sec.status}'; cannot create on target primary"
+            )
+    return sec_nodes, None
+
+
 def _register_snap_on_secondary(tgt_rpc, tgt_node, tgt_sec, sec_rpc, snap, migration):
     """
     Register a newly converted snapshot on the target's secondary node.
@@ -1073,7 +1099,7 @@ def _cleanup_subsystem_or_ns(nqn, ns_id, subsystem_was_created_by_migration, rpc
 
 
 def _get_secondary_rpc(node):
-    """Return an RPC client for node's secondary if it is online, else None."""
+    """Return RPC clients for node's online secondaries."""
     if not node.secondary_node_id:
         return None
     try:
@@ -1083,6 +1109,21 @@ def _get_secondary_rpc(node):
     except KeyError:
         pass
     return None
+
+
+def _get_all_secondary_rpcs(node):
+    """Return list of RPC clients for all online secondaries of node."""
+    rpcs = []
+    for sec_id in [node.secondary_node_id, node.secondary_node_id_2]:
+        if not sec_id:
+            continue
+        try:
+            sec = db.get_storage_node_by_id(sec_id)
+            if sec.status == StorageNode.STATUS_ONLINE:
+                rpcs.append(_make_rpc(sec))
+        except KeyError:
+            pass
+    return rpcs
 
 
 def _handle_cleanup_source(migration, src_node, src_rpc):

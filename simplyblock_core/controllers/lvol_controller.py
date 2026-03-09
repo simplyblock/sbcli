@@ -545,9 +545,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             return False, msg
 
     if ha_type == "ha":
-        lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
+        # Build nodes list with all secondaries
+        secondary_ids = [host_node.secondary_node_id]
+        if host_node.secondary_node_id_2:
+            secondary_ids.append(host_node.secondary_node_id_2)
+        lvol.nodes = [host_node.get_id()] + secondary_ids
+
         primary_node = None
-        secondary_node = None
+        secondary_nodes = []
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
         if host_node.status == StorageNode.STATUS_ONLINE:
 
@@ -559,25 +564,23 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                     lvol.remove(db_controller.kv_store)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_node = sec_node
+                    secondary_nodes.append(sec_node)
 
             elif sec_node.status == StorageNode.STATUS_ONLINE:
                 if is_node_leader(sec_node, lvol.lvs_name):
                     primary_node = sec_node
-                    secondary_node = host_node
+                    secondary_nodes.append(host_node)
                 else:
                     # both nodes are non leaders and online, set primary as leader
                     primary_node = host_node
-                    secondary_node = sec_node
+                    secondary_nodes.append(sec_node)
 
             else:
                 # sec node is not online, set primary as leader
                 primary_node = host_node
-                secondary_node = None
 
         elif sec_node.status == StorageNode.STATUS_ONLINE:
             # primary is not online but secondary is, create on secondary and set leader if needed,
-            secondary_node = None
             primary_node = sec_node
 
         else:
@@ -587,6 +590,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             lvol.remove(db_controller.kv_store)
             return False, msg
 
+        # Add additional secondaries (secondary_node_id_2, etc.) if online
+        for extra_sec_id in secondary_ids[1:]:
+            try:
+                extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
+                if extra_sec.status == StorageNode.STATUS_ONLINE and extra_sec.get_id() != (primary_node.get_id() if primary_node else None):
+                    secondary_nodes.append(extra_sec)
+            except KeyError:
+                pass
 
         if primary_node:
             lvol_bdev, error = add_lvol_on_node(lvol, primary_node)
@@ -598,11 +609,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             lvol.lvol_uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-
-        if secondary_node:
-            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
-            if secondary_node.status == StorageNode.STATUS_ONLINE:
-                lvol_bdev, error = add_lvol_on_node(lvol, secondary_node, is_primary=False)
+        for sec in secondary_nodes:
+            sec = db_controller.get_storage_node_by_id(sec.get_id())
+            if sec.status == StorageNode.STATUS_ONLINE:
+                lvol_bdev, error = add_lvol_on_node(lvol, sec, is_primary=False)
                 if error:
                     logger.error(error)
                     # remove lvol from primary
@@ -978,65 +988,73 @@ def delete_lvol(id_or_name, force_delete=False):
 
     elif lvol.ha_type == "ha":
 
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
 
+        # Gather all secondary nodes from lvol.nodes[1:]
+        all_sec_nodes = []
+        for sec_id in lvol.nodes[1:]:
+            try:
+                all_sec_nodes.append(db_controller.get_storage_node_by_id(sec_id))
+            except KeyError:
+                pass
+
         primary_node = None
-        secondary_node = None
+        secondary_nodes = []
+
+        # Find at least one online secondary to verify status
+        first_sec = all_sec_nodes[0] if all_sec_nodes else None
         if host_node.status == StorageNode.STATUS_ONLINE:
 
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
-                if sec_node.status == StorageNode.STATUS_DOWN:
+                if first_sec and first_sec.status == StorageNode.STATUS_DOWN:
                     msg = "Secondary node is in down status, can not delete lvol"
                     logger.error(msg)
                     return False, msg
-                elif sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_node = sec_node
-                else:
-                    secondary_node = None
+                for sn in all_sec_nodes:
+                    if sn.status == StorageNode.STATUS_ONLINE:
+                        secondary_nodes.append(sn)
 
-            elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if is_node_leader(sec_node, lvol.lvs_name):
-                    primary_node = sec_node
-                    secondary_node = host_node
+            elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+                if is_node_leader(first_sec, lvol.lvs_name):
+                    primary_node = first_sec
+                    if host_node.status == StorageNode.STATUS_ONLINE:
+                        secondary_nodes.append(host_node)
+                    for sn in all_sec_nodes[1:]:
+                        if sn.status == StorageNode.STATUS_ONLINE:
+                            secondary_nodes.append(sn)
                 else:
-                    # both nodes are non leaders and online, set primary as leader
                     primary_node = host_node
-                    secondary_node = sec_node
+                    for sn in all_sec_nodes:
+                        if sn.status == StorageNode.STATUS_ONLINE:
+                            secondary_nodes.append(sn)
 
             else:
-                # sec node is not online, set primary as leader
                 primary_node = host_node
-                secondary_node = None
 
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            # primary is not online but secondary is, create on secondary and set leader if needed,
-            secondary_node = None
-            primary_node = sec_node
+        elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+            primary_node = first_sec
 
         else:
-            # both primary and secondary are not online
             msg = "Host nodes are not online"
             logger.error(msg)
             return False, msg
 
-        # 1- delete subsystem from secondary
-        if secondary_node:
-            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
-            if secondary_node.status == StorageNode.STATUS_ONLINE:
-                secondary_rpc_client = secondary_node.rpc_client()
+        # 1- delete subsystem from all secondaries
+        for sec in secondary_nodes:
+            sec = db_controller.get_storage_node_by_id(sec.get_id())
+            if sec.status == StorageNode.STATUS_ONLINE:
+                secondary_rpc_client = sec.rpc_client()
                 subsystem = secondary_rpc_client.subsystem_list(lvol.nqn)
-                # 1- remove subsystem
                 if subsystem:
                     if len(subsystem[0]["namespaces"]) > 1:
                         logger.info("Removing namespace")
                         ret = secondary_rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
                     else:
-                        logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{secondary_node.get_id()}")
+                        logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{sec.get_id()}")
                         ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
                     if not ret:
-                        logger.warning(f"Failed to delete subsystem from node: {secondary_node.get_id()}")
+                        logger.warning(f"Failed to delete subsystem from node: {sec.get_id()}")
 
         # 2- delete subsystem and lvol bdev from primary
         if primary_node:
@@ -1464,44 +1482,51 @@ def resize_lvol(id, new_size):
 
     else:
         primary_node = None
-        secondary_node = None
+        secondary_nodes = []
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+
+        # Gather all secondary nodes from lvol.nodes[1:]
+        all_sec_nodes = []
+        for sec_id in lvol.nodes[1:]:
+            try:
+                all_sec_nodes.append(db_controller.get_storage_node_by_id(sec_id))
+            except KeyError:
+                pass
+
+        first_sec = all_sec_nodes[0] if all_sec_nodes else None
         if host_node.status == StorageNode.STATUS_ONLINE:
 
             if is_node_leader(host_node, lvol.lvs_name):
                 primary_node = host_node
-                if sec_node.status == StorageNode.STATUS_DOWN:
+                if first_sec and first_sec.status == StorageNode.STATUS_DOWN:
                     msg = "Secondary node is in down status, can not resize lvol"
                     logger.error(msg)
                     return False, msg
+                for sn in all_sec_nodes:
+                    if sn.status == StorageNode.STATUS_ONLINE:
+                        secondary_nodes.append(sn)
 
-                elif sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_node = sec_node
+            elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+                if is_node_leader(first_sec, lvol.lvs_name):
+                    primary_node = first_sec
+                    if host_node.status == StorageNode.STATUS_ONLINE:
+                        secondary_nodes.append(host_node)
+                    for sn in all_sec_nodes[1:]:
+                        if sn.status == StorageNode.STATUS_ONLINE:
+                            secondary_nodes.append(sn)
                 else:
-                    secondary_node = None
-
-            elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if is_node_leader(sec_node, lvol.lvs_name):
-                    primary_node = sec_node
-                    secondary_node = host_node
-                else:
-                    # both nodes are non leaders and online, set primary as leader
                     primary_node = host_node
-                    secondary_node = sec_node
+                    for sn in all_sec_nodes:
+                        if sn.status == StorageNode.STATUS_ONLINE:
+                            secondary_nodes.append(sn)
 
             else:
-                # sec node is not online, set primary as leader
                 primary_node = host_node
-                secondary_node = None
 
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            # primary is not online but secondary is, create on secondary and set leader if needed,
-            secondary_node = None
-            primary_node = sec_node
+        elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+            primary_node = first_sec
 
         else:
-            # both primary and secondary are not online
             msg = "Host nodes are not online"
             logger.error(msg)
             return False, msg
@@ -1519,17 +1544,17 @@ def resize_lvol(id, new_size):
                 logger.error(msg)
                 return False, msg
 
-        if secondary_node:
-            logger.info(f"Resizing LVol: {lvol.get_id()} on node: {secondary_node.get_id()}")
-            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
-            if secondary_node.status == StorageNode.STATUS_ONLINE:
+        for sec in secondary_nodes:
+            logger.info(f"Resizing LVol: {lvol.get_id()} on node: {sec.get_id()}")
+            sec = db_controller.get_storage_node_by_id(sec.get_id())
+            if sec.status == StorageNode.STATUS_ONLINE:
 
-                sec_rpc_client = RPCClient(secondary_node.mgmt_ip, secondary_node.rpc_port, secondary_node.rpc_username,
-                                           secondary_node.rpc_password)
+                sec_rpc_client = RPCClient(sec.mgmt_ip, sec.rpc_port, sec.rpc_username,
+                                           sec.rpc_password)
 
                 ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
                 if not ret:
-                    msg = f"Error resizing lvol on node: {sec_node.get_id()}"
+                    msg = f"Error resizing lvol on node: {sec.get_id()}"
                     logger.error(msg)
                     return False, msg
 
