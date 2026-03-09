@@ -768,6 +768,8 @@ _DISPATCH = {
 # ---------------------------------------------------------------------------
 
 class _MockHTTPServer(HTTPServer):
+    allow_reuse_address = True
+
     def __init__(self, server_address, handler_class, node_state: NodeState,
                  timeout_seconds: float = 6.0):
         super().__init__(server_address, handler_class)
@@ -820,6 +822,7 @@ class MockRpcServer:
     def stop(self):
         if self._server:
             self._server.shutdown()
+            self._server.server_close()
             self._server = None
         logger.info("MockRpcServer %s stopped", self.node_id)
 

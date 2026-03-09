@@ -6,6 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from . import backup
 from . import cluster
 from . import device
+from . import migration
 from . import volume
 from . import management_node
 from . import pool
@@ -53,6 +54,9 @@ cluster.instance_api.include_router(pool.api)
 
 backup.api.include_router(backup.policy_api)
 cluster.instance_api.include_router(backup.api)
+
+migration.api.include_router(migration.instance_api)
+cluster.instance_api.include_router(migration.api)
 
 cluster.api.include_router(cluster.instance_api)
 management_node.api.include_router(management_node.instance_api)

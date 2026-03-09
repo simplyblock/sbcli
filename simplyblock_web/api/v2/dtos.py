@@ -14,6 +14,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.lvol_migration import LVolMigration
 
 from . import util
 
@@ -308,4 +309,38 @@ class BackupPolicyDTO(BaseModel):
             max_versions=model.max_versions,
             max_age=model.max_age_display,
             status=model.status,
+        )
+
+
+class MigrationDTO(BaseModel):
+    id: UUID
+    lvol_id: str
+    source_node_id: str
+    target_node_id: str
+    phase: str
+    status: str
+    snaps_total: int
+    snaps_migrated: int
+    retry_count: int
+    max_retries: int
+    error_message: str
+    started_at: int
+    completed_at: int
+
+    @staticmethod
+    def from_model(model: LVolMigration):
+        return MigrationDTO(
+            id=UUID(model.uuid),
+            lvol_id=model.lvol_id,
+            source_node_id=model.source_node_id,
+            target_node_id=model.target_node_id,
+            phase=model.phase,
+            status=model.status,
+            snaps_total=len(model.snap_migration_plan),
+            snaps_migrated=len(model.snaps_migrated),
+            retry_count=model.retry_count,
+            max_retries=model.max_retries,
+            error_message=model.error_message or "",
+            started_at=model.started_at,
+            completed_at=model.completed_at,
         )
