@@ -1099,7 +1099,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         cores, _ = snode_api.read_allowed_list()
 
         if len(cores) == req_cpu_count:
-            new_distribution = snode_api.recalculate_cores_distribution(cores, number_of_alceml_devices)
+            new_distribution, _ = snode_api.recalculate_cores_distribution(cores, number_of_alceml_devices)
             poller_cpu_cores = new_distribution.get("poller_cpu_cores")
             alceml_cpu_cores = new_distribution.get("alceml_cpu_cores")
             distrib_cpu_cores = new_distribution.get("distrib_cpu_cores")
