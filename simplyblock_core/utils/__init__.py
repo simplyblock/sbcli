@@ -438,33 +438,24 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         return vcpus[:count]
 
     assigned = {}
-    assigned["app_thread_core"] = reserve_n(1)
     if (len(vcpu_list) < 12):
-        vcpu = reserve_n(1)
-        assigned["jm_cpu_core"] = vcpu
-        vcpu = reserve_n(1)
-        assigned["jc_singleton_core"] = vcpu
-        # assigned["alceml_worker_cpu_cores"] = vcpu
-        vcpu = reserve_n(1)
-        assigned["alceml_cpu_cores"] = vcpu
+        vcpu = reserve_n(4)
+        assigned["app_thread_core"] = vcpu[0:1]
+        assigned["jm_cpu_core"] = vcpu[1:2]
+        assigned["jc_singleton_core"] = vcpu[2:3]
+        assigned["alceml_cpu_cores"] = vcpu[3:4]
     elif (len(vcpu_list) < 22):
-        vcpu = reserve_n(1)
-        assigned["jm_cpu_core"] = vcpu
-        vcpu = reserve_n(1)
-        assigned["jc_singleton_core"] = vcpu
-        # vcpus = reserve_n(1)
-        # assigned["alceml_worker_cpu_cores"] = vcpus
-        vcpus = reserve_n(2)
-        assigned["alceml_cpu_cores"] = vcpus
+        vcpu = reserve_n(5)
+        assigned["app_thread_core"] = vcpu[0:1]
+        assigned["jm_cpu_core"] = vcpu[1:2]
+        assigned["jc_singleton_core"] = vcpu[2:3]
+        assigned["alceml_cpu_cores"] = vcpu[3:5]
     else:
-        vcpus = reserve_n(1)
-        assigned["jm_cpu_core"] = vcpus
-        vcpu = reserve_n(1)
-        assigned["jc_singleton_core"] = vcpu
-        # vcpus = reserve_n(int(alceml_count / 3) + ((alceml_count % 3) > 0))
-        # assigned["alceml_worker_cpu_cores"] = vcpus
-        vcpus = reserve_n(alceml_count)
-        assigned["alceml_cpu_cores"] = vcpus
+        vcpus = reserve_n(3+alceml_count)
+        assigned["app_thread_core"] = vcpus[0:1]
+        assigned["jm_cpu_core"] = vcpus[1:2]
+        assigned["jc_singleton_core"] = vcpus[2:3]
+        assigned["alceml_cpu_cores"] = vcpus[3:3+alceml_count]
     dp = int(len(remaining) / 2)
     if 17 > dp >= 12:
         poller_n = len(remaining) - 12
@@ -568,8 +559,8 @@ def calculate_minimum_hp_memory(small_pool_count, large_pool_count, lvol_count, 
     return int(1.2 * memory_consumption)
 
 
-def calculate_minimum_sys_memory(max_prov):
-    minimum_sys_memory = (2000 * 1024) * convert_size(max_prov, 'GB') + 500 * 1024 * 1024
+def calculate_minimum_sys_memory(ssd_list):
+    minimum_sys_memory = 2147483648 + get_total_capacity_of_nvme_devices(ssd_list)
 
     logger.debug(f"Minimum system memory is {humanbytes(minimum_sys_memory)}")
     return int(minimum_sys_memory)
@@ -1339,18 +1330,36 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
     return nvmes
 
 
+def get_total_capacity_of_nvme_devices(pci_lst):
+    json_string = get_nvme_list_verbose()
+    data = json.loads(json_string)
+    total_capacity = 0
+    for device_entry in data.get('Devices', []):
+        for subsystem in device_entry.get('Subsystems', []):
+            for controller in subsystem.get('Controllers', []):
+                address = controller.get("Address")
+                if len(controller.get("Namespaces")) > 0 and address in pci_lst:
+                    total_capacity = controller.get("Namespaces")[0].get("PhysicalSize")
+
+    return int(total_capacity)
+
+
 def calculate_unisolated_cores(cores, cores_percentage=0):
     # calculate the number if unused system cores (UnIsolated cores)
     total = len(cores)
     if cores_percentage:
-        return math.ceil(total * (100 - cores_percentage) / 100)
+        n = math.ceil(total * (100 - cores_percentage) / 100)
+        n_even = (n + 1) // 2 * 2
+        return n_even
     if total <= 10:
         return 2
     if total <= 20:
         return 3
     if total <= 28:
         return 4
-    return math.ceil(total * 0.15)
+    n = math.ceil(total * 0.15)
+    n_even = (n + 1) // 2 * 2
+    return n_even
 
 
 def get_core_indexes(core_to_index, list_of_cores):
@@ -1373,10 +1382,12 @@ def build_unisolated_stride(
       round-robin across pools, and within each pool advance by pool_stride
       e.g. stride=2 -> 0,2,4,... then 10,12,14,... then 20,22,24,...
 
-    If hyper_thread=True, append sibling right after each core:
-      sibling = cpu +/- (total//2)
+    If hyper_thread=True, append sibling right after each selected core,
+    where sibling is defined by *index pairing* across halves of the sorted list:
+      sibling(cores[i]) = cores[i + half] if i < half else cores[i - half]
     """
     hyper_thread = is_hyperthreading_enabled_via_siblings()
+
     if num_unisolated <= 0:
         return []
     if client_qpair_count <= 0:
@@ -1391,11 +1402,34 @@ def build_unisolated_stride(
 
     core_set = set(cores)
 
-    half: int = 0
+    half = 0
     if hyper_thread:
         if total % 2 != 0:
             raise ValueError(f"hyper_thread=True but total logical CPUs ({total}) is not even")
         half = total // 2
+
+    # If you REQUIRE strict pairing (cpu+sibling always together), uncomment:
+    # if hyper_thread and (num_unisolated % 2 != 0):
+    #     raise ValueError("num_unisolated must be even when hyper_thread=True")
+
+    core_to_idx = {c: i for i, c in enumerate(cores)}
+
+    def sibling_by_index(cpu: int) -> int:
+        """Return sibling based on index pairing across halves."""
+        i = core_to_idx[cpu]
+        sib_i = i + half if i < half else i - half
+        return cores[sib_i]
+
+    out: List[int] = []
+    used = set()
+
+    def add_cpu(cpu: int) -> bool:
+        """Add cpu if valid and still need more; return True if added."""
+        if cpu in core_set and cpu not in used and len(out) < num_unisolated:
+            out.append(cpu)
+            used.add(cpu)
+            return True
+        return False
 
     # Build pools
     pool_size = math.ceil(total / client_qpair_count)
@@ -1405,22 +1439,15 @@ def build_unisolated_stride(
     # Per-pool index (within each pool)
     idx = [0] * len(pools)
 
-    out: List[int] = []
-    used = set()
-
-    def add_cpu(cpu: int) -> None:
-        if cpu in core_set and cpu not in used and len(out) < num_unisolated:
-            out.append(cpu)
-            used.add(cpu)
-
     while len(out) < num_unisolated:
         progress = False
 
+        # Round-robin across pools
         for pi, pool in enumerate(pools):
             if len(out) >= num_unisolated:
                 break
 
-            # find next candidate in this pool using stride
+            # Find next candidate in this pool using stride, skipping already-used entries
             j = idx[pi]
             while j < len(pool) and pool[j] in used:
                 j += pool_stride
@@ -1430,29 +1457,30 @@ def build_unisolated_stride(
             cpu = pool[j]
             idx[pi] = j + pool_stride
 
-            add_cpu(cpu)
-            progress = True
+            added = add_cpu(cpu)
+            progress = progress or added
 
-            if hyper_thread and len(out) < num_unisolated:
-                sib = cpu + half if cpu < half else cpu - half
-                add_cpu(sib)
+            # Only add sibling if we actually added cpu
+            if hyper_thread and added and len(out) < num_unisolated:
+                add_cpu(sibling_by_index(cpu))
 
         if progress:
             continue
 
-        # Fallback: fill any remaining from whatever is unused (should rarely happen)
+        # Fallback: fill any remaining from whatever is unused
         for cpu in cores:
             if len(out) >= num_unisolated:
                 break
-            if cpu not in used:
-                add_cpu(cpu)
-                if hyper_thread and len(out) < num_unisolated:
-                    sib = cpu + half if cpu < half else cpu - half
-                    add_cpu(sib)
+            if cpu in used:
+                continue
+
+            added = add_cpu(cpu)
+            if hyper_thread and added and len(out) < num_unisolated:
+                add_cpu(sibling_by_index(cpu))
+
         break
 
     return out[:num_unisolated]
-
 
 def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage=0):
     node_distribution: dict = {}
@@ -1578,7 +1606,7 @@ def regenerate_config(new_config, old_config, force=False):
         old_config["nodes"][i]["small_pool_count"] = small_pool_count
         old_config["nodes"][i]["large_pool_count"] = large_pool_count
         old_config["nodes"][i]["huge_page_memory"] = minimum_hp_memory
-        minimum_sys_memory = calculate_minimum_sys_memory(old_config["nodes"][i]["max_size"])
+        minimum_sys_memory = calculate_minimum_sys_memory(old_config["nodes"][i]["ssd_pcis"])
         old_config["nodes"][i]["sys_memory"] = minimum_sys_memory
 
     memory_details = node_utils.get_memory_details()
@@ -1734,7 +1762,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["max_lvol"] = max_lvol
             node_info["max_size"] = max_prov
             node_info["huge_page_memory"] = max(minimum_hp_memory, max_prov)
-            minimum_sys_memory = calculate_minimum_sys_memory(max_prov)
+            minimum_sys_memory = calculate_minimum_sys_memory(node_info["ssd_pcis"])
             node_info["sys_memory"] = minimum_sys_memory
             all_nodes.append(node_info)
             node_index += 1
@@ -2890,3 +2918,45 @@ def create_rpc_socket_mount():
         subprocess.run(["df", "-h", mount_point])
     except Exception as e:
         logger.error(e)
+
+
+def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage):
+    minimum_hp_memory = 0
+    cores_by_numa = get_numa_cores()
+    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage)
+    node_index = 0
+    number_of_alcemls = number_of_devices//(nodes_per_socket * len(sockets_to_use))
+    if number_of_alcemls < 2:
+        number_of_alcemls = 2
+    for nid in sockets_to_use:
+        for idx, core_group in enumerate(node_cores.get(nid, [])):
+            distribution = calculate_core_allocations(core_group["isolated"], number_of_alcemls + 1)
+            number_of_distribs = 2
+            number_of_distribs_cores = len(distribution[5])
+
+            number_of_poller_cores = len(distribution[2])
+            if 12 >= number_of_distribs_cores > 2:
+                number_of_distribs = number_of_distribs_cores
+            elif number_of_poller_cores > 12:
+                number_of_distribs = 12
+            small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls +1, 2 * number_of_distribs,
+                                                                      len(core_group["isolated"]),
+                                                                      number_of_poller_cores or len(
+                                                                          core_group["isolated"]))
+            minimum_hp_memory += calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol,
+                                                            0, len(core_group["isolated"])) + 1000000000
+
+            node_index += 1
+    return convert_size(minimum_hp_memory, 'MB')
+
+def recalculate_cores_distribution(cores, number_of_alcemls):
+    distribution = calculate_core_allocations(cores, number_of_alcemls)
+    core_to_index = {core: idx for idx, core in enumerate(cores)}
+    return {
+        "app_thread_core": get_core_indexes(core_to_index, distribution[0]),
+        "jm_cpu_core": get_core_indexes(core_to_index, distribution[1]),
+        "poller_cpu_cores": get_core_indexes(core_to_index, distribution[2]),
+        "alceml_cpu_cores": get_core_indexes(core_to_index, distribution[3]),
+        "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
+        "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
+        "jc_singleton_core": get_core_indexes(core_to_index, distribution[6])}

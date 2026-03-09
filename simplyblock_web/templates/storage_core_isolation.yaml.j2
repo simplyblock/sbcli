@@ -91,14 +91,14 @@ spec:
             - name: etc
               mountPath: /etc
             - name: rootfs
-              mountPath: /host
+              mountPath: /
             - name: var-simplyblock
               mountPath: /var/simplyblock
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -e
-              
+
               if [[ -f /etc/os-release ]]; then
                   source /etc/os-release
                   OS_ID=$ID
@@ -113,14 +113,14 @@ spec:
                       apt update && apt install -y grep jq nvme-cli tuned
                       ;;
                   ubuntu)
-                      chroot /host apt update && chroot /host apt install -y grep jq nvme-cli tuned
-                      chroot /host apt-get install -y linux-modules-extra-$(uname -r)
+                      apt update && apt install -y grep jq nvme-cli tuned
+                      apt-get install -y linux-modules-extra-$(uname -r)
                       ;;
                   centos|rhel|rocky|almalinux|ol)
                       export YUM_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
                       export DNF_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
-                      chroot /host dnf install -y grep jq nvme-cli kernel-modules-extra tuned \
-                       --setopt=tsflags=nocontexts,noscripts --setopt=install_weak_deps=False 
+                      dnf install -y grep jq nvme-cli kernel-modules-extra tuned \
+                       --setopt=tsflags=nocontexts,noscripts --setopt=install_weak_deps=False
                       ;;
                   *)
                       echo "[WARN] OS $OS_ID not supported for automatic NVMe package installation"
@@ -204,7 +204,7 @@ spec:
               tuned-adm profile "$TUNED_PROFILE"
               case "$OS_ID" in
                   centos|rhel|rocky|almalinux)
-                  chroot /host grubby --update-kernel=ALL --args="isolcpus=$ISOLATED_CORES nohz_full=$ISOLATED_CORES rcu_nocbs=$ISOLATED_CORES"
+                  grubby --update-kernel=ALL --args="isolcpus=$ISOLATED_CORES nohz_full=$ISOLATED_CORES rcu_nocbs=$ISOLATED_CORES"
                       ;;
                   *)
                       echo ""
@@ -212,5 +212,5 @@ spec:
               esac
 
               echo "[INFO] Init setup and CPU isolation complete."
-              
+
               echo "--- Init setup complete ---"
