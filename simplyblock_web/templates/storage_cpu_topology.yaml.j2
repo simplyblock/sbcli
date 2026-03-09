@@ -1,0 +1,122 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ CORE_JOBNAME }}
+  namespace: {{ NAMESPACE }}
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
+
+      hostNetwork: true
+      hostPID: true
+
+      serviceAccountName: simplyblock-storage-node-sa
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+        - name: var-simplyblock
+          hostPath:
+            path: /var/simplyblock
+
+      containers:
+        - name: kubelet-cpu-topology
+          image: alpine:3.20
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host
+              mountPath: /host
+            - name: var-simplyblock
+              mountPath: /var/simplyblock
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              MARKER="/var/simplyblock/.cpu_topology_applied"
+              if [ -f "$MARKER" ]; then
+                echo "[INFO] Node already configured. Exiting."
+                exit 0
+              fi
+
+              KUBELET_CFG="/host/var/lib/kubelet/config.yaml"
+              CPU_MNG="/host/var/lib/kubelet/cpu_manager_state"
+              KUBELET_ENV1="/host/etc/default/kubelet"   # Debian/Ubuntu
+              KUBELET_ENV2="/host/etc/sysconfig/kubelet" # RHEL/CentOS
+              SYSTEMD_UNIT_DIR="/host/etc/systemd/system/kubelet.service.d"
+              DROPIN="$SYSTEMD_UNIT_DIR/20-simplyblock-cpu-manager.conf"
+
+              apk add --no-cache sed grep coreutils util-linux
+
+              echo "[INFO] Ensuring kubelet config exists at $KUBELET_CFG"
+              if [ ! -f "$KUBELET_CFG" ]; then
+                echo "[ERROR] kubelet config not found at $KUBELET_CFG"
+                echo "        Your cluster may not be using kubelet config file mode."
+                echo "        Check kubelet args for --config, or adjust KUBELET_CFG."
+                exit 1
+              fi
+
+              # Backup once
+              if [ ! -f "${KUBELET_CFG}.pre-simplyblock.bak" ]; then
+                cp -a "$KUBELET_CFG" "${KUBELET_CFG}.pre-simplyblock.bak"
+              fi
+
+              # Update/insert kubelet config keys (idempotent)
+              # cpuManagerPolicy: static
+              # cpuManagerReconcilePeriod: 5s
+              # topologyManagerPolicy: single-numa-node
+              # topologyManagerScope: pod
+              # reservedSystemCPUs: "0,1"
+              #
+              set_key () {
+                key="$1"; val="$2"
+                if grep -qE "^${key}:" "$KUBELET_CFG"; then
+                  sed -i -E "s|^${key}:.*|${key}: ${val}|" "$KUBELET_CFG"
+                else
+                  printf "\n%s: %s\n" "$key" "$val" >> "$KUBELET_CFG"
+                fi
+              }
+
+              set_key "cpuManagerPolicy" "static"
+              set_key "cpuManagerReconcilePeriod" "5s"
+              set_key "topologyManagerPolicy" "single-numa-node"
+              set_key "topologyManagerScope" "pod"
+              set_key "reservedSystemCPUs" {{ RESERVED_SYSTEM_CPUS }}
+
+              echo "[INFO] kubelet config updated:"
+              grep -E "^(cpuManagerPolicy|cpuManagerReconcilePeriod|topologyManagerPolicy|topologyManagerScope|reservedSystemCPUs):" "$KUBELET_CFG" || true
+
+              # Ensure kubelet is actually using this config file.
+              # Many kubeadm setups already do via systemd: ExecStart=... --config=/var/lib/kubelet/config.yaml
+              # If not present, add a systemd drop-in to force it.
+              mkdir -p "$SYSTEMD_UNIT_DIR"
+              if ! grep -R --quiet -- "--config=/var/lib/kubelet/config.yaml" /host/etc/systemd/system /host/lib/systemd/system /host/usr/lib/systemd/system 2>/dev/null; then
+                echo "[WARN] Did not detect kubelet --config flag; adding drop-in $DROPIN"
+                cat > "$DROPIN" <<'EOF'
+              [Service]
+              Environment="KUBELET_EXTRA_ARGS=--config=/var/lib/kubelet/config.yaml"
+              EOF
+              fi
+
+              # Restart kubelet
+              echo "removing old cpu_manager_state..."
+              rm -rf $CPU_MNG
+
+              echo "[INFO] Restarting kubelet via host systemd..."
+              nsenter --target 1 --mount --uts --ipc --net --pid -- sh -c "systemctl daemon-reload && systemctl restart kubelet"
+
+              echo "[INFO] Marking node as configured."
+              touch "$MARKER"
+
+              echo "[INFO] Done."
+              

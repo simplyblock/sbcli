@@ -66,6 +66,13 @@ spec:
       volumeMounts:
         - name: foundationdb
           mountPath: /etc/foundationdb
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "64Mi"
+        limits:
+          cpu: "100m"
+          memory: "64Mi"
 
   containers:
     - name: spdk-container
@@ -125,8 +132,16 @@ spec:
         limits:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
           cpu: {{ CORES }}
+          {% if CPU_TOPOLOGY_ENABLED %}
+          memory: {{ MEM2_MEGA }}Mi
+          numa-align/numa-{{ NSOCKET }}: 1
+          {% endif %}
         requests:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
+          {% if CPU_TOPOLOGY_ENABLED %}
+          memory: {{ MEM2_MEGA }}Mi
+          numa-align/numa-{{ NSOCKET }}: 1
+          {% endif %}
 
     - name: spdk-proxy-container
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
@@ -148,7 +163,42 @@ spec:
           value: "True"
         - name: TIMEOUT
           value: "300"
-    {% if MODE == "docker" %}
+      {% if CPU_TOPOLOGY_ENABLED %}
+      resources:
+        limits:
+          cpu: 1
+          memory: "128Mi"
+        requests:
+          cpu: 1
+          memory: "128Mi"
+      {% endif %}
+
+{% if MODE == "docker" %}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simplyblock-fluentd-{{ RPC_PORT }}-{{ CLUSTER_ID }}
+  namespace: {{ NAMESPACE }}
+  labels:
+    app: simplyblock-fluentd-app-{{ RPC_PORT }}
+spec:
+  serviceAccountName: simplyblock-storage-node-sa
+  nodeSelector:
+    kubernetes.io/hostname: {{ HOSTNAME }}
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+  volumes:
+    - name: varlog
+      hostPath:
+        path: /var/log
+    - name: dockercontainerlogdirectory
+      hostPath:
+        path: /var/log/pods
+  containers:
     - name: fluentd
       image: public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
       imagePullPolicy: "Always"
@@ -165,6 +215,8 @@ spec:
           value: "tcp"
         - name: FLUENTD_SYSTEMD_CONF
           value: "disable"
+        - name: FLUENT_CONTAINER_TAIL_PATH
+          value: "/var/log/pods/{{ NAMESPACE }}_snode-spdk-pod-{{ RPC_PORT }}-{{ CLUSTER_ID }}_*/*/*.log"
         - name: FLUENT_CONTAINER_TAIL_EXCLUDE_PATH
           value: /var/log/pods/fluent*
         - name: FLUENT_CONTAINER_TAIL_PARSER_TYPE
