@@ -1,5 +1,5 @@
 name: Bootstrap Cluster + Stress Run Until Failure
-run-name: "Stress Bootstrap | ${{ github.ref_name }} | ${{ inputs.MNODES }}"
+run-name: "Stress Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }}"
 
 on:
   workflow_dispatch:

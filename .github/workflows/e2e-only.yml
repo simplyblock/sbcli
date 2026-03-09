@@ -1,5 +1,5 @@
 name: Run E2E Tests on Existing Cluster
-run-name: "E2E | ${{ github.ref_name }} | ${{ inputs.MNODES }}"
+run-name: "E2E | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }}"
 
 on:
   workflow_dispatch:
