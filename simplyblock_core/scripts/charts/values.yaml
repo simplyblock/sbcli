@@ -16,7 +16,7 @@ observability:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "improved_user_experience"
+    tag: "main"
     pullPolicy: "Always"
 
 ports:
