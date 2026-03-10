@@ -2220,55 +2220,40 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         self.logger.info(f"[{storage_node_ip}] Distrib logs saved: {base_path} (tar: {final_tar})")
 
         # ------------------------------
-        # (1) Store paths:
-        #     - base_path
-        #     - latest /etc alceml folder
-        #     - files in that folder
+        # Validate placement dump files
         # ------------------------------
-        # alceml_latest_dir, alceml_txt_files = self._get_latest_alceml_dir_and_files(storage_node_ip)
+        alceml_latest_dir, alceml_txt_files = self._get_latest_alceml_dir_and_files(storage_node_ip)
 
-        # # also store the txt files we generated / collected into base_path
-        # # NOTE: these are files placed under base_path by the remote script
-        # gen_cmd = f"sudo ls -1 {shlex.quote(base_path)}/*.txt 2>/dev/null || true"
-        # gen_out, _ = self.exec_command(storage_node_ip, gen_cmd)
-        # generated_txt_files = [x.strip() for x in (gen_out or "").splitlines() if x.strip()]
+        # also collect any txt files generated / placed under base_path by the remote script
+        gen_cmd = f"sudo ls -1 {shlex.quote(base_path)}/*.txt 2>/dev/null || true"
+        gen_out, _ = self.exec_command(storage_node_ip, gen_cmd)
+        generated_txt_files = [x.strip() for x in (gen_out or "").splitlines() if x.strip()]
 
-        # self.distrib_dump_paths[storage_node_ip] = {
-        #     "base_path": base_path,
-        #     "alceml_latest_dir": alceml_latest_dir,
-        #     "alceml_txt_files": alceml_txt_files,
-        #     "generated_txt_files": generated_txt_files,
-        # }
+        self.logger.info(f"[{storage_node_ip}] alceml_latest_dir={alceml_latest_dir}, alceml txt count={len(alceml_txt_files)}, generated txt count={len(generated_txt_files)}")
 
-        # self.logger.info(f"[{storage_node_ip}] Stored dump paths: base_path={base_path}, alceml_latest_dir={alceml_latest_dir}")
-        # self.logger.info(f"[{storage_node_ip}] /etc alceml txt count={len(alceml_txt_files)}, generated txt count={len(generated_txt_files)}")
+        if not alceml_txt_files and not generated_txt_files:
+            self.logger.warning(f"[{storage_node_ip}] No dump txt files found to validate.")
+            return True
 
-        # # ------------------------------
-        # # (2) Validate using your steps only
-        # # ------------------------------
-        # if not alceml_txt_files and not generated_txt_files:
-        #     self.logger.warning(f"[{storage_node_ip}] No dump txt files found to validate.")
-        #     return True
+        # Copy /etc alceml dump txt files into NFS path so they are locally accessible
+        alceml_nfs_files = []
+        if alceml_txt_files:
+            alceml_dir = f"{base_path}/alceml_dumps_{timestamp}"
+            self.exec_command(storage_node_ip, f"sudo mkdir -p '{alceml_dir}' && sudo chmod -R 777 '{alceml_dir}'")
+            for fp in alceml_txt_files:
+                bn = os.path.basename(fp.rstrip("/"))
+                dest = f"{alceml_dir}/{bn}"
+                self.exec_command(storage_node_ip, f"sudo cp -f '{fp}' '{dest}' 2>/dev/null || true")
+                alceml_nfs_files.append(dest)
 
-        # before_dir = f"{base_path}/before-migration-{timestamp}"
-        # self.exec_command(storage_node_ip, f"sudo mkdir -p '{before_dir}' && sudo chmod -R 777 '{before_dir}'")
+        files_to_validate = alceml_nfs_files + generated_txt_files
+        ok = self._validate_dump_files(files_to_validate)
 
-        # Copy ONLY /etc alceml dumps into NFS before_dir
-        # alceml_nfs_files = []
-        # for fp in alceml_txt_files:
-        #     bn = os.path.basename(fp.rstrip("/"))
-        #     dest = f"{before_dir}/{bn}"
-        #     self.exec_command(storage_node_ip, f"sudo cp -f '{fp}' '{dest}' 2>/dev/null || true")
-        #     alceml_nfs_files.append(dest)
+        if not ok:
+            self.logger.error(f"[{storage_node_ip}] Placement dump validation FAILED.")
+            return False
 
-        # Validate: NFS-copied alceml + existing generated (already in base_path)
-        # files_to_validate = []
-        # files_to_validate.extend(alceml_nfs_files)
-        # files_to_validate.extend(generated_txt_files)
-
-        # ok = self._validate_dump_files(files_to_validate)
-        
-        # return True if ok else False
+        self.logger.info(f"[{storage_node_ip}] Placement dump validation passed.")
         return True
 
     def clone_mount_gen_uuid(self, node, device):
