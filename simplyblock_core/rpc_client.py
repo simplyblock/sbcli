@@ -194,14 +194,27 @@ class RPCClient:
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
 
+    @staticmethod
+    def _strip_dhhc_prefix(key):
+        """Strip DHHC-1:XX: prefix and trailing : from a key for SPDK.
+
+        SPDK expects raw base64 keys, not the DHHC-1 nvme-cli format.
+        """
+        if key and key.startswith("DHHC-1:"):
+            # Format: DHHC-1:<hash_id>:<base64>:
+            parts = key.split(":", 3)
+            if len(parts) >= 4:
+                return parts[2]
+        return key
+
     def subsystem_add_host(self, nqn, host, psk=None, dhchap_key=None, dhchap_ctrlr_key=None):
         params = {"nqn": nqn, "host": host}
         if psk:
             params["psk"] = psk
         if dhchap_key:
-            params["dhchap_key"] = dhchap_key
+            params["dhchap_key"] = self._strip_dhhc_prefix(dhchap_key)
         if dhchap_ctrlr_key:
-            params["dhchap_ctrlr_key"] = dhchap_ctrlr_key
+            params["dhchap_ctrlr_key"] = self._strip_dhhc_prefix(dhchap_ctrlr_key)
         return self._request("nvmf_subsystem_add_host", params)
 
     def subsystem_remove_host(self, nqn, host):
