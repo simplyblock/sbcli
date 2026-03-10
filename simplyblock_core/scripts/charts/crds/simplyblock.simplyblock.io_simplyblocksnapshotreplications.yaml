@@ -40,8 +40,24 @@ spec:
           spec:
             description: spec defines the desired state of SimplyBlockSnapshotReplication
             properties:
+              action:
+                enum:
+                - failback
+                type: string
+              excludeVolumeIDs:
+                description: 'Optional: volumes to exclude from failback.'
+                items:
+                  type: string
+                type: array
+              includeVolumeIDs:
+                description: |-
+                  Optional: only these volumes are included in failback.
+                  If empty, all volumes are candidates unless excluded below.
+                items:
+                  type: string
+                type: array
               interval:
-                description: 'snapshot replication interval in seconds (default: 60sec)'
+                description: 'snapshot replication interval in seconds (default: 300sec)'
                 format: int32
                 type: integer
               sourceCluster:
@@ -73,6 +89,11 @@ spec:
             properties:
               configured:
                 type: boolean
+              observedFailbackGeneration:
+                description: The metadata.generation value for which failback was
+                  last processed.
+                format: int64
+                type: integer
               volumes:
                 description: Per-volume replication status
                 items:
