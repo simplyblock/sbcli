@@ -17,8 +17,42 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient
+from simplyblock_core.snode_client import SNodeClient
 
 logger = lg.getLogger()
+
+
+def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
+    """Write DHCHAP key files to a storage node and register them in SPDK's keyring.
+
+    Returns a dict mapping key type ('dhchap_key', 'dhchap_ctrlr_key', 'psk')
+    to the SPDK keyring name for use in subsystem_add_host.
+    """
+    snode_api = SNodeClient(snode.api_endpoint)
+    # Sanitize host NQN for use as filename
+    safe_host = host_nqn.replace(":", "_").replace(".", "_")
+    key_names = {}
+
+    for key_type in ("dhchap_key", "dhchap_ctrlr_key", "psk"):
+        key_value = host_entry.get(key_type)
+        if not key_value:
+            continue
+        key_name = f"{key_type}_{safe_host}"
+        # Write key file to storage node via SNodeAPI
+        result, error = snode_api.write_key_file(key_name, key_value)
+        if error:
+            logger.error("Failed to write key file %s on node %s: %s", key_name, snode.get_id(), error)
+            continue
+        key_path = result
+        # Register in SPDK keyring
+        ret = rpc_client.keyring_file_add_key(key_name, key_path)
+        if not ret:
+            logger.error("Failed to register key %s in SPDK keyring on node %s", key_name, snode.get_id())
+            continue
+        key_names[key_type] = key_name
+
+    return key_names
+
 
 
 def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
@@ -711,12 +745,17 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         if lvol.allowed_hosts:
             for host_entry in lvol.allowed_hosts:
                 logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
-                rpc_client.subsystem_add_host(
-                    lvol.nqn, host_entry["nqn"],
-                    psk=host_entry.get("psk"),
-                    dhchap_key=host_entry.get("dhchap_key"),
-                    dhchap_ctrlr_key=host_entry.get("dhchap_ctrlr_key"),
-                )
+                has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+                if has_keys:
+                    key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+                    rpc_client.subsystem_add_host(
+                        lvol.nqn, host_entry["nqn"],
+                        psk=key_names.get("psk"),
+                        dhchap_key=key_names.get("dhchap_key"),
+                        dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                    )
+                else:
+                    rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
         ana_state = "non_optimized"
         if lvol.node_id == snode.get_id():
@@ -793,12 +832,17 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     if lvol.allowed_hosts:
         for host_entry in lvol.allowed_hosts:
             logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
-            rpc_client.subsystem_add_host(
-                lvol.nqn, host_entry["nqn"],
-                psk=host_entry.get("psk"),
-                dhchap_key=host_entry.get("dhchap_key"),
-                dhchap_ctrlr_key=host_entry.get("dhchap_ctrlr_key"),
-            )
+            has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+            if has_keys:
+                key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+                rpc_client.subsystem_add_host(
+                    lvol.nqn, host_entry["nqn"],
+                    psk=key_names.get("psk"),
+                    dhchap_key=key_names.get("dhchap_key"),
+                    dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                )
+            else:
+                rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
@@ -1388,12 +1432,11 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 client_data_nic_str = f"--host-iface={cluster.client_data_nic}"
 
             tls_str = ""
-            if cluster.tls:
-                tls_str = " --tls"
-
             host_auth_str = ""
             if host_entry:
                 host_auth_str = f" --hostnqn={host_nqn}"
+                if host_entry.get("psk"):
+                    tls_str = " --tls"
                 if host_entry.get("dhchap_key"):
                     host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
                 if host_entry.get("dhchap_ctrlr_key"):
@@ -1424,7 +1467,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 "connect": connect_cmd,
             }
 
-            if cluster.tls:
+            if host_entry and host_entry.get("psk"):
                 entry["tls"] = True
             if lvol.allowed_hosts:
                 entry["allowed_hosts"] = [h["nqn"] for h in lvol.allowed_hosts]
@@ -1957,17 +2000,22 @@ def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
             entry["psk"] = utils.generate_psk_key()
 
     # Apply to all nodes where the subsystem exists
+    has_keys = any(entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
     for node_id in lvol.nodes:
         snode = db_controller.get_storage_node_by_id(node_id)
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        ret = rpc_client.subsystem_add_host(
-            lvol.nqn, host_nqn,
-            psk=entry.get("psk"),
-            dhchap_key=entry.get("dhchap_key"),
-            dhchap_ctrlr_key=entry.get("dhchap_ctrlr_key"),
-        )
+        if has_keys:
+            key_names = _register_dhchap_keys_on_node(snode, host_nqn, entry, rpc_client)
+            ret = rpc_client.subsystem_add_host(
+                lvol.nqn, host_nqn,
+                psk=key_names.get("psk"),
+                dhchap_key=key_names.get("dhchap_key"),
+                dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+            )
+        else:
+            ret = rpc_client.subsystem_add_host(lvol.nqn, host_nqn)
         if not ret:
             return False, f"Failed to add host {host_nqn} on node {node_id}"
 

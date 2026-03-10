@@ -194,27 +194,25 @@ class RPCClient:
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
 
-    @staticmethod
-    def _strip_dhhc_prefix(key):
-        """Strip DHHC-1:XX: prefix and trailing : from a key for SPDK.
+    def keyring_file_add_key(self, name, path):
+        """Register a file-based key in SPDK's keyring by path."""
+        params = {"name": name, "path": path}
+        return self._request("keyring_file_add_key", params)
 
-        SPDK expects raw base64 keys, not the DHHC-1 nvme-cli format.
-        """
-        if key and key.startswith("DHHC-1:"):
-            # Format: DHHC-1:<hash_id>:<base64>:
-            parts = key.split(":", 3)
-            if len(parts) >= 4:
-                return parts[2]
-        return key
+    def keyring_file_remove_key(self, name):
+        """Remove a key from SPDK's keyring."""
+        params = {"name": name}
+        return self._request("keyring_file_remove_key", params)
 
     def subsystem_add_host(self, nqn, host, psk=None, dhchap_key=None, dhchap_ctrlr_key=None):
+        """Add a host to a subsystem. Key params are keyring key names (not raw values)."""
         params = {"nqn": nqn, "host": host}
         if psk:
             params["psk"] = psk
         if dhchap_key:
-            params["dhchap_key"] = self._strip_dhhc_prefix(dhchap_key)
+            params["dhchap_key"] = dhchap_key
         if dhchap_ctrlr_key:
-            params["dhchap_ctrlr_key"] = self._strip_dhhc_prefix(dhchap_ctrlr_key)
+            params["dhchap_ctrlr_key"] = dhchap_ctrlr_key
         return self._request("nvmf_subsystem_add_host", params)
 
     def subsystem_remove_host(self, nqn, host):
