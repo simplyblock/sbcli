@@ -519,8 +519,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.crypto_key1 = crypto_key1
         lvol.crypto_key2 = crypto_key2
 
-    # Process allowed hosts for TLS-secured clusters
-    if allowed_hosts and cl.tls and not namespace:
+    # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
+    if allowed_hosts and not namespace:
         host_entries = _build_host_entries(allowed_hosts, sec_options)
         if isinstance(host_entries, tuple):
             return host_entries  # (False, error_message)
@@ -1341,13 +1341,24 @@ def get_lvol(lvol_id_or_name, is_json):
         return utils.print_table(data2)
 
 
-def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
+def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, host_nqn=None):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(uuid)
     except KeyError as e:
         logger.error(e)
         return False
+
+    # Look up host entry for secrets when host_nqn is provided
+    host_entry = None
+    if host_nqn and lvol.allowed_hosts:
+        for h in lvol.allowed_hosts:
+            if h["nqn"] == host_nqn:
+                host_entry = h
+                break
+        if not host_entry:
+            logger.error(f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}")
+            return False
 
     out = []
     nodes_ids = []
@@ -1377,8 +1388,18 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 client_data_nic_str = f"--host-iface={cluster.client_data_nic}"
 
             tls_str = ""
-            if cluster.tls and lvol.allowed_hosts:
+            if cluster.tls:
                 tls_str = " --tls"
+
+            host_auth_str = ""
+            if host_entry:
+                host_auth_str = f" --hostnqn={host_nqn}"
+                if host_entry.get("dhchap_key"):
+                    host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
+                if host_entry.get("dhchap_ctrlr_key"):
+                    host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
+            elif host_nqn:
+                host_auth_str = f" --hostnqn={host_nqn}"
 
             connect_cmd = (
                 f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
@@ -1386,7 +1407,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 f"--nr-io-queues={cluster.client_qpair_count} "
                 f"--keep-alive-tmo={keep_alive_to} "
                 f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn} "
-                f"{client_data_nic_str}{tls_str}"
+                f"{client_data_nic_str}{tls_str}{host_auth_str}"
             )
 
             entry = {
@@ -1403,8 +1424,9 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 "connect": connect_cmd,
             }
 
-            if cluster.tls and lvol.allowed_hosts:
+            if cluster.tls:
                 entry["tls"] = True
+            if lvol.allowed_hosts:
                 entry["allowed_hosts"] = [h["nqn"] for h in lvol.allowed_hosts]
 
             out.append(entry)
@@ -1916,11 +1938,6 @@ def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
     except KeyError as e:
         logger.error(e)
         return False, str(e)
-
-    cluster = db_controller.get_cluster_by_id(
-        db_controller.get_storage_node_by_id(lvol.node_id).cluster_id)
-    if not cluster.tls:
-        return False, "TLS is not enabled on the cluster"
 
     # Check for duplicate
     for h in lvol.allowed_hosts:

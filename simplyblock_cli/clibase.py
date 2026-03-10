@@ -600,6 +600,8 @@ class CLIWrapperBase:
         kwargs = {}
         if (ctrl_loss_tmo := args.ctrl_loss_tmo) is not None:
             kwargs['ctrl_loss_tmo'] = ctrl_loss_tmo
+        if args.host_nqn:
+            kwargs['host_nqn'] = args.host_nqn
 
         data = lvol_controller.connect_lvol(args.volume_id, **kwargs)
         if data:
