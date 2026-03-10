@@ -82,7 +82,7 @@ def _run_backup(task):
             snap_bdev_name = f"{snapshot.lvol.lvs_name}/{snapshot.snap_name}"
 
         try:
-            ret = rpc_client.bdev_lvol_s3_backup(backup.uuid, [snap_bdev_name])
+            ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name])
             if not ret:
                 _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
                 return
@@ -95,7 +95,7 @@ def _run_backup(task):
 
     # Poll
     try:
-        stat = rpc_client.bdev_lvol_s3_backup_stat(backup.uuid)
+        stat = rpc_client.bdev_lvol_s3_backup_stat(backup.s3_id)
     except RPCException:
         task.retry += 1
         task.status = JobSchedule.STATUS_SUSPENDED
@@ -152,10 +152,8 @@ def _run_restore(task):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=30)
 
-    offset = task.function_params.get("restore_offset", 0)
-
     try:
-        ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, offset, chain_ids)
+        ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=16)
         if not ret:
             task.function_result = "bdev_lvol_s3_recovery RPC failed"
             task.retry += 1
@@ -191,8 +189,6 @@ def _run_restore(task):
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)
         elif state == "Failed":
-            if "offset" in stat:
-                task.function_params["restore_offset"] = stat["offset"]
             task.function_result = "Restore failed"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
@@ -245,7 +241,7 @@ def _run_merge(task):
         snode.rpc_username, snode.rpc_password, timeout=30)
 
     try:
-        ret = rpc_client.bdev_lvol_s3_merge(keep_backup.uuid, old_backup.uuid)
+        ret = rpc_client.bdev_lvol_s3_merge(keep_backup.s3_id, old_backup.s3_id, cluster_batch=16)
         if not ret:
             task.function_result = "bdev_lvol_s3_merge RPC failed"
             task.retry += 1
@@ -261,7 +257,7 @@ def _run_merge(task):
 
     # Poll
     try:
-        stat = rpc_client.bdev_lvol_s3_merge_stat(keep_backup.uuid)
+        stat = rpc_client.bdev_lvol_s3_merge_stat(keep_backup.s3_id)
     except RPCException:
         task.retry += 1
         task.status = JobSchedule.STATUS_SUSPENDED

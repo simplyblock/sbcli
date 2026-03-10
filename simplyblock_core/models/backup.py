@@ -23,6 +23,7 @@ class Backup(BaseModel):
         STATUS_DELETING: 5,
     }
 
+    s3_id: int = 0
     cluster_id: str = ""
     lvol_id: str = ""
     lvol_name: str = ""

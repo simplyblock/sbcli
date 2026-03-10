@@ -21,6 +21,15 @@ def _generate_backup_id():
     return str(uuid.uuid4())
 
 
+def _next_s3_id(cluster_id):
+    """Return the next cluster-wide unique s3_id (uint32) for data-plane RPCs."""
+    max_id = 0
+    for b in db_controller.get_backups(cluster_id):
+        if b.s3_id > max_id:
+            max_id = b.s3_id
+    return max_id + 1
+
+
 def _parse_age_string(age_str):
     """Parse age strings like '2d', '12h', '1w', '30m' into seconds."""
     match = re.match(r'^(\d+)([mhdw])$', age_str.strip())
@@ -140,6 +149,7 @@ def backup_snapshot(snapshot_id, cluster_id=None):
 
     backup = Backup()
     backup.uuid = backup_id
+    backup.s3_id = _next_s3_id(cluster_id)
     backup.cluster_id = cluster_id
     backup.lvol_id = lvol.get_id()
     backup.lvol_name = lvol.lvol_name
@@ -188,10 +198,10 @@ def restore_backup(backup_id, node_id, lvol_name, cluster_id=None):
     if not chain:
         return None, f"Could not build backup chain for {backup_id}"
 
-    # Create the restore task
+    # Create the restore task — pass integer s3_ids for data-plane RPCs
     result = tasks_controller.add_backup_restore_task(
         cluster_id, node_id, backup_id, lvol_name,
-        [b.uuid for b in chain])
+        [b.s3_id for b in chain])
 
     if result:
         return backup_id, None
@@ -227,7 +237,7 @@ def delete_backups(lvol_id):
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password)
-        s3_ids = [b.uuid for b in completed]
+        s3_ids = [b.s3_id for b in completed]
         try:
             rpc_client.bdev_lvol_s3_delete(s3_ids)
         except Exception as e:
@@ -248,6 +258,7 @@ def list_backups(cluster_id=None):
     for b in backups:
         data.append({
             "ID": b.uuid,
+            "S3 ID": b.s3_id,
             "LVol": b.lvol_name,
             "Snapshot": b.snapshot_name,
             "Node": b.node_id[:8] if b.node_id else "",
@@ -276,6 +287,7 @@ def import_backups(s3_metadata_list):
 
         backup = Backup()
         backup.uuid = backup_id
+        backup.s3_id = meta.get("s3_id", _next_s3_id(meta.get("cluster_id", "")))
         backup.cluster_id = meta.get("cluster_id", "")
         backup.lvol_id = meta.get("lvol_id", "")
         backup.lvol_name = meta.get("lvol_name", "")
