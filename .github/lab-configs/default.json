@@ -1,0 +1,23 @@
+{
+  "mnodes": "192.168.10.211",
+  "storage_ips": "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208",
+  "client_ips": "192.168.10.165 192.168.10.166",
+  "bastion_ip": "192.168.10.211",
+  "api_url": "http://192.168.10.211/",
+  "grafana": "http://192.168.10.211/grafana",
+  "ssh_user": "root",
+  "key_path": "/home/ec2-user/.ssh/simplyblock-us-east-2.pem",
+  "nfs_mount": "/mnt/nfs_share",
+  "nr_hugepages": "2048",
+  "sbcli_cmd": "sbctl",
+  "bootstrap": {
+    "max_lvol": "300",
+    "data_chunks": "2",
+    "parity_chunks": "2",
+    "journal_partition": "1",
+    "ha_jm_count": "3",
+    "ha_type": "ha",
+    "data_nic": "eth1",
+    "enable_node_affinity": "false"
+  }
+}
