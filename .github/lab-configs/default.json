@@ -18,6 +18,8 @@
     "ha_jm_count": "3",
     "ha_type": "ha",
     "data_nic": "eth1",
-    "enable_node_affinity": "false"
+    "enable_node_affinity": "false",
+    "cluster_extra_args": {},
+    "sn_extra_args": {}
   }
 }

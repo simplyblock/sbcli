@@ -111,7 +111,7 @@ jobs:
   e2e-run-2:
     name: "E2E R25.10-Hotfix 2+2"
     needs: [check-stress, e2e-run-1]
-    if: always() && needs.check-stress.outputs.stress_running != 'true' && needs.e2e-run-1.result != 'skipped'
+    if: always() && !cancelled() && needs.check-stress.outputs.stress_running != 'true' && needs.e2e-run-1.result != 'skipped'
     uses: ./.github/workflows/e2e-bootstrap.yml
     secrets: inherit
     with:
@@ -133,7 +133,7 @@ jobs:
   e2e-run-3:
     name: "E2E main 1+1"
     needs: [check-stress, e2e-run-2]
-    if: always() && needs.check-stress.outputs.stress_running != 'true' && needs.e2e-run-2.result != 'skipped'
+    if: always() && !cancelled() && needs.check-stress.outputs.stress_running != 'true' && needs.e2e-run-2.result != 'skipped'
     uses: ./.github/workflows/e2e-bootstrap.yml
     secrets: inherit
     with:
@@ -155,7 +155,7 @@ jobs:
   e2e-run-4:
     name: "E2E main 2+2"
     needs: [check-stress, e2e-run-3]
-    if: always() && needs.check-stress.outputs.stress_running != 'true' && needs.e2e-run-3.result != 'skipped'
+    if: always() && !cancelled() && needs.check-stress.outputs.stress_running != 'true' && needs.e2e-run-3.result != 'skipped'
     uses: ./.github/workflows/e2e-bootstrap.yml
     secrets: inherit
     with:
