@@ -345,10 +345,14 @@ class TestClusterBase:
 
     def fetch_all_nodes_distrib_log(self):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
+        all_ok = True
         for result in storage_nodes['results']:
             if result['is_secondary_node'] is False:
-                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"],
-                                                logs_path=self.docker_logs_path)
+                ok = self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"],
+                                                     logs_path=self.docker_logs_path)
+                if not ok:
+                    all_ok = False
+        assert all_ok, "Placement dump validation failed on one or more storage nodes"
 
     def collect_management_details(self, post_teardown=False):
         suffix = "_pre_teardown" if not post_teardown else "_post_teardown"
