@@ -42,6 +42,24 @@ from simplyblock_core.utils import pull_docker_image_with_retry
 logger = utils.get_logger(__name__)
 
 
+def _reapply_allowed_hosts(lvol, snode, rpc_client):
+    """Re-register allowed hosts (with DHCHAP keys) on a subsystem after recreation."""
+    from simplyblock_core.controllers.lvol_controller import _register_dhchap_keys_on_node
+    for host_entry in lvol.allowed_hosts:
+        logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
+        has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+        if has_keys:
+            key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+            rpc_client.subsystem_add_host(
+                lvol.nqn, host_entry["nqn"],
+                psk=key_names.get("psk"),
+                dhchap_key=key_names.get("dhchap_key"),
+                dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+            )
+        else:
+            rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
+
+
 def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool):
     """Connect snode to device
 
@@ -3192,9 +3210,13 @@ def recreate_lvstore_on_sec(secondary_node):
         else:
             min_cntlid = 1000
         for lvol in lvol_list:
-            logger.info("creating subsystem %s", lvol.nqn)
+            allow_any = not bool(lvol.allowed_hosts)
+            logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
             secondary_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                                  max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                                                  max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                                  allow_any_host=allow_any)
+            if lvol.allowed_hosts:
+                _reapply_allowed_hosts(lvol, secondary_node, secondary_rpc_client)
 
         port_type = "tcp"
         if primary_node.active_rdma:
@@ -3302,9 +3324,13 @@ def recreate_lvstore(snode, force=False):
 
     ### 2- create lvols nvmf subsystems
     for lvol in lvol_list:
-        logger.info("creating subsystem %s", lvol.nqn)
+        allow_any = not bool(lvol.allowed_hosts)
+        logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
         rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
-                                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                    allow_any_host=allow_any)
+        if lvol.allowed_hosts:
+            _reapply_allowed_hosts(lvol, snode, rpc_client)
 
     if sec_node:
 

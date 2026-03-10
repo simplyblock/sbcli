@@ -381,7 +381,8 @@ class TestAddHostToLvol(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
-    def test_add_host_no_tls_rejected(self, MockDBCtrl, MockRPC):
+    def test_add_host_without_tls_succeeds(self, MockDBCtrl, MockRPC):
+        """Adding a host without TLS is allowed (TLS and DHCHAP are independent)."""
         cl = _cluster(tls=False)
         node = _node()
         node.cluster_id = cl.uuid
@@ -390,9 +391,13 @@ class TestAddHostToLvol(unittest.TestCase):
         mock_db = _mock_db_for_host_ops(lvol, node, cl)
         MockDBCtrl.return_value = mock_db
 
+        mock_rpc_inst = MagicMock()
+        mock_rpc_inst.subsystem_add_host.return_value = True
+        MockRPC.return_value = mock_rpc_inst
+
         result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:host")
-        self.assertFalse(result)
-        self.assertIn("TLS is not enabled", err)
+        self.assertIsNone(err)
+        self.assertEqual(result["nqn"], "nqn:host")
 
     @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
@@ -743,6 +748,288 @@ class TestConstants(unittest.TestCase):
     def test_valid_dhgroups(self):
         expected = {"null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"}
         self.assertEqual(set(constants.VALID_DHCHAP_DHGROUPS), expected)
+
+
+# ---------------------------------------------------------------------------
+# Subsystem recreation on node restart (security preservation)
+# ---------------------------------------------------------------------------
+
+import simplyblock_core.storage_node_ops as snode_ops
+
+
+class TestReapplyAllowedHosts(unittest.TestCase):
+    """Tests for _reapply_allowed_hosts helper in storage_node_ops."""
+
+    @patch("simplyblock_core.storage_node_ops._register_dhchap_keys_on_node")
+    def test_reapply_hosts_with_dhchap_keys(self, mock_register):
+        """Hosts with DHCHAP keys get registered via keyring + subsystem_add_host."""
+        mock_register.return_value = {
+            "dhchap_key": "key_name_dhchap",
+            "dhchap_ctrlr_key": "key_name_ctrlr",
+        }
+        mock_rpc = MagicMock()
+        mock_rpc.subsystem_add_host.return_value = True
+
+        node = _node()
+        lvol = _lvol(allowed_hosts=[{
+            "nqn": "nqn:host1",
+            "dhchap_key": "DHHC-1:01:abc:",
+            "dhchap_ctrlr_key": "DHHC-1:01:def:",
+        }])
+
+        snode_ops._reapply_allowed_hosts(lvol, node, mock_rpc)
+
+        mock_register.assert_called_once_with(
+            node, "nqn:host1", lvol.allowed_hosts[0], mock_rpc)
+        mock_rpc.subsystem_add_host.assert_called_once_with(
+            lvol.nqn, "nqn:host1",
+            psk=None,
+            dhchap_key="key_name_dhchap",
+            dhchap_ctrlr_key="key_name_ctrlr",
+        )
+
+    def test_reapply_hosts_without_keys(self):
+        """Hosts without security keys get added with just the NQN."""
+        mock_rpc = MagicMock()
+        mock_rpc.subsystem_add_host.return_value = True
+
+        node = _node()
+        lvol = _lvol(allowed_hosts=[{"nqn": "nqn:plain-host"}])
+
+        snode_ops._reapply_allowed_hosts(lvol, node, mock_rpc)
+
+        mock_rpc.subsystem_add_host.assert_called_once_with(
+            lvol.nqn, "nqn:plain-host")
+
+    @patch("simplyblock_core.storage_node_ops._register_dhchap_keys_on_node")
+    def test_reapply_multiple_hosts(self, mock_register):
+        """All hosts are re-registered, not just the first one."""
+        mock_register.return_value = {"dhchap_key": "kn"}
+        mock_rpc = MagicMock()
+        mock_rpc.subsystem_add_host.return_value = True
+
+        node = _node()
+        lvol = _lvol(allowed_hosts=[
+            {"nqn": "nqn:h1", "dhchap_key": "DHHC-1:01:a:"},
+            {"nqn": "nqn:h2"},
+            {"nqn": "nqn:h3", "dhchap_key": "DHHC-1:01:b:"},
+        ])
+
+        snode_ops._reapply_allowed_hosts(lvol, node, mock_rpc)
+
+        self.assertEqual(mock_rpc.subsystem_add_host.call_count, 3)
+        self.assertEqual(mock_register.call_count, 2)  # h1 and h3 have keys
+
+    @patch("simplyblock_core.storage_node_ops._register_dhchap_keys_on_node")
+    def test_reapply_with_psk(self, mock_register):
+        """PSK-only host entry gets keyring registration."""
+        mock_register.return_value = {"psk": "psk_key_name"}
+        mock_rpc = MagicMock()
+        mock_rpc.subsystem_add_host.return_value = True
+
+        node = _node()
+        lvol = _lvol(allowed_hosts=[{
+            "nqn": "nqn:psk-host",
+            "psk": "abcdef1234567890",
+        }])
+
+        snode_ops._reapply_allowed_hosts(lvol, node, mock_rpc)
+
+        mock_register.assert_called_once()
+        mock_rpc.subsystem_add_host.assert_called_once_with(
+            lvol.nqn, "nqn:psk-host",
+            psk="psk_key_name",
+            dhchap_key=None,
+            dhchap_ctrlr_key=None,
+        )
+
+
+class TestRecreateSubsystemSecurity(unittest.TestCase):
+    """Verify that recreate_lvstore* passes allow_any_host and re-applies hosts."""
+
+    @patch("simplyblock_core.storage_node_ops._reapply_allowed_hosts")
+    @patch("simplyblock_core.storage_node_ops.add_lvol_thread")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_recreate_lvstore_on_sec_passes_allow_any_false(
+            self, MockDB, MockRPC, mock_tasks, mock_bdev_stack,
+            MockFW, mock_add_thread, mock_reapply):
+        """recreate_lvstore_on_sec sets allow_any_host=False for lvols with allowed_hosts."""
+        dhchap_host = {"nqn": "nqn:secured", "dhchap_key": "DHHC-1:01:x:"}
+
+        sec_node = _node("sec-1")
+        sec_node.cluster_id = "c1"
+        sec_node.api_endpoint = "127.0.0.1:5000"
+
+        primary_node = _node("pri-1")
+        primary_node.cluster_id = "c1"
+        primary_node.lvstore_status = "ready"
+        primary_node.lvstore_stack = []
+        primary_node.secondary_node_id = sec_node.uuid
+        primary_node.secondary_node_id_2 = ""
+        primary_node.active_rdma = False
+        primary_node.jm_vuid = "jm1"
+        primary_node.raid = "raid0"
+        primary_node.lvol_subsys_port = 4420
+        primary_node.rpc_port = 5260
+        primary_node.status = StorageNode.STATUS_ONLINE
+
+        lvol_secured = _lvol("lvol-s", allowed_hosts=[dhchap_host],
+                             nodes=[primary_node.uuid, sec_node.uuid])
+        lvol_secured.lvs_name = "LVS_1"
+        lvol_secured.lvol_bdev = "LVOL_1"
+
+        lvol_open = _lvol("lvol-o", allowed_hosts=[],
+                          nodes=[primary_node.uuid, sec_node.uuid])
+        lvol_open.lvs_name = "LVS_1"
+        lvol_open.lvol_bdev = "LVOL_2"
+
+        mock_db = MagicMock()
+        mock_db.get_primary_storage_nodes_by_secondary_node_id.return_value = [primary_node]
+        mock_db.get_lvols_by_node_id.return_value = [lvol_secured, lvol_open]
+        MockDB.return_value = mock_db
+
+        mock_rpc_inst = MagicMock()
+        mock_rpc_inst.subsystem_create.return_value = True
+        mock_rpc_inst.bdev_examine.return_value = True
+        mock_rpc_inst.bdev_wait_for_examine.return_value = True
+        MockRPC.return_value = mock_rpc_inst
+
+        # Mock secondary_node.rpc_client() for jc_suspend_compression
+        sec_node_rpc = MagicMock()
+        sec_node_rpc.jc_suspend_compression.return_value = (True, None)
+        with patch.object(sec_node, 'rpc_client', return_value=sec_node_rpc):
+            with patch.object(sec_node, 'connect_to_hublvol'):
+                mock_bdev_stack.return_value = (True, None)
+                mock_fw_inst = MagicMock()
+                MockFW.return_value = mock_fw_inst
+
+                snode_ops.recreate_lvstore_on_sec(sec_node)
+
+        # Verify subsystem_create calls
+        create_calls = mock_rpc_inst.subsystem_create.call_args_list
+        self.assertEqual(len(create_calls), 2)
+
+        # First call: secured lvol -> allow_any_host=False
+        _, kwargs1 = create_calls[0]
+        self.assertFalse(kwargs1.get("allow_any_host", True))
+
+        # Second call: open lvol -> allow_any_host=True
+        _, kwargs2 = create_calls[1]
+        self.assertTrue(kwargs2.get("allow_any_host", False))
+
+        # _reapply_allowed_hosts called only for the secured lvol
+        mock_reapply.assert_called_once_with(lvol_secured, sec_node, mock_rpc_inst)
+
+    @patch("simplyblock_core.storage_node_ops._reapply_allowed_hosts")
+    def test_recreate_lvol_on_node_reapplies_hosts(self, mock_reapply):
+        """recreate_lvol_on_node (in lvol_controller) re-applies allowed hosts."""
+        from simplyblock_core.controllers.lvol_controller import recreate_lvol_on_node
+
+        dhchap_host = {"nqn": "nqn:host", "dhchap_key": "DHHC-1:01:k:"}
+        node = _node()
+        node.api_endpoint = "127.0.0.1:5000"
+        lvol = _lvol(allowed_hosts=[dhchap_host])
+        lvol.lvs_name = "LVS_1"
+        lvol.lvol_bdev = "LVOL_1"
+        lvol.top_bdev = "LVS_1/LVOL_1"
+        lvol.guid = "abcd1234"
+        lvol.bdev_stack = []
+        lvol.lvol_type = ""
+        lvol.crypto_bdev = ""
+
+        mock_rpc = MagicMock()
+        mock_rpc.subsystem_create.return_value = True
+        mock_rpc.nvmf_subsystem_add_ns.return_value = 1
+        mock_rpc.nvmf_subsystem_add_listener.return_value = (True, None)
+        mock_rpc.ultra21_util_get_malloc_stats.return_value = {}
+        mock_rpc.get_bdevs.return_value = [{"uuid": "u1", "driver_specific": {}}]
+
+        with patch("simplyblock_core.controllers.lvol_controller.RPCClient",
+                    return_value=mock_rpc):
+            with patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node",
+                        return_value={"dhchap_key": "kn_dhchap"}) as mock_reg:
+                recreate_lvol_on_node(lvol, node)
+
+        # subsystem_create should use allow_any_host=False
+        mock_rpc.subsystem_create.assert_called_once()
+        _, kwargs = mock_rpc.subsystem_create.call_args
+        self.assertFalse(kwargs.get("allow_any_host", True))
+
+        # Host re-applied with keyring key names
+        mock_reg.assert_called_once()
+        mock_rpc.subsystem_add_host.assert_called_once()
+        add_call = mock_rpc.subsystem_add_host.call_args
+        self.assertEqual(add_call[0][1], "nqn:host")
+        self.assertEqual(add_call[1].get("dhchap_key"), "kn_dhchap")
+
+
+class TestRemoveHostKeyringCleanup(unittest.TestCase):
+    """Verify remove_host_from_lvol cleans up keyring keys."""
+
+    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.controllers.lvol_controller.DBController")
+    def test_remove_host_cleans_keyring(self, MockDBCtrl, MockRPC):
+        node = _node()
+        lvol = _lvol(
+            allowed_hosts=[{
+                "nqn": "nqn:host1",
+                "dhchap_key": "DHHC-1:01:abc:",
+                "dhchap_ctrlr_key": "DHHC-1:01:def:",
+            }],
+            nodes=[node.uuid],
+        )
+
+        mock_db = MagicMock()
+        mock_db.get_lvol_by_id.return_value = lvol
+        mock_db.get_storage_node_by_id.return_value = node
+        mock_db.kv_store = MagicMock()
+        MockDBCtrl.return_value = mock_db
+
+        mock_rpc_inst = MagicMock()
+        mock_rpc_inst.subsystem_remove_host.return_value = True
+        mock_rpc_inst.keyring_file_remove_key.return_value = True
+        MockRPC.return_value = mock_rpc_inst
+
+        result, err = lvol_ctl.remove_host_from_lvol("lvol-1", "nqn:host1")
+        self.assertTrue(result)
+
+        # Verify keyring cleanup was called for both key types
+        remove_calls = mock_rpc_inst.keyring_file_remove_key.call_args_list
+        key_names = [c[0][0] for c in remove_calls]
+        safe = "nqn_host1"
+        self.assertIn(f"dhchap_key_{safe}", key_names)
+        self.assertIn(f"dhchap_ctrlr_key_{safe}", key_names)
+
+    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.controllers.lvol_controller.DBController")
+    def test_remove_host_succeeds_even_if_spdk_fails(self, MockDBCtrl, MockRPC):
+        """DB is updated even if SPDK remove_host returns error (host already gone)."""
+        node = _node()
+        lvol = _lvol(
+            allowed_hosts=[{"nqn": "nqn:host1"}],
+            nodes=[node.uuid],
+        )
+
+        mock_db = MagicMock()
+        mock_db.get_lvol_by_id.return_value = lvol
+        mock_db.get_storage_node_by_id.return_value = node
+        mock_db.kv_store = MagicMock()
+        MockDBCtrl.return_value = mock_db
+
+        mock_rpc_inst = MagicMock()
+        mock_rpc_inst.subsystem_remove_host.return_value = False  # SPDK error
+        MockRPC.return_value = mock_rpc_inst
+
+        result, err = lvol_ctl.remove_host_from_lvol("lvol-1", "nqn:host1")
+        # Should still succeed (DB updated) but with a warning
+        self.assertTrue(result)
+        self.assertIn("Warning", err)
+        # allowed_hosts should be empty now
+        self.assertEqual(len(lvol.allowed_hosts), 0)
 
 
 if __name__ == "__main__":

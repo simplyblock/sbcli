@@ -563,9 +563,11 @@ class CLIWrapperBase:
 
     def volume__remove_host(self, sub_command, args):
         result, error = lvol_controller.remove_host_from_lvol(args.volume_id, args.host_nqn)
-        if error:
+        if not result:
             print(f"Error: {error}")
             return False
+        if error:
+            print(error)
         return True
 
     def volume__get_secret(self, sub_command, args):
@@ -779,10 +781,8 @@ class CLIWrapperBase:
         cluster_id = getattr(args, 'cluster_id', None)
         data = backup_controller.list_backups(cluster_id)
         if data:
-            utils.print_table(data)
-            return True
-        print("No backups found")
-        return True
+            return utils.print_table(data)
+        return "No backups found"
 
     def backup__delete(self, sub_command, args):
         success, error = backup_controller.delete_backups(args.lvol_id)
@@ -839,10 +839,8 @@ class CLIWrapperBase:
         cluster_id = getattr(args, 'cluster_id', None)
         data = backup_controller.list_policies(cluster_id)
         if data:
-            utils.print_table(data)
-            return True
-        print("No policies found")
-        return True
+            return utils.print_table(data)
+        return "No policies found"
 
     def backup__policy_attach(self, sub_command, args):
         att_id, error = backup_controller.attach_policy(

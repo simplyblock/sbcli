@@ -2062,6 +2062,16 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     if not found:
         return False, f"Host {host_nqn} is not in the allowed list"
 
+    # Find host entry to get key info before removal
+    host_entry = None
+    for h in lvol.allowed_hosts:
+        if h["nqn"] == host_nqn:
+            host_entry = h
+            break
+
+    safe_host = host_nqn.replace(":", "_").replace(".", "_")
+    errors = []
+
     # Remove from all nodes where the subsystem exists
     for node_id in lvol.nodes:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -2070,9 +2080,19 @@ def remove_host_from_lvol(lvol_id, host_nqn):
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
         ret = rpc_client.subsystem_remove_host(lvol.nqn, host_nqn)
         if not ret:
-            return False, f"Failed to remove host {host_nqn} from node {node_id}"
+            logger.error("Failed to remove host %s from node %s", host_nqn, node_id)
+            errors.append(node_id)
+
+        # Clean up keyring keys
+        for key_type in ("dhchap_key", "dhchap_ctrlr_key", "psk"):
+            if host_entry and host_entry.get(key_type):
+                key_name = f"{key_type}_{safe_host}"
+                rpc_client.keyring_file_remove_key(key_name)
 
     lvol.allowed_hosts = [h for h in lvol.allowed_hosts if h["nqn"] != host_nqn]
     lvol.write_to_db(db_controller.kv_store)
     logger.info(f"Removed host {host_nqn} from lvol {lvol_id}")
+
+    if errors:
+        return True, f"Warning: SPDK remove_host failed on nodes: {', '.join(errors)}"
     return True, None
