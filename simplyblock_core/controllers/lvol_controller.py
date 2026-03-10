@@ -1,4 +1,5 @@
 # coding=utf-8
+import base64
 import logging as lg
 import json
 import math
@@ -12,6 +13,7 @@ from typing import List, Tuple
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.kms_client import KMSClient
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
@@ -21,12 +23,21 @@ from simplyblock_core.rpc_client import RPCClient
 logger = lg.getLogger()
 
 
-def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
+def _create_crypto_lvol(rpc_client, name, base_name, key1, key2, kms_client=None):
     ret = rpc_client.get_bdevs(base_name)
     if not ret:
         logger.error(f"Failed to find LVol bdev {base_name}")
         return False
+
+    # lvol_keys = kms_client.get_keys(name)
+    # base64_key1 = kms_client.decrypt(lvol_keys['key1'])
+    # original_key1 = base64.b64decode(base64_key1.encode("ascii")).decode("utf-8")
+    #
+    # base64_key2 = kms_client.decrypt(lvol_keys['key2'])
+    # original_key2 = base64.b64decode(base64_key2.encode("ascii")).decode("utf-8")
+
     key_name = f'key_{name}'
+    # ret = rpc_client.lvol_crypto_key_create(key_name, original_key1, original_key2)
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
     if not ret:
         logger.error("failed to create crypto key")
@@ -517,6 +528,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.top_bdev = lvol.crypto_bdev
         lvol.crypto_key1 = crypto_key1
         lvol.crypto_key2 = crypto_key2
+
+        kms_client = KMSClient(cl.get_id())
+        encrypted_key1 = kms_client.encrypt(pool.get_id(), crypto_key1)
+        encrypted_key2 = kms_client.encrypt(pool.get_id(), crypto_key2)
+        kms_client.save_keys(lvol.crypto_bdev, encrypted_key1, encrypted_key2)
 
     lvol.write_to_db(db_controller.kv_store)
 

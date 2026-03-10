@@ -81,6 +81,24 @@ class KMSClient:
         logger.error("Unknown http status: %s", ret_code)
         return None, None
 
-
-    def get_key(self, key_name):
+    def get_keys(self, key_name):
         return self._request("GET", f"v1/{self.cluster_id}/{key_name}")
+
+    def save_keys(self, key_name, key1, key2):
+        params = {
+            "key1": key1,
+            "key2": key2,
+        }
+        return self._request("POST", f"v1/{self.cluster_id}/{key_name}", params)
+
+    def encrypt(self, key_name, plaintext):
+        params = {
+            "plaintext": plaintext
+        }
+        return self._request("POST", f"v1/transit/encrypt/{key_name}", params)
+
+    def decrypt(self, key_name, ciphertext):
+        params = {
+            "ciphertext": ciphertext
+        }
+        return self._request("POST", f"v1/transit/decrypt/{key_name}", params)
