@@ -1110,12 +1110,18 @@ def generate_psk_key(bits=256):
 def generate_dhchap_key(length=32, hash_id=1):
     """Generate a random DH-HMAC-CHAP key in NVMe TP8018 format.
 
-    Format: DHHC-1:<hash_id>:<base64_key>:
+    Format: DHHC-1:<hash_id>:<base64(key + crc32)>:
     hash_id: 00=none, 01=SHA-256, 02=SHA-384, 03=SHA-512
+    The key bytes are followed by a 4-byte CRC32 checksum (little-endian).
     """
     import secrets
     import base64
-    key_b64 = base64.b64encode(secrets.token_bytes(length)).decode()
+    import struct
+    import zlib
+    key_bytes = secrets.token_bytes(length)
+    crc = zlib.crc32(key_bytes) & 0xFFFFFFFF
+    key_with_crc = key_bytes + struct.pack('<I', crc)
+    key_b64 = base64.b64encode(key_with_crc).decode()
     return f"DHHC-1:{hash_id:02d}:{key_b64}:"
 
 
