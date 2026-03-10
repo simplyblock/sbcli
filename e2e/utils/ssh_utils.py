@@ -20,6 +20,13 @@ from typing import Optional, List
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
+import shlex
+import socket
+from collections import defaultdict
+from typing import Optional, List
+# import importlib
+# from glob import glob
+from utils.placement_dump_check import PlacementDump
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
@@ -29,6 +36,40 @@ def generate_random_string(length=6):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 
+def get_parent_device(device: str) -> str:
+    """
+    Convert an NVMe namespace device (/dev/nvmeXnY or /dev/nvmeXnYpZ) to controller (/dev/nvmeX).
+
+    Examples:
+      /dev/nvme0n1      -> /dev/nvme0
+      /dev/nvme0n2      -> /dev/nvme0
+      /dev/nvme12n1     -> /dev/nvme12
+      /dev/nvme0n1p1    -> /dev/nvme0
+      nvme0n1           -> /dev/nvme0
+    """
+    if not device:
+        return device
+
+    dev = device.strip()
+    if not dev.startswith("/dev/"):
+        dev = f"/dev/{dev}"
+
+    base = dev.split("/")[-1]  # nvme0n1 or nvme0n1p1
+
+    m = re.match(r"^(nvme\d+)(n\d+)(p\d+)?$", base)
+    if m:
+        return f"/dev/{m.group(1)}"
+
+    # if it's already controller like /dev/nvme0
+    m2 = re.match(r"^(nvme\d+)$", base)
+    if m2:
+        return f"/dev/{m2.group(1)}"
+
+    # fallback: strip after first 'n' (safer than returning nvme0n)
+    if "nvme" in base and "n" in base:
+        return f"/dev/{base.split('n')[0]}"
+
+    return dev
 def get_parent_device(device: str) -> str:
     """
     Convert an NVMe namespace device (/dev/nvmeXnY or /dev/nvmeXnYpZ) to controller (/dev/nvmeX).
@@ -78,6 +119,212 @@ class SshUtils:
         self.log_monitor_threads = {}
         self.log_monitor_stop_flags = {}
         self.ssh_semaphore = threading.Semaphore(10)  # Max 10 SSH calls in parallel (tune as needed)
+        self._bastion_client = None
+        self._reconnect_locks = defaultdict(threading.Lock)   
+        self.ssh_pass = None
+        self.distrib_dump_paths = {}
+
+    def _candidate_usernames(self, explicit_user) -> List[str]:
+        if explicit_user:
+            if isinstance(explicit_user, (list, tuple)):
+                return list(explicit_user)
+            return [str(explicit_user)]
+        return ["ec2-user", "ubuntu", "rocky", "root"]
+    
+    def _load_private_keys(self) -> List[paramiko.PKey]:
+        """
+        Try Ed25519 then RSA. If SSH_KEY_LOCATION/env points to a file, use it.
+        Else try ~/.ssh/id_ed25519 and ~/.ssh/id_rsa. If SSH_KEY_PATH is a dir, load all files from it.
+        """
+        paths = []
+        # explicit single file via KEY_NAME → SSH_KEY_LOCATION
+        if SSH_KEY_LOCATION and os.path.isfile(SSH_KEY_LOCATION):
+            paths.append(SSH_KEY_LOCATION)
+        # defaults
+        home = os.path.join(Path.home(), ".ssh")
+        paths.extend([os.path.join(home, "id_ed25519"), os.path.join(home, "id_rsa")])
+
+        keys = []
+        seen = set()
+        for p in paths:
+            if not os.path.exists(p) or p in seen:
+                continue
+            seen.add(p)
+            try:
+                keys.append(paramiko.Ed25519Key.from_private_key_file(p))
+                continue
+            except Exception:
+                pass
+            try:
+                keys.append(paramiko.RSAKey.from_private_key_file(p))
+            except Exception:
+                pass
+        if not keys and not self.ssh_pass:
+            raise FileNotFoundError("No usable SSH private key found and SSH_PASS not set.")
+        return keys
+
+    def _try_connect(self, host: str, username: str, pkey: Optional[paramiko.PKey], password: Optional[str], sock=None, timeout=30):
+        cli = paramiko.SSHClient()
+        cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        cli.connect(
+            hostname=host,
+            username=username,
+            pkey=pkey,
+            password=(password if pkey is None else None),
+            timeout=timeout,
+            banner_timeout=timeout,
+            auth_timeout=timeout,
+            allow_agent=False,
+            look_for_keys=False,
+            sock=sock
+        )
+        return cli
+
+    # def connect(self, address: str, port: int = 22,
+    #         bastion_server_address: str = None,
+    #         username: str = "ec2-user",
+    #         is_bastion_server: bool = False):
+    #     """Connect to cluster nodes"""
+    #     # --- prep usernames list ---
+    #     default_users = ["ec2-user", "ubuntu", "rocky", "root"]
+    #     if getattr(self, "ssh_user", None):
+    #         if isinstance(self.ssh_user, (list, tuple)):
+    #             usernames = list(self.ssh_user)
+    #         else:
+    #             usernames = [str(self.ssh_user)]
+    #     else:
+    #         usernames = default_users
+
+    #     # Load key (Ed25519 -> RSA fallback)
+    #     if not os.path.exists(SSH_KEY_LOCATION):
+    #         raise FileNotFoundError(f"SSH private key not found at {SSH_KEY_LOCATION}")
+    #     try:
+    #         private_key = paramiko.Ed25519Key(filename=SSH_KEY_LOCATION)
+    #     except Exception:
+    #         private_key = paramiko.RSAKey.from_private_key_file(SSH_KEY_LOCATION)
+
+    #     # Helper to store/replace a connection
+    #     def _store(host, client):
+    #         if self.ssh_connections.get(host):
+    #             try:
+    #                 self.ssh_connections[host].close()
+    #             except Exception:
+    #                 pass
+    #         self.ssh_connections[host] = client
+
+    #     # ---------- direct connection ----------
+    #     bastion_server_address = bastion_server_address or self.bastion_server
+    #     if not bastion_server_address:
+    #         self.logger.info(f"Connecting directly to {address} on port {port}...")
+    #         last_err = None
+    #         for user in usernames:
+    #             ssh = paramiko.SSHClient()
+    #             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    #             try:
+    #                 ssh.connect(
+    #                     hostname=address,
+    #                     username=user,
+    #                     port=port,
+    #                     pkey=private_key,
+    #                     timeout=300,
+    #                     banner_timeout=30,
+    #                     auth_timeout=30,
+    #                     allow_agent=False,
+    #                     look_for_keys=False,
+    #                 )
+    #                 self.logger.info(f"Connected directly to {address} as '{user}'.")
+    #                 _store(address, ssh)
+    #                 return
+    #             except Exception as e:
+    #                 last_err = e
+    #                 self.logger.info(f"Direct login failed for '{user}': {repr(e)}")
+    #                 try:
+    #                     ssh.close()
+    #                 except Exception:
+    #                     pass
+    #         raise Exception(f"All usernames failed for {address}. Last error: {repr(last_err)}")
+
+    #     # ---------- connect to bastion ----------
+    #     self.logger.info(f"Connecting to bastion server {bastion_server_address}...")
+    #     bastion_ssh = paramiko.SSHClient()
+    #     bastion_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    #     last_err = None
+    #     bastion_user_used = None
+    #     for b_user in usernames:
+    #         try:
+    #             bastion_ssh.connect(
+    #                 hostname=bastion_server_address,
+    #                 username=b_user,
+    #                 port=port,
+    #                 pkey=private_key,
+    #                 timeout=300,
+    #                 banner_timeout=30,
+    #                 auth_timeout=30,
+    #                 allow_agent=False,
+    #                 look_for_keys=False,
+    #             )
+    #             self.logger.info(f"Connected to bastion as '{b_user}'.")
+    #             _store(bastion_server_address, bastion_ssh)
+    #             bastion_user_used = b_user
+    #             break
+    #         except Exception as e:
+    #             last_err = e
+    #             self.logger.info(f"Bastion login failed for '{b_user}': {repr(e)}")
+    #     if bastion_user_used is None:
+    #         raise Exception(f"All usernames failed for bastion {bastion_server_address}. Last error: {repr(last_err)}")
+    #     if is_bastion_server:
+    #         return  # caller only needed bastion
+
+    #     # ---------- tunnel to target through bastion ----------
+    #     self.logger.info(f"Connecting to target server {address} through bastion server...")
+    #     transport = bastion_ssh.get_transport()
+    #     last_err = None
+    #     for user in usernames:
+    #         # IMPORTANT: open a NEW channel for each username attempt
+    #         try:
+    #             channel = transport.open_channel(
+    #                 "direct-tcpip",
+    #                 (address, port),
+    #                 ("localhost", 0),
+    #             )
+    #         except paramiko.ssh_exception.ChannelException as ce:
+    #             self.logger.error(
+    #                 f"Channel open failed: {repr(ce)} — check AllowTcpForwarding/PermitOpen on bastion."
+    #             )
+    #             raise
+    #         target_ssh = paramiko.SSHClient()
+    #         target_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    #         try:
+    #             target_ssh.connect(
+    #                 address,
+    #                 username=user,
+    #                 port=port,
+    #                 sock=channel,
+    #                 pkey=private_key,
+    #                 timeout=300,
+    #                 banner_timeout=30,
+    #                 auth_timeout=30,
+    #                 allow_agent=False,
+    #                 look_for_keys=False,
+    #             )
+    #             self.logger.info(f"Connected to {address} as '{user}' via bastion '{bastion_user_used}'.")
+    #             _store(address, target_ssh)
+    #             return
+    #         except Exception as e:
+    #             last_err = e
+    #             self.logger.info(f"Target login failed for '{user}': {repr(e)}")
+    #             try:
+    #                 target_ssh.close()
+    #             except Exception:
+    #                 pass
+    #             try:
+    #                 channel.close()
+    #             except Exception:
+    #                 pass
+
+    #     raise Exception(
+    #         f"Tunnel established, but all usernames failed for target {address}. Last error: {repr(last_err)}"
+    #     )
         self._bastion_client = None
         self._reconnect_locks = defaultdict(threading.Lock)   
         self.ssh_pass = None
