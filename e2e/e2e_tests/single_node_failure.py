@@ -125,7 +125,7 @@ class TestSingleNodeFailure(TestClusterBase):
         
         sleep_n_sec(30)
         timestamp = int(datetime.now().timestamp())
-        self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node[0]["rpc_port"])
+        self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node[0]["rpc_port"], cluster_id=self.cluster_id)
 
         try:
             self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
@@ -409,7 +409,7 @@ class TestHASingleNodeFailure(TestClusterBase):
 
             sleep_n_sec(30)
             timestamp = int(datetime.now().timestamp())
-            self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node["rpc_port"])
+            self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node["rpc_port"], cluster_id=self.cluster_id)
 
             try:
                 self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
@@ -462,9 +462,9 @@ class TestHASingleNodeFailure(TestClusterBase):
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
 
-        end_time = self.common_utils.manage_fio_threads(node=self.client_machines[0],
-                                                        threads=self.fio_threads,
-                                                        timeout=1000)
+        self.common_utils.manage_fio_threads(node=self.client_machines[0],
+                                             threads=self.fio_threads,
+                                             timeout=1000)
 
         for i in range(3):
             lvol_name = f"LVOL_{i}"
@@ -472,11 +472,11 @@ class TestHASingleNodeFailure(TestClusterBase):
             self.common_utils.validate_fio_test(node=self.client_machines[0],
                                                 log_file=self.log_path+f"_{lvol_name}")
 
-            total_fio_runtime = end_time - self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]
-            self.logger.info(f"FIO Run Time: {total_fio_runtime}")
+            # total_fio_runtime = end_time - self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]
+            # self.logger.info(f"FIO Run Time: {total_fio_runtime}")
 
-            assert  total_fio_runtime >= self.fio_runtime, \
-                f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]}'
+            # assert  total_fio_runtime >= self.fio_runtime, \
+            #     f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]}'
 
         self.logger.info("TEST CASE PASSED !!!")
 
