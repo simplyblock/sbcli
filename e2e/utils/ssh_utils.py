@@ -27,6 +27,13 @@ from typing import Optional, List
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
+import shlex
+import socket
+from collections import defaultdict
+from typing import Optional, List
+# import importlib
+# from glob import glob
+from utils.placement_dump_check import PlacementDump
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
@@ -2507,6 +2514,7 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         self.logger.info(f"[{storage_node_ip}] Distrib logs saved: {base_path} (tar: {final_tar})")
 
         # ------------------------------
+        # Validate placement dump files
         # Validate placement dump files
         # ------------------------------
         ok = self._validate_distrib_dumps(base_path, distribs)
