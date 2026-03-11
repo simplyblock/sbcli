@@ -27,6 +27,13 @@ from typing import Optional, List
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
+import shlex
+import socket
+from collections import defaultdict
+from typing import Optional, List
+# import importlib
+# from glob import glob
+from utils.placement_dump_check import PlacementDump
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
@@ -2335,6 +2342,46 @@ class SshUtils:
                 all_ok = False
         return all_ok
 
+    def _validate_distrib_dumps(self, base_path, distribs):
+        """
+        For each distrib, reads rpc_{distrib}.log to find the 'Response:' file path,
+        then checks the corresponding map txt file in base_path has lpgi data.
+        Returns True if all distribs have valid data, False otherwise.
+        """
+        all_ok = True
+        for distrib in distribs:
+            rpc_log_path = os.path.join(base_path, f"rpc_distrib_{distrib}.log")
+            try:
+                with open(rpc_log_path, "r") as f:
+                    rpc_content = f.read()
+            except Exception as e:
+                self.logger.error(f"[PLACEMENT_DUMP] Cannot read rpc log {rpc_log_path}: {e}")
+                all_ok = False
+                continue
+
+            match = re.search(r"Response:\s*(\S+\.txt)", rpc_content)
+            if not match:
+                self.logger.error(f"[PLACEMENT_DUMP] No Response file found in {rpc_log_path}. Log content: {rpc_content[:500]}")
+                all_ok = False
+                continue
+
+            response_filename = os.path.basename(match.group(1))
+            map_file_path = os.path.join(base_path, response_filename)
+            try:
+                with open(map_file_path, "r") as f:
+                    map_content = f.read()
+            except Exception as e:
+                self.logger.error(f"[PLACEMENT_DUMP] Cannot read map file {map_file_path}: {e}")
+                all_ok = False
+                continue
+
+            if "lpgi:" not in map_content:
+                self.logger.error(f"[PLACEMENT_DUMP] Map file has no lpgi data: {map_file_path}")
+                all_ok = False
+            else:
+                self.logger.info(f"[PLACEMENT_DUMP] Valid: {response_filename} (distrib={distrib})")
+
+        return all_ok
 
     def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path):
         self.logger.info(f"Fetching distrib logs for Storage Node ID: {storage_node_id} on {storage_node_ip}")
@@ -2468,33 +2515,9 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 
         # ------------------------------
         # Validate placement dump files
+        # Validate placement dump files
         # ------------------------------
-        alceml_latest_dir, alceml_txt_files = self._get_latest_alceml_dir_and_files(storage_node_ip)
-
-        # also collect any txt files generated / placed under base_path by the remote script
-        gen_cmd = f"sudo ls -1 {shlex.quote(base_path)}/*.txt 2>/dev/null || true"
-        gen_out, _ = self.exec_command(storage_node_ip, gen_cmd)
-        generated_txt_files = [x.strip() for x in (gen_out or "").splitlines() if x.strip()]
-
-        self.logger.info(f"[{storage_node_ip}] alceml_latest_dir={alceml_latest_dir}, alceml txt count={len(alceml_txt_files)}, generated txt count={len(generated_txt_files)}")
-
-        if not alceml_txt_files and not generated_txt_files:
-            self.logger.warning(f"[{storage_node_ip}] No dump txt files found to validate.")
-            return True
-
-        # Copy /etc alceml dump txt files into NFS path so they are locally accessible
-        alceml_nfs_files = []
-        if alceml_txt_files:
-            alceml_dir = f"{base_path}/alceml_dumps_{timestamp}"
-            self.exec_command(storage_node_ip, f"sudo mkdir -p '{alceml_dir}' && sudo chmod -R 777 '{alceml_dir}'")
-            for fp in alceml_txt_files:
-                bn = os.path.basename(fp.rstrip("/"))
-                dest = f"{alceml_dir}/{bn}"
-                self.exec_command(storage_node_ip, f"sudo cp -f '{fp}' '{dest}' 2>/dev/null || true")
-                alceml_nfs_files.append(dest)
-
-        files_to_validate = alceml_nfs_files + generated_txt_files
-        ok = self._validate_dump_files(files_to_validate)
+        ok = self._validate_distrib_dumps(base_path, distribs)
 
         if not ok:
             self.logger.error(f"[{storage_node_ip}] Placement dump validation FAILED.")
