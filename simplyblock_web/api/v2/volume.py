@@ -49,6 +49,7 @@ class _CreateParams(BaseModel):
     fabric: str = "tcp"
     max_namespace_per_subsys: int = 1
     do_replicate: bool = False
+    replication_cluster_id: Optional[str] = None
 
 
 class _CloneParams(BaseModel):
@@ -94,6 +95,7 @@ def add(
             fabric=data.fabric,
             max_namespace_per_subsys=data.max_namespace_per_subsys,
             do_replicate=data.do_replicate,
+            replication_cluster_id=data.replication_cluster_id,
 
         )
     elif isinstance(data, _CloneParams):
