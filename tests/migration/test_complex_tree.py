@@ -31,8 +31,6 @@ Tests:
 """
 
 import time
-import threading
-import pytest
 
 from simplyblock_core.controllers import migration_controller, lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -392,7 +390,7 @@ class TestConcurrentIndependentOperations:
         _seed_lvol(mock_src_server, new_lvol, ctx.node("src"))
 
         # Delete the independent lvol l_ind (not involved in any migration)
-        result = lvol_controller.delete_lvol(ctx.lvol_uuid("l_ind"))
+        _ = lvol_controller.delete_lvol(ctx.lvol_uuid("l_ind"))
         # Must not be blocked by the l3 migration
         # (may fail for RPC reasons but not for migration protection)
 

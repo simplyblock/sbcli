@@ -17,12 +17,11 @@ import logging
 import uuid as _uuid_mod
 import pytest
 
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
 
 from tests.migration.mock_rpc_server import MockRpcServer
 from tests.migration.topology_loader import (
-    TestContext, load_topology, load_topology_file,
+    TestContext, load_topology,
     set_cluster_status, set_node_status, set_lvol_status, set_snap_status,
 )
 

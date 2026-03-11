@@ -16,8 +16,9 @@ Tests cover:
 """
 
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
+import simplyblock_core.controllers.lvol_controller as lvol_ctl
 from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
@@ -332,7 +333,6 @@ class TestBuildHostEntries(unittest.TestCase):
 # add_host_to_lvol / remove_host_from_lvol
 # ---------------------------------------------------------------------------
 
-import simplyblock_core.controllers.lvol_controller as lvol_ctl
 
 
 def _mock_db_for_host_ops(lvol, node, cluster):

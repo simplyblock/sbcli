@@ -385,7 +385,7 @@ def get_snaps_to_delete_on_target(migration):
     preexisting = set(migration.snaps_preexisting_on_target)
 
     # Rule 2: protect snaps referenced by other target lvols
-    protected = set()
+    protected: set[str] = set()
     target_lvols = db.get_lvols_by_node_id(migration.target_node_id)
     for lvol in target_lvols:
         if lvol.uuid == migration.lvol_id:
@@ -454,7 +454,6 @@ def apply_migration_to_db(migration):
         logger.error(f"apply_migration_to_db: target node not found: {e}")
         return False
 
-    old_lvstore = lvol.lvs_name
     lvol.node_id = tgt_node.get_id()
     lvol.hostname = tgt_node.hostname
     lvol.lvs_name = tgt_node.lvstore

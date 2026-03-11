@@ -23,8 +23,8 @@ from simplyblock_core.controllers import migration_controller
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 
-from tests.migration.conftest import run_migration_task, set_node_status, set_cluster_status
-from tests.migration.topology_loader import load_topology, TestContext
+from tests.migration.conftest import run_migration_task, set_node_status
+from tests.migration.topology_loader import TestContext
 
 # Lazily initialised so the module can be imported without FDB installed.
 _db_instance = None
@@ -135,7 +135,6 @@ class TestBasicMigration:
                                               mock_src_server, mock_tgt_server):
         """Happy path: one snapshot on the source → successful full migration."""
         ctx = topology_two_node
-        src_node = ctx.node("src")
         tgt_node = ctx.node("tgt")
         lvol = ctx.lvol("l1")
 
@@ -163,7 +162,6 @@ class TestBasicMigration:
         When two lvols share the same NQN subsystem, the second migration must
         re-use the existing subsystem on the target rather than creating a new one.
         """
-        shared_nqn = "nqn.2023-02.io.simplyblock:shared-grp"
         spec = {
             "cluster": {},
             "nodes": [
@@ -187,7 +185,6 @@ class TestBasicMigration:
             ],
         }
         ctx = custom_topology(spec)
-        src_node = ctx.node("src")
         tgt_node = ctx.node("tgt")
 
         _seed_all(mock_src_server, ctx, "src")
@@ -526,7 +523,6 @@ class TestHASecondaryRegistration:
         _seed_all(mock_src_server, ctx, "src")
 
         lvol = ctx.lvol("l1")
-        snap = ctx.snap("s1")
 
         mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None

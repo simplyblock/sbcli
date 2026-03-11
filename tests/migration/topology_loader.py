@@ -86,12 +86,10 @@ them to bytes using the same ``utils.parse_size()`` function the CLI uses.
 """
 
 import json
-import os
 import time
 import uuid as _uuid_mod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from simplyblock_core import constants
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol

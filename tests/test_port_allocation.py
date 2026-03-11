@@ -18,8 +18,7 @@ All external dependencies (FDB, RPC, Docker) are mocked.
 """
 
 import unittest
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import patch
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -583,7 +582,7 @@ class TestSelectiveBlockingPorts(unittest.TestCase):
             _node("n2", lvol_subsys_port=4423, nvmf_port=4424, hublvol_port=4425),
         ]
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        all_ports = _get_all_nvmf_ports("c1")
+        _ = _get_all_nvmf_ports("c1")
 
         # Each port type for each node is distinct
         lvol_ports = {4420, 4423}
@@ -706,8 +705,7 @@ class TestEndToEndAllocationScenario(unittest.TestCase):
     @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
     @patch("simplyblock_core.db_controller.DBController")
     def test_four_nodes_two_hosts(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_nvmf_port, get_next_rpc_port, get_next_fw_port
-        from simplyblock_core.utils import _get_all_nvmf_ports
+        from simplyblock_core.utils import get_next_rpc_port, get_next_fw_port
 
         # Simulate progressive node creation
         nodes = []

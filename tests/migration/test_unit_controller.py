@@ -7,8 +7,7 @@ Every test patches the module-level ``db`` singleton so no FDB connection is nee
 
 import time
 import unittest
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
