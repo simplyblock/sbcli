@@ -253,7 +253,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
-                do_replicate=False):
+                do_replicate=False, replication_cluster_id=None):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -474,7 +474,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.ndcs = cl.distr_ndcs
     lvol.do_replicate = bool(do_replicate)
     if lvol.do_replicate:
-        random_nodes = _get_next_3_nodes(cl.snapshot_replication_target_cluster, lvol.size)
+        if replication_cluster_id:
+            replication_cluster = db_controller.get_cluster_by_id(replication_cluster_id)
+            if not replication_cluster:
+                return False, f"Replication cluster not found: {replication_cluster_id}"
+        else:
+            replication_cluster_id = cl.snapshot_replication_target_cluster
+        random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
         lvol.replication_node_id = random_nodes[0].get_id()
 
     lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
@@ -1868,7 +1874,7 @@ def replication_trigger(lvol_id):
 
     return out
 
-def replication_start(lvol_id):
+def replication_start(lvol_id, replication_cluster_id=None):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -1886,10 +1892,12 @@ def replication_start(lvol_id):
                 excluded_nodes.append(org_snap.lvol.node_id)
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        if not cluster.snapshot_replication_target_cluster:
+        if not replication_cluster_id:
+            replication_cluster_id = cluster.snapshot_replication_target_cluster
+        if not replication_cluster_id:
             logger.error(f"Cluster: {snode.cluster_id} not replicated")
             return False
-        random_nodes = _get_next_3_nodes(cluster.snapshot_replication_target_cluster, lvol.size)
+        random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
         for r_node in random_nodes:
             if r_node.get_id() not in excluded_nodes:
                 logger.info(f"Replicating on node: {r_node.get_id()}")
@@ -2072,3 +2080,70 @@ def list_replication_tasks(lvol_id):
             tasks.append(task)
 
     return tasks
+
+
+def suspend_lvol(lvol_id):
+
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    logger.info(f"suspending LVol subsystem: {lvol.get_id()}")
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    for iface in snode.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+            ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(lvol.nqn, iface.ip4_address, lvol.subsys_port, ana_state="inaccessible")
+            if not ret:
+                logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
+                return False
+
+    if snode.secondary_node_id:
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
+            for iface in sec_node.data_nics:
+                if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                    ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(lvol.nqn, iface.ip4_address, lvol.subsys_port, ana_state="inaccessible")
+                    if not ret:
+                        logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
+                        return False
+
+    return True
+
+
+def resume_lvol(lvol_id):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    logger.info(f"suspending LVol subsystem: {lvol.get_id()}")
+    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    for iface in snode.data_nics:
+        if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+            ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(
+                lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=True)
+            if not ret:
+                logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
+                return False
+
+    if snode.secondary_node_id:
+        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
+            for iface in sec_node.data_nics:
+                if iface.ip4_address and lvol.fabric == iface.trtype.lower():
+                    logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
+                    ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(
+                        lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=False)
+                    if not ret:
+                        logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
+                        return False
+
+    return True

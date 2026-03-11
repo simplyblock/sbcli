@@ -1704,6 +1704,10 @@ commands:
             help: "Logical volume id"
             dest: lvol_id
             type: str
+          - name: "--replication-cluster-id"
+            help: "Cluster ID of the replication target cluster"
+            dest: replication_cluster_id
+            type: str
       - name: replication-stop
         help: "Stop snapshot replication taken from lvol"
         arguments:
@@ -1720,6 +1724,20 @@ commands:
             type: str
       - name: replication-trigger
         help: "Start replication for lvol"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
+      - name: suspend
+        help: "Suspend lvol subsystems"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
+      - name: resume
+        help: "Resume lvol subsystems"
         arguments:
           - name: "lvol_id"
             help: "Logical volume id"

@@ -186,13 +186,20 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
     return Response(status_code=204)
 
-@instance_api.post('/replication_start', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
-def replication_start(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+@instance_api.post('/replication_trigger', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
+def replication_trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if not lvol_controller.replication_trigger(volume.get_id()):
         raise ValueError('Failed to start volume snapshot replication')
 
     return Response(status_code=204)
-    
+
+@instance_api.post('/replication_start', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
+def replication_start(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    if not lvol_controller.replication_start(volume.get_id(), cluster.get_id()):
+        raise ValueError('Failed to start volume snapshot replication')
+
+    return Response(status_code=204)
+
 @instance_api.post('/replication_stop', name='clusters:storage-pools:volumes:replication_stop', status_code=204, responses={204: {"content": None}})
 def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if not lvol_controller.replication_stop(volume.get_id()):

@@ -591,7 +591,7 @@ class CLIWrapperBase:
         return lvol_controller.inflate_lvol(args.volume_id)
 
     def volume__replication_start(self, sub_command, args):
-        return lvol_controller.replication_start(args.lvol_id)
+        return lvol_controller.replication_start(args.lvol_id, args.replication_cluster_id)
 
     def volume__replication_stop(self, sub_command, args):
         return lvol_controller.replication_stop(args.lvol_id)
@@ -601,6 +601,12 @@ class CLIWrapperBase:
 
     def volume__replication_trigger(self, sub_command, args):
         return lvol_controller.replication_trigger(args.lvol_id)
+
+    def volume__suspend(self, sub_command, args):
+        return lvol_controller.suspend_lvol(args.lvol_id)
+
+    def volume__resume(self, sub_command, args):
+        return lvol_controller.resume_lvol(args.lvol_id)
 
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id

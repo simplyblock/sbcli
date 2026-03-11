@@ -558,6 +558,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__replication_stop(subparser)
         self.init_volume__replication_status(subparser)
         self.init_volume__replication_trigger(subparser)
+        self.init_volume__suspend(subparser)
+        self.init_volume__resume(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -668,6 +670,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_start(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-start', 'Start snapshot replication taken from lvol')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+        argument = subcommand.add_argument('--replication-cluster-id', help='Cluster ID of the replication target cluster', type=str, dest='replication_cluster_id')
 
     def init_volume__replication_stop(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-stop', 'Stop snapshot replication taken from lvol')
@@ -679,6 +682,14 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__replication_trigger(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-trigger', 'Start replication for lvol')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__suspend(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'suspend', 'Suspend lvol subsystems')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__resume(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'resume', 'Resume lvol subsystems')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
 
 
@@ -1139,6 +1150,10 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__replication_status(sub_command, args)
                 elif sub_command in ['replication-trigger']:
                     ret = self.volume__replication_trigger(sub_command, args)
+                elif sub_command in ['suspend']:
+                    ret = self.volume__suspend(sub_command, args)
+                elif sub_command in ['resume']:
+                    ret = self.volume__resume(sub_command, args)
                 else:
                     self.parser.print_help()
 
