@@ -27,6 +27,10 @@ while True:
                     backup_controller.evaluate_policy(lvol)
                 except Exception as e:
                     logger.error(f"Error evaluating policy for lvol {lvol.get_id()}: {e}")
+                try:
+                    backup_controller.evaluate_schedule(lvol)
+                except Exception as e:
+                    logger.error(f"Error evaluating schedule for lvol {lvol.get_id()}: {e}")
         except Exception as e:
             logger.error(f"Error processing cluster {cl.get_id()}: {e}")
 

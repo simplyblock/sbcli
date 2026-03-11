@@ -618,7 +618,8 @@ class CLIWrapperBase:
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id
         name = args.name
-        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name)
+        backup = getattr(args, 'backup', False)
+        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name, backup=backup)
         return snapshot_id if not error else error
 
     def volume__clone(self, sub_command, args):
@@ -820,7 +821,8 @@ class CLIWrapperBase:
         policy_id, error = backup_controller.add_policy(
             args.cluster_id, args.name,
             max_versions=args.versions or 0,
-            max_age=args.age or "")
+            max_age=args.age or "",
+            schedule=args.schedule or "")
         if error:
             print(f"Error: {error}")
             return False

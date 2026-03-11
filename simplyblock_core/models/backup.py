@@ -36,6 +36,8 @@ class Backup(BaseModel):
     created_at: int = 0
     completed_at: int = 0
     error_message: str = ""
+    # Security params from the source lvol (for cross-cluster restore)
+    allowed_hosts: List[dict] = []
     # S3 metadata written to metadata bucket
     s3_metadata: dict = {}
 
@@ -62,6 +64,7 @@ class BackupPolicy(BaseModel):
     max_versions: int = 0
     max_age_seconds: int = 0
     max_age_display: str = ""
+    backup_schedule: str = ""  # e.g. "15m,4 60m,11 24h,7"
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)

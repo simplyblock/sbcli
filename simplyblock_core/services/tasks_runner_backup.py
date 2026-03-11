@@ -321,6 +321,26 @@ while True:
                 task.function_result = "max retry reached"
                 task.status = JobSchedule.STATUS_DONE
                 task.write_to_db(db.kv_store)
+                # Mark associated backup as failed so it doesn't stay in pending/in_progress
+                if task.function_name == JobSchedule.FN_BACKUP:
+                    bid = task.function_params.get("backup_id")
+                    if bid:
+                        try:
+                            b = db.get_backup_by_id(bid)
+                            if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS):
+                                _fail_backup(b, task, "max retry reached")
+                        except KeyError:
+                            pass
+                elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
+                    old_bid = task.function_params.get("old_backup_id")
+                    if old_bid:
+                        try:
+                            ob = db.get_backup_by_id(old_bid)
+                            if ob.status == Backup.STATUS_MERGING:
+                                ob.status = Backup.STATUS_COMPLETED
+                                ob.write_to_db()
+                        except KeyError:
+                            pass
                 continue
 
             try:
@@ -331,6 +351,12 @@ while True:
                 elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
                     _run_merge(task)
             except Exception as e:
-                logger.error(f"Error running backup task: {e}")
+                logger.error(f"Error running backup task {task.uuid}: {e}")
+                # Increment retry so the task eventually reaches max_retry
+                # instead of looping forever on non-RPCException errors
+                task.retry += 1
+                task.function_result = f"Unhandled error: {e}"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

@@ -1286,6 +1286,21 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         if m.is_active():
             migrating_lvols.add(m.lvol_id)
 
+    # Build policy lookup maps (single scan of attachments + policies)
+    from simplyblock_core.models.backup import BackupPolicyAttachment
+    all_attachments = db_controller.get_backup_policy_attachments(cluster_id)
+    all_policies = {p.uuid: p for p in db_controller.get_backup_policies(cluster_id)}
+    lvol_policy_map = {}   # lvol_id -> policy
+    pool_policy_map = {}   # pool_id -> policy
+    for att in all_attachments:
+        pol = all_policies.get(att.policy_id)
+        if not pol:
+            continue
+        if att.target_type == "lvol":
+            lvol_policy_map[att.target_id] = pol
+        elif att.target_type == "pool":
+            pool_policy_map[att.target_id] = pol
+
     snap_dict : dict[str, int] = {}
     for lvol in lvols:
         logger.debug(lvol)
@@ -1304,6 +1319,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         else:
             mode = f"{lvol.ndcs}x{lvol.npcs}"
 
+        eff_policy = lvol_policy_map.get(lvol.get_id()) or pool_policy_map.get(lvol.pool_uuid)
         lvol_data = {
             "Id": lvol.uuid,
             "Name": lvol.lvol_name,
@@ -1318,7 +1334,8 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "IO Err": lvol.io_error,
             "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
-            "Mode": mode
+            "Mode": mode,
+            "Policy": eff_policy.policy_name if eff_policy else "",
         }
         data.append(lvol_data)
 
@@ -1377,6 +1394,9 @@ def get_lvol(lvol_id_or_name, is_json):
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
     data['migrating'] = active_mig.uuid if active_mig else ""
+
+    policy = db_controller.get_policy_for_lvol(lvol)
+    data['policy'] = policy.policy_name if policy else ""
 
     if is_json:
         return json.dumps(data, indent=2)
@@ -1669,8 +1689,8 @@ def set_read_only(id):
     return True
 
 
-def create_snapshot(lvol_id, snapshot_name):
-    return snapshot_controller.add(lvol_id, snapshot_name)
+def create_snapshot(lvol_id, snapshot_name, backup=False):
+    return snapshot_controller.add(lvol_id, snapshot_name, backup=backup)
 
 
 def get_capacity(lvol_uuid, history, records_count=20, parse_sizes=True):

@@ -41,6 +41,32 @@ def _parse_age_string(age_str):
     return value * multipliers[unit]
 
 
+def _parse_schedule(schedule_str):
+    """Parse schedule string like '15m,4 60m,11 24h,7' into list of (interval_seconds, keep_count) tuples.
+    Returns sorted list by interval ascending. Raises ValueError on invalid input."""
+    if not schedule_str or not schedule_str.strip():
+        return []
+    tiers = []
+    for part in schedule_str.strip().split():
+        parts = part.split(',')
+        if len(parts) != 2:
+            raise ValueError(f"Invalid schedule tier: {part}. Expected format: <interval>,<count> e.g. 15m,4")
+        interval_seconds = _parse_age_string(parts[0])
+        try:
+            keep_count = int(parts[1])
+        except ValueError:
+            raise ValueError(f"Invalid keep count in tier: {part}. Must be an integer.")
+        if keep_count < 1:
+            raise ValueError(f"Keep count must be >= 1 in tier: {part}")
+        tiers.append((interval_seconds, keep_count))
+    tiers.sort(key=lambda t: t[0])
+    # Validate intervals are strictly increasing
+    for i in range(1, len(tiers)):
+        if tiers[i][0] <= tiers[i - 1][0]:
+            raise ValueError("Schedule tier intervals must be strictly increasing")
+    return tiers
+
+
 def _write_s3_metadata(rpc_client, backup):
     """Write backup metadata to the S3 metadata bucket.
     This metadata is needed for cross-cluster recovery."""
@@ -55,6 +81,7 @@ def _write_s3_metadata(rpc_client, backup):
         "prev_backup_id": backup.prev_backup_id,
         "created_at": backup.created_at,
         "size": backup.size,
+        "allowed_hosts": backup.allowed_hosts,
     }
     backup.s3_metadata = metadata
     # The actual S3 metadata write is done via the data plane's S3 bdev.
@@ -159,6 +186,7 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     backup.pool_uuid = lvol.pool_uuid
     backup.prev_backup_id = prev_backup.uuid if prev_backup else ""
     backup.size = snapshot.size
+    backup.allowed_hosts = lvol.allowed_hosts
     backup.created_at = int(time.time())
     backup.status = Backup.STATUS_PENDING
     backup.write_to_db()
@@ -296,6 +324,7 @@ def import_backups(s3_metadata_list):
         backup.node_id = meta.get("node_id", "")
         backup.prev_backup_id = meta.get("prev_backup_id", "")
         backup.size = meta.get("size", 0)
+        backup.allowed_hosts = meta.get("allowed_hosts", [])
         backup.created_at = meta.get("created_at", 0)
         backup.status = Backup.STATUS_COMPLETED
         backup.s3_metadata = meta
@@ -307,7 +336,7 @@ def import_backups(s3_metadata_list):
 
 # ---- Backup Policy Management ----
 
-def add_policy(cluster_id, name, max_versions=0, max_age=""):
+def add_policy(cluster_id, name, max_versions=0, max_age="", schedule=""):
     """Create a new backup policy.
     Returns (policy_id, error_message)."""
     max_age_seconds = 0
@@ -317,8 +346,14 @@ def add_policy(cluster_id, name, max_versions=0, max_age=""):
         except ValueError as e:
             return None, str(e)
 
-    if max_versions <= 0 and max_age_seconds <= 0:
-        return None, "At least one of --versions or --age must be specified"
+    if schedule:
+        try:
+            _parse_schedule(schedule)
+        except ValueError as e:
+            return None, str(e)
+
+    if max_versions <= 0 and max_age_seconds <= 0 and not schedule:
+        return None, "At least one of --versions, --age, or --schedule must be specified"
 
     # Check name uniqueness
     for p in db_controller.get_backup_policies(cluster_id):
@@ -332,6 +367,7 @@ def add_policy(cluster_id, name, max_versions=0, max_age=""):
     policy.max_versions = max_versions
     policy.max_age_seconds = max_age_seconds
     policy.max_age_display = max_age
+    policy.backup_schedule = schedule
     policy.status = BackupPolicy.STATUS_ACTIVE
     policy.write_to_db()
 
@@ -417,6 +453,7 @@ def list_policies(cluster_id=None):
             "Name": p.policy_name,
             "Versions": p.max_versions if p.max_versions > 0 else "-",
             "Max Age": p.max_age_display if p.max_age_display else "-",
+            "Schedule": p.backup_schedule if p.backup_schedule else "-",
             "Status": p.status,
         })
     return data
@@ -461,6 +498,82 @@ def evaluate_policy(lvol):
             oldest = completed[0]
             second = completed[1]
             _trigger_merge(second, oldest)
+
+
+def evaluate_schedule(lvol):
+    """Evaluate the backup schedule for an lvol and trigger auto-backups + tiered merges.
+    Called by the backup merge service."""
+    policy = db_controller.get_policy_for_lvol(lvol)
+    if not policy or not policy.backup_schedule:
+        return
+
+    try:
+        tiers = _parse_schedule(policy.backup_schedule)
+    except ValueError:
+        return
+
+    if not tiers:
+        return
+
+    now = int(time.time())
+
+    # Check if we need to create a new auto-backup based on the smallest tier interval
+    smallest_interval = tiers[0][0]
+    backups = db_controller.get_backups_by_lvol_id(lvol.get_id())
+    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
+    pending_or_running = [b for b in backups if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)]
+
+    # Don't create a new backup if one is already in progress
+    if not pending_or_running:
+        needs_backup = True
+        if completed:
+            completed.sort(key=lambda b: b.created_at, reverse=True)
+            latest = completed[0]
+            elapsed = now - latest.created_at
+            if elapsed < smallest_interval:
+                needs_backup = False
+
+        if needs_backup:
+            _auto_backup_lvol(lvol)
+            return  # Skip merge evaluation this cycle — let the backup complete first
+
+    # Tiered merge: enforce keep_count per tier
+    if len(completed) < 2:
+        return
+
+    completed.sort(key=lambda b: b.created_at)
+
+    # Assign backups to tiers (newest first matching).
+    # Tier boundaries: tier[i] covers backups with age < tier[i+1].interval (or unlimited for last tier).
+    # Within each tier, if count > keep_count, merge the oldest two.
+    for tier_idx, (interval, keep_count) in enumerate(tiers):
+        # Upper age boundary for this tier
+        if tier_idx + 1 < len(tiers):
+            upper_age = tiers[tier_idx + 1][0]
+        else:
+            upper_age = float('inf')
+
+        tier_backups = [b for b in completed if interval <= (now - b.created_at) < upper_age]
+        # For the first (smallest) tier, also include backups younger than the first interval
+        if tier_idx == 0:
+            tier_backups = [b for b in completed if (now - b.created_at) < upper_age]
+
+        if len(tier_backups) > keep_count:
+            # Merge oldest two in this tier
+            tier_backups.sort(key=lambda b: b.created_at)
+            oldest = tier_backups[0]
+            second = tier_backups[1]
+            _trigger_merge(second, oldest)
+            return  # One merge at a time
+
+
+def _auto_backup_lvol(lvol):
+    """Create an automatic snapshot + backup for scheduled backups."""
+    from simplyblock_core.controllers import snapshot_controller
+    snap_name = f"auto_{lvol.lvol_name}_{int(time.time())}"
+    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name, backup=True)
+    if error:
+        logger.warning(f"Auto-backup failed for lvol {lvol.get_id()}: {error}")
 
 
 def _trigger_merge(keep_backup, old_backup):

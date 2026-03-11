@@ -686,6 +686,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'create-snapshot', 'Creates a snapshot from a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('name', help='Snapshot name', type=str)
+        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot',
+                                dest='backup', action='store_true')
 
     def init_volume__clone(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a logical volumes from an existing snapshot')
@@ -901,6 +903,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('name', help='Policy name', type=str)
         subcommand.add_argument('--versions', help='Maximum number of backup versions', type=int, default=None, dest='versions')
         subcommand.add_argument('--age', help='Maximum backup age (e.g. 2d, 12h, 1w)', type=str, default=None, dest='age')
+        subcommand.add_argument('--schedule', help='Auto-backup schedule as space-separated tiers: "15m,4 60m,11 24h,7" '
+                                '(interval,keep_count per tier)', type=str, default=None, dest='schedule')
 
     def init_backup__policy_remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-remove', 'Remove a backup policy')
