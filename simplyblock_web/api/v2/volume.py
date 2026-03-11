@@ -280,3 +280,11 @@ def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume
 def list_replication_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
     tasks = lvol_controller.list_replication_tasks(volume.get_id())
     return [TaskDTO.from_model(task) for task in tasks]
+
+@instance_api.get('/suspend', name='clusters:storage-pools:volumes:suspend')
+def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+    return lvol_controller.suspend_lvol(volume.get_id())
+
+@instance_api.get('/resume', name='clusters:storage-pools:volumes:resume')
+def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+    return lvol_controller.resume_lvol(volume.get_id())
