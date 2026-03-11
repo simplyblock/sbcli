@@ -82,7 +82,7 @@ def _run_backup(task):
             snap_bdev_name = f"{snapshot.lvol.lvs_name}/{snapshot.snap_name}"
 
         try:
-            ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name])
+            ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name], cluster_batch=1)
             if not ret:
                 _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
                 return

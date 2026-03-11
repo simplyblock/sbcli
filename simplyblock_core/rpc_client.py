@@ -1409,20 +1409,19 @@ class RPCClient:
             "s3_bdev": bdev_name,
         })
 
-    def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=0):
+    def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
         """Start an async backup of snapshots to S3.
         Args:
             s3_id: unique backup identifier (uint32)
             snapshot_names: list of snapshot composite bdev names
-            cluster_batch: batch size in clusters (0 = default)
+            cluster_batch: batch size in clusters (default 1)
         Returns RPC result (truthy on success). Poll with bdev_lvol_s3_backup_stat.
         """
         params = {
             "s3_id": s3_id,
             "snapshot_names": snapshot_names,
+            "cluster_batch": cluster_batch,
         }
-        if cluster_batch:
-            params["cluster_batch"] = cluster_batch
         return self._request("bdev_lvol_s3_backup", params)
 
     def bdev_lvol_s3_backup_stat(self, s3_id):
