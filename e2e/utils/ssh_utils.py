@@ -27,13 +27,6 @@ from typing import Optional, List
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
-import shlex
-import socket
-from collections import defaultdict
-from typing import Optional, List
-# import importlib
-# from glob import glob
-from utils.placement_dump_check import PlacementDump
 
 
 SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
@@ -2350,7 +2343,7 @@ class SshUtils:
         """
         all_ok = True
         for distrib in distribs:
-            rpc_log_path = os.path.join(base_path, f"rpc_distrib_{distrib}.log")
+            rpc_log_path = os.path.join(base_path, f"rpc_{distrib}.log")
             try:
                 with open(rpc_log_path, "r") as f:
                     rpc_content = f.read()

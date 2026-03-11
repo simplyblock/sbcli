@@ -665,7 +665,6 @@ jobs:
             --testname "${TEST_CLASS}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
-            --send_debug_notification false \
             2>&1 | tee output.log
       
       - name: Export RUN_BASE_DIR from RUN_DIR_FILE
