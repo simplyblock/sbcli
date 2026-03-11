@@ -325,7 +325,7 @@ def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
-                            StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
+                            StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN, StorageNode.STATUS_IN_SHUTDOWN]:
         logger.info(f"Node status is: {snode.status}, skipping")
         return False
 
