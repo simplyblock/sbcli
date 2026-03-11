@@ -18,8 +18,7 @@ All external dependencies (FDB, RPC) are mocked.
 """
 
 import unittest
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
@@ -652,8 +651,8 @@ class TestCheckSecNodeHublvolPrimaryResolution(unittest.TestCase):
 
     def test_explicit_primary_node_id_overrides(self):
         """When primary_node_id is passed explicitly, it should be used."""
-        sec = _node("sec", lvstore_stack_secondary_1="primary-A",
-                     lvstore_stack_secondary_2="primary-B")
+        _ = _node("sec", lvstore_stack_secondary_1="primary-A",
+                  lvstore_stack_secondary_2="primary-B")
         explicit = "primary-B"
         primary_ref = explicit  # simulating the function logic
         assert primary_ref == "primary-B"

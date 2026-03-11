@@ -454,7 +454,6 @@ def apply_migration_to_db(migration):
         logger.error(f"apply_migration_to_db: target node not found: {e}")
         return False
 
-    old_lvstore = lvol.lvs_name
     lvol.node_id = tgt_node.get_id()
     lvol.hostname = tgt_node.hostname
     lvol.lvs_name = tgt_node.lvstore

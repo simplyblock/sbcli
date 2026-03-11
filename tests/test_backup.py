@@ -19,7 +19,7 @@ All external dependencies (FDB, RPC) are mocked.
 """
 
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import time
 
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
@@ -28,7 +28,6 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.models.pool import Pool
 
 
 # ---------------------------------------------------------------------------

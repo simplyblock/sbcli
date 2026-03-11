@@ -1,11 +1,9 @@
 # coding=utf-8
-import json
 import logging
 import re
 import time
 import uuid
 
-from simplyblock_core import constants, utils
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
@@ -168,7 +166,7 @@ def restore_backup(backup_id, node_id, lvol_name, cluster_id=None):
     """Restore a backup chain into a new lvol.
     Returns (task_id_or_status, error_message)."""
     try:
-        backup = db_controller.get_backup_by_id(backup_id)
+        _ = db_controller.get_backup_by_id(backup_id)
     except KeyError as e:
         return None, str(e)
 
