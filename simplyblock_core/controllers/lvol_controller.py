@@ -2147,3 +2147,120 @@ def resume_lvol(lvol_id):
                         return False
 
     return True
+
+
+def replicate_lvol_on_source_cluster(lvol_id):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
+
+    if not source_node:
+        logger.error(f"Node not found: {lvol.node_id}")
+        return False
+
+    if source_node.status != StorageNode.STATUS_ONLINE:
+        logger.error(f"Node is not online!: {source_node.get_id()}, status: {source_node.status}")
+        return False
+
+    for lv in db_controller.get_lvols(source_cluster.snapshot_replication_target_cluster):
+        if lv.nqn == lvol.nqn:
+            logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+            return lv.get_id()
+
+    snaps = []
+    snapshot = None
+    for task in db_controller.get_job_tasks(source_node.cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+
+            if snap.lvol.get_id() != lvol_id:
+                continue
+            snaps.append(snap)
+
+    if snaps:
+        snaps = sorted(snaps, key=lambda x: x.created_at)
+        last_snapshot = snaps[-1]
+        rep_snap = db_controller.get_snapshot_by_id(last_snapshot.target_replicated_snap_uuid)
+        snapshot = rep_snap
+
+    if not snapshot:
+        logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
+        return False
+
+    # create lvol on target node
+    new_lvol = copy.deepcopy(lvol)
+    new_lvol.uuid = str(uuid.uuid4())
+    new_lvol.create_dt = str(datetime.now())
+    new_lvol.node_id = target_node.get_id()
+    new_lvol.nodes = [target_node.get_id(), target_node.secondary_node_id]
+    new_lvol.replication_node_id = ""
+    new_lvol.do_replicate = False
+    new_lvol.cloned_from_snap = snapshot.get_id()
+    new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
+    new_lvol.lvs_name = target_node.lvstore
+    new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
+    new_lvol.snapshot_name = snapshot.snap_bdev
+    new_lvol.status = LVol.STATUS_IN_CREATION
+
+    new_lvol.bdev_stack = [
+        {
+            "type": "bdev_lvol_clone",
+            "name": lvol.top_bdev,
+            "params": {
+                "snapshot_name": snapshot.snap_bdev,
+                "clone_name": lvol.lvol_bdev
+            }
+        }
+    ]
+
+    if new_lvol.crypto_bdev:
+        new_lvol.bdev_stack.append({
+            "type": "crypto",
+            "name": lvol.crypto_bdev,
+            "params": {
+                "name": lvol.crypto_bdev,
+                "base_name": lvol.top_bdev,
+                "key1": lvol.crypto_key1,
+                "key2": lvol.crypto_key2,
+            }
+        })
+
+    new_lvol.write_to_db(db_controller.kv_store)
+
+    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
+    if error:
+        logger.error(error)
+        new_lvol.remove(db_controller.kv_store)
+        return False, error
+
+    new_lvol.lvol_uuid = lvol_bdev['uuid']
+    new_lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+    secondary_node = db_controller.get_storage_node_by_id(target_node.secondary_node_id)
+    if secondary_node.status == StorageNode.STATUS_ONLINE:
+        lvol_bdev, error = add_lvol_on_node(new_lvol, secondary_node, is_primary=False)
+        if error:
+            logger.error(error)
+            # remove lvol from primary
+            ret = delete_lvol_from_node(new_lvol, target_node)
+            if not ret:
+                logger.error("")
+            new_lvol.remove(db_controller.kv_store)
+            return False, error
+
+    new_lvol.status = LVol.STATUS_ONLINE
+    new_lvol.write_to_db(db_controller.kv_store)
+    lvol_events.lvol_replicated(lvol, new_lvol)
+
+    return new_lvol.lvol_uuid
+
