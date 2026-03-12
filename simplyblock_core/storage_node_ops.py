@@ -3527,11 +3527,11 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(
-                lvol.nqn, iface.trtype, iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
+                lvol.nqn, iface.trtype, iface.ip4_address, snode.lvol_subsys_port, ana_state=lvol_ana_state)
         elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
             logger.info("adding listener for %s on IP %s, fabric TCP" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(
-                lvol.nqn, "TCP", iface.ip4_address, lvol.subsys_port, ana_state=lvol_ana_state)
+                lvol.nqn, "TCP", iface.ip4_address, snode.lvol_subsys_port, ana_state=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     lvol_obj.status = LVol.STATUS_ONLINE
