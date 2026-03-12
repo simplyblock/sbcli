@@ -1314,7 +1314,7 @@ class RPCClient:
           ``transfer_state``: "No process" | "In progress" | "Failed" | "Done"
           ``offset``:         last written byte offset
         """
-        return self._request("bdev_lvol_transfer_stat", {"name": name})
+        return self._request("bdev_lvol_transfer_stat", {"lvol_name": name})
 
     def bdev_lvol_add_clone(self, lvol_name, parent_snapshot_name):
         """
