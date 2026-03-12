@@ -147,9 +147,69 @@ def create_s3_bdev(node, backup_config):
         return False
 
 
+def _get_snapshot_chain(snapshot):
+    """Walk snap_ref_id to build the full ancestor chain, oldest first."""
+    chain = [snapshot]
+    current = snapshot
+    while current.snap_ref_id:
+        try:
+            parent = db_controller.get_snapshot_by_id(current.snap_ref_id)
+            chain.append(parent)
+            current = parent
+        except KeyError:
+            break
+    chain.reverse()  # oldest first
+    return chain
+
+
+def _snapshot_has_backup(snapshot_id):
+    """Check if a snapshot already has a non-failed backup."""
+    backups = db_controller.get_backups_by_snapshot_id(snapshot_id)
+    return any(b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
+                            Backup.STATUS_COMPLETED) for b in backups)
+
+
+def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup):
+    """Create a single backup record and task for one snapshot.
+    Returns the created Backup object."""
+    backup_id = _generate_backup_id()
+
+    backup = Backup()
+    backup.uuid = backup_id
+    backup.s3_id = _next_s3_id(cluster_id)
+    backup.cluster_id = cluster_id
+    backup.lvol_id = lvol.get_id()
+    backup.lvol_name = lvol.lvol_name
+    backup.snapshot_id = snapshot.get_id()
+    backup.snapshot_name = snapshot.snap_name
+    backup.node_id = node_id
+    backup.pool_uuid = lvol.pool_uuid
+    backup.prev_backup_id = prev_backup.uuid if prev_backup else ""
+    backup.size = snapshot.size
+    backup.allowed_hosts = lvol.allowed_hosts
+    backup.created_at = int(time.time())
+    backup.status = Backup.STATUS_PENDING
+    backup.write_to_db()
+
+    _write_s3_metadata(None, backup)
+    backup.write_to_db()
+
+    backup_events.backup_created(cluster_id, node_id, backup)
+    tasks_controller.add_backup_task(backup)
+
+    return backup
+
+
 def backup_snapshot(snapshot_id, cluster_id=None):
     """Create a backup from an existing snapshot.
-    Returns (backup_id, error_message)."""
+
+    Walks the snapshot chain to ensure all ancestor snapshots are also
+    backed up, since a single snapshot backup is only a delta and cannot
+    be restored without its ancestors.
+
+    Returns (backup_id, error_message) where backup_id is the ID of the
+    backup for the requested snapshot.
+    """
     try:
         snapshot = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
@@ -171,35 +231,34 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     if not cluster_id:
         cluster_id = snode.cluster_id
 
-    backup_id = _generate_backup_id()
+    # Walk the snapshot chain and back up all unbacked ancestors first
+    snap_chain = _get_snapshot_chain(snapshot)
     prev_backup = _get_latest_backup_for_lvol(lvol.get_id())
+    final_backup_id = None
 
-    backup = Backup()
-    backup.uuid = backup_id
-    backup.s3_id = _next_s3_id(cluster_id)
-    backup.cluster_id = cluster_id
-    backup.lvol_id = lvol.get_id()
-    backup.lvol_name = lvol.lvol_name
-    backup.snapshot_id = snapshot_id
-    backup.snapshot_name = snapshot.snap_name
-    backup.node_id = node_id
-    backup.pool_uuid = lvol.pool_uuid
-    backup.prev_backup_id = prev_backup.uuid if prev_backup else ""
-    backup.size = snapshot.size
-    backup.allowed_hosts = lvol.allowed_hosts
-    backup.created_at = int(time.time())
-    backup.status = Backup.STATUS_PENDING
-    backup.write_to_db()
+    for snap in snap_chain:
+        if _snapshot_has_backup(snap.get_id()):
+            # Already backed up — update prev_backup pointer for chain linking
+            backups = db_controller.get_backups_by_snapshot_id(snap.get_id())
+            existing = next(
+                (b for b in backups if b.status in (
+                    Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
+                    Backup.STATUS_COMPLETED)),
+                None)
+            if existing:
+                prev_backup = existing
+            continue
 
-    _write_s3_metadata(None, backup)
-    backup.write_to_db()
+        backup = _create_single_backup(snap, lvol, node_id, cluster_id, prev_backup)
+        prev_backup = backup
+        if snap.get_id() == snapshot_id:
+            final_backup_id = backup.uuid
 
-    backup_events.backup_created(cluster_id, node_id, backup)
+    if not final_backup_id:
+        # The target snapshot was already backed up
+        return None, f"Snapshot {snapshot_id} already has a backup"
 
-    # Create async task to perform the actual backup
-    tasks_controller.add_backup_task(backup)
-
-    return backup_id, None
+    return final_backup_id, None
 
 
 def restore_backup(backup_id, node_id, lvol_name, cluster_id=None):
