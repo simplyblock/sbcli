@@ -2189,9 +2189,7 @@ def replicate_lvol_on_source_cluster(lvol_id):
 
     if snaps:
         snaps = sorted(snaps, key=lambda x: x.created_at)
-        last_snapshot = snaps[-1]
-        rep_snap = db_controller.get_snapshot_by_id(last_snapshot.target_replicated_snap_uuid)
-        snapshot = rep_snap
+        snapshot = snaps[-1]
 
     if not snapshot:
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
@@ -2201,14 +2199,9 @@ def replicate_lvol_on_source_cluster(lvol_id):
     new_lvol = copy.deepcopy(lvol)
     new_lvol.uuid = str(uuid.uuid4())
     new_lvol.create_dt = str(datetime.now())
-    new_lvol.node_id = target_node.get_id()
-    new_lvol.nodes = [target_node.get_id(), target_node.secondary_node_id]
     new_lvol.replication_node_id = ""
     new_lvol.do_replicate = False
     new_lvol.cloned_from_snap = snapshot.get_id()
-    new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
-    new_lvol.lvs_name = target_node.lvstore
-    new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.status = LVol.STATUS_IN_CREATION
 
@@ -2237,7 +2230,11 @@ def replicate_lvol_on_source_cluster(lvol_id):
 
     new_lvol.write_to_db(db_controller.kv_store)
 
-    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
+    delete_lvol(lvol_id)
+
+    time.sleep(3)
+
+    lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:
         logger.error(error)
         new_lvol.remove(db_controller.kv_store)
@@ -2246,13 +2243,13 @@ def replicate_lvol_on_source_cluster(lvol_id):
     new_lvol.lvol_uuid = lvol_bdev['uuid']
     new_lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-    secondary_node = db_controller.get_storage_node_by_id(target_node.secondary_node_id)
+    secondary_node = db_controller.get_storage_node_by_id(source_node.secondary_node_id)
     if secondary_node.status == StorageNode.STATUS_ONLINE:
         lvol_bdev, error = add_lvol_on_node(new_lvol, secondary_node, is_primary=False)
         if error:
             logger.error(error)
             # remove lvol from primary
-            ret = delete_lvol_from_node(new_lvol, target_node)
+            ret = delete_lvol_from_node(new_lvol, source_node)
             if not ret:
                 logger.error("")
             new_lvol.remove(db_controller.kv_store)
