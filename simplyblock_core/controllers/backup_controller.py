@@ -261,37 +261,83 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     return final_backup_id, None
 
 
-def restore_backup(backup_id, node_id, lvol_name, cluster_id=None):
-    """Restore a backup chain into a new lvol.
-    Returns (task_id_or_status, error_message)."""
+def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
+    """Restore a backup chain into a new fully-accessible lvol.
+
+    Creates the volume (with subsystem, listeners, namespace) via
+    lvol_controller.add_lvol_ha, then schedules an async task to
+    fill in the data from S3.  The volume is in STATUS_RESTORING
+    until the data transfer completes.
+
+    Returns (lvol_uuid, error_message).
+    """
+    from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.models.lvol_model import LVol
+
     try:
         backup = db_controller.get_backup_by_id(backup_id)
     except KeyError as e:
         return None, str(e)
-
-    try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-    except KeyError as e:
-        return None, str(e)
-
-    if snode.status != StorageNode.STATUS_ONLINE:
-        return None, f"Node {node_id} is not online"
-
-    if not cluster_id:
-        cluster_id = snode.cluster_id
 
     # Build the backup chain
     chain = db_controller.get_backup_chain(backup_id)
     if not chain:
         return None, f"Could not build backup chain for {backup_id}"
 
-    # Create the restore task — pass integer s3_ids for data-plane RPCs
+    size = backup.size
+    if size <= 0:
+        return None, "Backup has no size information"
+
+    # Create a fully-exposed volume (subsystem, listeners, namespace)
+    lvol_id, error = lvol_controller.add_lvol_ha(
+        name=lvol_name,
+        size=size,
+        pool_id_or_name=pool_id_or_name,
+        use_crypto=False,
+        max_size=0,
+        max_rw_iops=0,
+        max_rw_mbytes=0,
+        max_r_mbytes=0,
+        max_w_mbytes=0,
+        host_id_or_name=None,
+        ha_type="default",
+        crypto_key1=None,
+        crypto_key2=None,
+        use_comp=False,
+        distr_vuid=0,
+        lvol_priority_class=0,
+        allowed_hosts=backup.allowed_hosts,
+        fabric="tcp",
+    )
+    if error or not lvol_id:
+        return None, f"Failed to create restore volume: {error}"
+
+    # Mark volume as restoring
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError:
+        return None, f"Volume created but not found in DB: {lvol_id}"
+
+    lvol.status = LVol.STATUS_RESTORING
+    lvol.write_to_db()
+
+    if not cluster_id:
+        cluster_id = lvol.node_id
+        try:
+            snode = db_controller.get_storage_node_by_id(lvol.node_id)
+            cluster_id = snode.cluster_id
+        except KeyError:
+            pass
+
+    # The bdev name the data plane expects (e.g. LVS_7744/LVOL_12345)
+    bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+
     result = tasks_controller.add_backup_restore_task(
-        cluster_id, node_id, backup_id, lvol_name,
-        [b.s3_id for b in chain])
+        cluster_id, lvol.node_id, backup_id, bdev_name,
+        [b.s3_id for b in chain], lvol_id=lvol_id)
 
     if result:
-        return backup_id, None
+        return lvol_id, None
     return None, "Failed to create restore task"
 
 

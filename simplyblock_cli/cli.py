@@ -889,8 +889,8 @@ class CLIWrapper(CLIWrapperBase):
     def init_backup__restore(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restore', 'Restore a backup to a new logical volume')
         subcommand.add_argument('backup_id', help='Backup id', type=str)
-        subcommand.add_argument('--node', help='Target node id', type=str, required=True, dest='node_id')
         subcommand.add_argument('--lvol', help='New logical volume name', type=str, required=True, dest='lvol_name')
+        subcommand.add_argument('--pool', help='Target pool name or UUID', type=str, required=True, dest='pool')
         subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
 
     def init_backup__import(self, subparser):

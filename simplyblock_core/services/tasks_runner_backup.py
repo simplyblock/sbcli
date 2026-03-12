@@ -128,6 +128,22 @@ def _run_backup(task):
         task.write_to_db(db.kv_store)
 
 
+def _set_lvol_online(task):
+    """Mark restored lvol as online after successful data recovery."""
+    lvol_id = task.function_params.get("lvol_id")
+    if not lvol_id:
+        return
+    try:
+        from simplyblock_core.models.lvol_model import LVol
+        lvol = db.get_lvol_by_id(lvol_id)
+        if lvol.status == LVol.STATUS_RESTORING:
+            lvol.status = LVol.STATUS_ONLINE
+            lvol.write_to_db()
+            logger.info(f"Restored lvol {lvol_id} is now online")
+    except KeyError:
+        logger.warning(f"Restored lvol {lvol_id} not found in DB")
+
+
 def _run_restore(task):
     backup_id = task.function_params.get("backup_id")
     lvol_name = task.function_params.get("lvol_name")
@@ -153,7 +169,7 @@ def _run_restore(task):
         snode.rpc_username, snode.rpc_password, timeout=30)
 
     try:
-        ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=16)
+        ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=1)
         if not ret:
             task.function_result = "bdev_lvol_s3_recovery RPC failed"
             task.retry += 1
@@ -179,6 +195,7 @@ def _run_restore(task):
     if stat and isinstance(stat, dict):
         state = stat.get("transfer_state", "")
         if state == "Done":
+            _set_lvol_online(task)
             try:
                 backup = db.get_backup_by_id(backup_id)
                 backup_events.backup_restore_completed(
@@ -198,6 +215,7 @@ def _run_restore(task):
             task.write_to_db(db.kv_store)
     else:
         # Polling RPC not yet implemented — assume success
+        _set_lvol_online(task)
         try:
             backup = db.get_backup_by_id(backup_id)
             backup_events.backup_restore_completed(

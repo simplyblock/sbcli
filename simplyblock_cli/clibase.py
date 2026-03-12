@@ -795,12 +795,12 @@ class CLIWrapperBase:
 
     def backup__restore(self, sub_command, args):
         result, error = backup_controller.restore_backup(
-            args.backup_id, args.node_id, args.lvol_name,
+            args.backup_id, args.lvol_name, args.pool,
             cluster_id=getattr(args, 'cluster_id', None))
         if error:
             print(f"Error: {error}")
             return False
-        print(f"Restore task created for backup: {result}")
+        print(f"Restoring backup {args.backup_id} into new volume {result}")
         return True
 
     def backup__import(self, sub_command, args):

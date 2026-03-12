@@ -35,18 +35,18 @@ def create_backup(cluster: Cluster, parameters: _BackupSnapshotParams) -> Respon
 
 class _RestoreParams(BaseModel):
     backup_id: str
-    node_id: str
     lvol_name: str
+    pool: str
 
 
 @api.post('/restore', name='clusters:backups:restore', status_code=202)
 def restore_backup(cluster: Cluster, parameters: _RestoreParams):
     result, error = backup_controller.restore_backup(
-        parameters.backup_id, parameters.node_id, parameters.lvol_name,
+        parameters.backup_id, parameters.lvol_name, parameters.pool,
         cluster_id=cluster.get_id())
     if error:
         raise HTTPException(400, error)
-    return {"backup_id": result}
+    return {"lvol_id": result}
 
 
 class _ImportParams(BaseModel):
