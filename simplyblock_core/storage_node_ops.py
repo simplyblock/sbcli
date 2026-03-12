@@ -3630,6 +3630,39 @@ def get_secondary_nodes(current_node, exclude_ids=None):
     return nodes
 
 
+def get_secondary_nodes_2(current_node, exclude_ids=None):
+    """Get candidate nodes for second secondary assignment (dual fault tolerance).
+    Unlike get_secondary_nodes, this checks lvstore_stack_secondary_2 instead of
+    lvstore_stack_secondary_1, since nodes that already serve as first secondary
+    for another primary are still eligible as second secondary."""
+    if exclude_ids is None:
+        exclude_ids = []
+    db_controller = DBController()
+    nodes = []
+    nod_found = False
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    if len(all_nodes) == 2:
+        for node in all_nodes:
+            if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
+                return [node.get_id()]
+
+    for node in all_nodes:
+        if node.get_id() == current_node.get_id() or node.get_id() in exclude_ids:
+            if node.get_id() == current_node.get_id():
+                nod_found = True
+            continue
+        elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip:
+            if node.is_secondary_node:
+                nodes.append(node.get_id())
+
+            elif not node.lvstore_stack_secondary_2:
+                nodes.append(node.get_id())
+                if nod_found:
+                    return [node.get_id()]
+
+    return nodes
+
+
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
     lvstore_stack: List[dict] = []
