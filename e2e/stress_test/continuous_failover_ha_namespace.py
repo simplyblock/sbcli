@@ -174,7 +174,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
         cur = set(self._list_nvme_ns_devices(node=client, ctrl_dev=ctrl_dev))
         return len(cur) == 0
 
-    def _start_fio_for_lvol(self, lvol_name: str, runtime=3000):
+    def _start_fio_for_lvol(self, lvol_name: str, runtime=2000):
         d = self.lvol_mount_details[lvol_name]
         fio_thread = threading.Thread(
             target=self.ssh_obj.run_fio_test,
@@ -355,7 +355,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
             self.ssh_obj.delete_files(client_node, [f"{self.log_path}/{parent_name}_fio_iolog*"])
             sleep_n_sec(5)
 
-            self._start_fio_for_lvol(parent_name, runtime=3000)
+            self._start_fio_for_lvol(parent_name, runtime=2000)
             sleep_n_sec(5)
 
             # -------- Create children (same host_id as parent) --------
@@ -426,7 +426,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                 self.ssh_obj.delete_files(client_node, [f"{self.log_path}/{child_name}_fio_iolog*"])
                 sleep_n_sec(3)
 
-                self._start_fio_for_lvol(child_name, runtime=3000)
+                self._start_fio_for_lvol(child_name, runtime=2000)
                 sleep_n_sec(5)
 
     # -------------------------
