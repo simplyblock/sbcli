@@ -218,7 +218,7 @@ def set_node_online(node):
 
 
 def set_node_offline(node):
-    if node.status != StorageNode.STATUS_OFFLINE:
+    if node.status != StorageNode.STATUS_OFFLINE and node.status != StorageNode.STATUS_IN_SHUTDOWN:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE)
             for dev in node.nvme_devices:
@@ -244,7 +244,7 @@ def set_node_unreachable(node):
 
 
 def set_node_schedulable(node):
-    if node.status != StorageNode.STATUS_SCHEDULABLE:
+    if node.status != StorageNode.STATUS_SCHEDULABLE and node.status != StorageNode.STATUS_IN_SHUTDOWN:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_SCHEDULABLE)
             # initiate shutdown
@@ -325,7 +325,7 @@ def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
-                            StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
+                            StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN, StorageNode.STATUS_IN_SHUTDOWN]:
         logger.info(f"Node status is: {snode.status}, skipping")
         return False
 
