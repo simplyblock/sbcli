@@ -500,7 +500,7 @@ def spdk_process_kill(query: utils.RPCPortParams):
         pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
         resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
 
-        fluent_pod_name = f"fluent-pod-{query.rpc_port}-{first_six_cluster_id}"
+        fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
         try:
             k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
             logger.info(f"Deleting fluent pod {fluent_pod_name}")
