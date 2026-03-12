@@ -499,6 +499,16 @@ def spdk_process_kill(query: utils.RPCPortParams):
         first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
         pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
         resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
+
+        fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
+        try:
+            k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
+            logger.info(f"Deleting fluent pod {fluent_pod_name}")
+            k8s_core_v1.delete_namespaced_pod(fluent_pod_name, namespace)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+
         retries = 10
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
