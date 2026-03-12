@@ -70,17 +70,18 @@ def _run_backup(task):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=30)
 
+    # Resolve snapshot bdev name (needed for both kick-off and polling)
+    try:
+        snapshot = db.get_snapshot_by_id(backup.snapshot_id)
+    except KeyError:
+        _fail_backup(backup, task, f"Snapshot {backup.snapshot_id} not found")
+        return
+
+    snap_bdev_name = snapshot.snap_bdev
+    if not snap_bdev_name:
+        snap_bdev_name = f"{snapshot.lvol.lvs_name}/{snapshot.snap_name}"
+
     if backup.status == Backup.STATUS_PENDING:
-        try:
-            snapshot = db.get_snapshot_by_id(backup.snapshot_id)
-        except KeyError:
-            _fail_backup(backup, task, f"Snapshot {backup.snapshot_id} not found")
-            return
-
-        snap_bdev_name = snapshot.snap_bdev
-        if not snap_bdev_name:
-            snap_bdev_name = f"{snapshot.lvol.lvs_name}/{snapshot.snap_name}"
-
         try:
             ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name], cluster_batch=1)
             if not ret:
@@ -93,9 +94,9 @@ def _run_backup(task):
         backup.status = Backup.STATUS_IN_PROGRESS
         backup.write_to_db()
 
-    # Poll
+    # Poll via bdev_lvol_transfer_stat on the snapshot bdev
     try:
-        stat = rpc_client.bdev_lvol_s3_backup_stat(backup.s3_id)
+        stat = rpc_client.bdev_lvol_transfer_stat(snap_bdev_name)
     except RPCException:
         task.retry += 1
         task.status = JobSchedule.STATUS_SUSPENDED
@@ -115,16 +116,13 @@ def _run_backup(task):
         elif state == "Failed":
             _fail_backup(backup, task, "Backup transfer failed on data plane")
         else:
+            # "In progress" or "No process" — still running, retry later
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
     else:
-        # Polling RPC not yet implemented — assume success
-        backup.status = Backup.STATUS_COMPLETED
-        backup.completed_at = int(time.time())
-        backup.write_to_db()
-        backup_events.backup_completed(backup.cluster_id, backup.node_id, backup)
-        task.function_result = "Backup completed"
-        task.status = JobSchedule.STATUS_DONE
+        # Unexpected response — retry
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
 
 
@@ -149,6 +147,7 @@ def _run_restore(task):
     lvol_name = task.function_params.get("lvol_name")
     chain_ids = task.function_params.get("chain_ids", [])
     node_id = task.node_id
+    recovery_started = task.function_params.get("recovery_started", False)
 
     try:
         snode = db.get_storage_node_by_id(node_id)
@@ -168,24 +167,28 @@ def _run_restore(task):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=30)
 
-    try:
-        ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=1)
-        if not ret:
-            task.function_result = "bdev_lvol_s3_recovery RPC failed"
+    if not recovery_started:
+        try:
+            ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=1)
+            if not ret:
+                task.function_result = "bdev_lvol_s3_recovery RPC failed"
+                task.retry += 1
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return
+        except RPCException as e:
+            task.function_result = f"RPC error: {e.message}"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return
-    except RPCException as e:
-        task.function_result = f"RPC error: {e.message}"
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
 
-    # Poll
+        # Mark recovery as started so we don't re-issue the RPC on subsequent polls
+        task.function_params["recovery_started"] = True
+
+    # Poll via bdev_lvol_transfer_stat on the target lvol
     try:
-        stat = rpc_client.bdev_lvol_s3_recovery_stat(lvol_name)
+        stat = rpc_client.bdev_lvol_transfer_stat(lvol_name)
     except RPCException:
         task.retry += 1
         task.status = JobSchedule.STATUS_SUSPENDED
@@ -206,30 +209,25 @@ def _run_restore(task):
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)
         elif state == "Failed":
-            task.function_result = "Restore failed"
+            task.function_result = "Restore failed on data plane"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         else:
+            # "In progress" or "No process" — still running, retry later
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
     else:
-        # Polling RPC not yet implemented — assume success
-        _set_lvol_online(task)
-        try:
-            backup = db.get_backup_by_id(backup_id)
-            backup_events.backup_restore_completed(
-                task.cluster_id, node_id, backup, lvol_name)
-        except KeyError:
-            pass
-        task.function_result = f"Restore completed: {lvol_name}"
-        task.status = JobSchedule.STATUS_DONE
+        # Unexpected response — retry
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
 
 
 def _run_merge(task):
     keep_backup_id = task.function_params.get("keep_backup_id")
     old_backup_id = task.function_params.get("old_backup_id")
+    merge_started = task.function_params.get("merge_started", False)
 
     try:
         keep_backup = db.get_backup_by_id(keep_backup_id)
@@ -258,61 +256,32 @@ def _run_merge(task):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=30)
 
-    try:
-        ret = rpc_client.bdev_lvol_s3_merge(keep_backup.s3_id, old_backup.s3_id, cluster_batch=16)
-        if not ret:
-            task.function_result = "bdev_lvol_s3_merge RPC failed"
+    if not merge_started:
+        try:
+            ret = rpc_client.bdev_lvol_s3_merge(keep_backup.s3_id, old_backup.s3_id, cluster_batch=16)
+            if not ret:
+                task.function_result = "bdev_lvol_s3_merge RPC failed"
+                task.retry += 1
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return
+        except RPCException as e:
+            task.function_result = f"RPC error: {e.message}"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return
-    except RPCException as e:
-        task.function_result = f"RPC error: {e.message}"
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
 
-    # Poll
-    try:
-        stat = rpc_client.bdev_lvol_s3_merge_stat(keep_backup.s3_id)
-    except RPCException:
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+        task.function_params["merge_started"] = True
 
-    if stat and isinstance(stat, dict):
-        state = stat.get("transfer_state", "")
-        if state == "Done":
-            keep_backup.prev_backup_id = old_backup.prev_backup_id
-            keep_backup.write_to_db()
-            backup_events.backup_merge_completed(
-                keep_backup.cluster_id, keep_backup.node_id, keep_backup, old_backup.uuid)
-            old_backup.remove(db.kv_store)
-            task.function_result = "Merge completed"
-            task.status = JobSchedule.STATUS_DONE
-            task.write_to_db(db.kv_store)
-        elif state == "Failed":
-            old_backup.status = Backup.STATUS_COMPLETED
-            old_backup.write_to_db()
-            task.function_result = "Merge failed"
-            task.retry += 1
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-        else:
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-    else:
-        # Polling RPC not yet implemented — assume success
-        keep_backup.prev_backup_id = old_backup.prev_backup_id
-        keep_backup.write_to_db()
-        backup_events.backup_merge_completed(
-            keep_backup.cluster_id, keep_backup.node_id, keep_backup, old_backup.uuid)
-        old_backup.remove(db.kv_store)
-        task.function_result = "Merge completed"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
+    # TODO: merge operates at lvstore level (lvol=NULL in data plane), so
+    # bdev_lvol_transfer_stat cannot poll it. The data plane needs a dedicated
+    # merge status RPC. For now, retry until max_retry — the merge completes
+    # on the data plane side regardless.
+    task.retry += 1
+    task.status = JobSchedule.STATUS_SUSPENDED
+    task.function_result = "Merge polling not yet supported"
+    task.write_to_db(db.kv_store)
 
 
 logger.info("Starting backup tasks runner...")
