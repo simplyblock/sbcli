@@ -890,9 +890,10 @@ class TestRPCClientBackupMethods(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
         self.assertTrue(hasattr(RPCClient, 'bdev_lvol_s3_backup'))
 
-    def test_bdev_lvol_s3_backup_stat_exists(self):
+    def test_bdev_lvol_transfer_stat_exists(self):
+        """bdev_lvol_transfer_stat is used to poll all S3 transfer operations."""
         from simplyblock_core.rpc_client import RPCClient
-        self.assertTrue(hasattr(RPCClient, 'bdev_lvol_s3_backup_stat'))
+        self.assertTrue(hasattr(RPCClient, 'bdev_lvol_transfer_stat'))
 
     def test_bdev_lvol_s3_merge_exists(self):
         from simplyblock_core.rpc_client import RPCClient

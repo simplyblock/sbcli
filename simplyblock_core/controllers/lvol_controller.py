@@ -643,10 +643,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             lvol.lvol_uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-        for sec in secondary_nodes:
+        for sec_idx, sec in enumerate(secondary_nodes):
             sec = db_controller.get_storage_node_by_id(sec.get_id())
             if sec.status == StorageNode.STATUS_ONLINE:
-                lvol_bdev, error = add_lvol_on_node(lvol, sec, is_primary=False)
+                lvol_bdev, error = add_lvol_on_node(lvol, sec, is_primary=False, secondary_index=sec_idx)
                 if error:
                     logger.error(error)
                     # remove lvol from primary
@@ -723,7 +723,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
     return True, None
 
 
-def add_lvol_on_node(lvol, snode, is_primary=True):
+def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
@@ -734,7 +734,9 @@ def add_lvol_on_node(lvol, snode, is_primary=True):
         if is_primary:
             min_cntlid = 1
         else:
-            min_cntlid =  1000
+            # Each secondary needs a unique cntlid range to avoid conflicts
+            # sec1: 1000, sec2: 2000, etc.
+            min_cntlid = 1000 * (secondary_index + 1)
         allow_any = not bool(lvol.allowed_hosts)
         logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
         ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
