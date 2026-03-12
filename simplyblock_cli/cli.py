@@ -416,7 +416,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=32, dest='qpair_count')
         argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
-        argument = subcommand.add_argument('--tls', help='Path to JSON file with NVMe-oF TLS config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)', type=str, dest='nvmeof_tls')
+        argument = subcommand.add_argument('--host-sec', '--tls', help='Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)', type=str, dest='nvmeof_tls')
         argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1', type=int, default=1, dest='max_fault_tolerance', choices=[1, 2])
         argument = subcommand.add_argument('--use-backup', help='Path to JSON file with S3/MinIO backup configuration', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420', type=int, default=4420, dest='nvmf_base_port')
@@ -675,6 +675,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'connect', 'Gets the logical volume\'s NVMe/TCP connection string(s)')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         argument = subcommand.add_argument('--ctrl-loss-tmo', help='Control loss timeout for this volume', type=int, dest='ctrl_loss_tmo')
+        subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts with secrets)', type=str, dest='host_nqn')
 
     def init_volume__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'Resizes a logical volume')
@@ -685,6 +686,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'create-snapshot', 'Creates a snapshot from a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('name', help='Snapshot name', type=str)
+        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot',
+                                dest='backup', action='store_true')
 
     def init_volume__clone(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a logical volumes from an existing snapshot')
@@ -886,8 +889,8 @@ class CLIWrapper(CLIWrapperBase):
     def init_backup__restore(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restore', 'Restore a backup to a new logical volume')
         subcommand.add_argument('backup_id', help='Backup id', type=str)
-        subcommand.add_argument('--node', help='Target node id', type=str, required=True, dest='node_id')
         subcommand.add_argument('--lvol', help='New logical volume name', type=str, required=True, dest='lvol_name')
+        subcommand.add_argument('--pool', help='Target pool name or UUID', type=str, required=True, dest='pool')
         subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
 
     def init_backup__import(self, subparser):
@@ -900,6 +903,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('name', help='Policy name', type=str)
         subcommand.add_argument('--versions', help='Maximum number of backup versions', type=int, default=None, dest='versions')
         subcommand.add_argument('--age', help='Maximum backup age (e.g. 2d, 12h, 1w)', type=str, default=None, dest='age')
+        subcommand.add_argument('--schedule', help='Auto-backup schedule as space-separated tiers: "15m,4 60m,11 24h,7" '
+                                '(interval,keep_count per tier)', type=str, default=None, dest='schedule')
 
     def init_backup__policy_remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-remove', 'Remove a backup policy')

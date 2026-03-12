@@ -82,7 +82,7 @@ def _run_backup(task):
             snap_bdev_name = f"{snapshot.lvol.lvs_name}/{snapshot.snap_name}"
 
         try:
-            ret = rpc_client.bdev_lvol_s3_backup(backup.uuid, [snap_bdev_name])
+            ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name], cluster_batch=1)
             if not ret:
                 _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
                 return
@@ -95,7 +95,7 @@ def _run_backup(task):
 
     # Poll
     try:
-        stat = rpc_client.bdev_lvol_s3_backup_stat(backup.uuid)
+        stat = rpc_client.bdev_lvol_s3_backup_stat(backup.s3_id)
     except RPCException:
         task.retry += 1
         task.status = JobSchedule.STATUS_SUSPENDED
@@ -128,6 +128,22 @@ def _run_backup(task):
         task.write_to_db(db.kv_store)
 
 
+def _set_lvol_online(task):
+    """Mark restored lvol as online after successful data recovery."""
+    lvol_id = task.function_params.get("lvol_id")
+    if not lvol_id:
+        return
+    try:
+        from simplyblock_core.models.lvol_model import LVol
+        lvol = db.get_lvol_by_id(lvol_id)
+        if lvol.status == LVol.STATUS_RESTORING:
+            lvol.status = LVol.STATUS_ONLINE
+            lvol.write_to_db()
+            logger.info(f"Restored lvol {lvol_id} is now online")
+    except KeyError:
+        logger.warning(f"Restored lvol {lvol_id} not found in DB")
+
+
 def _run_restore(task):
     backup_id = task.function_params.get("backup_id")
     lvol_name = task.function_params.get("lvol_name")
@@ -152,10 +168,8 @@ def _run_restore(task):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=30)
 
-    offset = task.function_params.get("restore_offset", 0)
-
     try:
-        ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, offset, chain_ids)
+        ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=1)
         if not ret:
             task.function_result = "bdev_lvol_s3_recovery RPC failed"
             task.retry += 1
@@ -181,6 +195,7 @@ def _run_restore(task):
     if stat and isinstance(stat, dict):
         state = stat.get("transfer_state", "")
         if state == "Done":
+            _set_lvol_online(task)
             try:
                 backup = db.get_backup_by_id(backup_id)
                 backup_events.backup_restore_completed(
@@ -191,8 +206,6 @@ def _run_restore(task):
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)
         elif state == "Failed":
-            if "offset" in stat:
-                task.function_params["restore_offset"] = stat["offset"]
             task.function_result = "Restore failed"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
@@ -202,6 +215,7 @@ def _run_restore(task):
             task.write_to_db(db.kv_store)
     else:
         # Polling RPC not yet implemented — assume success
+        _set_lvol_online(task)
         try:
             backup = db.get_backup_by_id(backup_id)
             backup_events.backup_restore_completed(
@@ -245,7 +259,7 @@ def _run_merge(task):
         snode.rpc_username, snode.rpc_password, timeout=30)
 
     try:
-        ret = rpc_client.bdev_lvol_s3_merge(keep_backup.uuid, old_backup.uuid)
+        ret = rpc_client.bdev_lvol_s3_merge(keep_backup.s3_id, old_backup.s3_id, cluster_batch=16)
         if not ret:
             task.function_result = "bdev_lvol_s3_merge RPC failed"
             task.retry += 1
@@ -261,7 +275,7 @@ def _run_merge(task):
 
     # Poll
     try:
-        stat = rpc_client.bdev_lvol_s3_merge_stat(keep_backup.uuid)
+        stat = rpc_client.bdev_lvol_s3_merge_stat(keep_backup.s3_id)
     except RPCException:
         task.retry += 1
         task.status = JobSchedule.STATUS_SUSPENDED
@@ -325,6 +339,26 @@ while True:
                 task.function_result = "max retry reached"
                 task.status = JobSchedule.STATUS_DONE
                 task.write_to_db(db.kv_store)
+                # Mark associated backup as failed so it doesn't stay in pending/in_progress
+                if task.function_name == JobSchedule.FN_BACKUP:
+                    bid = task.function_params.get("backup_id")
+                    if bid:
+                        try:
+                            b = db.get_backup_by_id(bid)
+                            if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS):
+                                _fail_backup(b, task, "max retry reached")
+                        except KeyError:
+                            pass
+                elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
+                    old_bid = task.function_params.get("old_backup_id")
+                    if old_bid:
+                        try:
+                            ob = db.get_backup_by_id(old_bid)
+                            if ob.status == Backup.STATUS_MERGING:
+                                ob.status = Backup.STATUS_COMPLETED
+                                ob.write_to_db()
+                        except KeyError:
+                            pass
                 continue
 
             try:
@@ -335,6 +369,12 @@ while True:
                 elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
                     _run_merge(task)
             except Exception as e:
-                logger.error(f"Error running backup task: {e}")
+                logger.error(f"Error running backup task {task.uuid}: {e}")
+                # Increment retry so the task eventually reaches max_retry
+                # instead of looping forever on non-RPCException errors
+                task.retry += 1
+                task.function_result = f"Unhandled error: {e}"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

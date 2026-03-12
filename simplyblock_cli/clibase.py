@@ -563,9 +563,11 @@ class CLIWrapperBase:
 
     def volume__remove_host(self, sub_command, args):
         result, error = lvol_controller.remove_host_from_lvol(args.volume_id, args.host_nqn)
-        if error:
+        if not result:
             print(f"Error: {error}")
             return False
+        if error:
+            print(error)
         return True
 
     def volume__get_secret(self, sub_command, args):
@@ -600,6 +602,8 @@ class CLIWrapperBase:
         kwargs = {}
         if (ctrl_loss_tmo := args.ctrl_loss_tmo) is not None:
             kwargs['ctrl_loss_tmo'] = ctrl_loss_tmo
+        if args.host_nqn:
+            kwargs['host_nqn'] = args.host_nqn
 
         data = lvol_controller.connect_lvol(args.volume_id, **kwargs)
         if data:
@@ -614,7 +618,8 @@ class CLIWrapperBase:
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id
         name = args.name
-        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name)
+        backup = getattr(args, 'backup', False)
+        snapshot_id, error = lvol_controller.create_snapshot(volume_id, name, backup=backup)
         return snapshot_id if not error else error
 
     def volume__clone(self, sub_command, args):
@@ -777,10 +782,8 @@ class CLIWrapperBase:
         cluster_id = getattr(args, 'cluster_id', None)
         data = backup_controller.list_backups(cluster_id)
         if data:
-            utils.print_table(data)
-            return True
-        print("No backups found")
-        return True
+            return utils.print_table(data)
+        return "No backups found"
 
     def backup__delete(self, sub_command, args):
         success, error = backup_controller.delete_backups(args.lvol_id)
@@ -792,12 +795,12 @@ class CLIWrapperBase:
 
     def backup__restore(self, sub_command, args):
         result, error = backup_controller.restore_backup(
-            args.backup_id, args.node_id, args.lvol_name,
+            args.backup_id, args.lvol_name, args.pool,
             cluster_id=getattr(args, 'cluster_id', None))
         if error:
             print(f"Error: {error}")
             return False
-        print(f"Restore task created for backup: {result}")
+        print(f"Restoring backup {args.backup_id} into new volume {result}")
         return True
 
     def backup__import(self, sub_command, args):
@@ -818,7 +821,8 @@ class CLIWrapperBase:
         policy_id, error = backup_controller.add_policy(
             args.cluster_id, args.name,
             max_versions=args.versions or 0,
-            max_age=args.age or "")
+            max_age=args.age or "",
+            schedule=args.schedule or "")
         if error:
             print(f"Error: {error}")
             return False
@@ -837,10 +841,8 @@ class CLIWrapperBase:
         cluster_id = getattr(args, 'cluster_id', None)
         data = backup_controller.list_policies(cluster_id)
         if data:
-            utils.print_table(data)
-            return True
-        print("No policies found")
-        return True
+            return utils.print_table(data)
+        return "No policies found"
 
     def backup__policy_attach(self, sub_command, args):
         att_id, error = backup_controller.attach_policy(

@@ -605,6 +605,34 @@ def get_file_content(path: FilePath):
         return utils.get_response(None, err)
 
 
+DHCHAP_KEY_DIR = "/etc/simplyblock/dhchap_keys"
+
+
+class WriteKeyFileBody(BaseModel):
+    name: str = Field(..., description="Key name (used as filename)")
+    content: str = Field(..., description="Key content in DHHC-1:XX:base64: format")
+
+
+@api.post('/write_key_file', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def write_key_file(body: WriteKeyFileBody):
+    """Write a DHCHAP key file for SPDK keyring_file module."""
+    import re
+    if not re.match(r'^[a-zA-Z0-9_\\-]+$', body.name):
+        return utils.get_response(None, "Invalid key name")
+    os.makedirs(DHCHAP_KEY_DIR, mode=0o700, exist_ok=True)
+    key_path = os.path.join(DHCHAP_KEY_DIR, body.name)
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, body.content.encode())
+    finally:
+        os.close(fd)
+    return utils.get_response(key_path)
+
+
 class _FirewallParams(BaseModel):
     port_id: int
     port_type: str

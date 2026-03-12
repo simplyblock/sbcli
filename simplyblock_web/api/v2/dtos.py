@@ -222,11 +222,15 @@ class VolumeDTO(BaseModel):
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
     allowed_hosts: List[str]
+    policy: str
 
     @staticmethod
     def from_model(model: LVol, request: Request, cluster_id: str):
         from simplyblock_core.controllers import migration_controller
+        from simplyblock_core.db_controller import DBController as _DBC
         active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
+        _db = _DBC()
+        eff_policy = _db.get_policy_for_lvol(model)
         return VolumeDTO(
             id=UUID(model.get_id()),
             name=model.lvol_name,
@@ -261,11 +265,13 @@ class VolumeDTO(BaseModel):
             max_r_mbytes=model.r_mbytes_per_sec,
             max_w_mbytes=model.w_mbytes_per_sec,
             allowed_hosts=[h["nqn"] for h in (model.allowed_hosts or [])],
+            policy=eff_policy.policy_name if eff_policy else "",
         )
 
 
 class BackupDTO(BaseModel):
     id: UUID
+    s3_id: int
     lvol_id: str
     lvol_name: str
     snapshot_id: str
@@ -274,6 +280,7 @@ class BackupDTO(BaseModel):
     status: str
     prev_backup_id: str
     size: int
+    allowed_hosts: List[dict]
     created_at: int
     completed_at: int
 
@@ -281,6 +288,7 @@ class BackupDTO(BaseModel):
     def from_model(model: Backup):
         return BackupDTO(
             id=UUID(model.uuid),
+            s3_id=model.s3_id,
             lvol_id=model.lvol_id,
             lvol_name=model.lvol_name,
             snapshot_id=model.snapshot_id,
@@ -289,6 +297,7 @@ class BackupDTO(BaseModel):
             status=model.status,
             prev_backup_id=model.prev_backup_id,
             size=model.size,
+            allowed_hosts=model.allowed_hosts or [],
             created_at=model.created_at,
             completed_at=model.completed_at,
         )
@@ -299,6 +308,7 @@ class BackupPolicyDTO(BaseModel):
     name: str
     max_versions: int
     max_age: str
+    backup_schedule: str
     status: str
 
     @staticmethod
@@ -308,6 +318,7 @@ class BackupPolicyDTO(BaseModel):
             name=model.policy_name,
             max_versions=model.max_versions,
             max_age=model.max_age_display,
+            backup_schedule=model.backup_schedule or "",
             status=model.status,
         )
 

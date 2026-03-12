@@ -194,7 +194,18 @@ class RPCClient:
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
 
+    def keyring_file_add_key(self, name, path):
+        """Register a file-based key in SPDK's keyring by path."""
+        params = {"name": name, "path": path}
+        return self._request("keyring_file_add_key", params)
+
+    def keyring_file_remove_key(self, name):
+        """Remove a key from SPDK's keyring."""
+        params = {"name": name}
+        return self._request("keyring_file_remove_key", params)
+
     def subsystem_add_host(self, nqn, host, psk=None, dhchap_key=None, dhchap_ctrlr_key=None):
+        """Add a host to a subsystem. Key params are keyring key names (not raw values)."""
         params = {"nqn": nqn, "host": host}
         if psk:
             params["psk"] = psk
@@ -1395,20 +1406,23 @@ class RPCClient:
         Called once per lvstore at setup time (cluster activate, node restart)."""
         return self._request("bdev_lvol_s3_bdev", {
             "lvs_name": lvs_name,
-            "bdev_name": bdev_name,
+            "s3_bdev": bdev_name,
         })
 
-    def bdev_lvol_s3_backup(self, s3_id, snapshot_names):
+    def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
         """Start an async backup of snapshots to S3.
         Args:
-            s3_id: unique backup identifier
+            s3_id: unique backup identifier (uint32)
             snapshot_names: list of snapshot composite bdev names
+            cluster_batch: batch size in clusters (default 1)
         Returns RPC result (truthy on success). Poll with bdev_lvol_s3_backup_stat.
         """
-        return self._request("bdev_lvol_s3_backup", {
+        params = {
             "s3_id": s3_id,
-            "snapshot_names": " ".join(snapshot_names),
-        })
+            "snapshot_names": snapshot_names,
+            "cluster_batch": cluster_batch,
+        }
+        return self._request("bdev_lvol_s3_backup", params)
 
     def bdev_lvol_s3_backup_stat(self, s3_id):
         """Poll async backup status.
@@ -1418,13 +1432,17 @@ class RPCClient:
             "s3_id": s3_id,
         })
 
-    def bdev_lvol_s3_merge(self, s3_id, old_s3_id):
+    def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None):
         """Merge two backups: keep s3_id and merge old_s3_id into it.
         This shortens the backup chain."""
-        return self._request("bdev_lvol_s3_merge", {
+        params = {
             "s3_id": s3_id,
             "old_s3_id": old_s3_id,
-        })
+            "cluster_batch": cluster_batch,
+        }
+        if lvs_name:
+            params["lvs_name"] = lvs_name
+        return self._request("bdev_lvol_s3_merge", params)
 
     def bdev_lvol_s3_merge_stat(self, s3_id):
         """Poll async merge status."""
@@ -1433,17 +1451,17 @@ class RPCClient:
             "s3_id": s3_id,
         })
 
-    def bdev_lvol_s3_recovery(self, lvol_name, offset, s3_backup_ids):
+    def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch):
         """Restore a chain of S3 backups into a new lvol.
         Args:
             lvol_name: target lvol name to restore into
-            offset: byte offset to resume from (0 for fresh restore)
-            s3_backup_ids: list of S3 backup IDs forming the chain (oldest first)
+            s3_ids: list of S3 backup IDs (uint32) forming the chain (oldest first)
+            cluster_batch: batch size in clusters
         """
         return self._request("bdev_lvol_s3_recovery", {
             "lvol_name": lvol_name,
-            "offset": offset,
-            "s3_backup_ids": " ".join(s3_backup_ids),
+            "cluster_batch": cluster_batch,
+            "s3_ids": s3_ids,
         })
 
     def bdev_lvol_s3_recovery_stat(self, lvol_name):
@@ -1454,8 +1472,8 @@ class RPCClient:
         })
 
     def bdev_lvol_s3_delete(self, s3_ids):
-        """Delete all S3 backups for the given IDs."""
+        """Delete all S3 backups for the given IDs (list of uint32)."""
         # RPC still missing on data plane — use dummy
         return self._request("bdev_lvol_s3_delete", {
-            "s3_ids": " ".join(s3_ids),
+            "s3_ids": s3_ids,
         })
