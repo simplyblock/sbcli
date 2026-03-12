@@ -847,14 +847,16 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             if jm_dev and jm_dev not in remote_devices:
                 remote_devices.append(jm_dev)
 
-    if this_node.lvstore_stack_secondary_1:
-        org_node = db_controller.get_storage_node_by_id(this_node.lvstore_stack_secondary_1)
-        if org_node.jm_device:
-            remote_devices.append(org_node.jm_device)
-        for jm_id in org_node.jm_ids:
-            jm_dev = db_controller.get_jm_device_by_id(jm_id)
-            if jm_dev and jm_dev not in remote_devices:
-                remote_devices.append(jm_dev)
+    for sec_attr in ['lvstore_stack_secondary_1', 'lvstore_stack_secondary_2']:
+        sec_primary_id = getattr(this_node, sec_attr, None)
+        if sec_primary_id:
+            org_node = db_controller.get_storage_node_by_id(sec_primary_id)
+            if org_node.jm_device and org_node.jm_device not in remote_devices:
+                remote_devices.append(org_node.jm_device)
+            for jm_id in org_node.jm_ids:
+                jm_dev = db_controller.get_jm_device_by_id(jm_id)
+                if jm_dev and jm_dev not in remote_devices:
+                    remote_devices.append(jm_dev)
 
     logger.debug(f"remote_devices: {remote_devices}")
     allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_RESTARTING]
@@ -2521,7 +2523,7 @@ def suspend_storage_node(node_id, force=False):
     port_type = "tcp"
     if snode.active_rdma:
         port_type = "udp"
-    if snode.lvstore_stack_secondary_1:
+    if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
         nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
         if nodes:
             for node in nodes:
@@ -3157,21 +3159,28 @@ def set_node_status(node_id, status, reconnect_on_online=True):
 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node and snode.lvstore_status == "ready":
-                if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                    try:
-                        sec_node.connect_to_hublvol(snode)
-                    except Exception as e:
-                        logger.error("Error establishing hublvol: %s", e)
+            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+                if not sec_id:
+                    continue
+                sec_node = db_controller.get_storage_node_by_id(sec_id)
+                if sec_node and snode.lvstore_status == "ready":
+                    if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                        try:
+                            sec_node.connect_to_hublvol(snode)
+                        except Exception as e:
+                            logger.error("Error establishing hublvol: %s", e)
 
-            primary_node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-            if primary_node and primary_node.lvstore_status == "ready":
-                if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                    try:
-                        snode.connect_to_hublvol(primary_node)
-                    except Exception as e:
-                        logger.error("Error establishing hublvol: %s", e)
+            for sec_attr in ['lvstore_stack_secondary_1', 'lvstore_stack_secondary_2']:
+                primary_id = getattr(snode, sec_attr, None)
+                if not primary_id:
+                    continue
+                primary_node = db_controller.get_storage_node_by_id(primary_id)
+                if primary_node and primary_node.lvstore_status == "ready":
+                    if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                        try:
+                            snode.connect_to_hublvol(primary_node)
+                        except Exception as e:
+                            logger.error("Error establishing hublvol: %s", e)
 
     return True
 
@@ -3482,12 +3491,10 @@ def recreate_lvstore(snode, force=False):
         sec_node.write_to_db()
 
     # all lvols to their respect loops
-    if snode.lvstore_stack_secondary_1:
-        node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-        if node:
-            ret = recreate_lvstore_on_sec(snode)
-            if not ret:
-                logger.error(f"Failed to recreate secondary on node: {snode.get_id()}")
+    if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
+        ret = recreate_lvstore_on_sec(snode)
+        if not ret:
+            logger.error(f"Failed to recreate secondary on node: {snode.get_id()}")
 
     # reset snapshot delete status
     for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
