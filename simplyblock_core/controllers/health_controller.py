@@ -565,15 +565,17 @@ def check_node(node_id, with_devices=True):
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 
-    if snode.lvstore_stack_secondary_1:
-        try:
-            n = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary_1)
-            lvol_port_check = check_port_on_node(snode, n.lvol_subsys_port)
-            logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
-        except KeyError:
-            logger.error("node not found")
-        except Exception:
-            logger.error("Check node port failed, connection error")
+    for sec_attr in ['lvstore_stack_secondary_1', 'lvstore_stack_secondary_2']:
+        primary_id = getattr(snode, sec_attr, None)
+        if primary_id:
+            try:
+                n = db_controller.get_storage_node_by_id(primary_id)
+                lvol_port_check = check_port_on_node(snode, n.lvol_subsys_port)
+                logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
+            except KeyError:
+                logger.error("node not found")
+            except Exception:
+                logger.error("Check node port failed, connection error")
 
     if not snode.is_secondary_node:
         try:

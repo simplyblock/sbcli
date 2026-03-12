@@ -1415,7 +1415,7 @@ class RPCClient:
             s3_id: unique backup identifier (uint32)
             snapshot_names: list of snapshot composite bdev names
             cluster_batch: batch size in clusters (default 1)
-        Returns RPC result (truthy on success). Poll with bdev_lvol_s3_backup_stat.
+        Returns RPC result (truthy on success). Poll with bdev_lvol_transfer_stat.
         """
         params = {
             "s3_id": s3_id,
@@ -1424,13 +1424,10 @@ class RPCClient:
         }
         return self._request("bdev_lvol_s3_backup", params)
 
-    def bdev_lvol_s3_backup_stat(self, s3_id):
-        """Poll async backup status.
-        Returns dict with transfer_state and progress info."""
-        # Polling RPC definition missing on data plane — use dummy
-        return self._request("bdev_lvol_s3_backup_stat", {
-            "s3_id": s3_id,
-        })
+    # Backup/recovery/merge polling: use bdev_lvol_transfer_stat(lvol_name)
+    # which reads lvol->transfer_status on the data plane. Works for backup
+    # (pass snapshot bdev name) and recovery (pass target lvol name).
+    # Merge has lvol=NULL on data plane so transfer_stat cannot poll it.
 
     def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None):
         """Merge two backups: keep s3_id and merge old_s3_id into it.
@@ -1444,13 +1441,6 @@ class RPCClient:
             params["lvs_name"] = lvs_name
         return self._request("bdev_lvol_s3_merge", params)
 
-    def bdev_lvol_s3_merge_stat(self, s3_id):
-        """Poll async merge status."""
-        # Polling RPC definition missing on data plane — use dummy
-        return self._request("bdev_lvol_s3_merge_stat", {
-            "s3_id": s3_id,
-        })
-
     def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch):
         """Restore a chain of S3 backups into a new lvol.
         Args:
@@ -1462,13 +1452,6 @@ class RPCClient:
             "lvol_name": lvol_name,
             "cluster_batch": cluster_batch,
             "s3_ids": s3_ids,
-        })
-
-    def bdev_lvol_s3_recovery_stat(self, lvol_name):
-        """Poll async recovery status."""
-        # Polling RPC definition missing on data plane — use dummy
-        return self._request("bdev_lvol_s3_recovery_stat", {
-            "lvol_name": lvol_name,
         })
 
     def bdev_lvol_s3_delete(self, s3_ids):
