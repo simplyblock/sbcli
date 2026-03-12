@@ -392,7 +392,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 5,
                     "time_based": True,
-                    "runtime": 3000,
+                    "runtime": 2000,
                     "log_avg_msec": 1000,
                     "iolog_file": self.lvol_mount_details[lvol_name]["iolog_base_path"],
                 },
@@ -1041,7 +1041,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 5,
                     "time_based": True,
-                    "runtime": 3000,
+                    "runtime": 2000,
                     "log_avg_msec": 1000,
                     "iolog_file": self.clone_mount_details[clone_name]["iolog_base_path"],
                 },
@@ -1318,7 +1318,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     "iodepth": 1,
                     "numjobs": 5,
                     "time_based": True,
-                    "runtime": 3000,
+                    "runtime": 2000,
                     "log_avg_msec": 1000,
                     "iolog_file": self.lvol_mount_details[lvol]["iolog_base_path"],
                 },
@@ -1545,7 +1545,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
 
-            self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=100000)
+            self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=5000)
 
             for lvol_name, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(

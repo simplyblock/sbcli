@@ -636,7 +636,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             # for node, outage_type in outage_events:
             #     if not self.sbcli_utils.is_secondary_node(node):
             self.validate_migration_for_node(self.outage_start_time, 2000, None, 60, no_task_ok=no_task_ok)
-            self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=20000)
+            self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=5000)
 
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(clone_details["Client"], clone_details["Log"])

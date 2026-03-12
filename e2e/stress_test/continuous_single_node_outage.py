@@ -687,7 +687,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
                 time_duration=time_duration
             )
 
-            self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=100000)
+            self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=6000)
 
             for lvol_name, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(
