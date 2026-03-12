@@ -22,7 +22,7 @@ from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
-    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller, backup_controller
+    device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.iface import IFace
@@ -2148,6 +2148,7 @@ def restart_storage_node(
 
             # Create S3 bdev for backup support (only if backup is configured)
             if cluster.backup_config:
+                from simplyblock_core.controllers import backup_controller
                 logger.info("Creating S3 bdev on restarted node")
                 backup_controller.create_s3_bdev(snode, cluster.backup_config)
 
