@@ -287,9 +287,9 @@ def list_replication_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) 
     return [TaskDTO.from_model(task) for task in tasks]
 
 @instance_api.get('/suspend', name='clusters:storage-pools:volumes:suspend')
-def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.suspend_lvol(volume.get_id())
 
 @instance_api.get('/resume', name='clusters:storage-pools:volumes:resume')
-def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.resume_lvol(volume.get_id())
