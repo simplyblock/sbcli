@@ -26,11 +26,6 @@ on:
         required: true
         default: "192.168.10.211"
 
-      NR_HUGEPAGES:
-        description: "Hugepages"
-        required: true
-        default: "2048"
-
       GRAFANA_ENDPOINT:
         description: "Grafana endpoint"
         required: true
@@ -101,10 +96,6 @@ on:
         description: "bootstrap: --ha-jm-count"
         required: true
         default: "3"
-      BOOTSTRAP_HA_TYPE:
-        description: "bootstrap: --ha-type"
-        required: true
-        default: "ha"
       BOOTSTRAP_IS_SINGLE_NODE:
         description: "Bootstrap: deploy as single-node (--is-single-node)"
         type: boolean
@@ -115,6 +106,19 @@ on:
         type: boolean
         required: false
         default: false
+      EXTRA_CLUSTER_ARGS:
+        description: |
+          Additional arguments to pass to cluster create command (optional)
+          Example: --log-del-interval 10 --cap-warn 80
+        required: false
+        type: string
+      EXTRA_SN_ARGS:
+        description: |
+          Additional arguments to pass to storage-node add-node command (optional)
+          Example: --spdk-debug --enable-test-device
+          Example: --host-nqn /home/ec2-user/host-nqn.json
+        required: false
+        type: string
 
       # =========================
       # Stress test inputs
@@ -142,7 +146,9 @@ jobs:
       BASTION_IP: ${{ inputs.BASTION_IP }}
       BASTION_SERVER: ${{ inputs.BASTION_IP }}
       MNODES: ${{ inputs.MNODES }}
-      NR_HUGEPAGES: ${{ inputs.NR_HUGEPAGES }}
+      NR_HUGEPAGES: '2048'
+      EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
+      EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT }}
       SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
@@ -163,7 +169,6 @@ jobs:
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION }}
       BOOTSTRAP_DATA_NIC: ${{ inputs.BOOTSTRAP_DATA_NIC }}
       BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT }}
-      BOOTSTRAP_HA_TYPE: ${{ inputs.BOOTSTRAP_HA_TYPE }}
 
       # Stress derived from bootstrap chunks
       NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
@@ -495,13 +500,38 @@ jobs:
           if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
             extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
           fi
-          # Checkbox flags
+
           if [[ "${{ inputs.BOOTSTRAP_IS_SINGLE_NODE }}" == "true" ]]; then
             extra_args+=( --is-single-node true )
           fi
 
           if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
             extra_args+=( --enable-node-affinity true )
+          fi
+
+          # Parse overrides from EXTRA_SN_ARGS
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            if nr_val=$(printf '%s' "${EXTRA_SN_ARGS}" | grep -oP '(?<=--nr-hugepages )\S+' | head -1) && [[ -n "${nr_val}" ]]; then
+              echo "Overriding NR_HUGEPAGES from ${NR_HUGEPAGES} to ${nr_val} (from EXTRA_SN_ARGS)"
+              echo "NR_HUGEPAGES=${nr_val}" >> "$GITHUB_ENV"
+              NR_HUGEPAGES="${nr_val}"
+            fi
+          fi
+
+          # Parse overrides from EXTRA_CLUSTER_ARGS
+          HA_TYPE="ha"
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            if ha_val=$(printf '%s' "${EXTRA_CLUSTER_ARGS}" | grep -oP '(?<=--ha-type )\S+' | head -1) && [[ -n "${ha_val}" ]]; then
+              echo "Overriding HA_TYPE from ha to ${ha_val} (from EXTRA_CLUSTER_ARGS)"
+              HA_TYPE="${ha_val}"
+            fi
+          fi
+
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            extra_args+=( --extra-cluster-args "${EXTRA_CLUSTER_ARGS}" )
+          fi
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            extra_args+=( --extra-sn-args "${EXTRA_SN_ARGS}" )
           fi
 
           set +e
@@ -512,7 +542,7 @@ jobs:
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
             --ha-jm-count "${BOOTSTRAP_HA_JM_COUNT}" \
-            --ha-type "${BOOTSTRAP_HA_TYPE}" \
+            --ha-type "${HA_TYPE}" \
             --data-nics "${BOOTSTRAP_DATA_NIC}" \
             "${extra_args[@]}" | tee bootstrap.log
           rc=${PIPESTATUS[0]}

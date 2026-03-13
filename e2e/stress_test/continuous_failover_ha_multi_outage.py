@@ -178,16 +178,18 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.logger.info(f"Performing {outage_type} on primary node {node}.")
             self.log_outage_event(node, outage_type, "Outage started")
 
+            node_outage_dur = 0
             if outage_type == "container_stop":
                 self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             elif outage_type == "graceful_shutdown":
                 self._graceful_shutdown_node(node)
             elif outage_type == "interface_partial_network_interrupt":
                 self._disconnect_partial_interface(node, node_ip)
+                node_outage_dur = 300
             elif outage_type == "interface_full_network_interrupt":
-                self._disconnect_full_interface(node, node_ip)
+                node_outage_dur = self._disconnect_full_interface(node, node_ip)
 
-            outage_combinations.append((node, outage_type))
+            outage_combinations.append((node, outage_type, node_outage_dur))
             self.current_outage_nodes.append(node)
 
         self.outage_start_time = int(datetime.now().timestamp())
@@ -260,13 +262,14 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
     def _disconnect_full_interface(self, node, node_ip):
         self.logger.info("Handling full interface based network interruption...")
         active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-        self.outage_dur = random.choice([300, 30])
-        self.logger.info(f"Selected Outage seconds for n/w outage: {self.outage_dur}")
+        outage_dur = random.choice([300, 30])
+        self.logger.info(f"Selected Outage seconds for n/w outage: {outage_dur}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
-            args=(node_ip, active_interfaces, self.outage_dur)
+            args=(node_ip, active_interfaces, outage_dur)
         )
         self.disconnect_thread.start()
+        return outage_dur
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage, skipping lvols on any outage node."""
@@ -590,8 +593,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.create_snapshots_and_clones()
             sleep_n_sec(280)
 
-            for node, outage_type in outage_events:
+            for node, outage_type, node_outage_dur in outage_events:
                 self.current_outage_node = node
+                self.outage_dur = node_outage_dur
                 if outage_type in ["container_stop", "interface_full_network_interrupt"] and self.npcs > 1:
                     self.restart_nodes_after_failover(outage_type, True)
                 else:
