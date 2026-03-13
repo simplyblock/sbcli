@@ -148,9 +148,15 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
 
     def _rescan_nvme_namespaces(self, node, ctrl_dev: str):
         """Trigger a namespace rescan on the NVMe controller so the host refreshes its namespace list."""
+        self.logger.info(
+            f"RESCAN Namespaces FUNCTION: {node} {ctrl_dev}"
+        )
         ctrl = get_parent_device(ctrl_dev)  # ensure /dev/nvmeX not /dev/nvmeXn1
+        self.logger.info(
+            f"RESCAN Namespaces JUST BEFORE rescan FUNCTION: {node} {ctrl_dev} {ctrl}"
+        )
         cmd = f"bash -lc \"nvme ns-rescan {ctrl} 2>/dev/null || true\""
-        out, err = self.ssh_obj.exec_command(node=node, command=cmd, supress_logs=True)
+        out, err = self.ssh_obj.exec_command(node=node, command=cmd, supress_logs=False)
         self.logger.info(f"[rescan_ns] ctrl={ctrl} out={out} err={err}")
 
     def _wait_until_namespace_device_gone(self, node, ctrl_dev: str, device: str, timeout=120, interval=2):
@@ -528,18 +534,44 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
             except Exception as e:
                 self.logger.warning(f"[NS] delete_lvol failed for {lvol_name}: {e}")
                 self.record_pending_lvol_delete(lvol_name, lvol_id)
-
+            
+            self.logger.info(
+                f"[NS] Random delete picked: {lvol_name} (namespace={is_ns}, id={lvol_id}, device={device}, ctrl={ctrl_dev})"
+            )
             # Rescan namespaces on the controller so the host drops the removed namespace device
             if is_ns and client and ctrl_dev:
+                self.logger.info(
+                    "RESCAN Namespaces on controller to trigger host refresh after delete (before verification)"
+                )
                 self._rescan_nvme_namespaces(node=client, ctrl_dev=ctrl_dev)
 
             # Verify namespace device disappearance (without disconnect)
             if is_ns and client and ctrl_dev and device:
+                # Quick check — resolves in most cases after initial nvme ns-rescan
                 ok = self._wait_until_namespace_device_gone(
-                    node=client, ctrl_dev=ctrl_dev, device=device, timeout=180, interval=3
+                    node=client, ctrl_dev=ctrl_dev, device=device, timeout=30, interval=3
                 )
                 if not ok:
-                    raise Exception(f"[NS] Namespace device still present after delete: {device} (lvol={lvol_name})")
+                    # Wait before fallback to allow the host to settle
+                    self.logger.info("[NS] Device still present after initial rescan; waiting 120s before sysfs fallback.")
+                    sleep_n_sec(120)
+                    # Fallback: trigger rescan via sysfs rescan_controller
+                    ctrl_name = ctrl_dev.split("/")[-1]  # /dev/nvme12 -> nvme12
+                    sysfs_cmd = (
+                        f"bash -lc \"echo 1 | sudo tee /sys/class/nvme/{ctrl_name}/rescan_controller"
+                        f" 2>/dev/null || true\""
+                    )
+                    out, err = self.ssh_obj.exec_command(node=client, command=sysfs_cmd, supress_logs=False)
+                    self.logger.info(
+                        f"[NS] sysfs rescan fallback: ctrl={ctrl_name} out={out} err={err}"
+                    )
+                    ok = self._wait_until_namespace_device_gone(
+                        node=client, ctrl_dev=ctrl_dev, device=device, timeout=180, interval=3
+                    )
+                if not ok:
+                    raise Exception(
+                        f"[NS] Namespace device still present after delete+rescan: {device} (lvol={lvol_name})"
+                    )
                 self.logger.info(f"[NS] Verified namespace device removed: {device}")
 
                 # If this was the last namespace on that controller -> disconnect now
