@@ -156,7 +156,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         outage_num = 0
         for node in outage_nodes:
             if outage_num == 0:
-                outage_type = random.choice(self.outage_types)
+                # When only 1 outage per cycle, use outage_types2 so that
+                # container_stop is also eligible (no second-node timing risk).
+                if self.npcs == 1:
+                    outage_type = random.choice(self.outage_types2)
+                else:
+                    outage_type = random.choice(self.outage_types)
                 outage_num = 1
             else:
                 outage_type = random.choice(self.outage_types2)
