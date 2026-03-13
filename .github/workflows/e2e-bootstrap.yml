@@ -205,7 +205,7 @@ on:
         type: string
 
 concurrency:
-  group: simplyblock-lab-e2e
+  group: simplyblock-lab-e2e-${{ inputs.MNODES }}
   cancel-in-progress: true
 
 jobs:
