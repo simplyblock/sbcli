@@ -16,9 +16,6 @@ on:
       MNODES:
         type: string
         default: "192.168.10.211"
-      NR_HUGEPAGES:
-        type: string
-        default: "2048"
       GRAFANA_ENDPOINT:
         type: string
         default: "http://192.168.10.211/grafana"
@@ -57,10 +54,7 @@ on:
         default: "1"
       BOOTSTRAP_HA_JM_COUNT:
         type: string
-        default: "3"
-      BOOTSTRAP_HA_TYPE:
-        type: string
-        default: "ha"
+        default: "4"
       BOOTSTRAP_DATA_NIC:
         type: string
         default: "eth1"
@@ -70,6 +64,12 @@ on:
       BOOTSTRAP_ENABLE_NODE_AFFINITY:
         type: boolean
         default: false
+      EXTRA_CLUSTER_ARGS:
+        type: string
+        default: ""
+      EXTRA_SN_ARGS:
+        type: string
+        default: ""
       TEST_CLASS:
         type: string
         default: ""
@@ -101,11 +101,6 @@ on:
         description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
         required: true
         default: "192.168.10.211"
-
-      NR_HUGEPAGES:
-        description: "Hugepages"
-        required: true
-        default: "2048"
 
       GRAFANA_ENDPOINT:
         description: "Grafana endpoint"
@@ -172,11 +167,7 @@ on:
       BOOTSTRAP_HA_JM_COUNT:
         description: "bootstrap: --ha-jm-count"
         required: true
-        default: "3"
-      BOOTSTRAP_HA_TYPE:
-        description: "bootstrap: --ha-type"
-        required: true
-        default: "ha"
+        default: "4"
       BOOTSTRAP_DATA_NIC:
         description: "bootstrap: --data-nics (network interface for data traffic)"
         required: true
@@ -191,6 +182,19 @@ on:
         type: boolean
         required: false
         default: false
+      EXTRA_CLUSTER_ARGS:
+        description: |
+          Additional arguments to pass to cluster create command (optional)
+          Example: --log-del-interval 10 --cap-warn 80"
+        required: false
+        type: string
+      EXTRA_SN_ARGS:
+        description: |
+          Additional arguments to pass to storage-node add-node command (optional)
+          Example: "--spdk-debug --enable-test-device"
+          Example: "--host-nqn /home/ec2-user/host-nqn.json"
+        required: false
+        type: string
 
       # =========================
       # E2E test inputs
@@ -218,7 +222,9 @@ jobs:
       BASTION_IP: ${{ inputs.BASTION_IP || '192.168.10.211' }}
       BASTION_SERVER: ${{ inputs.BASTION_IP || '192.168.10.211' }}
       MNODES: ${{ inputs.MNODES || '192.168.10.211' }}
-      NR_HUGEPAGES: ${{ inputs.NR_HUGEPAGES || '2048' }}
+      NR_HUGEPAGES: '2048'
+      EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
+      EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
       SBCLI_CMD: ${{ inputs.SBCLI_CMD || 'sbctl' }}
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'R25.10-Hotfix' }}
@@ -237,8 +243,7 @@ jobs:
       BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
       BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
-      BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '3' }}
-      BOOTSTRAP_HA_TYPE: ${{ inputs.BOOTSTRAP_HA_TYPE || 'ha' }}
+      BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '4' }}
       BOOTSTRAP_DATA_NIC: ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
 
       # E2E derived from bootstrap chunks
@@ -574,13 +579,38 @@ jobs:
           if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
             extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
           fi
-          # Checkbox flags
+
           if [[ "${{ inputs.BOOTSTRAP_IS_SINGLE_NODE }}" == "true" ]]; then
             extra_args+=( --is-single-node true )
           fi
 
           if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
             extra_args+=( --enable-node-affinity true )
+          fi
+
+          # Parse overrides from EXTRA_SN_ARGS
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            if nr_val=$(printf '%s' "${EXTRA_SN_ARGS}" | grep -oP '(?<=--nr-hugepages )\S+' | head -1) && [[ -n "${nr_val}" ]]; then
+              echo "Overriding NR_HUGEPAGES from ${NR_HUGEPAGES} to ${nr_val} (from EXTRA_SN_ARGS)"
+              echo "NR_HUGEPAGES=${nr_val}" >> "$GITHUB_ENV"
+              NR_HUGEPAGES="${nr_val}"
+            fi
+          fi
+
+          # Parse overrides from EXTRA_CLUSTER_ARGS
+          HA_TYPE="ha"
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            if ha_val=$(printf '%s' "${EXTRA_CLUSTER_ARGS}" | grep -oP '(?<=--ha-type )\S+' | head -1) && [[ -n "${ha_val}" ]]; then
+              echo "Overriding HA_TYPE from ha to ${ha_val} (from EXTRA_CLUSTER_ARGS)"
+              HA_TYPE="${ha_val}"
+            fi
+          fi
+
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            extra_args+=( --extra-cluster-args "${EXTRA_CLUSTER_ARGS}" )
+          fi
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            extra_args+=( --extra-sn-args "${EXTRA_SN_ARGS}" )
           fi
 
           set +e
@@ -591,7 +621,7 @@ jobs:
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
             --ha-jm-count "${BOOTSTRAP_HA_JM_COUNT}" \
-            --ha-type "${BOOTSTRAP_HA_TYPE}" \
+            --ha-type "${HA_TYPE}" \
             --data-nics "${BOOTSTRAP_DATA_NIC}" \
             "${extra_args[@]}" | tee bootstrap.log
           rc=${PIPESTATUS[0]}

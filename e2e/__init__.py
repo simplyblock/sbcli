@@ -52,6 +52,7 @@ from stress_test.lvol_snap_clone_fio_failover import(
 from stress_test.continuous_failover_ha import RandomFailoverTest
 from stress_test.continuous_failover_ha_multi_client import RandomMultiClientFailoverTest
 from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
+from stress_test.continuous_failover_ha_multi_outage_all_nodes import RandomMultiClientMultiFailoverAllNodesTest
 from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailoverTest
 from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
@@ -148,6 +149,7 @@ def get_stress_tests():
         RandomFailoverTest,
         RandomMultiClientFailoverTest,
         RandomMultiClientMultiFailoverTest,
+        RandomMultiClientMultiFailoverAllNodesTest,
         RandomMultiGeometryFailoverTest,
         RandomMultiClient2NodeFailoverTest,
         RandomRDMAFailoverTest,
