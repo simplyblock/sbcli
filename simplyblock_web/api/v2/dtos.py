@@ -269,6 +269,8 @@ class VolumeDTO(BaseModel):
     max_w_mbytes: util.Unsigned
     capacity: CapacityStatDTO
     rep_info: Optional[dict] = None
+    from_source: bool = True
+
 
     @staticmethod
     def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None, rep_info=None):
