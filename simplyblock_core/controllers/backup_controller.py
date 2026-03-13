@@ -21,6 +21,15 @@ def _generate_backup_id():
     return str(uuid.uuid4())
 
 
+def _next_s3_id(cluster_id):
+    """Return the next cluster-wide unique s3_id (uint32) for data-plane RPCs."""
+    max_id = 0
+    for b in db_controller.get_backups(cluster_id):
+        if b.s3_id > max_id:
+            max_id = b.s3_id
+    return max_id + 1
+
+
 def _parse_age_string(age_str):
     """Parse age strings like '2d', '12h', '1w', '30m' into seconds."""
     match = re.match(r'^(\d+)([mhdw])$', age_str.strip())
@@ -30,6 +39,32 @@ def _parse_age_string(age_str):
     unit = match.group(2)
     multipliers = {'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}
     return value * multipliers[unit]
+
+
+def _parse_schedule(schedule_str):
+    """Parse schedule string like '15m,4 60m,11 24h,7' into list of (interval_seconds, keep_count) tuples.
+    Returns sorted list by interval ascending. Raises ValueError on invalid input."""
+    if not schedule_str or not schedule_str.strip():
+        return []
+    tiers = []
+    for part in schedule_str.strip().split():
+        parts = part.split(',')
+        if len(parts) != 2:
+            raise ValueError(f"Invalid schedule tier: {part}. Expected format: <interval>,<count> e.g. 15m,4")
+        interval_seconds = _parse_age_string(parts[0])
+        try:
+            keep_count = int(parts[1])
+        except ValueError:
+            raise ValueError(f"Invalid keep count in tier: {part}. Must be an integer.")
+        if keep_count < 1:
+            raise ValueError(f"Keep count must be >= 1 in tier: {part}")
+        tiers.append((interval_seconds, keep_count))
+    tiers.sort(key=lambda t: t[0])
+    # Validate intervals are strictly increasing
+    for i in range(1, len(tiers)):
+        if tiers[i][0] <= tiers[i - 1][0]:
+            raise ValueError("Schedule tier intervals must be strictly increasing")
+    return tiers
 
 
 def _write_s3_metadata(rpc_client, backup):
@@ -46,6 +81,7 @@ def _write_s3_metadata(rpc_client, backup):
         "prev_backup_id": backup.prev_backup_id,
         "created_at": backup.created_at,
         "size": backup.size,
+        "allowed_hosts": backup.allowed_hosts,
     }
     backup.s3_metadata = metadata
     # The actual S3 metadata write is done via the data plane's S3 bdev.
@@ -111,9 +147,69 @@ def create_s3_bdev(node, backup_config):
         return False
 
 
+def _get_snapshot_chain(snapshot):
+    """Walk snap_ref_id to build the full ancestor chain, oldest first."""
+    chain = [snapshot]
+    current = snapshot
+    while current.snap_ref_id:
+        try:
+            parent = db_controller.get_snapshot_by_id(current.snap_ref_id)
+            chain.append(parent)
+            current = parent
+        except KeyError:
+            break
+    chain.reverse()  # oldest first
+    return chain
+
+
+def _snapshot_has_backup(snapshot_id):
+    """Check if a snapshot already has a non-failed backup."""
+    backups = db_controller.get_backups_by_snapshot_id(snapshot_id)
+    return any(b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
+                            Backup.STATUS_COMPLETED) for b in backups)
+
+
+def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup):
+    """Create a single backup record and task for one snapshot.
+    Returns the created Backup object."""
+    backup_id = _generate_backup_id()
+
+    backup = Backup()
+    backup.uuid = backup_id
+    backup.s3_id = _next_s3_id(cluster_id)
+    backup.cluster_id = cluster_id
+    backup.lvol_id = lvol.get_id()
+    backup.lvol_name = lvol.lvol_name
+    backup.snapshot_id = snapshot.get_id()
+    backup.snapshot_name = snapshot.snap_name
+    backup.node_id = node_id
+    backup.pool_uuid = lvol.pool_uuid
+    backup.prev_backup_id = prev_backup.uuid if prev_backup else ""
+    backup.size = snapshot.size
+    backup.allowed_hosts = lvol.allowed_hosts
+    backup.created_at = int(time.time())
+    backup.status = Backup.STATUS_PENDING
+    backup.write_to_db()
+
+    _write_s3_metadata(None, backup)
+    backup.write_to_db()
+
+    backup_events.backup_created(cluster_id, node_id, backup)
+    tasks_controller.add_backup_task(backup)
+
+    return backup
+
+
 def backup_snapshot(snapshot_id, cluster_id=None):
     """Create a backup from an existing snapshot.
-    Returns (backup_id, error_message)."""
+
+    Walks the snapshot chain to ensure all ancestor snapshots are also
+    backed up, since a single snapshot backup is only a delta and cannot
+    be restored without its ancestors.
+
+    Returns (backup_id, error_message) where backup_id is the ID of the
+    backup for the requested snapshot.
+    """
     try:
         snapshot = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
@@ -135,66 +231,113 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     if not cluster_id:
         cluster_id = snode.cluster_id
 
-    backup_id = _generate_backup_id()
+    # Walk the snapshot chain and back up all unbacked ancestors first
+    snap_chain = _get_snapshot_chain(snapshot)
     prev_backup = _get_latest_backup_for_lvol(lvol.get_id())
+    final_backup_id = None
 
-    backup = Backup()
-    backup.uuid = backup_id
-    backup.cluster_id = cluster_id
-    backup.lvol_id = lvol.get_id()
-    backup.lvol_name = lvol.lvol_name
-    backup.snapshot_id = snapshot_id
-    backup.snapshot_name = snapshot.snap_name
-    backup.node_id = node_id
-    backup.pool_uuid = lvol.pool_uuid
-    backup.prev_backup_id = prev_backup.uuid if prev_backup else ""
-    backup.size = snapshot.size
-    backup.created_at = int(time.time())
-    backup.status = Backup.STATUS_PENDING
-    backup.write_to_db()
+    for snap in snap_chain:
+        if _snapshot_has_backup(snap.get_id()):
+            # Already backed up — update prev_backup pointer for chain linking
+            backups = db_controller.get_backups_by_snapshot_id(snap.get_id())
+            existing = next(
+                (b for b in backups if b.status in (
+                    Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
+                    Backup.STATUS_COMPLETED)),
+                None)
+            if existing:
+                prev_backup = existing
+            continue
 
-    _write_s3_metadata(None, backup)
-    backup.write_to_db()
+        backup = _create_single_backup(snap, lvol, node_id, cluster_id, prev_backup)
+        prev_backup = backup
+        if snap.get_id() == snapshot_id:
+            final_backup_id = backup.uuid
 
-    backup_events.backup_created(cluster_id, node_id, backup)
+    if not final_backup_id:
+        # The target snapshot was already backed up
+        return None, f"Snapshot {snapshot_id} already has a backup"
 
-    # Create async task to perform the actual backup
-    tasks_controller.add_backup_task(backup)
-
-    return backup_id, None
+    return final_backup_id, None
 
 
-def restore_backup(backup_id, node_id, lvol_name, cluster_id=None):
-    """Restore a backup chain into a new lvol.
-    Returns (task_id_or_status, error_message)."""
+def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
+    """Restore a backup chain into a new fully-accessible lvol.
+
+    Creates the volume (with subsystem, listeners, namespace) via
+    lvol_controller.add_lvol_ha, then schedules an async task to
+    fill in the data from S3.  The volume is in STATUS_RESTORING
+    until the data transfer completes.
+
+    Returns (lvol_uuid, error_message).
+    """
+    from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.models.lvol_model import LVol
+
     try:
         backup = db_controller.get_backup_by_id(backup_id)
     except KeyError as e:
         return None, str(e)
-
-    try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-    except KeyError as e:
-        return None, str(e)
-
-    if snode.status != StorageNode.STATUS_ONLINE:
-        return None, f"Node {node_id} is not online"
-
-    if not cluster_id:
-        cluster_id = snode.cluster_id
 
     # Build the backup chain
     chain = db_controller.get_backup_chain(backup_id)
     if not chain:
         return None, f"Could not build backup chain for {backup_id}"
 
-    # Create the restore task
+    size = backup.size
+    if size <= 0:
+        return None, "Backup has no size information"
+
+    # Create a fully-exposed volume (subsystem, listeners, namespace)
+    lvol_id, error = lvol_controller.add_lvol_ha(
+        name=lvol_name,
+        size=size,
+        pool_id_or_name=pool_id_or_name,
+        use_crypto=False,
+        max_size=0,
+        max_rw_iops=0,
+        max_rw_mbytes=0,
+        max_r_mbytes=0,
+        max_w_mbytes=0,
+        host_id_or_name=None,
+        ha_type="default",
+        crypto_key1=None,
+        crypto_key2=None,
+        use_comp=False,
+        distr_vuid=0,
+        lvol_priority_class=0,
+        allowed_hosts=backup.allowed_hosts,
+        fabric="tcp",
+    )
+    if error or not lvol_id:
+        return None, f"Failed to create restore volume: {error}"
+
+    # Mark volume as restoring
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError:
+        return None, f"Volume created but not found in DB: {lvol_id}"
+
+    lvol.status = LVol.STATUS_RESTORING
+    lvol.write_to_db()
+
+    if not cluster_id:
+        cluster_id = lvol.node_id
+        try:
+            snode = db_controller.get_storage_node_by_id(lvol.node_id)
+            cluster_id = snode.cluster_id
+        except KeyError:
+            pass
+
+    # The bdev name the data plane expects (e.g. LVS_7744/LVOL_12345)
+    bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+
     result = tasks_controller.add_backup_restore_task(
-        cluster_id, node_id, backup_id, lvol_name,
-        [b.uuid for b in chain])
+        cluster_id, lvol.node_id, backup_id, bdev_name,
+        [b.s3_id for b in chain], lvol_id=lvol_id)
 
     if result:
-        return backup_id, None
+        return lvol_id, None
     return None, "Failed to create restore task"
 
 
@@ -227,7 +370,7 @@ def delete_backups(lvol_id):
         rpc_client = RPCClient(
             snode.mgmt_ip, snode.rpc_port,
             snode.rpc_username, snode.rpc_password)
-        s3_ids = [b.uuid for b in completed]
+        s3_ids = [b.s3_id for b in completed]
         try:
             rpc_client.bdev_lvol_s3_delete(s3_ids)
         except Exception as e:
@@ -248,6 +391,7 @@ def list_backups(cluster_id=None):
     for b in backups:
         data.append({
             "ID": b.uuid,
+            "S3 ID": b.s3_id,
             "LVol": b.lvol_name,
             "Snapshot": b.snapshot_name,
             "Node": b.node_id[:8] if b.node_id else "",
@@ -276,6 +420,7 @@ def import_backups(s3_metadata_list):
 
         backup = Backup()
         backup.uuid = backup_id
+        backup.s3_id = meta.get("s3_id", _next_s3_id(meta.get("cluster_id", "")))
         backup.cluster_id = meta.get("cluster_id", "")
         backup.lvol_id = meta.get("lvol_id", "")
         backup.lvol_name = meta.get("lvol_name", "")
@@ -284,6 +429,7 @@ def import_backups(s3_metadata_list):
         backup.node_id = meta.get("node_id", "")
         backup.prev_backup_id = meta.get("prev_backup_id", "")
         backup.size = meta.get("size", 0)
+        backup.allowed_hosts = meta.get("allowed_hosts", [])
         backup.created_at = meta.get("created_at", 0)
         backup.status = Backup.STATUS_COMPLETED
         backup.s3_metadata = meta
@@ -295,7 +441,7 @@ def import_backups(s3_metadata_list):
 
 # ---- Backup Policy Management ----
 
-def add_policy(cluster_id, name, max_versions=0, max_age=""):
+def add_policy(cluster_id, name, max_versions=0, max_age="", schedule=""):
     """Create a new backup policy.
     Returns (policy_id, error_message)."""
     max_age_seconds = 0
@@ -305,8 +451,14 @@ def add_policy(cluster_id, name, max_versions=0, max_age=""):
         except ValueError as e:
             return None, str(e)
 
-    if max_versions <= 0 and max_age_seconds <= 0:
-        return None, "At least one of --versions or --age must be specified"
+    if schedule:
+        try:
+            _parse_schedule(schedule)
+        except ValueError as e:
+            return None, str(e)
+
+    if max_versions <= 0 and max_age_seconds <= 0 and not schedule:
+        return None, "At least one of --versions, --age, or --schedule must be specified"
 
     # Check name uniqueness
     for p in db_controller.get_backup_policies(cluster_id):
@@ -320,6 +472,7 @@ def add_policy(cluster_id, name, max_versions=0, max_age=""):
     policy.max_versions = max_versions
     policy.max_age_seconds = max_age_seconds
     policy.max_age_display = max_age
+    policy.backup_schedule = schedule
     policy.status = BackupPolicy.STATUS_ACTIVE
     policy.write_to_db()
 
@@ -405,6 +558,7 @@ def list_policies(cluster_id=None):
             "Name": p.policy_name,
             "Versions": p.max_versions if p.max_versions > 0 else "-",
             "Max Age": p.max_age_display if p.max_age_display else "-",
+            "Schedule": p.backup_schedule if p.backup_schedule else "-",
             "Status": p.status,
         })
     return data
@@ -449,6 +603,82 @@ def evaluate_policy(lvol):
             oldest = completed[0]
             second = completed[1]
             _trigger_merge(second, oldest)
+
+
+def evaluate_schedule(lvol):
+    """Evaluate the backup schedule for an lvol and trigger auto-backups + tiered merges.
+    Called by the backup merge service."""
+    policy = db_controller.get_policy_for_lvol(lvol)
+    if not policy or not policy.backup_schedule:
+        return
+
+    try:
+        tiers = _parse_schedule(policy.backup_schedule)
+    except ValueError:
+        return
+
+    if not tiers:
+        return
+
+    now = int(time.time())
+
+    # Check if we need to create a new auto-backup based on the smallest tier interval
+    smallest_interval = tiers[0][0]
+    backups = db_controller.get_backups_by_lvol_id(lvol.get_id())
+    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
+    pending_or_running = [b for b in backups if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)]
+
+    # Don't create a new backup if one is already in progress
+    if not pending_or_running:
+        needs_backup = True
+        if completed:
+            completed.sort(key=lambda b: b.created_at, reverse=True)
+            latest = completed[0]
+            elapsed = now - latest.created_at
+            if elapsed < smallest_interval:
+                needs_backup = False
+
+        if needs_backup:
+            _auto_backup_lvol(lvol)
+            return  # Skip merge evaluation this cycle — let the backup complete first
+
+    # Tiered merge: enforce keep_count per tier
+    if len(completed) < 2:
+        return
+
+    completed.sort(key=lambda b: b.created_at)
+
+    # Assign backups to tiers (newest first matching).
+    # Tier boundaries: tier[i] covers backups with age < tier[i+1].interval (or unlimited for last tier).
+    # Within each tier, if count > keep_count, merge the oldest two.
+    for tier_idx, (interval, keep_count) in enumerate(tiers):
+        # Upper age boundary for this tier
+        if tier_idx + 1 < len(tiers):
+            upper_age = tiers[tier_idx + 1][0]
+        else:
+            upper_age = float('inf')
+
+        tier_backups = [b for b in completed if interval <= (now - b.created_at) < upper_age]
+        # For the first (smallest) tier, also include backups younger than the first interval
+        if tier_idx == 0:
+            tier_backups = [b for b in completed if (now - b.created_at) < upper_age]
+
+        if len(tier_backups) > keep_count:
+            # Merge oldest two in this tier
+            tier_backups.sort(key=lambda b: b.created_at)
+            oldest = tier_backups[0]
+            second = tier_backups[1]
+            _trigger_merge(second, oldest)
+            return  # One merge at a time
+
+
+def _auto_backup_lvol(lvol):
+    """Create an automatic snapshot + backup for scheduled backups."""
+    from simplyblock_core.controllers import snapshot_controller
+    snap_name = f"auto_{lvol.lvol_name}_{int(time.time())}"
+    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name, backup=True)
+    if error:
+        logger.warning(f"Auto-backup failed for lvol {lvol.get_id()}: {error}")
 
 
 def _trigger_merge(keep_backup, old_backup):

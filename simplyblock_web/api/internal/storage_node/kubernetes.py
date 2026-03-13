@@ -499,6 +499,16 @@ def spdk_process_kill(query: utils.RPCPortParams):
         first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
         pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
         resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
+
+        fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
+        try:
+            k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
+            logger.info(f"Deleting fluent pod {fluent_pod_name}")
+            k8s_core_v1.delete_namespaced_pod(fluent_pod_name, namespace)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+
         retries = 10
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
@@ -593,6 +603,34 @@ def get_file_content(path: FilePath):
         err = err.decode("utf-8")
         logger.debug(err)
         return utils.get_response(None, err)
+
+
+DHCHAP_KEY_DIR = "/etc/simplyblock/dhchap_keys"
+
+
+class WriteKeyFileBody(BaseModel):
+    name: str = Field(..., description="Key name (used as filename)")
+    content: str = Field(..., description="Key content in DHHC-1:XX:base64: format")
+
+
+@api.post('/write_key_file', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def write_key_file(body: WriteKeyFileBody):
+    """Write a DHCHAP key file for SPDK keyring_file module."""
+    import re
+    if not re.match(r'^[a-zA-Z0-9_\\-]+$', body.name):
+        return utils.get_response(None, "Invalid key name")
+    os.makedirs(DHCHAP_KEY_DIR, mode=0o700, exist_ok=True)
+    key_path = os.path.join(DHCHAP_KEY_DIR, body.name)
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, body.content.encode())
+    finally:
+        os.close(fd)
+    return utils.get_response(key_path)
 
 
 class _FirewallParams(BaseModel):

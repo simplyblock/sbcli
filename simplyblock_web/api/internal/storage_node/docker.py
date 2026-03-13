@@ -157,8 +157,7 @@ def spdk_process_start(body: SPDKParams):
     ssd_pcie_list = " ".join(body.ssd_pcie) if body.ssd_pcie else "none"
     spdk_debug = '1' if body.spdk_debug else ''
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MiB') if body.total_mem else ''
-    # spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
-    spdk_mem_mib = 0
+    spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
     node_docker = get_docker_client(timeout=60 * 3)
     for name in {f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"}:
@@ -315,6 +314,34 @@ def get_file_content(path: FilePath):
         err = err.decode("utf-8")
         logger.debug(err)
         return utils.get_response(None, err)
+
+
+DHCHAP_KEY_DIR = os.environ.get("DHCHAP_KEY_DIR", "/etc/simplyblock/dhchap_keys")
+
+
+class WriteKeyFileBody(BaseModel):
+    name: str = Field(..., description="Key name (used as filename)")
+    content: str = Field(..., description="Key content in DHHC-1:XX:base64: format")
+
+
+@api.post('/write_key_file', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'string'
+    })}}},
+})
+def write_key_file(body: WriteKeyFileBody):
+    """Write a DHCHAP key file for SPDK keyring_file module."""
+    import re
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', body.name):
+        return utils.get_response(None, "Invalid key name")
+    os.makedirs(DHCHAP_KEY_DIR, mode=0o700, exist_ok=True)
+    key_path = os.path.join(DHCHAP_KEY_DIR, body.name)
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, body.content.encode())
+    finally:
+        os.close(fd)
+    return utils.get_response(key_path)
 
 
 def set_cluster_id(cluster_id):

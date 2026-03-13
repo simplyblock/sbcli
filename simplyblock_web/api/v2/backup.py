@@ -35,18 +35,18 @@ def create_backup(cluster: Cluster, parameters: _BackupSnapshotParams) -> Respon
 
 class _RestoreParams(BaseModel):
     backup_id: str
-    node_id: str
     lvol_name: str
+    pool: str
 
 
 @api.post('/restore', name='clusters:backups:restore', status_code=202)
 def restore_backup(cluster: Cluster, parameters: _RestoreParams):
     result, error = backup_controller.restore_backup(
-        parameters.backup_id, parameters.node_id, parameters.lvol_name,
+        parameters.backup_id, parameters.lvol_name, parameters.pool,
         cluster_id=cluster.get_id())
     if error:
         raise HTTPException(400, error)
-    return {"backup_id": result}
+    return {"lvol_id": result}
 
 
 class _ImportParams(BaseModel):
@@ -82,6 +82,7 @@ class _PolicyCreateParams(BaseModel):
     name: str
     versions: Optional[int] = 0
     age: Optional[str] = ""
+    schedule: Optional[str] = ""
 
 
 @policy_api.post('/', name='clusters:backup-policies:create', status_code=201, responses={201: {"content": None}})
@@ -89,7 +90,8 @@ def create_policy(cluster: Cluster, parameters: _PolicyCreateParams) -> Response
     policy_id, error = backup_controller.add_policy(
         cluster.get_id(), parameters.name,
         max_versions=parameters.versions or 0,
-        max_age=parameters.age or "")
+        max_age=parameters.age or "",
+        schedule=parameters.schedule or "")
     if error:
         raise HTTPException(400, error)
     return Response(status_code=201, headers={'X-Policy-Id': policy_id})

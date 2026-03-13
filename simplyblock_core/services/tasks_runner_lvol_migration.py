@@ -312,7 +312,7 @@ def _expose_lvol_on_secondary(lvol, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid)
             if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                 ret, err = sec_rpc.nvmf_subsystem_add_listener(
                     lvol.nqn, iface.trtype, iface.ip4_address,
-                    lvol.subsys_port, "non_optimized")
+                    tgt_sec.lvol_subsys_port, "non_optimized")
                 if not ret:
                     if err and isinstance(err, dict) and err.get("code") == -32602:
                         logger.warning("Listener already exists on secondary")

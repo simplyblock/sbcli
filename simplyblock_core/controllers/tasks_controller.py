@@ -478,7 +478,7 @@ def add_backup_task(backup):
     )
 
 
-def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids):
+def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids, lvol_id=""):
     """Create the task that restores an S3 backup chain into a new lvol."""
     return _add_task(
         JobSchedule.FN_BACKUP_RESTORE,
@@ -489,6 +489,7 @@ def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids
         function_params={
             "backup_id": backup_id,
             "lvol_name": lvol_name,
+            "lvol_id": lvol_id,
             "chain_ids": chain_ids,
         },
     )

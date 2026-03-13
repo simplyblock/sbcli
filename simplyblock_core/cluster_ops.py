@@ -584,6 +584,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     max_size = records[0]['size_total']
 
     used_nodes_as_sec = []
+    used_nodes_as_sec_2 = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
@@ -611,8 +612,8 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             # Assign second secondary when max_fault_tolerance >= 2
             if cluster.max_fault_tolerance >= 2 and not snode.secondary_node_id_2:
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
-                secondary_nodes_2 = storage_node_ops.get_secondary_nodes(
-                    snode, exclude_ids=[snode.secondary_node_id] + used_nodes_as_sec)
+                secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
+                    snode, exclude_ids=[snode.secondary_node_id] + used_nodes_as_sec_2)
                 if not secondary_nodes_2:
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
@@ -622,7 +623,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 sec_node_2 = db_controller.get_storage_node_by_id(snode.secondary_node_id_2)
                 sec_node_2.lvstore_stack_secondary_2 = snode.get_id()
                 sec_node_2.write_to_db()
-                used_nodes_as_sec.append(snode.secondary_node_id_2)
+                used_nodes_as_sec_2.append(snode.secondary_node_id_2)
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:

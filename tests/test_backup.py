@@ -51,9 +51,10 @@ def _node(uuid="node-1", status=StorageNode.STATUS_ONLINE, lvstore="lvs_test",
 
 def _backup(uuid="backup-1", lvol_id="lvol-1", status=Backup.STATUS_COMPLETED,
             node_id="node-1", cluster_id="cluster-1", prev_backup_id="",
-            created_at=None, snapshot_id="snap-1"):
+            created_at=None, snapshot_id="snap-1", s3_id=1):
     b = Backup()
     b.uuid = uuid
+    b.s3_id = s3_id
     b.lvol_id = lvol_id
     b.lvol_name = "test_lvol"
     b.snapshot_id = snapshot_id
@@ -107,6 +108,7 @@ class TestBackupModel(unittest.TestCase):
 
     def test_default_fields(self):
         b = Backup()
+        self.assertEqual(b.s3_id, 0)
         self.assertEqual(b.status, "")
         self.assertEqual(b.prev_backup_id, "")
         self.assertEqual(b.size, 0)
@@ -321,14 +323,16 @@ class TestCreateS3Bdev(unittest.TestCase):
 
 class TestBackupSnapshot(unittest.TestCase):
 
+    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.backup_events")
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_success(self, mock_db, mock_events, mock_tasks):
+    def test_success(self, mock_db, mock_events, mock_tasks, _mock_write):
         snap = _snapshot()
         mock_db.get_snapshot_by_id.return_value = snap
         mock_db.get_storage_node_by_id.return_value = _node()
         mock_db.get_backups_by_lvol_id.return_value = []
+        mock_db.get_backups.return_value = []
         mock_tasks.add_backup_task.return_value = "task-1"
 
         from simplyblock_core.controllers.backup_controller import backup_snapshot
@@ -338,6 +342,9 @@ class TestBackupSnapshot(unittest.TestCase):
         self.assertIsNone(error)
         mock_tasks.add_backup_task.assert_called_once()
         mock_events.backup_created.assert_called_once()
+        # Verify s3_id is assigned
+        created_backup = mock_events.backup_created.call_args[0][2]
+        self.assertEqual(created_backup.s3_id, 1)
 
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
     def test_snapshot_not_found(self, mock_db):
@@ -374,15 +381,17 @@ class TestBackupSnapshot(unittest.TestCase):
         self.assertIsNone(backup_id)
         self.assertIn("not online", error)
 
+    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.backup_events")
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_incremental_backup(self, mock_db, mock_events, mock_tasks):
+    def test_incremental_backup(self, mock_db, mock_events, mock_tasks, _mock_write):
         snap = _snapshot()
-        prev = _backup(uuid="prev-backup")
+        prev = _backup(uuid="prev-backup", s3_id=3)
         mock_db.get_snapshot_by_id.return_value = snap
         mock_db.get_storage_node_by_id.return_value = _node()
         mock_db.get_backups_by_lvol_id.return_value = [prev]
+        mock_db.get_backups.return_value = [prev]
         mock_tasks.add_backup_task.return_value = "task-1"
 
         from simplyblock_core.controllers.backup_controller import backup_snapshot
@@ -393,6 +402,7 @@ class TestBackupSnapshot(unittest.TestCase):
         # Verify the backup object passed to events has prev_backup_id set
         created_backup = mock_events.backup_created.call_args[0][2]
         self.assertEqual(created_backup.prev_backup_id, "prev-backup")
+        self.assertEqual(created_backup.s3_id, 4)
 
 
 # ===========================================================================
@@ -404,7 +414,7 @@ class TestRestoreBackup(unittest.TestCase):
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
     def test_success(self, mock_db, mock_tasks):
-        backup = _backup()
+        backup = _backup(s3_id=5)
         node = _node()
         mock_db.get_backup_by_id.return_value = backup
         mock_db.get_storage_node_by_id.return_value = node
@@ -416,6 +426,9 @@ class TestRestoreBackup(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertIsNone(error)
+        # Verify s3_id integers are passed, not UUIDs
+        call_args = mock_tasks.add_backup_restore_task.call_args
+        self.assertEqual(call_args[0][4], [5])
 
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
     def test_backup_not_found(self, mock_db):
@@ -507,8 +520,9 @@ class TestListBackups(unittest.TestCase):
 
 class TestPolicyAdd(unittest.TestCase):
 
+    @patch.object(BackupPolicy, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_success(self, mock_db):
+    def test_success(self, mock_db, _mock_write):
         mock_db.get_backup_policies.return_value = []
 
         from simplyblock_core.controllers.backup_controller import add_policy
@@ -574,8 +588,9 @@ class TestPolicyRemove(unittest.TestCase):
 
 class TestPolicyAttach(unittest.TestCase):
 
+    @patch.object(BackupPolicyAttachment, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_success(self, mock_db):
+    def test_success(self, mock_db, _mock_write):
         p = _policy()
         mock_db.get_backup_policy_by_id.return_value = p
         mock_db.get_lvol_by_id.return_value = MagicMock()
@@ -650,9 +665,10 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_not_called()
 
+    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_version_limit_exceeded(self, mock_db, mock_tasks):
+    def test_version_limit_exceeded(self, mock_db, mock_tasks, _mock_write):
         policy = _policy(max_versions=2, max_age_seconds=0)
         mock_db.get_policy_for_lvol.return_value = policy
 
@@ -685,9 +701,10 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_not_called()
 
+    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_age_limit_exceeded(self, mock_db, mock_tasks):
+    def test_age_limit_exceeded(self, mock_db, mock_tasks, _mock_write):
         policy = _policy(max_versions=0)
         policy.max_age_seconds = 3600  # 1 hour
         mock_db.get_policy_for_lvol.return_value = policy
@@ -723,9 +740,10 @@ class TestEvaluatePolicy(unittest.TestCase):
         # Should NOT trigger merge: version exceeded but age not exceeded
         mock_tasks.add_backup_merge_task.assert_not_called()
 
+    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_both_conditions_met(self, mock_db, mock_tasks):
+    def test_both_conditions_met(self, mock_db, mock_tasks, _mock_write):
         """When both limits set and both exceeded, merge triggers."""
         policy = _policy(max_versions=2)
         policy.max_age_seconds = 3600
@@ -764,9 +782,11 @@ class TestEvaluatePolicy(unittest.TestCase):
 
 class TestImportBackups(unittest.TestCase):
 
+    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_import_new(self, mock_db):
+    def test_import_new(self, mock_db, _mock_write):
         mock_db.get_backup_by_id.side_effect = KeyError("not found")
+        mock_db.get_backups.return_value = []
 
         from simplyblock_core.controllers.backup_controller import import_backups
         count = import_backups([
@@ -776,10 +796,12 @@ class TestImportBackups(unittest.TestCase):
 
         self.assertEqual(count, 2)
 
+    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_skip_existing(self, mock_db):
+    def test_skip_existing(self, mock_db, _mock_write):
         existing = _backup(uuid="b-1")
         mock_db.get_backup_by_id.side_effect = lambda bid: existing if bid == "b-1" else (_ for _ in ()).throw(KeyError())
+        mock_db.get_backups.return_value = [existing]
 
         from simplyblock_core.controllers.backup_controller import import_backups
         count = import_backups([
@@ -868,9 +890,10 @@ class TestRPCClientBackupMethods(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
         self.assertTrue(hasattr(RPCClient, 'bdev_lvol_s3_backup'))
 
-    def test_bdev_lvol_s3_backup_stat_exists(self):
+    def test_bdev_lvol_transfer_stat_exists(self):
+        """bdev_lvol_transfer_stat is used to poll all S3 transfer operations."""
         from simplyblock_core.rpc_client import RPCClient
-        self.assertTrue(hasattr(RPCClient, 'bdev_lvol_s3_backup_stat'))
+        self.assertTrue(hasattr(RPCClient, 'bdev_lvol_transfer_stat'))
 
     def test_bdev_lvol_s3_merge_exists(self):
         from simplyblock_core.rpc_client import RPCClient
