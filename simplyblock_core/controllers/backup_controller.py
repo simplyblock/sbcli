@@ -5,6 +5,9 @@ import re
 import time
 import uuid
 
+import boto3
+from botocore.exceptions import ClientError
+
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
@@ -157,8 +160,31 @@ def create_s3_bdev(node, backup_config):
         logger.error(f"Error creating S3 bdev on node {node.get_id()}: {e}")
         return False
 
-    # Step 2: Register bucket name with the S3 bdev
+    # Step 2: Ensure the S3 bucket exists, then register it with the S3 bdev
     bucket_name = backup_config.get("bucket_name", f"simplyblock-backup-{node.cluster_id}")
+    try:
+        s3_kwargs = {
+            "aws_access_key_id": backup_config.get("access_key_id", ""),
+            "aws_secret_access_key": backup_config.get("secret_access_key", ""),
+        }
+        endpoint_url = backup_config.get("local_endpoint", "")
+        if endpoint_url:
+            s3_kwargs["endpoint_url"] = endpoint_url
+        s3_client = boto3.client("s3", **s3_kwargs)
+        try:
+            s3_client.head_bucket(Bucket=bucket_name)
+            logger.info(f"S3 bucket already exists: {bucket_name}")
+        except ClientError as e:
+            error_code = int(e.response["Error"]["Code"])
+            if error_code == 404:
+                s3_client.create_bucket(Bucket=bucket_name)
+                logger.info(f"S3 bucket created: {bucket_name}")
+            else:
+                raise
+    except Exception as e:
+        logger.error(f"Error ensuring S3 bucket {bucket_name} exists: {e}")
+        return False
+
     try:
         ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
         if not ret:
