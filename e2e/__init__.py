@@ -56,6 +56,7 @@ from stress_test.continuous_failover_ha_multi_outage_all_nodes import RandomMult
 from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailoverTest
 from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
+from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import RandomRapidFailoverNoGap
 from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvolSnapshotCloneAPI
 from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
@@ -153,6 +154,7 @@ def get_stress_tests():
         RandomMultiGeometryFailoverTest,
         RandomMultiClient2NodeFailoverTest,
         RandomRDMAFailoverTest,
+        RandomRDMAMultiFailoverTest,
         RandomRapidFailoverNoGap,
         TestParallelLvolSnapshotCloneAPI,
         RandomMultiClientFailoverNamespaceTest,
