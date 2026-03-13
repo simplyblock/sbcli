@@ -408,7 +408,7 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
 
     result = tasks_controller.add_backup_restore_task(
         cluster_id, lvol.node_id, backup_id, bdev_name,
-        [b.s3_id for b in chain], lvol_id=lvol_id)
+        [b.s3_id for b in reversed(chain)], lvol_id=lvol_id)
 
     if result:
         return lvol_id, None
