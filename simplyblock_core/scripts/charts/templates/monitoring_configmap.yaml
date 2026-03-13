@@ -27,8 +27,7 @@ data:
         basic_auth:
           username:
           password:
-  {{- end }}
-
+          
       - job_name: 'node'
         kubernetes_sd_configs:
         - role: endpoints
@@ -36,6 +35,7 @@ data:
         - source_labels: [__meta_kubernetes_endpoints_name]
           action: keep
           regex: 'simplyblock-node-exporter'
+  {{- end }}
 
 ---
 apiVersion: v1
