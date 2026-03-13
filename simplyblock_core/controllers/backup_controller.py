@@ -100,6 +100,25 @@ def _get_latest_backup_for_lvol(lvol_id):
     return completed[0]
 
 
+def _compute_s3_cpu_masks(node):
+    """Compute CPU masks for the S3 bdev.
+    Returns (bdb_lcpu_mask, s3_lcpu_mask):
+        bdb_lcpu_mask: app_thread core (SPDK lightweight thread, low overhead)
+        s3_lcpu_mask: all system vCPUs (no pinning — let Linux scheduler handle
+                      the AWS SDK thread pool; the data plane default would
+                      wrongly pin onto SPDK reactor cores)
+    """
+    # SPDK thread for the bdev poller — reuse the app thread core
+    bdb_lcpu_mask = 0
+    if node.app_thread_mask:
+        bdb_lcpu_mask = int(node.app_thread_mask, 16)
+
+    # AWS SDK thread pool — set all system vCPU bits so threads are unconstrained
+    s3_lcpu_mask = (1 << node.cpu) - 1 if node.cpu > 0 else 0
+
+    return bdb_lcpu_mask, s3_lcpu_mask
+
+
 def create_s3_bdev(node, backup_config):
     """Create the S3 bdev and attach it to a node's lvstore.
     Called during cluster activate / node restart.
@@ -114,6 +133,8 @@ def create_s3_bdev(node, backup_config):
         node.rpc_username, node.rpc_password)
     s3_bdev_name = f"s3_{node.lvstore}"
 
+    bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
+
     # Step 1: Create the S3 bdev
     try:
         ret = rpc_client.bdev_s3_create(
@@ -125,6 +146,9 @@ def create_s3_bdev(node, backup_config):
             local_endpoint=backup_config.get("local_endpoint", ""),
             access_key_id=backup_config.get("access_key_id", ""),
             secret_access_key=backup_config.get("secret_access_key", ""),
+            bdb_lcpu_mask=bdb_lcpu_mask,
+            s3_lcpu_mask=s3_lcpu_mask,
+            s3_thread_pool_size=backup_config.get("s3_thread_pool_size", 0),
         )
         if not ret:
             logger.warning(f"Failed to create S3 bdev on node {node.get_id()}")
@@ -133,7 +157,19 @@ def create_s3_bdev(node, backup_config):
         logger.error(f"Error creating S3 bdev on node {node.get_id()}: {e}")
         return False
 
-    # Step 2: Attach the S3 bdev to the lvstore
+    # Step 2: Register bucket name with the S3 bdev
+    bucket_name = backup_config.get("bucket_name", f"simplyblock-backup-{node.cluster_id}")
+    try:
+        ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
+        if not ret:
+            logger.warning(f"Failed to set bucket name on S3 bdev {s3_bdev_name}")
+            return False
+        logger.info(f"S3 bdev bucket set: {bucket_name} on {s3_bdev_name}")
+    except Exception as e:
+        logger.error(f"Error setting bucket name on S3 bdev {s3_bdev_name}: {e}")
+        return False
+
+    # Step 3: Attach the S3 bdev to the lvstore
     try:
         ret = rpc_client.bdev_lvol_s3_bdev(node.lvstore, s3_bdev_name)
         if ret:

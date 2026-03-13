@@ -1371,7 +1371,8 @@ class RPCClient:
 
     def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
                        snapshot_backups=True, local_testing=False, local_endpoint="",
-                       access_key_id="", secret_access_key=""):
+                       access_key_id="", secret_access_key="",
+                       bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0):
         """Create the S3 bdev device.
         Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
         Args:
@@ -1383,6 +1384,9 @@ class RPCClient:
             local_endpoint: Local endpoint URL
             access_key_id: AWS access key (optional if using IAM roles)
             secret_access_key: AWS secret key (optional if using IAM roles)
+            bdb_lcpu_mask: CPU mask for the SPDK thread of this bdev (uint64)
+            s3_lcpu_mask: CPU mask for the internal AWS S3 thread pool (uint64)
+            s3_thread_pool_size: AWS S3 thread pool size (default 32 on data plane)
         """
         params = {
             "name": name,
@@ -1398,6 +1402,12 @@ class RPCClient:
             params["access_key_id"] = access_key_id
         if secret_access_key:
             params["secret_access_key"] = secret_access_key
+        if bdb_lcpu_mask:
+            params["bdb_lcpu_mask"] = bdb_lcpu_mask
+        if s3_lcpu_mask:
+            params["s3_lcpu_mask"] = s3_lcpu_mask
+        if s3_thread_pool_size:
+            params["s3_thread_pool_size"] = s3_thread_pool_size
         return self._request("bdev_s3_create", params)
 
     def bdev_lvol_s3_bdev(self, lvs_name, bdev_name):
@@ -1407,6 +1417,18 @@ class RPCClient:
         return self._request("bdev_lvol_s3_bdev", {
             "lvs_name": lvs_name,
             "s3_bdev": bdev_name,
+        })
+
+    def bdev_s3_add_bucket_name(self, name, bucket_name):
+        """Register a bucket name with the S3 bdev.
+        Must be called after bdev_s3_create and before any backup/recovery operations.
+        Args:
+            name: S3 bdev name (e.g. 's3_LVS_1234')
+            bucket_name: S3/MinIO bucket name to use for data storage
+        """
+        return self._request("bdev_s3_add_bucket_name", {
+            "name": name,
+            "bucket_name": bucket_name,
         })
 
     def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
