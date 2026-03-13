@@ -1410,6 +1410,16 @@ class RPCClient:
             params["s3_thread_pool_size"] = s3_thread_pool_size
         return self._request("bdev_s3_create", params)
 
+    def bdev_lvol_create_poller_group(self, cpu_mask):
+        """Create helper poll group threads for S3 backup transfers.
+        Must be called before any S3 backup/recovery operations.
+        Args:
+            cpu_mask: hex CPU mask for helper threads (e.g. '0x1')
+        """
+        return self._request("bdev_lvol_create_poller_group", {
+            "cpu_mask": cpu_mask,
+        })
+
     def bdev_lvol_s3_bdev(self, lvs_name, bdev_name):
         """Attach an S3 bdev to the given lvstore.
         The S3 bdev must already exist (created via bdev_s3_create).

@@ -138,6 +138,18 @@ def create_s3_bdev(node, backup_config):
 
     bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
 
+    # Step 0: Create helper poll group threads for S3 transfers
+    cpu_mask = node.app_thread_mask if node.app_thread_mask else "0x1"
+    try:
+        ret = rpc_client.bdev_lvol_create_poller_group(cpu_mask)
+        if not ret:
+            logger.warning(f"Failed to create poller group on node {node.get_id()}")
+        else:
+            logger.info(f"S3 poller group created with mask {cpu_mask} on node {node.get_id()}")
+    except Exception as e:
+        # May fail if already created — not fatal
+        logger.warning(f"Poller group creation returned error (may already exist): {e}")
+
     # Step 1: Create the S3 bdev
     try:
         ret = rpc_client.bdev_s3_create(
