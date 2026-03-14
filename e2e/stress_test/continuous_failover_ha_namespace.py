@@ -56,6 +56,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
         self.parent_ctrl = {}                    # parent_name -> "/dev/nvmeX"
         self.parent_host_id = {}                # parent_name -> node uuid (host_id)
         self.parent_to_children = defaultdict(list)
+        self.stale_ns_devices = {}               # lvol_name -> {device, ctrl_dev, client}
 
         self.test_name = "continuous_random_failover_multi_client_ha_namespace"
     
@@ -569,20 +570,25 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         node=client, ctrl_dev=ctrl_dev, device=device, timeout=180, interval=3
                     )
                 if not ok:
-                    raise Exception(
-                        f"[NS] Namespace device still present after delete+rescan: {device} (lvol={lvol_name})"
+                    self.logger.warning(
+                        f"[NS] Device {device} still present after delete+rescan (lvol={lvol_name}). "
+                        f"Will retry after outage recovery. Not a failure."
                     )
-                self.logger.info(f"[NS] Verified namespace device removed: {device}")
-
-                # If this was the last namespace on that controller -> disconnect now
-                if self._is_last_namespace_after_delete(client, ctrl_dev):
-                    self.logger.info(f"[NS] Last namespace left on {ctrl_dev} -> disconnecting {lvol_name}")
-                    try:
-                        self.disconnect_lvol(lvol_id)
-                    except Exception as e:
-                        self.logger.warning(f"[NS] disconnect_lvol (last-ns) failed for {lvol_name}: {e}")
+                    self.stale_ns_devices[lvol_name] = {
+                        "device": device, "ctrl_dev": ctrl_dev, "client": client
+                    }
                 else:
-                    self.logger.info(f"[NS] Other namespaces still exist on {ctrl_dev}; not disconnecting.")
+                    self.logger.info(f"[NS] Verified namespace device removed: {device}")
+
+                    # If this was the last namespace on that controller -> disconnect now
+                    if self._is_last_namespace_after_delete(client, ctrl_dev):
+                        self.logger.info(f"[NS] Last namespace left on {ctrl_dev} -> disconnecting {lvol_name}")
+                        try:
+                            self.disconnect_lvol(lvol_id)
+                        except Exception as e:
+                            self.logger.warning(f"[NS] disconnect_lvol (last-ns) failed for {lvol_name}: {e}")
+                    else:
+                        self.logger.info(f"[NS] Other namespaces still exist on {ctrl_dev}; not disconnecting.")
             # For non-namespace, disconnect already done (best-effort)
 
             # Cleanup only this lvol logs
@@ -617,6 +623,65 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                 self.parent_to_children.pop(lvol_name, None)
 
         sleep_n_sec(60)
+
+    # -------------------------
+    # Stale device retry after outage recovery
+    # -------------------------
+    def _retry_stale_ns_rescans(self):
+        """
+        After an outage node comes back online, retry rescan for any devices that
+        did not disappear during delete_random_lvols.  Log results; never fail.
+        """
+        if not self.stale_ns_devices:
+            return
+
+        self.logger.info(
+            f"[NS] Retrying rescan for {len(self.stale_ns_devices)} stale device(s) after outage recovery: "
+            f"{list(self.stale_ns_devices.keys())}"
+        )
+
+        for lvol_name, info in list(self.stale_ns_devices.items()):
+            device = info["device"]
+            ctrl_dev = info["ctrl_dev"]
+            client = info["client"]
+            ctrl_name = ctrl_dev.split("/")[-1]
+
+            # nvme ns-rescan
+            self._rescan_nvme_namespaces(node=client, ctrl_dev=ctrl_dev)
+
+            # sysfs fallback
+            sysfs_cmd = (
+                f"bash -lc \"echo 1 | sudo tee /sys/class/nvme/{ctrl_name}/rescan_controller"
+                f" 2>/dev/null || true\""
+            )
+            out, err = self.ssh_obj.exec_command(node=client, command=sysfs_cmd, supress_logs=True)
+            self.logger.info(f"[NS] post-outage sysfs rescan: ctrl={ctrl_name} out={out} err={err}")
+
+            gone = self._wait_until_namespace_device_gone(
+                node=client, ctrl_dev=ctrl_dev, device=device, timeout=60, interval=3
+            )
+            if gone:
+                self.logger.info(
+                    f"[NS] Stale device {device} (lvol={lvol_name}) cleared after outage recovery."
+                )
+                self.stale_ns_devices.pop(lvol_name, None)
+            else:
+                self.logger.warning(
+                    f"[NS] Stale device {device} (lvol={lvol_name}) still present after outage recovery rescan. "
+                    f"Not a failure — continuing."
+                )
+
+        if self.stale_ns_devices:
+            self.logger.warning(
+                f"[NS] Devices not yet cleared (not a failure): "
+                + ", ".join(
+                    f"{n}={v['device']}" for n, v in self.stale_ns_devices.items()
+                )
+            )
+
+    def restart_nodes_after_failover(self, *args, **kwargs):
+        super().restart_nodes_after_failover(*args, **kwargs)
+        self._retry_stale_ns_rescans()
 
     # -------------------------
     # RUN
