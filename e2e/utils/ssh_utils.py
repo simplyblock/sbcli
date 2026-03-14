@@ -70,40 +70,6 @@ def get_parent_device(device: str) -> str:
         return f"/dev/{base.split('n')[0]}"
 
     return dev
-def get_parent_device(device: str) -> str:
-    """
-    Convert an NVMe namespace device (/dev/nvmeXnY or /dev/nvmeXnYpZ) to controller (/dev/nvmeX).
-
-    Examples:
-      /dev/nvme0n1      -> /dev/nvme0
-      /dev/nvme0n2      -> /dev/nvme0
-      /dev/nvme12n1     -> /dev/nvme12
-      /dev/nvme0n1p1    -> /dev/nvme0
-      nvme0n1           -> /dev/nvme0
-    """
-    if not device:
-        return device
-
-    dev = device.strip()
-    if not dev.startswith("/dev/"):
-        dev = f"/dev/{dev}"
-
-    base = dev.split("/")[-1]  # nvme0n1 or nvme0n1p1
-
-    m = re.match(r"^(nvme\d+)(n\d+)(p\d+)?$", base)
-    if m:
-        return f"/dev/{m.group(1)}"
-
-    # if it's already controller like /dev/nvme0
-    m2 = re.match(r"^(nvme\d+)$", base)
-    if m2:
-        return f"/dev/{m2.group(1)}"
-
-    # fallback: strip after first 'n' (safer than returning nvme0n)
-    if "nvme" in base and "n" in base:
-        return f"/dev/{base.split('n')[0]}"
-
-    return dev
 
 class SshUtils:
     """Class to perform all ssh level operationa
