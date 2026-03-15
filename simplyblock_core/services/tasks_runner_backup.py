@@ -240,18 +240,10 @@ def _run_restore(task):
                 task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         elif state == "No process" and recovery_started:
-            # "No process" after kickoff means the transfer completed and was
-            # cleaned up before we polled.  The data plane returns "Failed" on
-            # actual failures, so treat "No process" as successful completion.
-            _set_lvol_online(task)
-            try:
-                backup = db.get_backup_by_id(backup_id)
-                backup_events.backup_restore_completed(
-                    task.cluster_id, node_id, backup, lvol_name)
-            except KeyError:
-                pass
-            task.function_result = f"Restore completed: {lvol_name}"
-            task.status = JobSchedule.STATUS_DONE
+            # "No process" may mean the transfer hasn't registered yet or
+            # completed and was cleaned up.  Keep polling — the data plane
+            # returns "Failed" on actual failures.
+            task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         else:
             # "In progress" — still running, retry later
