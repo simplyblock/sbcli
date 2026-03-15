@@ -228,17 +228,35 @@ def create_s3_bdev(node, backup_config):
 
 
 def _get_snapshot_chain(snapshot):
-    """Walk snap_ref_id to build the full ancestor chain, oldest first."""
-    chain = [snapshot]
-    current = snapshot
-    while current.snap_ref_id:
-        try:
-            parent = db_controller.get_snapshot_by_id(current.snap_ref_id)
-            chain.append(parent)
-            current = parent
-        except KeyError:
-            break
-    chain.reverse()  # oldest first
+    """Build the snapshot chain ending at this snapshot, oldest first.
+
+    For cloned volumes, walks snap_ref_id upward.  For regular volumes
+    (no snap_ref_id), collects all snapshots of the same lvol that were
+    created at or before this snapshot, ordered by created_at.
+    """
+    if snapshot.snap_ref_id:
+        # Clone-based chain: walk snap_ref_id
+        chain = [snapshot]
+        current = snapshot
+        while current.snap_ref_id:
+            try:
+                parent = db_controller.get_snapshot_by_id(current.snap_ref_id)
+                chain.append(parent)
+                current = parent
+            except KeyError:
+                break
+        chain.reverse()  # oldest first
+        return chain
+
+    # Regular volume: all snapshots of the same lvol up to this one
+    lvol_id = snapshot.lvol.get_id() if snapshot.lvol else None
+    if not lvol_id:
+        return [snapshot]
+
+    all_snaps = db_controller.get_snapshots_by_lvol_id(lvol_id)
+    # Filter to snapshots created at or before this one, sort oldest first
+    chain = [s for s in all_snaps if s.created_at <= snapshot.created_at]
+    chain.sort(key=lambda s: s.created_at)
     return chain
 
 
