@@ -94,13 +94,19 @@ def _write_s3_metadata(rpc_client, backup):
 
 
 def _get_latest_backup_for_lvol(lvol_id):
-    """Get the most recent completed backup for a given lvol."""
+    """Get the most recent non-failed backup for a given lvol.
+
+    Includes pending/in-progress backups so that chain links are set
+    even when multiple backups are created in quick succession before
+    the earlier ones complete.
+    """
     backups = db_controller.get_backups_by_lvol_id(lvol_id)
-    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
-    if not completed:
+    valid = [b for b in backups if b.status in (
+        Backup.STATUS_COMPLETED, Backup.STATUS_IN_PROGRESS, Backup.STATUS_PENDING)]
+    if not valid:
         return None
-    completed.sort(key=lambda b: b.created_at, reverse=True)
-    return completed[0]
+    valid.sort(key=lambda b: b.created_at, reverse=True)
+    return valid[0]
 
 
 def _compute_s3_cpu_masks(node):
