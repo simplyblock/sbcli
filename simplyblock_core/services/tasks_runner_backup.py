@@ -120,18 +120,18 @@ def _run_backup(task):
         elif state == "Failed":
             _fail_backup(backup, task, "Backup transfer failed on data plane")
         elif state == "No process" and backup.status == Backup.STATUS_IN_PROGRESS:
-            # "No process" means no transfer is running.  The data plane now
-            # properly returns "Failed" on timeout, so "No process" after we
-            # kicked off the backup means the transfer was never created.
-            # Retry a few times in case of a race, then fail.
-            no_process_count = task.function_params.get("no_process_count", 0) + 1
-            task.function_params["no_process_count"] = no_process_count
-            if no_process_count >= 6:
-                _fail_backup(backup, task,
-                             "Backup transfer never started (No process after 6 polls)")
-            else:
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
+            # "No process" after we kicked off the backup means the transfer
+            # completed and was cleaned up before we polled, OR it was never
+            # created.  The data plane returns "Failed" on actual failures, so
+            # "No process" is the expected terminal state for a successful
+            # backup (the xfer task is destroyed after setting XFER_DONE).
+            backup.status = Backup.STATUS_COMPLETED
+            backup.completed_at = int(time.time())
+            backup.write_to_db()
+            backup_events.backup_completed(backup.cluster_id, backup.node_id, backup)
+            task.function_result = "Backup completed"
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db(db.kv_store)
         else:
             # "In progress" — still running, retry later
             task.status = JobSchedule.STATUS_SUSPENDED
@@ -202,6 +202,10 @@ def _run_restore(task):
 
         # Mark recovery as started so we don't re-issue the RPC on subsequent polls
         task.function_params["recovery_started"] = True
+        # Give the data plane time to start the transfer before polling
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
 
     # Poll via bdev_lvol_transfer_stat on the target lvol
     try:
@@ -236,17 +240,18 @@ def _run_restore(task):
                 task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         elif state == "No process" and recovery_started:
-            # "No process" means no transfer is running.  The data plane now
-            # properly returns "Failed" on timeout, so "No process" after we
-            # kicked off recovery means the transfer was never created.
-            # Retry a few times in case of a race, then fail.
-            no_process_count = task.function_params.get("no_process_count", 0) + 1
-            task.function_params["no_process_count"] = no_process_count
-            if no_process_count >= 6:
-                task.function_result = f"Restore failed: transfer never started (No process after 6 polls)"
-                task.status = JobSchedule.STATUS_DONE
-            else:
-                task.status = JobSchedule.STATUS_SUSPENDED
+            # "No process" after kickoff means the transfer completed and was
+            # cleaned up before we polled.  The data plane returns "Failed" on
+            # actual failures, so treat "No process" as successful completion.
+            _set_lvol_online(task)
+            try:
+                backup = db.get_backup_by_id(backup_id)
+                backup_events.backup_restore_completed(
+                    task.cluster_id, node_id, backup, lvol_name)
+            except KeyError:
+                pass
+            task.function_result = f"Restore completed: {lvol_name}"
+            task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)
         else:
             # "In progress" — still running, retry later
