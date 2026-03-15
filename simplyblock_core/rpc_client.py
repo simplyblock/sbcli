@@ -407,11 +407,11 @@ class RPCClient:
             "clear_method": "unmap",
             "lvol_priority_class": lvol_priority_class,
         }
-        # if ndcs or npcs:
-        #     params.update({
-        #         'ndcs' : ndcs,
-        #         'npcs' : npcs,
-        #     })
+        if ndcs or npcs:
+            params.update({
+                'ndcs' : ndcs,
+                'npcs' : npcs,
+            })
         if uuid:
             params["uuid"] = uuid
         return self._request("bdev_lvol_create", params)
