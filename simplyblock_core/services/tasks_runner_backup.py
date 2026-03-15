@@ -93,6 +93,10 @@ def _run_backup(task):
 
         backup.status = Backup.STATUS_IN_PROGRESS
         backup.write_to_db()
+        # Give the data plane time to start the transfer before polling
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
 
     # Poll via bdev_lvol_transfer_stat on the snapshot bdev
     try:
