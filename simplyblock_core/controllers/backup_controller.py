@@ -362,7 +362,9 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
     if size <= 0:
         return None, "Backup has no size information"
 
-    # Create a fully-exposed volume (subsystem, listeners, namespace)
+    # Create the restore volume on the same node that performed the backup,
+    # because S3 bdev key encoding is per-lvstore and the recovery RPC reads
+    # from the local node's S3 bdev.
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,
@@ -373,7 +375,7 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
         max_rw_mbytes=0,
         max_r_mbytes=0,
         max_w_mbytes=0,
-        host_id_or_name=None,
+        host_id_or_name=backup.node_id,
         ha_type="default",
         crypto_key1=None,
         crypto_key2=None,
