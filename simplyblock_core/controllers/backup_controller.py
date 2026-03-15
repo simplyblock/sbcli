@@ -408,9 +408,15 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
     # The bdev name the data plane expects (e.g. LVS_7744/LVOL_12345)
     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
+    # Only include completed backups — incomplete ones have no metadata in S3
+    completed_chain = [b for b in reversed(chain)
+                       if b.status == Backup.STATUS_COMPLETED]
+    if not completed_chain:
+        return None, "No completed backups in chain"
+
     result = tasks_controller.add_backup_restore_task(
         cluster_id, lvol.node_id, backup_id, bdev_name,
-        [b.s3_id for b in reversed(chain)], lvol_id=lvol_id)
+        [b.s3_id for b in completed_chain], lvol_id=lvol_id)
 
     if result:
         return lvol_id, None
