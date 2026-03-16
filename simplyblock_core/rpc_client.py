@@ -1288,7 +1288,7 @@ class RPCClient:
 
     def bdev_lvol_set_migration_flag(self, name):
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
-        return self._request("bdev_lvol_set_migration_flag", {"name": name})
+        return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
     def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate"):
         """
@@ -1299,10 +1299,10 @@ class RPCClient:
         Poll progress with :meth:`bdev_lvol_transfer_stat`.
         """
         return self._request("bdev_lvol_transfer", {
-            "name": name,
+            "lvol_name": name,
             "offset": offset,
-            "block_size": batch_size,
-            "bdev_name": bdev_name,
+            "cluster_batch": batch_size,
+            "gateway": bdev_name,
             "operation": operation,
         })
 
@@ -1325,8 +1325,8 @@ class RPCClient:
         before converting the lvol to a snapshot.
         """
         return self._request("bdev_lvol_add_clone", {
-            "lvol_name": lvol_name,
-            "parent_snapshot_name": parent_snapshot_name,
+            "lvol_name": parent_snapshot_name,
+            "child_name": lvol_name,
         })
 
     def bdev_lvol_convert(self, name):
@@ -1334,7 +1334,7 @@ class RPCClient:
         Convert a writable lvol *name* (composite) into an immutable snapshot
         in-place.  Called on the target node after :meth:`bdev_lvol_add_clone`.
         """
-        return self._request("bdev_lvol_convert", {"name": name})
+        return self._request("bdev_lvol_convert", {"lvol_name": name})
 
     def bdev_lvol_get_lvols(self, lvs_name):
         """
@@ -1363,8 +1363,8 @@ class RPCClient:
             "lvol_name": lvol_name,
             "lvol_id": lvol_id,
             "snapshot_name": snapshot_name,
-            "batch_size": batch_size,
-            "bdev_name": bdev_name,
+            "cluster_batch": batch_size,
+            "gateway": bdev_name,
         })
 
     # ---- S3 Backup RPCs ----

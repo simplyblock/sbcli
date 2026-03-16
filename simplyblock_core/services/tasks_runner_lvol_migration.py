@@ -353,14 +353,34 @@ def _cleanup_snap_transfer(src_rpc, tgt_rpc, ctx):
             logger.warning(f"delete migration subsystem {temp_nqn}: {e}")
 
 
-def _cleanup_final_migration(src_rpc, ctx):
-    """Detach the hub controller attached for the final lvol migration."""
+def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False):
+    """Detach the hub controller attached for the final lvol migration.
+
+    When *rollback_target* is True the target lvol and its subsystem/namespace
+    are also torn down so that a retry can re-create them from scratch.
+    """
     ctrl_name = ctx.get('ctrl_name')
     if ctrl_name:
         try:
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
         except Exception as e:
             logger.warning(f"detach hub ctrl {ctrl_name}: {e}")
+
+    if rollback_target and tgt_rpc:
+        tgt_composite = ctx.get('tgt_lvol_composite')
+        nqn = ctx.get('nqn')
+        tgt_ns_id = ctx.get('tgt_ns_id')
+        sub_created = ctx.get('subsystem_created_on_target', False)
+        if nqn and tgt_ns_id is not None:
+            try:
+                _cleanup_subsystem_or_ns(nqn, tgt_ns_id, sub_created, tgt_rpc)
+            except Exception as e:
+                logger.warning(f"cleanup target subsystem {nqn}: {e}")
+        if tgt_composite:
+            try:
+                _delete_bdev_blocking(tgt_composite, tgt_rpc)
+            except Exception as e:
+                logger.warning(f"cleanup target lvol {tgt_composite}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -860,7 +880,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     if ctx.get('stage') == 'transfer':
         result = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
         if result is None:
-            _cleanup_final_migration(src_rpc, ctx)
+            _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
             migration.transfer_context = {}
             migration.write_to_db(db.kv_store)
             return False, True, "bdev_lvol_transfer_stat returned None for final migration"
@@ -871,7 +891,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             return False, False, None
 
         if state in ('Failed', 'No process'):
-            _cleanup_final_migration(src_rpc, ctx)
+            _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
             migration.transfer_context = {}
             migration.write_to_db(db.kv_store)
             return False, True, f"Final migration {state}"
