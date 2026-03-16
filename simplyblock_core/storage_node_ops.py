@@ -3338,14 +3338,18 @@ def recreate_lvstore(snode, force=False):
         lvol_ana_state = "inaccessible"
 
     ### 2- create lvols nvmf subsystems
+    created_subsystems = []
     for lvol in lvol_list:
-        allow_any = not bool(lvol.allowed_hosts)
-        logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
-        rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
-                                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
-                                    allow_any_host=allow_any)
-        if lvol.allowed_hosts:
-            _reapply_allowed_hosts(lvol, snode, rpc_client)
+        if lvol.nqn not in created_subsystems:
+            allow_any = not bool(lvol.allowed_hosts)
+            logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
+            ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
+                                              max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                              allow_any_host=allow_any)
+            if ret:
+                created_subsystems.append(lvol.nqn)
+            if lvol.allowed_hosts:
+                _reapply_allowed_hosts(lvol, snode, rpc_client)
 
     if sec_node:
 
