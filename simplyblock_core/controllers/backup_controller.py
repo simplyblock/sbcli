@@ -454,8 +454,7 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
     # Only include completed backups — incomplete ones have no metadata in S3
-    # chain is already oldest-first; keep that order for the data plane
-    completed_chain = [b for b in chain
+    completed_chain = [b for b in reversed(chain)
                        if b.status == Backup.STATUS_COMPLETED]
     if not completed_chain:
         return None, "No completed backups in chain"
