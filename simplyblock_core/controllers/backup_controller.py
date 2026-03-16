@@ -760,24 +760,11 @@ def evaluate_policy(lvol):
         oldest_age = now - completed[0].created_at
         age_exceeded = oldest_age > policy.max_age_seconds
 
-    # Both conditions must be met before merging
-    if versions_exceeded and age_exceeded:
-        # Merge oldest into second oldest
+    # Either condition triggers a merge
+    if versions_exceeded or age_exceeded:
         oldest = completed[0]
         second = completed[1]
         _trigger_merge(second, oldest)
-    elif policy.max_versions > 0 and not policy.max_age_seconds:
-        # Only version limit, no age limit
-        if versions_exceeded:
-            oldest = completed[0]
-            second = completed[1]
-            _trigger_merge(second, oldest)
-    elif policy.max_age_seconds > 0 and not policy.max_versions:
-        # Only age limit, no version limit
-        if age_exceeded:
-            oldest = completed[0]
-            second = completed[1]
-            _trigger_merge(second, oldest)
 
 
 def evaluate_schedule(lvol):
