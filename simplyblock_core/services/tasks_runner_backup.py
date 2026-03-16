@@ -300,15 +300,23 @@ def _run_merge(task):
             return
 
         task.function_params["merge_started"] = True
+        task.write_to_db(db.kv_store)
+        # Give the data plane time to complete the merge before finalizing
+        return
 
-    # TODO: merge operates at lvstore level (lvol=NULL in data plane), so
-    # bdev_lvol_transfer_stat cannot poll it. The data plane needs a dedicated
-    # merge status RPC. For now, retry until max_retry — the merge completes
-    # on the data plane side regardless.
-    task.retry += 1
-    task.status = JobSchedule.STATUS_SUSPENDED
-    task.function_result = "Merge polling not yet supported"
+    # The merge RPC is synchronous on the data plane — once it returned
+    # successfully, the S3 data has been merged.  Finalize: update the
+    # chain links, remove the old backup, and mark the task done.
+    keep_backup.prev_backup_id = old_backup.prev_backup_id
+    keep_backup.status = Backup.STATUS_COMPLETED
+    keep_backup.write_to_db()
+
+    old_backup.remove(db.kv_store)
+
+    task.function_result = "Merge completed"
+    task.status = JobSchedule.STATUS_DONE
     task.write_to_db(db.kv_store)
+    logger.info(f"Merge completed: {old_backup_id} merged into {keep_backup_id}")
 
 
 logger.info("Starting backup tasks runner...")
