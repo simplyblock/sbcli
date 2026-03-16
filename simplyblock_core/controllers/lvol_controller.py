@@ -2014,10 +2014,10 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
-            "name": lvol.top_bdev,
+            "name": new_lvol.top_bdev,
             "params": {
                 "snapshot_name": snapshot.snap_bdev,
-                "clone_name": lvol.lvol_bdev
+                "clone_name": new_lvol.lvol_bdev
             }
         }
     ]
@@ -2025,12 +2025,12 @@ def replicate_lvol_on_target_cluster(lvol_id):
     if new_lvol.crypto_bdev:
         new_lvol.bdev_stack.append({
             "type": "crypto",
-            "name": lvol.crypto_bdev,
+            "name": new_lvol.crypto_bdev,
             "params": {
-                "name": lvol.crypto_bdev,
-                "base_name": lvol.top_bdev,
-                "key1": lvol.crypto_key1,
-                "key2": lvol.crypto_key2,
+                "name": new_lvol.crypto_bdev,
+                "base_name": new_lvol.top_bdev,
+                "key1": new_lvol.crypto_key1,
+                "key2": new_lvol.crypto_key2,
             }
         })
 
