@@ -276,6 +276,7 @@ def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup):
     backup.uuid = backup_id
     backup.s3_id = _next_s3_id(cluster_id)
     backup.cluster_id = cluster_id
+    backup.source_cluster_id = cluster_id  # local backup
     backup.lvol_id = lvol.get_id()
     backup.lvol_name = lvol.lvol_name
     backup.snapshot_id = snapshot.get_id()
@@ -312,6 +313,18 @@ def backup_snapshot(snapshot_id, cluster_id=None):
         snapshot = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
         return None, str(e)
+
+    # Block new backups when S3 source is switched to an external cluster
+    node_id = snapshot.lvol.node_id if snapshot.lvol else None
+    if node_id:
+        try:
+            snode = db_controller.get_storage_node_by_id(node_id)
+            if not is_local_backup_source(snode.cluster_id):
+                return None, ("Cannot create backups while backup source is "
+                              "switched to an external cluster. Switch back "
+                              "to local first.")
+        except KeyError:
+            pass
 
     if not snapshot.lvol:
         return None, "Snapshot has no associated lvol"
@@ -384,6 +397,22 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
         backup = db_controller.get_backup_by_id(backup_id)
     except KeyError as e:
         return None, str(e)
+
+    # Verify the backup's source matches the active S3 source.
+    # If the backup came from an external cluster, the S3 bdev must be
+    # switched to that cluster's bucket before restoring.
+    if cluster_id:
+        backup_src = backup.source_cluster_id or backup.cluster_id
+        try:
+            cl = db_controller.get_cluster_by_id(cluster_id)
+            active_src = cl.backup_source or cluster_id
+            if backup_src != active_src:
+                return None, (
+                    f"Backup source is {backup_src[:8]} but active S3 source "
+                    f"is {active_src[:8]}. Use 'sbctl backup source-switch "
+                    f"{backup_src}' first.")
+        except KeyError:
+            pass
 
     # Build the backup chain
     chain = db_controller.get_backup_chain(backup_id)
@@ -519,7 +548,8 @@ def list_backups(cluster_id=None):
     backups = db_controller.get_backups(cluster_id)
     data = []
     for b in backups:
-        source_cluster = b.s3_metadata.get("source_cluster_id", "") if b.s3_metadata else ""
+        source = b.source_cluster_id or b.cluster_id
+        is_external = source != b.cluster_id
         entry = {
             "ID": b.uuid,
             "S3 ID": b.s3_id,
@@ -529,9 +559,8 @@ def list_backups(cluster_id=None):
             "Status": b.status,
             "Prev": b.prev_backup_id[:8] if b.prev_backup_id else "-",
             "Created": time.strftime("%Y-%m-%d %H:%M", time.localtime(b.created_at)) if b.created_at else "",
+            "Source": source[:8] if is_external else "local",
         }
-        if source_cluster and source_cluster != b.cluster_id:
-            entry["Source"] = source_cluster[:8]
         data.append(entry)
     return data
 
@@ -569,11 +598,14 @@ def export_backups(cluster_id=None, lvol_name=None):
 def import_backups(s3_metadata_list, cluster_id=None):
     """Import backup metadata from another cluster's S3 metadata.
 
+    Backups are stored in the local cluster's DB namespace but keep their
+    original s3_ids (scoped to source_cluster_id).  The source_cluster_id
+    field tracks which cluster originally created the backup.
+
     Args:
         s3_metadata_list: list of dicts with backup metadata.
-        cluster_id: Target cluster to import into. If provided, overrides the
-            source cluster_id so backups are visible in this cluster's DB
-            namespace. Required for cross-cluster restore.
+        cluster_id: Target cluster to import into.  Required for cross-cluster
+            restore so the backups are visible in the local cluster's DB.
     """
     imported = 0
     for meta in s3_metadata_list:
@@ -588,12 +620,14 @@ def import_backups(s3_metadata_list, cluster_id=None):
         except KeyError:
             pass
 
+        source_cluster = meta.get("cluster_id", "")
+        target_cluster = cluster_id or source_cluster
+
         backup = Backup()
         backup.uuid = backup_id
-        # Use target cluster_id if provided, otherwise keep source cluster_id
-        target_cluster = cluster_id or meta.get("cluster_id", "")
-        backup.s3_id = meta.get("s3_id", _next_s3_id(target_cluster))
+        backup.s3_id = meta.get("s3_id", 0)
         backup.cluster_id = target_cluster
+        backup.source_cluster_id = source_cluster
         backup.lvol_id = meta.get("lvol_id", "")
         backup.lvol_name = meta.get("lvol_name", "")
         backup.snapshot_id = meta.get("snapshot_id", "")
@@ -605,13 +639,129 @@ def import_backups(s3_metadata_list, cluster_id=None):
         backup.created_at = meta.get("created_at", 0)
         backup.status = Backup.STATUS_COMPLETED
         backup.s3_metadata = meta
-        # Preserve source cluster info for audit trail
-        backup.s3_metadata["source_cluster_id"] = meta.get("cluster_id", "")
-        backup.s3_metadata["source_node_id"] = meta.get("node_id", "")
         backup.write_to_db()
         imported += 1
 
     return imported
+
+
+def get_backup_sources(cluster_id):
+    """List all distinct backup sources (local + imported clusters).
+
+    Returns a list of dicts with source_cluster_id, count, and whether
+    it is the currently active source.
+    """
+    try:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        return []
+
+    backups = db_controller.get_backups(cluster_id)
+    sources = {}
+    for b in backups:
+        src = b.source_cluster_id or cluster_id
+        if src not in sources:
+            sources[src] = {"source_cluster_id": src, "count": 0, "is_local": src == cluster_id}
+        sources[src]["count"] += 1
+
+    active_source = cluster.backup_source or cluster_id
+    result = []
+    for src_id, info in sources.items():
+        info["active"] = (src_id == active_source)
+        result.append(info)
+
+    # Always include local even if no backups
+    if cluster_id not in sources:
+        result.append({
+            "source_cluster_id": cluster_id,
+            "count": 0,
+            "is_local": True,
+            "active": active_source == cluster_id,
+        })
+
+    return result
+
+
+def switch_backup_source(cluster_id, source_cluster_id):
+    """Switch the active backup source for all nodes in the cluster.
+
+    Reconfigures the S3 bdev on every node to read from the bucket
+    belonging to source_cluster_id.  While switched to an external
+    source, new backups cannot be created.
+
+    Args:
+        cluster_id: The local cluster ID.
+        source_cluster_id: The cluster ID whose S3 bucket to activate.
+            Use the local cluster_id (or "local") to switch back.
+
+    Returns (success, error_message).
+    """
+    try:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        return False, f"Cluster {cluster_id} not found"
+
+    if source_cluster_id == "local":
+        source_cluster_id = cluster_id
+
+    # Determine the bucket name for the source cluster
+    backup_config = cluster.backup_config or {}
+    if source_cluster_id == cluster_id:
+        bucket_name = backup_config.get("bucket_name",
+                                        f"simplyblock-backup-{cluster_id}")
+    else:
+        bucket_name = f"simplyblock-backup-{source_cluster_id}"
+
+    # Verify the bucket exists
+    try:
+        s3_kwargs = {
+            "aws_access_key_id": backup_config.get("access_key_id", ""),
+            "aws_secret_access_key": backup_config.get("secret_access_key", ""),
+        }
+        endpoint_url = backup_config.get("local_endpoint", "")
+        if endpoint_url:
+            s3_kwargs["endpoint_url"] = endpoint_url
+        s3_client = boto3.client("s3", **s3_kwargs)
+        s3_client.head_bucket(Bucket=bucket_name)
+    except Exception as e:
+        return False, f"S3 bucket {bucket_name} not accessible: {e}"
+
+    # Reconfigure S3 bdev bucket on all online nodes
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    errors = []
+    for node in nodes:
+        if node.status != StorageNode.STATUS_ONLINE or not node.lvstore:
+            continue
+        try:
+            rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port,
+                node.rpc_username, node.rpc_password)
+            s3_bdev_name = f"s3_{node.lvstore}"
+            ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
+            if not ret:
+                errors.append(f"Node {node.get_id()}: failed to set bucket")
+            else:
+                logger.info(f"Switched S3 bucket to {bucket_name} on node {node.get_id()}")
+        except Exception as e:
+            errors.append(f"Node {node.get_id()}: {e}")
+
+    if errors:
+        return False, "; ".join(errors)
+
+    # Persist the active source in the cluster record
+    cluster.backup_source = source_cluster_id
+    cluster.write_to_db()
+
+    return True, None
+
+
+def is_local_backup_source(cluster_id):
+    """Check if the cluster is currently using its own local backup source."""
+    try:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        return True
+    return not cluster.backup_source or cluster.backup_source == cluster_id
 
 
 # ---- Backup Policy Management ----

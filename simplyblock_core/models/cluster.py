@@ -73,6 +73,8 @@ class Cluster(BaseModel):
     client_data_nic: str = ""
     max_fault_tolerance: int = 1
     backup_config: dict = {}
+    backup_source: str = ""  # active backup source cluster_id ("" = local)
+    backup_timeout_seconds: int = 14400  # 4 hours default
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001

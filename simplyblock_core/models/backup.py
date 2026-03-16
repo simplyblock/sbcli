@@ -33,6 +33,7 @@ class Backup(BaseModel):
     prev_backup_id: str = ""
     pool_uuid: str = ""
     size: int = 0
+    source_cluster_id: str = ""  # original cluster that created this backup
     created_at: int = 0
     completed_at: int = 0
     error_message: str = ""
