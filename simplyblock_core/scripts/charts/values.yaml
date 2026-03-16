@@ -22,6 +22,18 @@ image:
     tag: "R25.10-Hotfix"
     pullPolicy: "Always"
 
+tolerations:
+  create: false
+  list:
+  - operator: Exists
+    effect:
+    key: 
+    value:
+nodeSelector:
+  create: false
+  key: 
+  value:
+  
 ports:
   lvolNvmfPortStart:
 
