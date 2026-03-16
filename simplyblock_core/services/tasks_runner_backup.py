@@ -83,7 +83,7 @@ def _run_backup(task):
 
     if backup.status == Backup.STATUS_PENDING:
         try:
-            ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name], cluster_batch=1)
+            ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name], cluster_batch=16)
             if not ret:
                 _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
                 return
@@ -181,7 +181,7 @@ def _run_restore(task):
 
     if not recovery_started:
         try:
-            ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=1)
+            ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=16)
             if not ret:
                 task.function_result = "bdev_lvol_s3_recovery RPC failed"
                 task.retry += 1
