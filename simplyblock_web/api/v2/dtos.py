@@ -320,5 +320,6 @@ class VolumeDTO(BaseModel):
             max_r_mbytes=model.r_mbytes_per_sec,
             max_w_mbytes=model.w_mbytes_per_sec,
             capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
-            rep_info=rep_info
+            rep_info=rep_info,
+            from_source=model.from_source
         )
