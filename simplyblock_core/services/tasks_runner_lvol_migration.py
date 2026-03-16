@@ -421,8 +421,10 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     ctrl_name = f"mig_{migration.uuid[:8]}_{snap_index}"
 
     # Step 1: create target lvol
+    # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
+    # the new lvol.  Do not pass the snapshot UUID here.
     size_in_mib = _bytes_to_mib(snap.used_size)
-    ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore, uuid=snap_uuid)
+    ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
 
@@ -953,8 +955,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     # --- Start the final migration ---
 
-    # Step 1: create writable target lvol (same UUID; size in MiB)
-    ret = tgt_rpc.create_lvol(lvol.lvol_bdev, lvol.size, tgt_node.lvstore, uuid=lvol.uuid)
+    # Step 1: create writable target lvol (size in MiB)
+    # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
+    # the new lvol.  Do not pass the lvol UUID here.
+    ret = tgt_rpc.create_lvol(lvol.lvol_bdev, lvol.size, tgt_node.lvstore)
     if not ret:
         return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
 

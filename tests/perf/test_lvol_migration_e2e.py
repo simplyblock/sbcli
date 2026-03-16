@@ -531,9 +531,18 @@ def main():
     ssh_exec(client_ip, ["sudo killall fio || true"])
     ssh_exec(client_ip, ["sudo umount /mnt/migtest || true"])
 
-    # --- Teardown ---
-    print("\n=== Tearing down cluster ===")
-    terminate_all()
+    # --- Teardown (only on success) ---
+    mig_list_final = ssh_exec(mgmt_ip, [
+        "sudo /usr/local/bin/sbctl lvol migrate-list"
+    ], get_output=True)[0]
+    if "done" in mig_list_final.lower() or "completed" in mig_list_final.lower():
+        print("\n=== Tearing down cluster (migration succeeded) ===")
+        terminate_all()
+    else:
+        print("\n=== Keeping cluster alive for debugging ===")
+        print(f"  Mgmt: {mgmt_ip}")
+        print(f"  To tear down manually: python3 tests/perf/test_lvol_migration_e2e.py --teardown")
+
     print("\nDONE.")
 
 
