@@ -2202,6 +2202,7 @@ def replicate_lvol_on_source_cluster(lvol_id):
     new_lvol = copy.deepcopy(lvol)
     new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.snapshot_name = snapshot.snap_bdev
+    new_lvol.from_source = True
     new_lvol.status = LVol.STATUS_IN_CREATION
 
     new_lvol.bdev_stack = [
@@ -2259,9 +2260,6 @@ def replicate_lvol_on_source_cluster(lvol_id):
 
     new_lvol.status = LVol.STATUS_ONLINE
     new_lvol.write_to_db(db_controller.kv_store)
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    lvol.from_source = True
-    lvol.write_to_db()
     lvol_events.lvol_replicated(lvol, new_lvol)
 
     return new_lvol.lvol_uuid
