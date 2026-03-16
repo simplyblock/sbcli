@@ -339,18 +339,25 @@ while True:
                 task.write_to_db(db.kv_store)
                 continue
 
-            if task.retry >= task.max_retry:
-                task.function_result = "max retry reached"
+            # Time-based timeout for backup/restore tasks instead of retry count.
+            # These tasks poll "No process" while the data plane works — retries
+            # are not failures, they are poll cycles.  Only time out after the
+            # configured limit (default 4 hours).
+            backup_timeout_sec = getattr(cl, 'backup_timeout_seconds', 0) or 14400
+            elapsed = int(time.time()) - task.date if task.date else 0
+            timed_out = elapsed > backup_timeout_sec
+
+            if timed_out:
+                task.function_result = f"timeout after {elapsed}s"
                 task.status = JobSchedule.STATUS_DONE
                 task.write_to_db(db.kv_store)
-                # Mark associated backup as failed so it doesn't stay in pending/in_progress
                 if task.function_name == JobSchedule.FN_BACKUP:
                     bid = task.function_params.get("backup_id")
                     if bid:
                         try:
                             b = db.get_backup_by_id(bid)
                             if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS):
-                                _fail_backup(b, task, "max retry reached")
+                                _fail_backup(b, task, f"timeout after {elapsed}s")
                         except KeyError:
                             pass
                 elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
