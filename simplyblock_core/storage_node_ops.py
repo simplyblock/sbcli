@@ -2398,21 +2398,19 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
+    time.sleep(3)
 
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
         logger.info("Setting JM unavailable")
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
+    time.sleep(1)
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
                           NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
 
-    # # make other nodes disconnect from this node
-    # logger.info("disconnect all other nodes connections to this node")
-    # for dev in snode.nvme_devices:
-    #     distr_controller.disconnect_device(dev)
-
+    time.sleep(1)
     logger.info("Stopping SPDK")
     try:
         SNodeClient(snode.api_endpoint, timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
