@@ -2171,10 +2171,10 @@ def replicate_lvol_on_source_cluster(lvol_id):
         logger.error(f"Node is not online!: {source_node.get_id()}, status: {source_node.status}")
         return False
 
-    for lv in db_controller.get_lvols(source_cluster.snapshot_replication_target_cluster):
-        if lv.nqn == lvol.nqn:
-            logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
-            return lv.get_id()
+    # for lv in db_controller.get_lvols(source_cluster.snapshot_replication_target_cluster):
+    #     if lv.nqn == lvol.nqn:
+    #         logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+    #         return lv.get_id()
 
     snaps = []
     snapshot = None
@@ -2200,10 +2200,6 @@ def replicate_lvol_on_source_cluster(lvol_id):
 
     # create lvol on target node
     new_lvol = copy.deepcopy(lvol)
-    new_lvol.uuid = str(uuid.uuid4())
-    new_lvol.create_dt = str(datetime.now())
-    new_lvol.replication_node_id = ""
-    new_lvol.do_replicate = False
     new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.status = LVol.STATUS_IN_CREATION
@@ -2233,7 +2229,10 @@ def replicate_lvol_on_source_cluster(lvol_id):
 
     new_lvol.write_to_db(db_controller.kv_store)
 
-    delete_lvol(lvol_id)
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    lvol.uuid = str(uuid.uuid4())
+    lvol.write_to_db()
+    delete_lvol(lvol.uuid)
 
     time.sleep(3)
 
