@@ -796,11 +796,30 @@ class CLIWrapperBase:
     def backup__restore(self, sub_command, args):
         result, error = backup_controller.restore_backup(
             args.backup_id, args.lvol_name, args.pool,
-            cluster_id=getattr(args, 'cluster_id', None))
+            cluster_id=getattr(args, 'cluster_id', None),
+            target_node_id=getattr(args, 'node', None))
         if error:
             print(f"Error: {error}")
             return False
         print(f"Restoring backup {args.backup_id} into new volume {result}")
+        return True
+
+    def backup__export(self, sub_command, args):
+        import json as _json
+        data = backup_controller.export_backups(
+            cluster_id=getattr(args, 'cluster_id', None),
+            lvol_name=getattr(args, 'lvol_name', None))
+        if not data:
+            print("No completed backups found")
+            return False
+        output = _json.dumps(data, indent=2)
+        output_file = getattr(args, 'output', None)
+        if output_file:
+            with open(output_file, 'w') as f:
+                f.write(output)
+            print(f"Exported {len(data)} backup(s) to {output_file}")
+        else:
+            print(output)
         return True
 
     def backup__import(self, sub_command, args):
@@ -813,7 +832,8 @@ class CLIWrapperBase:
             return False
         if not isinstance(metadata_list, list):
             metadata_list = [metadata_list]
-        count = backup_controller.import_backups(metadata_list)
+        count = backup_controller.import_backups(
+            metadata_list, cluster_id=getattr(args, 'cluster_id', None))
         print(f"Imported {count} backup(s)")
         return True
 

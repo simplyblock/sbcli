@@ -871,6 +871,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_backup__list(subparser)
         self.init_backup__delete(subparser)
         self.init_backup__restore(subparser)
+        self.init_backup__export(subparser)
         self.init_backup__import(subparser)
         self.init_backup__policy_add(subparser)
         self.init_backup__policy_remove(subparser)
@@ -891,11 +892,20 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('backup_id', help='Backup id', type=str)
         subcommand.add_argument('--lvol', help='New logical volume name', type=str, required=True, dest='lvol_name')
         subcommand.add_argument('--pool', help='Target pool name or UUID', type=str, required=True, dest='pool')
+        subcommand.add_argument('--node', help='Target storage node ID (default: original backup node)', type=str, default=None, dest='node')
         subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+
+    def init_backup__export(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore')
+        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+        subcommand.add_argument('--lvol', help='Filter exports to a specific lvol name', type=str, default=None, dest='lvol_name')
+        subcommand.add_argument('-o', '--output', help='Output file path (default: stdout)', type=str, default=None, dest='output')
 
     def init_backup__import(self, subparser):
         subcommand = self.add_sub_command(subparser, 'import', 'Import backup metadata from a JSON file')
         subcommand.add_argument('metadata_file', help='Path to JSON metadata file', type=str)
+        subcommand.add_argument('--cluster-id', help='Target cluster to import into (required for cross-cluster restore)',
+                                type=str, default=None, dest='cluster_id')
 
     def init_backup__policy_add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-add', 'Create a new backup policy')
@@ -1309,6 +1319,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__delete(sub_command, args)
                 elif sub_command in ['restore']:
                     ret = self.backup__restore(sub_command, args)
+                elif sub_command in ['export']:
+                    ret = self.backup__export(sub_command, args)
                 elif sub_command in ['import']:
                     ret = self.backup__import(sub_command, args)
                 elif sub_command in ['policy-add']:

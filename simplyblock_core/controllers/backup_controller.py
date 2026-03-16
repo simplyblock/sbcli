@@ -359,13 +359,21 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     return final_backup_id, None
 
 
-def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
+def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
+                   target_node_id=None):
     """Restore a backup chain into a new fully-accessible lvol.
 
     Creates the volume (with subsystem, listeners, namespace) via
     lvol_controller.add_lvol_ha, then schedules an async task to
     fill in the data from S3.  The volume is in STATUS_RESTORING
     until the data transfer completes.
+
+    Args:
+        target_node_id: Optional node to restore onto. If not provided,
+            restores to the original backup node. Any node in the cluster
+            can restore any backup because S3 keys are node-agnostic
+            ({s3_id}/{mid_flag}/{extent}) and all nodes share the same
+            S3 bucket and credentials.
 
     Returns (lvol_uuid, error_message).
     """
@@ -386,9 +394,22 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
     if size <= 0:
         return None, "Backup has no size information"
 
-    # Create the restore volume on the same node that performed the backup,
-    # because S3 bdev key encoding is per-lvstore and the recovery RPC reads
-    # from the local node's S3 bdev.
+    # Determine target node: use explicit target, or fall back to backup node
+    restore_node_id = target_node_id or backup.node_id
+
+    # Validate target node is online and has an S3 bdev
+    try:
+        target_node = db_controller.get_storage_node_by_id(restore_node_id)
+    except KeyError:
+        return None, f"Target node {restore_node_id} not found"
+
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        return None, (f"Target node {restore_node_id} is not online "
+                      f"(status: {target_node.status})")
+
+    if not target_node.lvstore:
+        return None, f"Target node {restore_node_id} has no lvstore (S3 bdev requires lvstore)"
+
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,
@@ -399,7 +420,7 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
         max_rw_mbytes=0,
         max_r_mbytes=0,
         max_w_mbytes=0,
-        host_id_or_name=backup.node_id,
+        host_id_or_name=restore_node_id,
         ha_type="default",
         crypto_key1=None,
         crypto_key2=None,
@@ -495,7 +516,8 @@ def list_backups(cluster_id=None):
     backups = db_controller.get_backups(cluster_id)
     data = []
     for b in backups:
-        data.append({
+        source_cluster = b.s3_metadata.get("source_cluster_id", "") if b.s3_metadata else ""
+        entry = {
             "ID": b.uuid,
             "S3 ID": b.s3_id,
             "LVol": b.lvol_name,
@@ -504,13 +526,52 @@ def list_backups(cluster_id=None):
             "Status": b.status,
             "Prev": b.prev_backup_id[:8] if b.prev_backup_id else "-",
             "Created": time.strftime("%Y-%m-%d %H:%M", time.localtime(b.created_at)) if b.created_at else "",
-        })
+        }
+        if source_cluster and source_cluster != b.cluster_id:
+            entry["Source"] = source_cluster[:8]
+        data.append(entry)
     return data
 
 
-def import_backups(s3_metadata_list):
+def export_backups(cluster_id=None, lvol_name=None):
+    """Export completed backup metadata as a list of dicts suitable for import
+    into another cluster via import_backups().
+
+    Returns a list of metadata dicts including s3_id, chain links, and size.
+    """
+    backups = db_controller.get_backups(cluster_id)
+    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
+    if lvol_name:
+        completed = [b for b in completed if b.lvol_name == lvol_name]
+
+    result = []
+    for b in completed:
+        result.append({
+            "backup_id": b.uuid,
+            "s3_id": b.s3_id,
+            "cluster_id": b.cluster_id,
+            "lvol_id": b.lvol_id,
+            "lvol_name": b.lvol_name,
+            "snapshot_id": b.snapshot_id,
+            "snapshot_name": b.snapshot_name,
+            "node_id": b.node_id,
+            "prev_backup_id": b.prev_backup_id,
+            "size": b.size,
+            "allowed_hosts": b.allowed_hosts,
+            "created_at": b.created_at,
+        })
+    return result
+
+
+def import_backups(s3_metadata_list, cluster_id=None):
     """Import backup metadata from another cluster's S3 metadata.
-    s3_metadata_list is a list of dicts with backup metadata."""
+
+    Args:
+        s3_metadata_list: list of dicts with backup metadata.
+        cluster_id: Target cluster to import into. If provided, overrides the
+            source cluster_id so backups are visible in this cluster's DB
+            namespace. Required for cross-cluster restore.
+    """
     imported = 0
     for meta in s3_metadata_list:
         backup_id = meta.get("backup_id")
@@ -526,8 +587,10 @@ def import_backups(s3_metadata_list):
 
         backup = Backup()
         backup.uuid = backup_id
-        backup.s3_id = meta.get("s3_id", _next_s3_id(meta.get("cluster_id", "")))
-        backup.cluster_id = meta.get("cluster_id", "")
+        # Use target cluster_id if provided, otherwise keep source cluster_id
+        target_cluster = cluster_id or meta.get("cluster_id", "")
+        backup.s3_id = meta.get("s3_id", _next_s3_id(target_cluster))
+        backup.cluster_id = target_cluster
         backup.lvol_id = meta.get("lvol_id", "")
         backup.lvol_name = meta.get("lvol_name", "")
         backup.snapshot_id = meta.get("snapshot_id", "")
@@ -539,6 +602,9 @@ def import_backups(s3_metadata_list):
         backup.created_at = meta.get("created_at", 0)
         backup.status = Backup.STATUS_COMPLETED
         backup.s3_metadata = meta
+        # Preserve source cluster info for audit trail
+        backup.s3_metadata["source_cluster_id"] = meta.get("cluster_id", "")
+        backup.s3_metadata["source_node_id"] = meta.get("node_id", "")
         backup.write_to_db()
         imported += 1
 
