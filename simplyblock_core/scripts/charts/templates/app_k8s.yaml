@@ -19,6 +19,25 @@ spec:
         app: simplyblock-admin-control
     spec:
       serviceAccountName: simplyblock-control-sa
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet 
       affinity:
@@ -88,7 +107,26 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-webappapi
-    spec:       
+    spec:
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: webappapi
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -146,6 +184,25 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet 
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
       - name: storage-node-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -197,7 +254,26 @@ spec:
         app: simplyblock-mgmt-node-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet 
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: mgmt-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -251,7 +327,26 @@ spec:
         app: simplyblock-lvol-stats-collector
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet 
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: lvol-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -303,7 +398,26 @@ spec:
         app: simplyblock-main-distr-event-collector
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}  
       containers:
         - name: main-distr-event-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -355,7 +469,26 @@ spec:
         app: simplyblock-capacity-and-stats-collector
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}  
       containers:
       - name: capacity-and-stats-collector
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -407,7 +540,26 @@ spec:
         app: simplyblock-capacity-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: capacity-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -459,7 +611,26 @@ spec:
         app: simplyblock-health-check
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: health-check
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -511,7 +682,26 @@ spec:
         app: simplyblock-device-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: device-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -563,7 +753,26 @@ spec:
         app: simplyblock-lvol-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: lvol-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -614,7 +823,26 @@ spec:
         app: simplyblock-snapshot-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet      
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}      
       containers:
       - name: snapshot-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -663,7 +891,26 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-cleanupfdb
-    spec:      
+    spec:
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}      
       containers:
         - name: cleanupfdb
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -717,7 +964,26 @@ spec:
         app: simplyblock-tasks-runner-restart
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet      
+      dnsPolicy: ClusterFirstWithHostNet  
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}    
       containers:
         - name: tasks-runner-restart
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -769,7 +1035,26 @@ spec:
         app: simplyblock-tasks-runner-migration
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -820,7 +1105,26 @@ spec:
         app: simplyblock-tasks-runner-failed-migration
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-failed-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -871,7 +1175,26 @@ spec:
         app: simplyblock-tasks-runner-cluster-status
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-cluster-status
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -922,7 +1245,26 @@ spec:
         app: simplyblock-tasks-runner-new-device-migration
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-new-device-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -973,7 +1315,26 @@ spec:
         app: simplyblock-tasks-node-add-runner
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-node-addrunner
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -1027,7 +1388,26 @@ spec:
         app: simplyblock-tasks-runner-port-allow
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-port-allow
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -1078,7 +1458,26 @@ spec:
         app: simplyblock-tasks-runner-jc-comp-resume
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-jc-comp-resume
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -1130,6 +1529,25 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: tasks-runner-sync-lvol-del
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -1176,7 +1594,26 @@ spec:
     metadata:
       labels:
         app: simplyblock-fluent-bit
-    spec:      
+    spec:
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}      
       containers:
         - name: fluent-bit
           image: fluent/fluent-bit:1.8.11
