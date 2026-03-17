@@ -464,7 +464,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
 
     # Step 5: fire async transfer
     remote_bdev = f"{ctrl_name}n1"
-    ret = src_rpc.bdev_lvol_transfer(src_composite, 0, 4, remote_bdev, "migrate")
+    ret = src_rpc.bdev_lvol_transfer(src_composite, 0, 16, remote_bdev, "migrate")
     if ret is None:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
         tgt_rpc.subsystem_delete(temp_nqn)
