@@ -1,0 +1,9 @@
+{
+    "secondary_target": 0,
+    "with_compression": false,
+    "snapshot_backups": true,
+    "local_testing": true,
+    "local_endpoint": "http://192.168.10.164:9000",
+    "access_key_id": "minioadmin",
+    "secret_access_key": "minioadmin"
+}

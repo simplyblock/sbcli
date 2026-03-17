@@ -570,8 +570,9 @@ def check_node(node_id, with_devices=True):
         if primary_id:
             try:
                 n = db_controller.get_storage_node_by_id(primary_id)
-                lvol_port_check = check_port_on_node(snode, n.lvol_subsys_port)
-                logger.info(f"Check: node {snode.mgmt_ip}, port: {n.lvol_subsys_port} ... {lvol_port_check}")
+                sec_lvs_port = n.get_lvol_subsys_port(n.lvstore)
+                lvol_port_check = check_port_on_node(snode, sec_lvs_port)
+                logger.info(f"Check: node {snode.mgmt_ip}, port: {sec_lvs_port} ... {lvol_port_check}")
             except KeyError:
                 logger.error("node not found")
             except Exception:
@@ -579,8 +580,9 @@ def check_node(node_id, with_devices=True):
 
     if not snode.is_secondary_node:
         try:
-            lvol_port_check = check_port_on_node(snode, snode.lvol_subsys_port)
-            logger.info(f"Check: node {snode.mgmt_ip}, port: {snode.lvol_subsys_port} ... {lvol_port_check}")
+            own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+            lvol_port_check = check_port_on_node(snode, own_lvs_port)
+            logger.info(f"Check: node {snode.mgmt_ip}, port: {own_lvs_port} ... {lvol_port_check}")
         except Exception:
             logger.error("Check node port failed, connection error")
 

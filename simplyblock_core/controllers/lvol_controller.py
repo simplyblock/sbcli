@@ -22,6 +22,20 @@ from simplyblock_core.snode_client import SNodeClient
 logger = lg.getLogger()
 
 
+def _get_dhchap_group(cluster):
+    """Return the DH group to set on the target subsystem for DH-HMAC-CHAP.
+
+    Uses the first group from cluster.tls_config.dhchap_dhgroups if configured,
+    otherwise returns 'null' (HMAC-CHAP only, no DH key exchange).
+    """
+    if cluster and cluster.tls and cluster.tls_config:
+        params = cluster.tls_config.get("params", cluster.tls_config)
+        groups = params.get("dhchap_dhgroups") or []
+        if groups:
+            return groups[0]
+    return "null"
+
+
 def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
     """Write DHCHAP key files to a storage node and register them in SPDK's keyring.
 
@@ -493,7 +507,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
     lvol.lvs_name = host_node.lvstore
-    lvol.subsys_port = host_node.lvol_subsys_port
+    lvol.subsys_port = host_node.get_lvol_subsys_port(host_node.lvstore)
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
     if npcs or ndcs:
@@ -745,6 +759,9 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
 
         # add allowed hosts to subsystem
         if lvol.allowed_hosts:
+            db_ctrl = DBController()
+            cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
+            dhchap_group = _get_dhchap_group(cluster)
             for host_entry in lvol.allowed_hosts:
                 logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
                 has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
@@ -755,6 +772,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                         psk=key_names.get("psk"),
                         dhchap_key=key_names.get("dhchap_key"),
                         dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                        dhchap_group=dhchap_group,
                     )
                 else:
                     rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
@@ -764,8 +782,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
             ana_state = "optimized"
 
         # add listeners
-        # Use the node's own lvol_subsys_port, not lvol.subsys_port which is always the primary's port
-        listener_port = snode.lvol_subsys_port
+        # Use the per-lvstore port for the lvol's lvstore
+        listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
         logger.info("adding listeners")
         for iface in snode.data_nics:
             if iface.ip4_address and lvol.fabric==iface.trtype.lower():
@@ -834,6 +852,9 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     # Re-apply allowed hosts on subsystem recreate
     if lvol.allowed_hosts:
+        db_ctrl = DBController()
+        cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
+        dhchap_group = _get_dhchap_group(cluster)
         for host_entry in lvol.allowed_hosts:
             logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
             has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
@@ -844,6 +865,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
                     psk=key_names.get("psk"),
                     dhchap_key=key_names.get("dhchap_key"),
                     dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                    dhchap_group=dhchap_group,
                 )
             else:
                 rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
@@ -854,7 +876,8 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     # if not ret:
     #     return False, "Failed to add bdev to subsystem"
 
-    # add listeners
+    # add listeners - use per-lvstore port
+    recreate_lvs_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     logger.info("adding listeners")
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric==iface.trtype.lower():
@@ -862,9 +885,9 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
                 ana_state = "non_optimized"
                 if lvol.node_id == snode.get_id():
                     ana_state = "optimized"
-            logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, snode.lvol_subsys_port))
+            logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, recreate_lvs_port))
             logger.info(f"Setting ANA state: {ana_state}")
-            ret = rpc_client.listeners_create(lvol.nqn, iface.trtype, iface.ip4_address, snode.lvol_subsys_port, ana_state)
+            ret = rpc_client.listeners_create(lvol.nqn, iface.trtype, iface.ip4_address, recreate_lvs_port, ana_state)
 
     return True, None
 
@@ -1441,7 +1464,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
             ip = nic.ip4_address
-            port = snode.lvol_subsys_port
+            port = snode.get_lvol_subsys_port(lvol.lvs_name)
             transport = "tcp"
             if nic.ip4_address and lvol.fabric == nic.trtype.lower():
                 transport = nic.trtype.lower()
@@ -2025,6 +2048,12 @@ def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
 
     # Apply to all nodes where the subsystem exists
     has_keys = any(entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+    # Resolve DH group from cluster config (LVol has no cluster_id, get from first node)
+    dhchap_group = "null"
+    if has_keys and lvol.nodes:
+        first_node = db_controller.get_storage_node_by_id(lvol.nodes[0])
+        cluster = db_controller.get_cluster_by_id(first_node.cluster_id)
+        dhchap_group = _get_dhchap_group(cluster)
     for node_id in lvol.nodes:
         snode = db_controller.get_storage_node_by_id(node_id)
         if snode.status != StorageNode.STATUS_ONLINE:
@@ -2037,6 +2066,7 @@ def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
                 psk=key_names.get("psk"),
                 dhchap_key=key_names.get("dhchap_key"),
                 dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                dhchap_group=dhchap_group,
             )
         else:
             ret = rpc_client.subsystem_add_host(lvol.nqn, host_nqn)

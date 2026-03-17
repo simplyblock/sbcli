@@ -1,0 +1,66 @@
+{
+    "mgmt": {
+        "instance_id": "i-0c89a385a401bb465",
+        "public_ip": "54.158.10.136",
+        "private_ip": "172.31.39.42",
+        "subnet_id": "subnet-0593459d6b931ee4c",
+        "security_group_id": "sg-02e89a1372e9f39e9"
+    },
+    "storage_nodes": [
+        {
+            "instance_id": "i-0c7eb941d881fcaf8",
+            "private_ip": "172.31.39.63",
+            "public_ip": "98.82.191.230",
+            "subnet_id": "subnet-0593459d6b931ee4c",
+            "security_group_id": "sg-02e89a1372e9f39e9"
+        },
+        {
+            "instance_id": "i-0c55e8a8669bd1c3c",
+            "private_ip": "172.31.47.3",
+            "public_ip": "52.200.29.57",
+            "subnet_id": "subnet-0593459d6b931ee4c",
+            "security_group_id": "sg-02e89a1372e9f39e9"
+        },
+        {
+            "instance_id": "i-0a0e263e5c5bb7156",
+            "private_ip": "172.31.47.42",
+            "public_ip": "34.230.27.105",
+            "subnet_id": "subnet-0593459d6b931ee4c",
+            "security_group_id": "sg-02e89a1372e9f39e9"
+        },
+        {
+            "instance_id": "i-059e9278c85b68068",
+            "private_ip": "172.31.47.12",
+            "public_ip": "18.234.250.5",
+            "subnet_id": "subnet-0593459d6b931ee4c",
+            "security_group_id": "sg-02e89a1372e9f39e9"
+        },
+        {
+            "instance_id": "i-0fd08f9398d9927eb",
+            "private_ip": "172.31.42.4",
+            "public_ip": "54.198.36.240",
+            "subnet_id": "subnet-0593459d6b931ee4c",
+            "security_group_id": "sg-02e89a1372e9f39e9"
+        },
+        {
+            "instance_id": "i-064570127b4b7d1de",
+            "private_ip": "172.31.46.121",
+            "public_ip": "100.24.64.121",
+            "subnet_id": "subnet-0593459d6b931ee4c",
+            "security_group_id": "sg-02e89a1372e9f39e9"
+        }
+    ],
+    "clients": [
+        {
+            "instance_id": "i-03e059eb4621e6e95",
+            "public_ip": "100.48.2.4",
+            "private_ip": "172.31.40.204",
+            "security_group_id": "sg-02e89a1372e9f39e9"
+        }
+    ],
+    "subnet_id": "subnet-0593459d6b931ee4c",
+    "target_group": "sg-02e89a1372e9f39e9",
+    "cluster_uuid": "0594e7b0-764b-45c2-8537-3af57f83a3c1",
+    "user": "ec2-user",
+    "key_path": "/home/michael/.ssh/mtes01.pem"
+}

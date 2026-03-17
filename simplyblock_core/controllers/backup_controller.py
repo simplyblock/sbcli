@@ -5,6 +5,9 @@ import re
 import time
 import uuid
 
+import boto3
+from botocore.exceptions import ClientError
+
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
@@ -91,13 +94,38 @@ def _write_s3_metadata(rpc_client, backup):
 
 
 def _get_latest_backup_for_lvol(lvol_id):
-    """Get the most recent completed backup for a given lvol."""
+    """Get the most recent non-failed backup for a given lvol.
+
+    Includes pending/in-progress backups so that chain links are set
+    even when multiple backups are created in quick succession before
+    the earlier ones complete.
+    """
     backups = db_controller.get_backups_by_lvol_id(lvol_id)
-    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
-    if not completed:
+    valid = [b for b in backups if b.status in (
+        Backup.STATUS_COMPLETED, Backup.STATUS_IN_PROGRESS, Backup.STATUS_PENDING)]
+    if not valid:
         return None
-    completed.sort(key=lambda b: b.created_at, reverse=True)
-    return completed[0]
+    valid.sort(key=lambda b: b.created_at, reverse=True)
+    return valid[0]
+
+
+def _compute_s3_cpu_masks(node):
+    """Compute CPU masks for the S3 bdev.
+    Returns (bdb_lcpu_mask, s3_lcpu_mask):
+        bdb_lcpu_mask: app_thread core (SPDK lightweight thread, low overhead)
+        s3_lcpu_mask: all system vCPUs (no pinning — let Linux scheduler handle
+                      the AWS SDK thread pool; the data plane default would
+                      wrongly pin onto SPDK reactor cores)
+    """
+    # SPDK thread for the bdev poller — reuse the app thread core
+    bdb_lcpu_mask = 0
+    if node.app_thread_mask:
+        bdb_lcpu_mask = int(node.app_thread_mask, 16)
+
+    # AWS SDK thread pool — set all system vCPU bits so threads are unconstrained
+    s3_lcpu_mask = (1 << node.cpu) - 1 if node.cpu > 0 else 0
+
+    return bdb_lcpu_mask, s3_lcpu_mask
 
 
 def create_s3_bdev(node, backup_config):
@@ -114,6 +142,20 @@ def create_s3_bdev(node, backup_config):
         node.rpc_username, node.rpc_password)
     s3_bdev_name = f"s3_{node.lvstore}"
 
+    bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
+
+    # Step 0: Create helper poll group threads for S3 transfers
+    cpu_mask = node.app_thread_mask if node.app_thread_mask else "0x1"
+    try:
+        ret = rpc_client.bdev_lvol_create_poller_group(cpu_mask)
+        if not ret:
+            logger.warning(f"Failed to create poller group on node {node.get_id()}")
+        else:
+            logger.info(f"S3 poller group created with mask {cpu_mask} on node {node.get_id()}")
+    except Exception as e:
+        # May fail if already created — not fatal
+        logger.warning(f"Poller group creation returned error (may already exist): {e}")
+
     # Step 1: Create the S3 bdev
     try:
         ret = rpc_client.bdev_s3_create(
@@ -125,6 +167,9 @@ def create_s3_bdev(node, backup_config):
             local_endpoint=backup_config.get("local_endpoint", ""),
             access_key_id=backup_config.get("access_key_id", ""),
             secret_access_key=backup_config.get("secret_access_key", ""),
+            bdb_lcpu_mask=bdb_lcpu_mask,
+            s3_lcpu_mask=s3_lcpu_mask,
+            s3_thread_pool_size=backup_config.get("s3_thread_pool_size", 0),
         )
         if not ret:
             logger.warning(f"Failed to create S3 bdev on node {node.get_id()}")
@@ -133,7 +178,42 @@ def create_s3_bdev(node, backup_config):
         logger.error(f"Error creating S3 bdev on node {node.get_id()}: {e}")
         return False
 
-    # Step 2: Attach the S3 bdev to the lvstore
+    # Step 2: Ensure the S3 bucket exists, then register it with the S3 bdev
+    bucket_name = backup_config.get("bucket_name", f"simplyblock-backup-{node.cluster_id}")
+    try:
+        s3_kwargs = {
+            "aws_access_key_id": backup_config.get("access_key_id", ""),
+            "aws_secret_access_key": backup_config.get("secret_access_key", ""),
+        }
+        endpoint_url = backup_config.get("local_endpoint", "")
+        if endpoint_url:
+            s3_kwargs["endpoint_url"] = endpoint_url
+        s3_client = boto3.client("s3", **s3_kwargs)
+        try:
+            s3_client.head_bucket(Bucket=bucket_name)
+            logger.info(f"S3 bucket already exists: {bucket_name}")
+        except ClientError as e:
+            error_code = int(e.response["Error"]["Code"])
+            if error_code == 404:
+                s3_client.create_bucket(Bucket=bucket_name)
+                logger.info(f"S3 bucket created: {bucket_name}")
+            else:
+                raise
+    except Exception as e:
+        logger.error(f"Error ensuring S3 bucket {bucket_name} exists: {e}")
+        return False
+
+    try:
+        ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
+        if not ret:
+            logger.warning(f"Failed to set bucket name on S3 bdev {s3_bdev_name}")
+            return False
+        logger.info(f"S3 bdev bucket set: {bucket_name} on {s3_bdev_name}")
+    except Exception as e:
+        logger.error(f"Error setting bucket name on S3 bdev {s3_bdev_name}: {e}")
+        return False
+
+    # Step 3: Attach the S3 bdev to the lvstore
     try:
         ret = rpc_client.bdev_lvol_s3_bdev(node.lvstore, s3_bdev_name)
         if ret:
@@ -148,17 +228,35 @@ def create_s3_bdev(node, backup_config):
 
 
 def _get_snapshot_chain(snapshot):
-    """Walk snap_ref_id to build the full ancestor chain, oldest first."""
-    chain = [snapshot]
-    current = snapshot
-    while current.snap_ref_id:
-        try:
-            parent = db_controller.get_snapshot_by_id(current.snap_ref_id)
-            chain.append(parent)
-            current = parent
-        except KeyError:
-            break
-    chain.reverse()  # oldest first
+    """Build the snapshot chain ending at this snapshot, oldest first.
+
+    For cloned volumes, walks snap_ref_id upward.  For regular volumes
+    (no snap_ref_id), collects all snapshots of the same lvol that were
+    created at or before this snapshot, ordered by created_at.
+    """
+    if snapshot.snap_ref_id:
+        # Clone-based chain: walk snap_ref_id
+        chain = [snapshot]
+        current = snapshot
+        while current.snap_ref_id:
+            try:
+                parent = db_controller.get_snapshot_by_id(current.snap_ref_id)
+                chain.append(parent)
+                current = parent
+            except KeyError:
+                break
+        chain.reverse()  # oldest first
+        return chain
+
+    # Regular volume: all snapshots of the same lvol up to this one
+    lvol_id = snapshot.lvol.get_id() if snapshot.lvol else None
+    if not lvol_id:
+        return [snapshot]
+
+    all_snaps = db_controller.get_snapshots_by_lvol_id(lvol_id)
+    # Filter to snapshots created at or before this one, sort oldest first
+    chain = [s for s in all_snaps if s.created_at <= snapshot.created_at]
+    chain.sort(key=lambda s: s.created_at)
     return chain
 
 
@@ -178,6 +276,7 @@ def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup):
     backup.uuid = backup_id
     backup.s3_id = _next_s3_id(cluster_id)
     backup.cluster_id = cluster_id
+    backup.source_cluster_id = cluster_id  # local backup
     backup.lvol_id = lvol.get_id()
     backup.lvol_name = lvol.lvol_name
     backup.snapshot_id = snapshot.get_id()
@@ -214,6 +313,18 @@ def backup_snapshot(snapshot_id, cluster_id=None):
         snapshot = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
         return None, str(e)
+
+    # Block new backups when S3 source is switched to an external cluster
+    node_id = snapshot.lvol.node_id if snapshot.lvol else None
+    if node_id:
+        try:
+            snode = db_controller.get_storage_node_by_id(node_id)
+            if not is_local_backup_source(snode.cluster_id):
+                return None, ("Cannot create backups while backup source is "
+                              "switched to an external cluster. Switch back "
+                              "to local first.")
+        except KeyError:
+            pass
 
     if not snapshot.lvol:
         return None, "Snapshot has no associated lvol"
@@ -261,13 +372,21 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     return final_backup_id, None
 
 
-def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
+def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
+                   target_node_id=None):
     """Restore a backup chain into a new fully-accessible lvol.
 
     Creates the volume (with subsystem, listeners, namespace) via
     lvol_controller.add_lvol_ha, then schedules an async task to
     fill in the data from S3.  The volume is in STATUS_RESTORING
     until the data transfer completes.
+
+    Args:
+        target_node_id: Optional node to restore onto. If not provided,
+            restores to the original backup node. Any node in the cluster
+            can restore any backup because S3 keys are node-agnostic
+            ({s3_id}/{mid_flag}/{extent}) and all nodes share the same
+            S3 bucket and credentials.
 
     Returns (lvol_uuid, error_message).
     """
@@ -279,6 +398,22 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
     except KeyError as e:
         return None, str(e)
 
+    # Verify the backup's source matches the active S3 source.
+    # If the backup came from an external cluster, the S3 bdev must be
+    # switched to that cluster's bucket before restoring.
+    if cluster_id:
+        backup_src = backup.source_cluster_id or backup.cluster_id
+        try:
+            cl = db_controller.get_cluster_by_id(cluster_id)
+            active_src = cl.backup_source or cluster_id
+            if backup_src != active_src:
+                return None, (
+                    f"Backup source is {backup_src[:8]} but active S3 source "
+                    f"is {active_src[:8]}. Use 'sbctl backup source-switch "
+                    f"{backup_src}' first.")
+        except KeyError:
+            pass
+
     # Build the backup chain
     chain = db_controller.get_backup_chain(backup_id)
     if not chain:
@@ -288,7 +423,22 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
     if size <= 0:
         return None, "Backup has no size information"
 
-    # Create a fully-exposed volume (subsystem, listeners, namespace)
+    # Determine target node: use explicit target, or fall back to backup node
+    restore_node_id = target_node_id or backup.node_id
+
+    # Validate target node is online and has an S3 bdev
+    try:
+        target_node = db_controller.get_storage_node_by_id(restore_node_id)
+    except KeyError:
+        return None, f"Target node {restore_node_id} not found"
+
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        return None, (f"Target node {restore_node_id} is not online "
+                      f"(status: {target_node.status})")
+
+    if not target_node.lvstore:
+        return None, f"Target node {restore_node_id} has no lvstore (S3 bdev requires lvstore)"
+
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,
@@ -299,7 +449,7 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
         max_rw_mbytes=0,
         max_r_mbytes=0,
         max_w_mbytes=0,
-        host_id_or_name=None,
+        host_id_or_name=restore_node_id,
         ha_type="default",
         crypto_key1=None,
         crypto_key2=None,
@@ -332,9 +482,18 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None):
     # The bdev name the data plane expects (e.g. LVS_7744/LVOL_12345)
     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
+    # Only include completed backups — incomplete ones have no metadata in S3
+    # Data plane processes s3_ids in array order: the first entry's clusters
+    # take priority (skip-if-populated).  Newest-first means the latest
+    # incremental data wins, with older backups filling any remaining gaps.
+    completed_chain = [b for b in reversed(chain)
+                       if b.status == Backup.STATUS_COMPLETED]
+    if not completed_chain:
+        return None, "No completed backups in chain"
+
     result = tasks_controller.add_backup_restore_task(
         cluster_id, lvol.node_id, backup_id, bdev_name,
-        [b.s3_id for b in chain], lvol_id=lvol_id)
+        [b.s3_id for b in completed_chain], lvol_id=lvol_id)
 
     if result:
         return lvol_id, None
@@ -389,7 +548,9 @@ def list_backups(cluster_id=None):
     backups = db_controller.get_backups(cluster_id)
     data = []
     for b in backups:
-        data.append({
+        source = b.source_cluster_id or b.cluster_id
+        is_external = source != b.cluster_id
+        entry = {
             "ID": b.uuid,
             "S3 ID": b.s3_id,
             "LVol": b.lvol_name,
@@ -398,13 +559,54 @@ def list_backups(cluster_id=None):
             "Status": b.status,
             "Prev": b.prev_backup_id[:8] if b.prev_backup_id else "-",
             "Created": time.strftime("%Y-%m-%d %H:%M", time.localtime(b.created_at)) if b.created_at else "",
-        })
+            "Source": source[:8] if is_external else "local",
+        }
+        data.append(entry)
     return data
 
 
-def import_backups(s3_metadata_list):
+def export_backups(cluster_id=None, lvol_name=None):
+    """Export completed backup metadata as a list of dicts suitable for import
+    into another cluster via import_backups().
+
+    Returns a list of metadata dicts including s3_id, chain links, and size.
+    """
+    backups = db_controller.get_backups(cluster_id)
+    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
+    if lvol_name:
+        completed = [b for b in completed if b.lvol_name == lvol_name]
+
+    result = []
+    for b in completed:
+        result.append({
+            "backup_id": b.uuid,
+            "s3_id": b.s3_id,
+            "cluster_id": b.cluster_id,
+            "lvol_id": b.lvol_id,
+            "lvol_name": b.lvol_name,
+            "snapshot_id": b.snapshot_id,
+            "snapshot_name": b.snapshot_name,
+            "node_id": b.node_id,
+            "prev_backup_id": b.prev_backup_id,
+            "size": b.size,
+            "allowed_hosts": b.allowed_hosts,
+            "created_at": b.created_at,
+        })
+    return result
+
+
+def import_backups(s3_metadata_list, cluster_id=None):
     """Import backup metadata from another cluster's S3 metadata.
-    s3_metadata_list is a list of dicts with backup metadata."""
+
+    Backups are stored in the local cluster's DB namespace but keep their
+    original s3_ids (scoped to source_cluster_id).  The source_cluster_id
+    field tracks which cluster originally created the backup.
+
+    Args:
+        s3_metadata_list: list of dicts with backup metadata.
+        cluster_id: Target cluster to import into.  Required for cross-cluster
+            restore so the backups are visible in the local cluster's DB.
+    """
     imported = 0
     for meta in s3_metadata_list:
         backup_id = meta.get("backup_id")
@@ -418,10 +620,14 @@ def import_backups(s3_metadata_list):
         except KeyError:
             pass
 
+        source_cluster = meta.get("cluster_id", "")
+        target_cluster = cluster_id or source_cluster
+
         backup = Backup()
         backup.uuid = backup_id
-        backup.s3_id = meta.get("s3_id", _next_s3_id(meta.get("cluster_id", "")))
-        backup.cluster_id = meta.get("cluster_id", "")
+        backup.s3_id = meta.get("s3_id", 0)
+        backup.cluster_id = target_cluster
+        backup.source_cluster_id = source_cluster
         backup.lvol_id = meta.get("lvol_id", "")
         backup.lvol_name = meta.get("lvol_name", "")
         backup.snapshot_id = meta.get("snapshot_id", "")
@@ -437,6 +643,125 @@ def import_backups(s3_metadata_list):
         imported += 1
 
     return imported
+
+
+def get_backup_sources(cluster_id):
+    """List all distinct backup sources (local + imported clusters).
+
+    Returns a list of dicts with source_cluster_id, count, and whether
+    it is the currently active source.
+    """
+    try:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        return []
+
+    backups = db_controller.get_backups(cluster_id)
+    sources = {}
+    for b in backups:
+        src = b.source_cluster_id or cluster_id
+        if src not in sources:
+            sources[src] = {"source_cluster_id": src, "count": 0, "is_local": src == cluster_id}
+        sources[src]["count"] += 1
+
+    active_source = cluster.backup_source or cluster_id
+    result = []
+    for src_id, info in sources.items():
+        info["active"] = (src_id == active_source)
+        result.append(info)
+
+    # Always include local even if no backups
+    if cluster_id not in sources:
+        result.append({
+            "source_cluster_id": cluster_id,
+            "count": 0,
+            "is_local": True,
+            "active": active_source == cluster_id,
+        })
+
+    return result
+
+
+def switch_backup_source(cluster_id, source_cluster_id):
+    """Switch the active backup source for all nodes in the cluster.
+
+    Reconfigures the S3 bdev on every node to read from the bucket
+    belonging to source_cluster_id.  While switched to an external
+    source, new backups cannot be created.
+
+    Args:
+        cluster_id: The local cluster ID.
+        source_cluster_id: The cluster ID whose S3 bucket to activate.
+            Use the local cluster_id (or "local") to switch back.
+
+    Returns (success, error_message).
+    """
+    try:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        return False, f"Cluster {cluster_id} not found"
+
+    if source_cluster_id == "local":
+        source_cluster_id = cluster_id
+
+    # Determine the bucket name for the source cluster
+    backup_config = cluster.backup_config or {}
+    if source_cluster_id == cluster_id:
+        bucket_name = backup_config.get("bucket_name",
+                                        f"simplyblock-backup-{cluster_id}")
+    else:
+        bucket_name = f"simplyblock-backup-{source_cluster_id}"
+
+    # Verify the bucket exists
+    try:
+        s3_kwargs = {
+            "aws_access_key_id": backup_config.get("access_key_id", ""),
+            "aws_secret_access_key": backup_config.get("secret_access_key", ""),
+        }
+        endpoint_url = backup_config.get("local_endpoint", "")
+        if endpoint_url:
+            s3_kwargs["endpoint_url"] = endpoint_url
+        s3_client = boto3.client("s3", **s3_kwargs)
+        s3_client.head_bucket(Bucket=bucket_name)
+    except Exception as e:
+        return False, f"S3 bucket {bucket_name} not accessible: {e}"
+
+    # Reconfigure S3 bdev bucket on all online nodes
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    errors = []
+    for node in nodes:
+        if node.status != StorageNode.STATUS_ONLINE or not node.lvstore:
+            continue
+        try:
+            rpc_client = RPCClient(
+                node.mgmt_ip, node.rpc_port,
+                node.rpc_username, node.rpc_password)
+            s3_bdev_name = f"s3_{node.lvstore}"
+            ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
+            if not ret:
+                errors.append(f"Node {node.get_id()}: failed to set bucket")
+            else:
+                logger.info(f"Switched S3 bucket to {bucket_name} on node {node.get_id()}")
+        except Exception as e:
+            errors.append(f"Node {node.get_id()}: {e}")
+
+    if errors:
+        return False, "; ".join(errors)
+
+    # Persist the active source in the cluster record
+    cluster.backup_source = source_cluster_id
+    cluster.write_to_db()
+
+    return True, None
+
+
+def is_local_backup_source(cluster_id):
+    """Check if the cluster is currently using its own local backup source."""
+    try:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        return True
+    return not cluster.backup_source or cluster.backup_source == cluster_id
 
 
 # ---- Backup Policy Management ----
@@ -585,24 +910,11 @@ def evaluate_policy(lvol):
         oldest_age = now - completed[0].created_at
         age_exceeded = oldest_age > policy.max_age_seconds
 
-    # Both conditions must be met before merging
-    if versions_exceeded and age_exceeded:
-        # Merge oldest into second oldest
+    # Either condition triggers a merge
+    if versions_exceeded or age_exceeded:
         oldest = completed[0]
         second = completed[1]
         _trigger_merge(second, oldest)
-    elif policy.max_versions > 0 and not policy.max_age_seconds:
-        # Only version limit, no age limit
-        if versions_exceeded:
-            oldest = completed[0]
-            second = completed[1]
-            _trigger_merge(second, oldest)
-    elif policy.max_age_seconds > 0 and not policy.max_versions:
-        # Only age limit, no version limit
-        if age_exceeded:
-            oldest = completed[0]
-            second = completed[1]
-            _trigger_merge(second, oldest)
 
 
 def evaluate_schedule(lvol):
@@ -642,43 +954,75 @@ def evaluate_schedule(lvol):
             _auto_backup_lvol(lvol)
             return  # Skip merge evaluation this cycle — let the backup complete first
 
-    # Tiered merge: enforce keep_count per tier
+    # Tiered merge: enforce keep_count per tier.
+    # Each tier covers an age range.  Backups age from tier 0 (newest)
+    # into higher tiers.  When a tier exceeds its keep_count, the oldest
+    # backup in that tier is merged into its successor.
+    # All tiers are evaluated each cycle so limits are maintained in parallel.
     if len(completed) < 2:
         return
 
     completed.sort(key=lambda b: b.created_at)
 
-    # Assign backups to tiers (newest first matching).
-    # Tier boundaries: tier[i] covers backups with age < tier[i+1].interval (or unlimited for last tier).
-    # Within each tier, if count > keep_count, merge the oldest two.
+    # Don't merge while another merge is already in progress
+    merging = [b for b in backups if b.status == Backup.STATUS_MERGING]
+    if merging:
+        return
+
     for tier_idx, (interval, keep_count) in enumerate(tiers):
-        # Upper age boundary for this tier
+        # Age boundaries for this tier
+        if tier_idx == 0:
+            lower_age = 0
+        else:
+            lower_age = tiers[tier_idx - 1][0]
+
         if tier_idx + 1 < len(tiers):
             upper_age = tiers[tier_idx + 1][0]
         else:
             upper_age = float('inf')
 
-        tier_backups = [b for b in completed if interval <= (now - b.created_at) < upper_age]
-        # For the first (smallest) tier, also include backups younger than the first interval
-        if tier_idx == 0:
-            tier_backups = [b for b in completed if (now - b.created_at) < upper_age]
+        tier_backups = [b for b in completed
+                        if lower_age <= (now - b.created_at) < upper_age]
 
         if len(tier_backups) > keep_count:
-            # Merge oldest two in this tier
             tier_backups.sort(key=lambda b: b.created_at)
             oldest = tier_backups[0]
             second = tier_backups[1]
             _trigger_merge(second, oldest)
-            return  # One merge at a time
+            return  # One merge per cycle to avoid conflicts
 
 
 def _auto_backup_lvol(lvol):
-    """Create an automatic snapshot + backup for scheduled backups."""
+    """Create an automatic snapshot + backup for scheduled backups.
+
+    Unlike manual backup_snapshot() which walks the full ancestor chain,
+    auto-backups create a single snapshot and a single backup for it.
+    The prev_backup_id is set to the latest existing backup so the
+    incremental chain is maintained without re-backing all ancestors.
+    """
     from simplyblock_core.controllers import snapshot_controller
     snap_name = f"auto_{lvol.lvol_name}_{int(time.time())}"
-    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name, backup=True)
+    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name)
     if error:
-        logger.warning(f"Auto-backup failed for lvol {lvol.get_id()}: {error}")
+        logger.warning(f"Auto-backup snapshot failed for lvol {lvol.get_id()}: {error}")
+        return
+
+    try:
+        snapshot = db_controller.get_snapshot_by_id(snap_id)
+    except KeyError:
+        logger.warning(f"Auto-backup: snapshot {snap_id} not found after creation")
+        return
+
+    node_id = lvol.node_id
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.warning(f"Auto-backup: node {node_id} not found")
+        return
+
+    cluster_id = snode.cluster_id
+    prev_backup = _get_latest_backup_for_lvol(lvol.get_id())
+    _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup)
 
 
 def _trigger_merge(keep_backup, old_backup):

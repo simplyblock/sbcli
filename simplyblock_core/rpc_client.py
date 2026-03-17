@@ -204,8 +204,14 @@ class RPCClient:
         params = {"name": name}
         return self._request("keyring_file_remove_key", params)
 
-    def subsystem_add_host(self, nqn, host, psk=None, dhchap_key=None, dhchap_ctrlr_key=None):
-        """Add a host to a subsystem. Key params are keyring key names (not raw values)."""
+    def subsystem_add_host(self, nqn, host, psk=None, dhchap_key=None, dhchap_ctrlr_key=None, dhchap_group=None):
+        """Add a host to a subsystem. Key params are keyring key names (not raw values).
+
+        dhchap_group: DH group for DH-HMAC-CHAP (e.g. 'null', 'ffdhe2048').
+        When dhchap_key is set but dhchap_group is omitted, SPDK may advertise
+        DH groups it cannot fulfil, causing 'failed to generate DH key' on the
+        target.  Always pass an explicit group when using DH-CHAP.
+        """
         params = {"nqn": nqn, "host": host}
         if psk:
             params["psk"] = psk
@@ -213,6 +219,8 @@ class RPCClient:
             params["dhchap_key"] = dhchap_key
         if dhchap_ctrlr_key:
             params["dhchap_ctrlr_key"] = dhchap_ctrlr_key
+        if dhchap_group:
+            params["dhchap_group"] = dhchap_group
         return self._request("nvmf_subsystem_add_host", params)
 
     def subsystem_remove_host(self, nqn, host):
@@ -1288,7 +1296,7 @@ class RPCClient:
 
     def bdev_lvol_set_migration_flag(self, name):
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
-        return self._request("bdev_lvol_set_migration_flag", {"name": name})
+        return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
     def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate"):
         """
@@ -1299,10 +1307,10 @@ class RPCClient:
         Poll progress with :meth:`bdev_lvol_transfer_stat`.
         """
         return self._request("bdev_lvol_transfer", {
-            "name": name,
+            "lvol_name": name,
             "offset": offset,
-            "block_size": batch_size,
-            "bdev_name": bdev_name,
+            "cluster_batch": batch_size,
+            "gateway": bdev_name,
             "operation": operation,
         })
 
@@ -1325,8 +1333,8 @@ class RPCClient:
         before converting the lvol to a snapshot.
         """
         return self._request("bdev_lvol_add_clone", {
-            "lvol_name": lvol_name,
-            "parent_snapshot_name": parent_snapshot_name,
+            "lvol_name": parent_snapshot_name,
+            "child_name": lvol_name,
         })
 
     def bdev_lvol_convert(self, name):
@@ -1334,7 +1342,7 @@ class RPCClient:
         Convert a writable lvol *name* (composite) into an immutable snapshot
         in-place.  Called on the target node after :meth:`bdev_lvol_add_clone`.
         """
-        return self._request("bdev_lvol_convert", {"name": name})
+        return self._request("bdev_lvol_convert", {"lvol_name": name})
 
     def bdev_lvol_get_lvols(self, lvs_name):
         """
@@ -1363,15 +1371,16 @@ class RPCClient:
             "lvol_name": lvol_name,
             "lvol_id": lvol_id,
             "snapshot_name": snapshot_name,
-            "batch_size": batch_size,
-            "bdev_name": bdev_name,
+            "cluster_batch": batch_size,
+            "gateway": bdev_name,
         })
 
     # ---- S3 Backup RPCs ----
 
     def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
                        snapshot_backups=True, local_testing=False, local_endpoint="",
-                       access_key_id="", secret_access_key=""):
+                       access_key_id="", secret_access_key="",
+                       bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0):
         """Create the S3 bdev device.
         Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
         Args:
@@ -1383,6 +1392,9 @@ class RPCClient:
             local_endpoint: Local endpoint URL
             access_key_id: AWS access key (optional if using IAM roles)
             secret_access_key: AWS secret key (optional if using IAM roles)
+            bdb_lcpu_mask: CPU mask for the SPDK thread of this bdev (uint64)
+            s3_lcpu_mask: CPU mask for the internal AWS S3 thread pool (uint64)
+            s3_thread_pool_size: AWS S3 thread pool size (default 32 on data plane)
         """
         params = {
             "name": name,
@@ -1398,7 +1410,23 @@ class RPCClient:
             params["access_key_id"] = access_key_id
         if secret_access_key:
             params["secret_access_key"] = secret_access_key
+        if bdb_lcpu_mask:
+            params["bdb_lcpu_mask"] = bdb_lcpu_mask
+        if s3_lcpu_mask:
+            params["s3_lcpu_mask"] = s3_lcpu_mask
+        if s3_thread_pool_size:
+            params["s3_thread_pool_size"] = s3_thread_pool_size
         return self._request("bdev_s3_create", params)
+
+    def bdev_lvol_create_poller_group(self, cpu_mask):
+        """Create helper poll group threads for S3 backup transfers.
+        Must be called before any S3 backup/recovery operations.
+        Args:
+            cpu_mask: hex CPU mask for helper threads (e.g. '0x1')
+        """
+        return self._request("bdev_lvol_create_poller_group", {
+            "cpu_mask": cpu_mask,
+        })
 
     def bdev_lvol_s3_bdev(self, lvs_name, bdev_name):
         """Attach an S3 bdev to the given lvstore.
@@ -1407,6 +1435,18 @@ class RPCClient:
         return self._request("bdev_lvol_s3_bdev", {
             "lvs_name": lvs_name,
             "s3_bdev": bdev_name,
+        })
+
+    def bdev_s3_add_bucket_name(self, name, bucket_name):
+        """Register a bucket name with the S3 bdev.
+        Must be called after bdev_s3_create and before any backup/recovery operations.
+        Args:
+            name: S3 bdev name (e.g. 's3_LVS_1234')
+            bucket_name: S3/MinIO bucket name to use for data storage
+        """
+        return self._request("bdev_s3_add_bucket_name", {
+            "name": name,
+            "bucket_name": bucket_name,
         })
 
     def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
