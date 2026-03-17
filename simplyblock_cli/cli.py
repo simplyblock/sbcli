@@ -416,7 +416,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=32, dest='qpair_count')
         argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
-        argument = subcommand.add_argument('--host-sec', '--tls', help='Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)', type=str, dest='nvmeof_tls')
+        argument = subcommand.add_argument('--host-sec', help='Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)', type=str, dest='host_sec')
         argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1', type=int, default=1, dest='max_fault_tolerance', choices=[1, 2])
         argument = subcommand.add_argument('--use-backup', help='Path to JSON file with S3/MinIO backup configuration', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420', type=int, default=4420, dest='nvmf_base_port')
@@ -871,12 +871,15 @@ class CLIWrapper(CLIWrapperBase):
         self.init_backup__list(subparser)
         self.init_backup__delete(subparser)
         self.init_backup__restore(subparser)
+        self.init_backup__export(subparser)
         self.init_backup__import(subparser)
         self.init_backup__policy_add(subparser)
         self.init_backup__policy_remove(subparser)
         self.init_backup__policy_list(subparser)
         self.init_backup__policy_attach(subparser)
         self.init_backup__policy_detach(subparser)
+        self.init_backup__source_list(subparser)
+        self.init_backup__source_switch(subparser)
 
     def init_backup__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'List all backups')
@@ -891,11 +894,20 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('backup_id', help='Backup id', type=str)
         subcommand.add_argument('--lvol', help='New logical volume name', type=str, required=True, dest='lvol_name')
         subcommand.add_argument('--pool', help='Target pool name or UUID', type=str, required=True, dest='pool')
+        subcommand.add_argument('--node', help='Target storage node ID (default: original backup node)', type=str, default=None, dest='node')
         subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+
+    def init_backup__export(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore')
+        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+        subcommand.add_argument('--lvol', help='Filter exports to a specific lvol name', type=str, default=None, dest='lvol_name')
+        subcommand.add_argument('-o', '--output', help='Output file path (default: stdout)', type=str, default=None, dest='output')
 
     def init_backup__import(self, subparser):
         subcommand = self.add_sub_command(subparser, 'import', 'Import backup metadata from a JSON file')
         subcommand.add_argument('metadata_file', help='Path to JSON metadata file', type=str)
+        subcommand.add_argument('--cluster-id', help='Target cluster to import into (required for cross-cluster restore)',
+                                type=str, default=None, dest='cluster_id')
 
     def init_backup__policy_add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-add', 'Create a new backup policy')
@@ -925,6 +937,17 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('policy_id', help='Policy id', type=str)
         subcommand.add_argument('target_type', help='Target type', type=str, choices=['pool', 'lvol'])
         subcommand.add_argument('target_id', help='Target id (pool or lvol UUID)', type=str)
+
+    def init_backup__source_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'source-list', 'List backup sources (local and imported clusters)')
+        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+
+    def init_backup__source_switch(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'source-switch',
+            'Switch the active S3 backup source to a different cluster. '
+            'Use "local" or the local cluster UUID to switch back.')
+        subcommand.add_argument('source_cluster_id', help='Source cluster UUID or "local"', type=str)
+        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
 
     def init_qos(self):
         subparser = self.add_command('qos', 'qos commands')
@@ -1309,6 +1332,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__delete(sub_command, args)
                 elif sub_command in ['restore']:
                     ret = self.backup__restore(sub_command, args)
+                elif sub_command in ['export']:
+                    ret = self.backup__export(sub_command, args)
                 elif sub_command in ['import']:
                     ret = self.backup__import(sub_command, args)
                 elif sub_command in ['policy-add']:
@@ -1321,6 +1346,10 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__policy_attach(sub_command, args)
                 elif sub_command in ['policy-detach']:
                     ret = self.backup__policy_detach(sub_command, args)
+                elif sub_command in ['source-list']:
+                    ret = self.backup__source_list(sub_command, args)
+                elif sub_command in ['source-switch']:
+                    ret = self.backup__source_switch(sub_command, args)
                 else:
                     self.parser.print_help()
 

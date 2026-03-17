@@ -316,7 +316,7 @@ def _bdev_lvol_get_lvol_delete_status(s: NodeState, p: dict):
 
 
 def _bdev_lvol_set_migration_flag(s: NodeState, p: dict):
-    name = _req(p, 'name')
+    name = _req(p, 'lvol_name')
     composite = name if name in s.lvols else s.composite(name)
     if composite not in s.lvols:
         raise _RpcError(-2, f"bdev {composite} not found")
@@ -395,10 +395,13 @@ def _bdev_lvol_clone(s: NodeState, p: dict):
 
 
 def _bdev_lvol_add_clone(s: NodeState, p: dict):
-    """Link a writable lvol to its parent snapshot (migration pre-step)."""
-    lvol_name = _req(p, 'lvol_name')
-    parent_snap = _req(p, 'parent_snapshot_name')
-    composite = lvol_name if lvol_name in s.lvols else s.composite(lvol_name)
+    """Link a writable lvol (child) to its parent snapshot (migration pre-step).
+
+    SPDK semantics: lvol_name = parent snapshot, child_name = the clone/child.
+    """
+    parent_snap = _req(p, 'lvol_name')
+    child_name = _req(p, 'child_name')
+    composite = child_name if child_name in s.lvols else s.composite(child_name)
     if composite not in s.lvols:
         raise _RpcError(-2, f"lvol {composite} not found")
     s.lvols[composite]['driver_specific']['lvol']['base_snapshot'] = parent_snap
@@ -408,7 +411,7 @@ def _bdev_lvol_add_clone(s: NodeState, p: dict):
 
 def _bdev_lvol_convert(s: NodeState, p: dict):
     """Convert a writable lvol into an immutable snapshot in-place."""
-    name = _req(p, 'name')
+    name = _req(p, 'lvol_name')
     composite = name if name in s.lvols else s.composite(name)
     if composite not in s.lvols:
         raise _RpcError(-2, f"lvol {composite} not found for convert")
@@ -509,7 +512,7 @@ def _ultra21_lvol_set(s: NodeState, p: dict):
 
 def _bdev_lvol_transfer(s: NodeState, p: dict):
     """Start async data transfer from source lvol to a remote bdev."""
-    name = _req(p, 'name')
+    name = _req(p, 'lvol_name')
     composite = name if (name in s.lvols or name in s.snapshots) else s.composite(name)
     if composite not in s.lvols and composite not in s.snapshots:
         raise _RpcError(-2, f"source bdev {composite} not found")
@@ -523,7 +526,7 @@ def _bdev_lvol_transfer(s: NodeState, p: dict):
 
 def _bdev_lvol_transfer_stat(s: NodeState, p: dict):
     """Poll transfer status: {'transfer_state': ..., 'offset': N}."""
-    name = _req(p, 'name')
+    name = _req(p, 'lvol_name')
     # Resolve to the key used in transfer_ops (which is always the composite form)
     composite = name if name in s.transfer_ops else s.composite(name)
     if composite not in s.transfer_ops:

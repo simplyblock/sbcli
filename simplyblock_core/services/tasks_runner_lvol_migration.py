@@ -312,7 +312,7 @@ def _expose_lvol_on_secondary(lvol, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid)
             if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                 ret, err = sec_rpc.nvmf_subsystem_add_listener(
                     lvol.nqn, iface.trtype, iface.ip4_address,
-                    tgt_sec.lvol_subsys_port, "non_optimized")
+                    tgt_sec.get_lvol_subsys_port(lvol.lvs_name), "non_optimized")
                 if not ret:
                     if err and isinstance(err, dict) and err.get("code") == -32602:
                         logger.warning("Listener already exists on secondary")
@@ -353,14 +353,34 @@ def _cleanup_snap_transfer(src_rpc, tgt_rpc, ctx):
             logger.warning(f"delete migration subsystem {temp_nqn}: {e}")
 
 
-def _cleanup_final_migration(src_rpc, ctx):
-    """Detach the hub controller attached for the final lvol migration."""
+def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False):
+    """Detach the hub controller attached for the final lvol migration.
+
+    When *rollback_target* is True the target lvol and its subsystem/namespace
+    are also torn down so that a retry can re-create them from scratch.
+    """
     ctrl_name = ctx.get('ctrl_name')
     if ctrl_name:
         try:
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
         except Exception as e:
             logger.warning(f"detach hub ctrl {ctrl_name}: {e}")
+
+    if rollback_target and tgt_rpc:
+        tgt_composite = ctx.get('tgt_lvol_composite')
+        nqn = ctx.get('nqn')
+        tgt_ns_id = ctx.get('tgt_ns_id')
+        sub_created = ctx.get('subsystem_created_on_target', False)
+        if nqn and tgt_ns_id is not None:
+            try:
+                _cleanup_subsystem_or_ns(nqn, tgt_ns_id, sub_created, tgt_rpc)
+            except Exception as e:
+                logger.warning(f"cleanup target subsystem {nqn}: {e}")
+        if tgt_composite:
+            try:
+                _delete_bdev_blocking(tgt_composite, tgt_rpc)
+            except Exception as e:
+                logger.warning(f"cleanup target lvol {tgt_composite}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -401,8 +421,10 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     ctrl_name = f"mig_{migration.uuid[:8]}_{snap_index}"
 
     # Step 1: create target lvol
+    # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
+    # the new lvol.  Do not pass the snapshot UUID here.
     size_in_mib = _bytes_to_mib(snap.used_size)
-    ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore, uuid=snap_uuid)
+    ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
 
@@ -419,7 +441,8 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
         _delete_bdev_blocking(tgt_composite, tgt_rpc)
         return None, f"Failed to create migration subsystem for snap {snap_uuid}"
 
-    ret = tgt_rpc.listeners_create(temp_nqn, trtype, target_ip, tgt_node.lvol_subsys_port)
+    tgt_lvs_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+    ret = tgt_rpc.listeners_create(temp_nqn, trtype, target_ip, tgt_lvs_port)
     if not ret:
         tgt_rpc.subsystem_delete(temp_nqn)
         _delete_bdev_blocking(tgt_composite, tgt_rpc)
@@ -433,7 +456,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
 
     # Step 4: connect source to target
     ret = src_rpc.bdev_nvme_attach_controller(
-        ctrl_name, temp_nqn, target_ip, tgt_node.lvol_subsys_port, trtype)
+        ctrl_name, temp_nqn, target_ip, tgt_lvs_port, trtype)
     if not ret:
         tgt_rpc.subsystem_delete(temp_nqn)
         _delete_bdev_blocking(tgt_composite, tgt_rpc)
@@ -550,9 +573,11 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     trtype, target_ip = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
 
-    # ── A. Launch / resume all planned snapshots in parallel ─────────────────
+    # ── A. Launch / resume planned snapshots in batches ──────────────────────
+    _PARALLEL_BATCH = 3  # max concurrent NVMe-oF transfers per run
     if ctx.get('stage') != 'parallel_transfer':
-        unprocessed = [u for u in plan if u not in migration.snaps_migrated]
+        all_unprocessed = [u for u in plan if u not in migration.snaps_migrated]
+        unprocessed = all_unprocessed[:_PARALLEL_BATCH]
 
         if unprocessed:
             # HA secondary gate – check once; all snaps belong to the same volume
@@ -722,10 +747,16 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             migration.write_to_db(db.kv_store)
             return False, False, None
 
-        # All parallel transfers complete
+        # All parallel transfers in this batch complete
         migration.transfer_context = {}
         migration.write_to_db(db.kv_store)
         ctx = {}
+
+        # If there are more unprocessed snaps, return now so the next tick
+        # launches the next batch.
+        remaining = [u for u in plan if u not in migration.snaps_migrated]
+        if remaining:
+            return False, False, None
 
     # ── C. Intermediate ("shrink") snapshots – busy-poll within this call ────
     # These snapshots capture only the delta written since the last planned snap.
@@ -860,7 +891,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     if ctx.get('stage') == 'transfer':
         result = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
         if result is None:
-            _cleanup_final_migration(src_rpc, ctx)
+            _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
             migration.transfer_context = {}
             migration.write_to_db(db.kv_store)
             return False, True, "bdev_lvol_transfer_stat returned None for final migration"
@@ -871,7 +902,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             return False, False, None
 
         if state in ('Failed', 'No process'):
-            _cleanup_final_migration(src_rpc, ctx)
+            _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
             migration.transfer_context = {}
             migration.write_to_db(db.kv_store)
             return False, True, f"Final migration {state}"
@@ -933,8 +964,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     # --- Start the final migration ---
 
-    # Step 1: create writable target lvol (same UUID; size in MiB)
-    ret = tgt_rpc.create_lvol(lvol.lvol_bdev, lvol.size, tgt_node.lvstore, uuid=lvol.uuid)
+    # Step 1: create writable target lvol (size in MiB)
+    # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
+    # the new lvol.  Do not pass the lvol UUID here.
+    ret = tgt_rpc.create_lvol(lvol.lvol_bdev, lvol.size, tgt_node.lvstore)
     if not ret:
         return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
 
@@ -955,7 +988,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             return False, True, f"Failed to create subsystem {nqn} on target"
         subsystem_created_on_target = True
 
-        ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_node.lvol_subsys_port)
+        ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore))
         if not ret:
             tgt_rpc.subsystem_delete(nqn)
             _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
@@ -1058,11 +1091,11 @@ def _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         src_trtype, src_ip = _get_migration_nic(src_node)
 
         tgt_rpc.nvmf_subsystem_listener_set_ana_state(
-            nqn, tgt_ip, tgt_node.lvol_subsys_port, trtype=tgt_trtype, ana="optimized")
+            nqn, tgt_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore), trtype=tgt_trtype, ana="optimized")
         logger.info(f"ANA: {nqn} on target {tgt_ip} → optimized")
 
         src_rpc.nvmf_subsystem_listener_set_ana_state(
-            nqn, src_ip, src_node.lvol_subsys_port, trtype=src_trtype, ana="inaccessible")
+            nqn, src_ip, src_node.get_lvol_subsys_port(src_node.lvstore), trtype=src_trtype, ana="inaccessible")
         logger.info(f"ANA: {nqn} on source {src_ip} → inaccessible")
     except Exception as e:
         logger.error(f"ANA state update error (non-fatal): {e}")

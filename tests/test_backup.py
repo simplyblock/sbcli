@@ -46,6 +46,8 @@ def _node(uuid="node-1", status=StorageNode.STATUS_ONLINE, lvstore="lvs_test",
     n.rpc_port = 5260
     n.rpc_username = "admin"
     n.rpc_password = "pass"
+    n.app_thread_mask = "0x8"  # core 3
+    n.cpu = 8  # 8 system vCPUs
     return n
 
 
@@ -232,7 +234,44 @@ class TestParseAgeString(unittest.TestCase):
 
 
 # ===========================================================================
-# 6. backup_controller.create_s3_bdev
+# 6a. _compute_s3_cpu_masks
+# ===========================================================================
+
+class TestComputeS3CpuMasks(unittest.TestCase):
+
+    def test_masks_from_node(self):
+        from simplyblock_core.controllers.backup_controller import _compute_s3_cpu_masks
+        node = _node()  # app_thread_mask="0x8", cpu=8
+        bdb, s3 = _compute_s3_cpu_masks(node)
+        self.assertEqual(bdb, 0x8)       # app thread core 3
+        self.assertEqual(s3, 0xFF)        # all 8 vCPUs — no pinning
+
+    def test_no_app_thread_mask(self):
+        from simplyblock_core.controllers.backup_controller import _compute_s3_cpu_masks
+        node = _node()
+        node.app_thread_mask = ""
+        bdb, s3 = _compute_s3_cpu_masks(node)
+        self.assertEqual(bdb, 0)          # falls back to data plane default
+        self.assertEqual(s3, 0xFF)
+
+    def test_no_cpu_count(self):
+        from simplyblock_core.controllers.backup_controller import _compute_s3_cpu_masks
+        node = _node()
+        node.cpu = 0
+        bdb, s3 = _compute_s3_cpu_masks(node)
+        self.assertEqual(bdb, 0x8)
+        self.assertEqual(s3, 0)           # falls back to data plane default
+
+    def test_large_cpu_count(self):
+        from simplyblock_core.controllers.backup_controller import _compute_s3_cpu_masks
+        node = _node()
+        node.cpu = 32
+        bdb, s3 = _compute_s3_cpu_masks(node)
+        self.assertEqual(s3, 0xFFFFFFFF)  # all 32 vCPUs
+
+
+# ===========================================================================
+# 6b. backup_controller.create_s3_bdev
 # ===========================================================================
 
 class TestCreateS3Bdev(unittest.TestCase):
@@ -241,6 +280,7 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_success(self, MockRPC):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
+        mock_rpc.bdev_s3_add_bucket_name.return_value = True
         mock_rpc.bdev_lvol_s3_bdev.return_value = True
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
@@ -251,6 +291,12 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         self.assertTrue(result)
         mock_rpc.bdev_s3_create.assert_called_once()
+        # Verify CPU masks: bdb_lcpu_mask=app_thread(0x8=8), s3_lcpu_mask=all 8 vCPUs(0xFF=255)
+        _, kwargs = mock_rpc.bdev_s3_create.call_args
+        self.assertEqual(kwargs["bdb_lcpu_mask"], 0x8)
+        self.assertEqual(kwargs["s3_lcpu_mask"], 0xFF)
+        mock_rpc.bdev_s3_add_bucket_name.assert_called_once_with(
+            "s3_lvs_test", "simplyblock-backup-cluster-1")
         mock_rpc.bdev_lvol_s3_bdev.assert_called_once_with("lvs_test", "s3_lvs_test")
 
     @patch("simplyblock_core.controllers.backup_controller.RPCClient")
@@ -270,12 +316,26 @@ class TestCreateS3Bdev(unittest.TestCase):
         node = _node()
         result = create_s3_bdev(node, {})
         self.assertFalse(result)
+        mock_rpc.bdev_s3_add_bucket_name.assert_not_called()
+        mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
+
+    @patch("simplyblock_core.controllers.backup_controller.RPCClient")
+    def test_bucket_name_fails(self, MockRPC):
+        mock_rpc = MockRPC.return_value
+        mock_rpc.bdev_s3_create.return_value = True
+        mock_rpc.bdev_s3_add_bucket_name.return_value = None
+
+        from simplyblock_core.controllers.backup_controller import create_s3_bdev
+        node = _node()
+        result = create_s3_bdev(node, {})
+        self.assertFalse(result)
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup_controller.RPCClient")
     def test_attach_fails(self, MockRPC):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
+        mock_rpc.bdev_s3_add_bucket_name.return_value = True
         mock_rpc.bdev_lvol_s3_bdev.return_value = None
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
@@ -287,6 +347,7 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_local_testing_params(self, MockRPC):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
+        mock_rpc.bdev_s3_add_bucket_name.return_value = True
         mock_rpc.bdev_lvol_s3_bdev.return_value = True
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
@@ -415,16 +476,26 @@ class TestRestoreBackup(unittest.TestCase):
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
     def test_success(self, mock_db, mock_tasks):
         backup = _backup(s3_id=5)
-        node = _node()
         mock_db.get_backup_by_id.return_value = backup
-        mock_db.get_storage_node_by_id.return_value = node
         mock_db.get_backup_chain.return_value = [backup]
         mock_tasks.add_backup_restore_task.return_value = True
 
-        from simplyblock_core.controllers.backup_controller import restore_backup
-        result, error = restore_backup("backup-1", "node-1", "restored_lvol")
+        # Mock the lvol created by add_lvol_ha
+        mock_lvol = MagicMock()
+        mock_lvol.node_id = "node-1"
+        mock_lvol.lvs_name = "lvs_test"
+        mock_lvol.lvol_bdev = "LVOL_123"
+        mock_lvol.write_to_db = MagicMock()
+        mock_db.get_lvol_by_id.return_value = mock_lvol
+        mock_db.get_storage_node_by_id.return_value = _node()
 
-        self.assertIsNotNone(result)
+        with patch("simplyblock_core.controllers.lvol_controller.add_lvol_ha") as mock_add_ha:
+            mock_add_ha.return_value = ("lvol-new", None)
+
+            from simplyblock_core.controllers.backup_controller import restore_backup
+            result, error = restore_backup("backup-1", "restored_lvol", "pool-1")
+
+        self.assertEqual(result, "lvol-new")
         self.assertIsNone(error)
         # Verify s3_id integers are passed, not UUIDs
         call_args = mock_tasks.add_backup_restore_task.call_args
@@ -435,21 +506,24 @@ class TestRestoreBackup(unittest.TestCase):
         mock_db.get_backup_by_id.side_effect = KeyError("not found")
 
         from simplyblock_core.controllers.backup_controller import restore_backup
-        result, error = restore_backup("missing", "node-1", "lvol")
+        result, error = restore_backup("missing", "lvol", "pool-1")
 
         self.assertIsNone(result)
         self.assertIsNotNone(error)
 
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_node_offline(self, mock_db):
+    def test_add_lvol_ha_fails(self, mock_db):
         mock_db.get_backup_by_id.return_value = _backup()
-        mock_db.get_storage_node_by_id.return_value = _node(status=StorageNode.STATUS_OFFLINE)
+        mock_db.get_backup_chain.return_value = [_backup()]
 
-        from simplyblock_core.controllers.backup_controller import restore_backup
-        result, error = restore_backup("backup-1", "node-1", "lvol")
+        with patch("simplyblock_core.controllers.lvol_controller.add_lvol_ha") as mock_add_ha:
+            mock_add_ha.return_value = (None, "Pool not found")
+
+            from simplyblock_core.controllers.backup_controller import restore_backup
+            result, error = restore_backup("backup-1", "lvol", "bad-pool")
 
         self.assertIsNone(result)
-        self.assertIn("not online", error)
+        self.assertIn("Failed to create restore volume", error)
 
 
 # ===========================================================================
@@ -881,6 +955,10 @@ class TestRPCClientBackupMethods(unittest.TestCase):
     def test_bdev_s3_create_exists(self):
         from simplyblock_core.rpc_client import RPCClient
         self.assertTrue(hasattr(RPCClient, 'bdev_s3_create'))
+
+    def test_bdev_s3_add_bucket_name_exists(self):
+        from simplyblock_core.rpc_client import RPCClient
+        self.assertTrue(hasattr(RPCClient, 'bdev_s3_add_bucket_name'))
 
     def test_bdev_lvol_s3_bdev_exists(self):
         from simplyblock_core.rpc_client import RPCClient

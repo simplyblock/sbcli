@@ -493,7 +493,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
     lvol.lvs_name = host_node.lvstore
-    lvol.subsys_port = host_node.lvol_subsys_port
+    lvol.subsys_port = host_node.get_lvol_subsys_port(host_node.lvstore)
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.base_bdev = lvol.top_bdev
     if npcs or ndcs:
@@ -764,8 +764,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
             ana_state = "optimized"
 
         # add listeners
-        # Use the node's own lvol_subsys_port, not lvol.subsys_port which is always the primary's port
-        listener_port = snode.lvol_subsys_port
+        # Use the per-lvstore port for the lvol's lvstore
+        listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
         logger.info("adding listeners")
         for iface in snode.data_nics:
             if iface.ip4_address and lvol.fabric==iface.trtype.lower():
@@ -854,7 +854,8 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     # if not ret:
     #     return False, "Failed to add bdev to subsystem"
 
-    # add listeners
+    # add listeners - use per-lvstore port
+    recreate_lvs_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     logger.info("adding listeners")
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric==iface.trtype.lower():
@@ -862,9 +863,9 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
                 ana_state = "non_optimized"
                 if lvol.node_id == snode.get_id():
                     ana_state = "optimized"
-            logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, snode.lvol_subsys_port))
+            logger.info("adding listener for %s on IP %s port %s" % (lvol.nqn, iface.ip4_address, recreate_lvs_port))
             logger.info(f"Setting ANA state: {ana_state}")
-            ret = rpc_client.listeners_create(lvol.nqn, iface.trtype, iface.ip4_address, snode.lvol_subsys_port, ana_state)
+            ret = rpc_client.listeners_create(lvol.nqn, iface.trtype, iface.ip4_address, recreate_lvs_port, ana_state)
 
     return True, None
 
@@ -1441,7 +1442,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
             ip = nic.ip4_address
-            port = snode.lvol_subsys_port
+            port = snode.get_lvol_subsys_port(lvol.lvs_name)
             transport = "tcp"
             if nic.ip4_address and lvol.fabric == nic.trtype.lower():
                 transport = nic.trtype.lower()

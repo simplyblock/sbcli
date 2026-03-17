@@ -242,14 +242,14 @@ def check_node(snode):
 
             lvol_port_check = False
             # if node_api_check:
-            ports = [snode.lvol_subsys_port]
+            ports = [snode.get_lvol_subsys_port(snode.lvstore)]
 
             for sec_stack_ref in [snode.lvstore_stack_secondary_1, snode.lvstore_stack_secondary_2]:
                 if sec_stack_ref:
                     try:
                         sec_ref_node = db.get_storage_node_by_id(sec_stack_ref)
                         if sec_ref_node and sec_ref_node.status == StorageNode.STATUS_ONLINE:
-                            ports.append(sec_ref_node.lvol_subsys_port)
+                            ports.append(sec_ref_node.get_lvol_subsys_port(sec_ref_node.lvstore))
                     except KeyError:
                         pass
 

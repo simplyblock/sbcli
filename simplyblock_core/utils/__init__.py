@@ -835,6 +835,12 @@ def _get_all_nvmf_ports(cluster_id):
             used_ports.add(node.nvmf_port)
         if node.hublvol and node.hublvol.nvmf_port > 0:
             used_ports.add(node.hublvol.nvmf_port)
+        # Collect per-lvstore ports
+        for lvs_name, ports in (node.lvstore_ports or {}).items():
+            if isinstance(ports, dict):
+                for p in ports.values():
+                    if isinstance(p, int) and p > 0:
+                        used_ports.add(p)
     return used_ports
 
 
@@ -889,6 +895,20 @@ def get_next_fw_port(cluster_id, mgmt_ip=None):
     while next_port in used_ports:
         next_port += 1
     return next_port
+
+
+def get_next_lvstore_ports(cluster_id):
+    """Allocate two consecutive NVMe-oF ports for a new lvstore (lvol_subsys + hublvol)."""
+    nvmf_base, _, _ = _get_cluster_port_config(cluster_id)
+    used_ports = _get_all_nvmf_ports(cluster_id)
+    ports = []
+    next_port = nvmf_base
+    while len(ports) < 2:
+        if next_port not in used_ports:
+            ports.append(next_port)
+            used_ports.add(next_port)
+        next_port += 1
+    return ports[0], ports[1]
 
 
 def get_next_dev_port(cluster_id):
