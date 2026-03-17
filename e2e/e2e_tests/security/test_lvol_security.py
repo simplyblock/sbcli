@@ -901,7 +901,7 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
         # Should error; lvol must NOT be created
         created_id = self.sbcli_utils.get_lvol_id(lvol_name)
         assert not created_id, \
-            f"TC-SEC-050: lvol should NOT be created with non-existent sec-options file"
+            "TC-SEC-050: lvol should NOT be created with non-existent sec-options file"
         self.logger.info("TC-SEC-050 PASS: lvol not created for missing file")
 
         # ── TC-SEC-051: allowed-hosts file contains object not array ───────

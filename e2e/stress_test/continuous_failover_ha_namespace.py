@@ -670,7 +670,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
 
         if self.stale_ns_devices:
             self.logger.warning(
-                f"[NS] Devices not yet cleared (not a failure): "
+                "[NS] Devices not yet cleared (not a failure): "
                 + ", ".join(
                     f"{n}={v['device']}" for n, v in self.stale_ns_devices.items()
                 )
