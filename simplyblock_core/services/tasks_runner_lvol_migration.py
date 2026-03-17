@@ -572,9 +572,11 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     trtype, target_ip = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
 
-    # ── A. Launch / resume all planned snapshots in parallel ─────────────────
+    # ── A. Launch / resume planned snapshots in batches ──────────────────────
+    _PARALLEL_BATCH = 3  # max concurrent NVMe-oF transfers per run
     if ctx.get('stage') != 'parallel_transfer':
-        unprocessed = [u for u in plan if u not in migration.snaps_migrated]
+        all_unprocessed = [u for u in plan if u not in migration.snaps_migrated]
+        unprocessed = all_unprocessed[:_PARALLEL_BATCH]
 
         if unprocessed:
             # HA secondary gate – check once; all snaps belong to the same volume
@@ -744,10 +746,16 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             migration.write_to_db(db.kv_store)
             return False, False, None
 
-        # All parallel transfers complete
+        # All parallel transfers in this batch complete
         migration.transfer_context = {}
         migration.write_to_db(db.kv_store)
         ctx = {}
+
+        # If there are more unprocessed snaps, return now so the next tick
+        # launches the next batch.
+        remaining = [u for u in plan if u not in migration.snaps_migrated]
+        if remaining:
+            return False, False, None
 
     # ── C. Intermediate ("shrink") snapshots – busy-poll within this call ────
     # These snapshots capture only the delta written since the last planned snap.
