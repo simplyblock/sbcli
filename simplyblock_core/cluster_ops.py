@@ -401,6 +401,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             utils.configure_kms_on_docker(cluster, dev_ip)
         elif mode == "kubernetes":
             utils.configure_kms_on_k8s(cluster)
+        cluster.write_to_db(db_controller.kv_store)
 
     logger.info("New Cluster has been created")
     logger.info(cluster.uuid)

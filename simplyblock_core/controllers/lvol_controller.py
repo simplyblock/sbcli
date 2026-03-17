@@ -98,7 +98,7 @@ def _create_crypto_lvol_kms(snode, lvol, cluster):
         return False
 
     kms_client = KMSClient(cluster.get_id())
-    lvol_keys = kms_client.get_keys(name)
+    lvol_keys, err = kms_client.get_keys(name)
     if not lvol_keys:
         logger.error(f"Failed to get keys for lvol: {name} from KMS")
         if lvol.crypto_key1 and lvol.crypto_key2:

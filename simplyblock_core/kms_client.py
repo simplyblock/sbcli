@@ -42,7 +42,7 @@ class KMSClient:
 
     def _request(self, method, path, payload=None):
         try:
-            logger.error("Requesting path: %s, params: %s", self.url+path, payload)
+            logger.debug("Requesting path: %s, params: %s", self.url+path, payload)
             data = None
             params = None
             if payload:
@@ -56,7 +56,7 @@ class KMSClient:
         except Exception as e:
             raise KMSClientException(str(e))
 
-        logger.error("Response: status_code: %s, content: %s",
+        logger.debug("Response: status_code: %s, content: %s",
                      response.status_code, response.content)
         ret_code = response.status_code
 
