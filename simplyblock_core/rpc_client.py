@@ -204,8 +204,14 @@ class RPCClient:
         params = {"name": name}
         return self._request("keyring_file_remove_key", params)
 
-    def subsystem_add_host(self, nqn, host, psk=None, dhchap_key=None, dhchap_ctrlr_key=None):
-        """Add a host to a subsystem. Key params are keyring key names (not raw values)."""
+    def subsystem_add_host(self, nqn, host, psk=None, dhchap_key=None, dhchap_ctrlr_key=None, dhchap_group=None):
+        """Add a host to a subsystem. Key params are keyring key names (not raw values).
+
+        dhchap_group: DH group for DH-HMAC-CHAP (e.g. 'null', 'ffdhe2048').
+        When dhchap_key is set but dhchap_group is omitted, SPDK may advertise
+        DH groups it cannot fulfil, causing 'failed to generate DH key' on the
+        target.  Always pass an explicit group when using DH-CHAP.
+        """
         params = {"nqn": nqn, "host": host}
         if psk:
             params["psk"] = psk
@@ -213,6 +219,8 @@ class RPCClient:
             params["dhchap_key"] = dhchap_key
         if dhchap_ctrlr_key:
             params["dhchap_ctrlr_key"] = dhchap_ctrlr_key
+        if dhchap_group:
+            params["dhchap_group"] = dhchap_group
         return self._request("nvmf_subsystem_add_host", params)
 
     def subsystem_remove_host(self, nqn, host):
