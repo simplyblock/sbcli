@@ -57,11 +57,29 @@ from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailo
 from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
+from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import RandomRapidFailoverNoGap
 from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvolSnapshotCloneAPI
 from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
 from stress_test.continuous_single_node_outage import RandomMultiClientSingleNodeTest
+from stress_test.continuous_failover_ha_security import (
+    RandomSecurityFailoverTest,
+    RandomAllSecurityFailoverTest,
+)
 
+from e2e_tests.security.test_lvol_security import (
+    TestLvolSecurityCombinations,
+    TestLvolAllowedHostsPositive,
+    TestLvolAllowedHostsNegative,
+    TestLvolDynamicHostManagement,
+    TestLvolCryptoWithAllowedHosts,
+    TestLvolDhcapDirections,
+    TestLvolMultipleAllowedHosts,
+    TestLvolSecurityNegativeHostOps,
+    TestLvolSecurityNegativeCreation,
+    TestLvolSecurityNegativeConnect,
+    TestLvolAllowedHostsNoDhchap,
+)
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
 
@@ -93,7 +111,23 @@ ALL_TESTS = [
     TestHASingleNodeReboot,
     TestHASingleNodeOutage,
     TestSingleNodeResizeLvolCone,
-    TestAddK8sNodesDuringFioRun
+    TestAddK8sNodesDuringFioRun,
+    # Security E2E tests
+    TestLvolSecurityCombinations,
+    TestLvolAllowedHostsPositive,
+    TestLvolAllowedHostsNegative,
+    TestLvolDynamicHostManagement,
+    TestLvolCryptoWithAllowedHosts,
+    TestLvolDhcapDirections,
+    TestLvolMultipleAllowedHosts,
+    TestLvolAllowedHostsNoDhchap,
+    # Security negative tests
+    TestLvolSecurityNegativeHostOps,
+    TestLvolSecurityNegativeCreation,
+    TestLvolSecurityNegativeConnect,
+    # Security stress tests
+    RandomSecurityFailoverTest,
+    RandomAllSecurityFailoverTest,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -155,6 +189,7 @@ def get_stress_tests():
         RandomMultiClient2NodeFailoverTest,
         RandomRDMAFailoverTest,
         RandomRDMAMultiFailoverTest,
+        RandomK8sMultiOutageFailoverTest,
         RandomRapidFailoverNoGap,
         TestParallelLvolSnapshotCloneAPI,
         RandomMultiClientFailoverNamespaceTest,

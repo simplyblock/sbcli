@@ -3088,7 +3088,126 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         cmd = f"ls -1 {ctrl}n* 2>/dev/null | sort -V || true"
         out, _ = self.exec_command(node=node, command=f"bash -lc \"{cmd}\"", supress_logs=True)
         return [x.strip() for x in (out or "").splitlines() if x.strip()]
-    
+
+    # ── Security helpers ──────────────────────────────────────────────────────
+
+    def write_json_file(self, node, path, data):
+        """Serialize *data* as JSON and write it to *path* on *node*."""
+        import json as _json
+        json_str = _json.dumps(data).replace("'", "'\\''")
+        self.exec_command(node, f"echo '{json_str}' > {path}", supress_logs=True)
+
+    def get_client_host_nqn(self, node):
+        """Return the NVMe host NQN of *node* via ``nvme gen-hostnqn``."""
+        out, _ = self.exec_command(node, "nvme gen-hostnqn")
+        return out.strip().split('\n')[0].strip()
+
+    def get_lvol_connect_str_with_host_nqn(self, node, lvol_id, host_nqn,
+                                            ctrl_loss_tmo=-1):
+        """
+        Run ``volume connect <id> --host-nqn <nqn> --ctrl-loss-tmo <tmo>``
+        and return (list_of_connect_commands, stderr).
+
+        Using ``ctrl_loss_tmo=-1`` matches the behaviour of the existing
+        API-based ``get_lvol_connect_str`` helper so that NVMe controllers
+        never time out during a storage-node outage.
+        """
+        cmd = (f"{self.base_cmd} volume connect {lvol_id}"
+               f" --host-nqn {host_nqn}"
+               f" --ctrl-loss-tmo {ctrl_loss_tmo}")
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[get_lvol_connect_str_with_host_nqn] id={lvol_id} "
+            f"host_nqn={host_nqn}: out={out!r}, err={err!r}")
+        connect_lines = [
+            line.strip() for line in out.strip().split('\n')
+            if line.strip() and 'nvme connect' in line
+        ]
+        return connect_lines, err
+
+    def create_sec_lvol(self, node, lvol_name, size, pool,
+                        sec_options=None, allowed_hosts=None,
+                        encrypt=False, key1=None, key2=None,
+                        distr_ndcs=0, distr_npcs=0, fabric="tcp"):
+        """
+        Create an lvol with optional security parameters via CLI so that
+        ``--sec-options`` and ``--allowed-hosts`` can be supplied.
+
+        sec_options  : dict, e.g. ``{"dhchap_key": True, "dhchap_ctrlr_key": True}``
+        allowed_hosts: list of NQN strings
+        distr_ndcs   : number of data chunks per stripe (0 = cluster default)
+        distr_npcs   : number of parity chunks per stripe (0 = cluster default)
+        fabric       : "tcp" or "rdma"
+        Returns (stdout, stderr).
+        """
+        cmd = f"{self.base_cmd} -d volume add {lvol_name} {size} {pool}"
+        if encrypt and key1 and key2:
+            cmd += f" --encrypt --crypto-key1 {key1} --crypto-key2 {key2}"
+        if fabric and fabric != "tcp":
+            cmd += f" --fabric {fabric}"
+        if distr_ndcs and distr_npcs:
+            cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
+
+        tmp_files = []
+        if sec_options is not None:
+            p = f"/tmp/sec_{lvol_name}.json"
+            self.write_json_file(node, p, sec_options)
+            cmd += f" --sec-options {p}"
+            tmp_files.append(p)
+        if allowed_hosts is not None:
+            p = f"/tmp/hosts_{lvol_name}.json"
+            self.write_json_file(node, p, allowed_hosts)
+            cmd += f" --allowed-hosts {p}"
+            tmp_files.append(p)
+
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[create_sec_lvol] {lvol_name}: out={out!r}, err={err!r}")
+        for f in tmp_files:
+            self.exec_command(node, f"rm -f {f}", supress_logs=True)
+        return out, err
+
+    def add_host_to_lvol(self, node, lvol_id, host_nqn, sec_options=None):
+        """
+        Run ``volume add-host <id> <nqn> [--sec-options file]``.
+
+        sec_options: dict written to a temp file and passed via ``--sec-options``.
+        Returns (stdout, stderr).
+        """
+        import random as _random
+        import string as _string
+        tmp_files = []
+        cmd = f"{self.base_cmd} volume add-host {lvol_id} {host_nqn}"
+        if sec_options:
+            suffix = ''.join(_random.choices(
+                _string.ascii_uppercase + _string.digits, k=6))
+            p = f"/tmp/addhost_{suffix}.json"
+            self.write_json_file(node, p, sec_options)
+            cmd += f" --sec-options {p}"
+            tmp_files.append(p)
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[add_host_to_lvol] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
+        for f in tmp_files:
+            self.exec_command(node, f"rm -f {f}", supress_logs=True)
+        return out, err
+
+    def remove_host_from_lvol(self, node, lvol_id, host_nqn):
+        """Run ``volume remove-host <id> <nqn>`` and return (stdout, stderr)."""
+        cmd = f"{self.base_cmd} volume remove-host {lvol_id} {host_nqn}"
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[remove_host_from_lvol] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
+        return out, err
+
+    def get_lvol_host_secret(self, node, lvol_id, host_nqn):
+        """Run ``volume get-secret <id> <nqn>`` and return (stdout, stderr)."""
+        cmd = f"{self.base_cmd} volume get-secret {lvol_id} {host_nqn}"
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[get_lvol_host_secret] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
+        return out, err
+
 
 class RunnerK8sLog:
     """

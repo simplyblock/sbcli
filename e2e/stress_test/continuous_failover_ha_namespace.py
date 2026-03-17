@@ -483,11 +483,8 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                 f"[NS] Random delete picked: {lvol_name} (namespace={is_ns}, id={lvol_id}, device={device}, ctrl={ctrl_dev})"
             )
 
-            # Stop fio only for this lvol
-            try:
-                self.common_utils.validate_fio_test(client, log_file=d["Log"])
-            except Exception as e:
-                self.logger.warning(f"[NS] validate_fio_test failed for {lvol_name}: {e}")
+            # Stop fio only for this lvol — raise on FIO I/O errors
+            self.common_utils.validate_fio_test(client, log_file=d["Log"])
 
             try:
                 self.ssh_obj.find_process_name(client, f"{lvol_name}_fio", return_pid=False)
