@@ -2758,7 +2758,7 @@ def create_rpc_socket_mount():
 def get_kms_cont(dev_ip):
     node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}", version="auto")
     for container in node_docker.containers.list():
-        if container.name.startswith("app_kms"): # type: ignore[union-attr]
+        if container.name.startswith("kms_kms_server"): # type: ignore[union-attr]
             return container
 
 
