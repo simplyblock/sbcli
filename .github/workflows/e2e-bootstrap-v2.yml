@@ -771,6 +771,31 @@ jobs:
             --run_ha true \
             2>&1 | tee output.log
 
+      - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            ssh -i "${KEY_PATH}" \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script" || true
+          }
+
+          for ip in $MNODES $STORAGE_PRIVATE_IPS; do
+            echo "---- $ip: kill tmux ----"
+            run_remote "$ip" "pkill -9 tmux || true"
+          done
+
+          for ip in $CLIENTNODES; do
+            echo "---- $ip: kill fio ----"
+            run_remote "$ip" "pkill -9 fio || true"
+          done
+
       - name: Mark test end time (always)
         if: always()
         shell: bash
