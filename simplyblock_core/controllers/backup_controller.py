@@ -954,34 +954,42 @@ def evaluate_schedule(lvol):
             _auto_backup_lvol(lvol)
             return  # Skip merge evaluation this cycle — let the backup complete first
 
-    # Tiered merge: enforce keep_count per tier
+    # Tiered merge: enforce keep_count per tier.
+    # Each tier covers an age range.  Backups age from tier 0 (newest)
+    # into higher tiers.  When a tier exceeds its keep_count, the oldest
+    # backup in that tier is merged into its successor.
+    # All tiers are evaluated each cycle so limits are maintained in parallel.
     if len(completed) < 2:
         return
 
     completed.sort(key=lambda b: b.created_at)
 
-    # Assign backups to tiers (newest first matching).
-    # Tier boundaries: tier[i] covers backups with age < tier[i+1].interval (or unlimited for last tier).
-    # Within each tier, if count > keep_count, merge the oldest two.
+    # Don't merge while another merge is already in progress
+    merging = [b for b in backups if b.status == Backup.STATUS_MERGING]
+    if merging:
+        return
+
     for tier_idx, (interval, keep_count) in enumerate(tiers):
-        # Upper age boundary for this tier
+        # Age boundaries for this tier
+        if tier_idx == 0:
+            lower_age = 0
+        else:
+            lower_age = tiers[tier_idx - 1][0]
+
         if tier_idx + 1 < len(tiers):
             upper_age = tiers[tier_idx + 1][0]
         else:
             upper_age = float('inf')
 
-        tier_backups = [b for b in completed if interval <= (now - b.created_at) < upper_age]
-        # For the first (smallest) tier, also include backups younger than the first interval
-        if tier_idx == 0:
-            tier_backups = [b for b in completed if (now - b.created_at) < upper_age]
+        tier_backups = [b for b in completed
+                        if lower_age <= (now - b.created_at) < upper_age]
 
         if len(tier_backups) > keep_count:
-            # Merge oldest two in this tier
             tier_backups.sort(key=lambda b: b.created_at)
             oldest = tier_backups[0]
             second = tier_backups[1]
             _trigger_merge(second, oldest)
-            return  # One merge at a time
+            return  # One merge per cycle to avoid conflicts
 
 
 def _auto_backup_lvol(lvol):
