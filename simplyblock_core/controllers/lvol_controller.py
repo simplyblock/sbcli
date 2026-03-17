@@ -105,11 +105,11 @@ def _create_crypto_lvol_kms(snode, lvol, cluster):
             logger.warning(f"Using keys from DB for lvol: {name}")
             return _create_crypto_lvol(rpc_client, name, base_name, lvol.crypto_key1, lvol.crypto_key2)
 
-    base64_key1 = kms_client.decrypt(lvol.pool_uuid, lvol_keys['key1'])
-    original_key1 = base64.b64decode(base64_key1.encode("ascii")).decode("utf-8")
+    base64_key1, err = kms_client.decrypt(lvol.pool_uuid, lvol_keys['key1'][0]['ciphertext'])
+    original_key1 = base64_key1['plaintext']
 
-    base64_key2 = kms_client.decrypt(lvol.pool_uuid, lvol_keys['key2'])
-    original_key2 = base64.b64decode(base64_key2.encode("ascii")).decode("utf-8")
+    base64_key2, err = kms_client.decrypt(lvol.pool_uuid, lvol_keys['key2'][0]['ciphertext'])
+    original_key2 = base64_key2['plaintext']
 
     key_name = f'key_{name}'
     ret = rpc_client.lvol_crypto_key_create(key_name, original_key1, original_key2)
