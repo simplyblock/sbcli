@@ -77,6 +77,10 @@ on:
         type: string
         default: ""
         description: "Optional label appended to artifact names to avoid collisions when called multiple times in the same workflow run (e.g. 'run1', 'run2')"
+      CLUSTER_SECURITY:
+        type: string
+        default: "none"
+        description: "Cluster security mode: none or host-sec"
   workflow_dispatch:
     inputs:
       # =========================
@@ -204,6 +208,21 @@ on:
         required: false
         type: string
 
+      # =========================
+      # Security inputs
+      # =========================
+      CLUSTER_SECURITY:
+        description: |
+          Enable cluster host security.
+          'host-sec' writes dhchap JSON to /root/host-sec.json on mgmt and passes --host-sec to cluster create.
+          Required for security E2E tests (TestLvolSecurity*, TestLvolAllowedHosts*, etc.)
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - host-sec
+
 concurrency:
   group: simplyblock-lab-e2e-${{ inputs.MNODES }}
   cancel-in-progress: true
@@ -250,6 +269,7 @@ jobs:
       NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       TEST_CLASS: ${{ inputs.TEST_CLASS || '' }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'none' }}
 
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -567,6 +587,27 @@ jobs:
           rm -rf simplyBlockDeploy
           git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
           test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
+
+      - name: Write cluster security config to mgmt node
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ "${CLUSTER_SECURITY:-none}" == "none" || -z "${CLUSTER_SECURITY:-}" ]]; then
+            echo "Cluster security disabled; skipping."
+            exit 0
+          fi
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          if [[ "${CLUSTER_SECURITY}" == "host-sec" ]]; then
+            echo "Writing /root/host-sec.json to ${mgmt_ip}..."
+            HOST_SEC_JSON='{"dhchap_digests":["sha256","sha384"],"dhchap_dhgroups":["ffdhe2048","ffdhe4096"]}'
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${mgmt_ip}" \
+              "echo '${HOST_SEC_JSON}' > /root/host-sec.json && echo 'Written:' && cat /root/host-sec.json"
+            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --host-sec /root/host-sec.json" >> "$GITHUB_ENV"
+            echo "Appended --host-sec /root/host-sec.json to EXTRA_CLUSTER_ARGS"
+          fi
 
       - name: Bootstrap cluster (all params are inputs; --spdk-image only if set)
         shell: bash
