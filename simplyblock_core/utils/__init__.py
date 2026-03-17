@@ -20,6 +20,7 @@ from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1Ob
     V1LabelSelector, V1ResourceRequirements
 
 import docker
+from kubernetes.stream import stream
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
@@ -2896,3 +2897,109 @@ def get_kms_cont(dev_ip):
     for container in node_docker.containers.list():
         if container.name.startswith("app_kms"): # type: ignore[union-attr]
             return container
+
+
+def configure_kms_on_docker(cluster, dev_ip):
+    container = get_kms_cont(f"{dev_ip}:2375")
+    if container:
+        environment = [
+            "VAULT_ADDR=http://127.0.0.1:8200",
+            "VAULT_SKIP_VERIFY=true"]
+        res = container.exec_run(
+            cmd="vault operator init -key-shares=1 -key-threshold=1 -format=json",
+            environment=environment
+        )
+        out = res.output.decode("utf-8")
+        logger.debug(out)
+        with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
+            outfile.write(out)
+
+        with open("/etc/simplyblock/kms/data/init.json", "r") as f:
+            init_file = json.loads(f.read())
+            logger.debug(f"vault operator unseal {init_file['unseal_keys_b64'][0]}")
+            res = container.exec_run(
+                cmd=f"vault operator unseal {init_file['unseal_keys_b64'][0]}",
+                environment=environment)
+            out = res.output.decode("utf-8")
+            logger.debug(res.exit_code)
+            logger.debug(out)
+            if res.exit_code == 0:
+                cluster.kms_unseal_key = init_file['unseal_keys_b64'][0]
+            logger.debug(f"vault login {init_file['root_token']}")
+            res = container.exec_run(
+                cmd=f"vault login {init_file['root_token']}",
+                environment=environment)
+            out = res.output.decode("utf-8")
+            logger.debug(out)
+            if res.exit_code == 0:
+                cluster.kms_root_token = init_file['root_token']
+            res = container.exec_run(
+                cmd=f"vault secrets enable -path={cluster.uuid} -version=1 kv",
+                environment=environment)
+            out = res.output.decode("utf-8")
+            logger.debug(out)
+
+
+def run_cmd_on_kms_pod(pod_name, namespace, command):
+    load_kube_config_with_fallback()
+    v1 = client.CoreV1Api()
+    try:
+        resp = stream(v1.connect_get_namespaced_pod_exec,
+                      name=pod_name,
+                      namespace=namespace,
+                      command=command,
+                      stderr=True, stdin=False,
+                      stdout=True, tty=False)
+        return resp
+    except Exception as e:
+        logger.error(f"Error executing command on KMS pod: {e}")
+        return None
+
+def configure_kms_on_k8s(cluster):
+    load_kube_config_with_fallback()
+    v1 = client.CoreV1Api()
+
+    try:
+        pod_name_prefix = "simplyblock-kms"
+        pod_name = None
+        pods = v1.list_namespaced_pod(namespace=constants.K8S_NAMESPACE, label_selector=f"app={pod_name_prefix}").items
+        for pod in pods:
+            if pod.metadata.name.startswith(pod_name_prefix):
+                pod_name = pod.metadata.name
+                break
+
+        if not pod_name:
+            logger.error(f"No KMS pod found")
+            return
+
+        exec_command = ['/bin/sh', '-c', 'vault operator init -key-shares=1 -key-threshold=1 -format=json']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+
+        with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
+            outfile.write(resp)
+
+        with open('/etc/simplyblock/kms/data/init.json', 'r') as f:
+            init_file = json.load(f)
+            kms_unseal_key = init_file['unseal_keys_b64'][0]
+            kms_root_token = init_file['root_token']
+
+            exec_command = ['/bin/sh', '-c', f'vault operator unseal {kms_unseal_key}']
+            resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+            logger.debug(resp)
+            if resp:
+                cluster.kms_unseal_key = kms_unseal_key
+
+            exec_command = ['/bin/sh', '-c', f'vault login {kms_root_token}']
+            resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+            logger.debug(resp)
+            if resp:
+                cluster.kms_root_token = kms_root_token
+
+            exec_command = ['/bin/sh', '-c', f'vault secrets enable -path={cluster.uuid} -version=1 kv']
+            resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+            logger.debug(resp)
+
+
+    except Exception as e:
+        logger.error(f"Error configuring KMS on Kubernetes: {e}")

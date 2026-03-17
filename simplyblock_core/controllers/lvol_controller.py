@@ -23,21 +23,13 @@ from simplyblock_core.rpc_client import RPCClient
 logger = lg.getLogger()
 
 
-def _create_crypto_lvol(rpc_client, name, base_name, key1, key2, kms_client=None):
+def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
     ret = rpc_client.get_bdevs(base_name)
     if not ret:
         logger.error(f"Failed to find LVol bdev {base_name}")
         return False
 
-    # lvol_keys = kms_client.get_keys(name)
-    # base64_key1 = kms_client.decrypt(lvol_keys['key1'])
-    # original_key1 = base64.b64decode(base64_key1.encode("ascii")).decode("utf-8")
-    #
-    # base64_key2 = kms_client.decrypt(lvol_keys['key2'])
-    # original_key2 = base64.b64decode(base64_key2.encode("ascii")).decode("utf-8")
-
     key_name = f'key_{name}'
-    # ret = rpc_client.lvol_crypto_key_create(key_name, original_key1, original_key2)
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
     if not ret:
         logger.error("failed to create crypto key")
@@ -48,6 +40,39 @@ def _create_crypto_lvol(rpc_client, name, base_name, key1, key2, kms_client=None
         return False
     return ret
 
+def _create_crypto_lvol_kms(snode, lvol, cluster):
+    rpc_client = snode.rpc_client()
+    name = lvol.crypto_bdev
+    base_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+    ret = rpc_client.get_bdevs(base_name)
+    if not ret:
+        logger.error(f"Failed to find LVol bdev {base_name}")
+        return False
+
+    kms_client = KMSClient(cluster.get_id())
+    lvol_keys = kms_client.get_keys(name)
+    if not lvol_keys:
+        logger.error(f"Failed to get keys for lvol: {name} from KMS")
+        if lvol.crypto_key1 and lvol.crypto_key2:
+            logger.warning(f"Using keys from DB for lvol: {name}")
+            return _create_crypto_lvol(rpc_client, name, base_name, lvol.crypto_key1, lvol.crypto_key2)
+
+    base64_key1 = kms_client.decrypt(lvol.pool_uuid, lvol_keys['key1'])
+    original_key1 = base64.b64decode(base64_key1.encode("ascii")).decode("utf-8")
+
+    base64_key2 = kms_client.decrypt(lvol.pool_uuid, lvol_keys['key2'])
+    original_key2 = base64.b64decode(base64_key2.encode("ascii")).decode("utf-8")
+
+    key_name = f'key_{name}'
+    ret = rpc_client.lvol_crypto_key_create(key_name, original_key1, original_key2)
+    if not ret:
+        logger.error("failed to create crypto key")
+        return False
+    ret = rpc_client.lvol_crypto_create(name, base_name, key_name)
+    if not ret:
+        logger.error(f"failed to create crypto LVol {name}")
+        return False
+    return ret
 
 def _create_compress_lvol(rpc_client, base_bdev_name):
     pm_path = constants.PMEM_DIR
@@ -506,12 +531,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.bdev_stack = [lvol_dict]
 
     if use_crypto:
-        if crypto_key1 is None or crypto_key2 is None:
-            return False, "encryption keys for lvol not provided"
+        if not cl.deploy_kms:
+            if crypto_key1 is None or crypto_key2 is None:
+                return False, "encryption keys for lvol not provided"
+            else:
+                success, err = validate_aes_xts_keys(crypto_key1, crypto_key2)
+                if not success:
+                    return False, err
         else:
-            success, err = validate_aes_xts_keys(crypto_key1, crypto_key2)
-            if not success:
-                return False, err
+            crypto_key1 = utils.generate_hex_string(32)
+            crypto_key2 = utils.generate_hex_string(32)
 
         lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
         lvol.bdev_stack.append({
@@ -519,20 +548,24 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             "name": lvol.crypto_bdev,
             "params": {
                 "name": lvol.crypto_bdev,
-                "base_name": lvol.top_bdev,
-                "key1": crypto_key1,
-                "key2": crypto_key2,
+                "base_name": lvol.top_bdev
             }
         })
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
-        lvol.crypto_key1 = crypto_key1
-        lvol.crypto_key2 = crypto_key2
 
-        kms_client = KMSClient(cl.get_id())
-        encrypted_key1 = kms_client.encrypt(pool.get_id(), crypto_key1)
-        encrypted_key2 = kms_client.encrypt(pool.get_id(), crypto_key2)
-        kms_client.save_keys(lvol.crypto_bdev, encrypted_key1, encrypted_key2)
+        if cl.deploy_kms:
+            kms_client = KMSClient(cl.get_id())
+            encrypted_key1 = kms_client.encrypt(pool.get_id(), crypto_key1)
+            encrypted_key2 = kms_client.encrypt(pool.get_id(), crypto_key2)
+            ret, err = kms_client.save_keys(lvol.crypto_bdev, encrypted_key1, encrypted_key2)
+            if ret:
+                logger.info(ret)
+            if err:
+                logger.error(err)
+        else:
+            lvol.crypto_key1 = crypto_key1
+            lvol.crypto_key2 = crypto_key2
 
     lvol.write_to_db(db_controller.kv_store)
 
@@ -652,7 +685,13 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
             ret = rpc_client.ultra21_lvol_mount_lvol(**params)
 
         elif type == "crypto":
-            ret = _create_crypto_lvol(rpc_client, **params)
+            db_controller = DBController()
+            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+            if cluster.deploy_kms:
+                ret = _create_crypto_lvol_kms(snode, lvol, cluster)
+            else:
+                ret = _create_crypto_lvol(rpc_client, lvol.crypto_bdev, f"{lvol.lvs_name}/{lvol.lvol_bdev}",
+                                          lvol.crypto_key1, lvol.crypto_key2)
 
         elif type == "bdev_lvstore":
             ret = rpc_client.create_lvstore(**params)
@@ -755,13 +794,17 @@ def is_node_leader(snode, lvs_name):
     return False
 
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
+    db_controller = DBController()
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-
     base=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
     if "crypto" in lvol.lvol_type:
-        ret = _create_crypto_lvol(
-            rpc_client, lvol.crypto_bdev, base, lvol.crypto_key1, lvol.crypto_key2)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        if cluster.deploy_kms:
+            ret = _create_crypto_lvol_kms(snode, lvol, cluster)
+        else:
+            ret = _create_crypto_lvol(
+                rpc_client, lvol.crypto_bdev, base, lvol.crypto_key1, lvol.crypto_key2)
         if not ret:
             msg=f"Failed to create crypto lvol on node {snode.get_id()}"
             logger.error(msg)

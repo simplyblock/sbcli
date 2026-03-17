@@ -1,4 +1,7 @@
 
+kms:
+  enabled: true
+
 observability:
   enabled: false
   secret: "sWbpOgba1bKnCfcPkVQi"

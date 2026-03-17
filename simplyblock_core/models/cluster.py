@@ -75,6 +75,7 @@ class Cluster(BaseModel):
     client_data_nic: str = ""
     kms_unseal_key: str = ""
     kms_root_token: str = ""
+    deploy_kms: bool = False
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

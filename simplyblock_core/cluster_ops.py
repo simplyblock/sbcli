@@ -223,7 +223,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
-                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic) -> str:
+                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic, deploy_kms=True) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -238,6 +238,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
+    db_connection = None
     if mode == "docker":
         if not ifname:
             ifname = "eth0"
@@ -313,6 +314,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.fabric_tcp = protocols["tcp"]
     cluster.fabric_rdma = protocols["rdma"]
     cluster.is_single_node = is_single_node
+    cluster.deploy_kms = bool(deploy_kms)
 
     if ingress_host_source == "hostip":
         base = dev_ip
@@ -344,7 +346,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Deploying swarm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
+                             log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint,
+                             str(disable_monitoring), str(cluster.deploy_kms))
         logger.info("Deploying swarm stack > Done")
 
         logger.info("Configuring DB...")
@@ -352,45 +355,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring DB > Done")
         monitoring_secret = cluster.secret
 
-        # configure kms vault
-        container = utils.get_kms_cont(f"{dev_ip}:2375")
-        if container:
-            environment = [
-                "VAULT_ADDR=http://127.0.0.1:8200",
-                "VAULT_SKIP_VERIFY=true"]
-            res = container.exec_run(
-                cmd="vault operator init -key-shares=1 -key-threshold=1 -format=json",
-                environment=environment
-            )
-            out = res.output.decode("utf-8")
-            logger.debug(out)
-            with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
-                outfile.write(out)
-
-            with open("/etc/simplyblock/kms/data/init.json", "r") as f:
-                init_file = json.loads(f.read())
-                logger.debug(f"vault operator unseal {init_file['unseal_keys_b64'][0]}")
-                res = container.exec_run(
-                    cmd=f"vault operator unseal {init_file['unseal_keys_b64'][0]}",
-                    environment=environment)
-                out = res.output.decode("utf-8")
-                logger.debug(res.exit_code)
-                logger.debug(out)
-                if res.exit_code == 0:
-                    cluster.kms_unseal_key = init_file['unseal_keys_b64'][0]
-                logger.debug(f"vault login {init_file['root_token']}")
-                res = container.exec_run(
-                    cmd=f"vault login {init_file['root_token']}",
-                    environment=environment)
-                out = res.output.decode("utf-8")
-                logger.debug(out)
-                if res.exit_code == 0:
-                    cluster.kms_root_token = init_file['root_token']
-                res = container.exec_run(
-                    cmd=f"vault secrets enable -path={cluster.uuid} -version=1 kv",
-                    environment=environment)
-                out = res.output.decode("utf-8")
-                logger.debug(out)
+        if cluster.deploy_kms:
+            # configure kms vault
+            utils.configure_kms_on_docker(cluster, dev_ip)
 
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
@@ -400,10 +367,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Patching prometheus configmap...")
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
-    if not disable_monitoring:
-        if ingress_host_source == "hostip":
-            dns_name = dev_ip
-
+        if cluster.deploy_kms:
+            # configure kms vault
+            utils.configure_kms_on_k8s(cluster)
 
         _set_max_result_window(os_endpoint)
 
@@ -448,35 +414,6 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
     # Remove the mount point directory
     subprocess.check_call(["sudo", "rm", "-rf", mount_point])
     logger.info(f"Removed mount point: {mount_point}")
-
-
-def _run_fio(mount_point) -> None:
-    if not os.path.exists(mount_point):
-        os.makedirs(mount_point, exist_ok=True)
-
-    try:
-        fio_config = textwrap.dedent(f"""
-            [test]
-            ioengine=aiolib
-            direct=1
-            iodepth=4
-            readwrite=randrw
-            bs=4K
-            nrfiles=4
-            size=1G
-            verify=md5
-            numjobs=3
-            directory={mount_point}
-        """).strip()
-        config_file = "fio.cfg"
-        with open(config_file, "w") as f:
-            f.write(fio_config)
-
-        logger.info(subprocess.check_output(["sudo", "fio", config_file], text=True))
-    finally:
-        if os.path.exists(config_file):
-            os.remove(config_file)
-            logger.info("fio configuration file removed.")
 
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,

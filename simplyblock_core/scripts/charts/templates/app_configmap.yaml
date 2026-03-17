@@ -144,3 +144,34 @@ data:
     fdbserver --listen-address 0.0.0.0:"$FDB_PORT" --public-address "$PUBLIC_IP:$FDB_PORT" \
         --datadir /var/fdb/data --logdir /var/fdb/logs \
         --locality-zoneid="$(hostname)" --locality-machineid="$(hostname)" --class "$FDB_PROCESS_CLASS"
+
+{{- if .Values.kms.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simplyblock-kms-config
+  namespace: {{ .Release.Namespace }}
+data:
+  config.hcl: |
+    {
+      "storage": {
+        "file": {
+          "path": "/vault/data"
+        }
+      },
+      "listener": [
+        {
+          "tcp": {
+            "address": "0.0.0.0:8200",
+            "tls_disable": true
+          }
+        }
+      ],
+      "default_lease_ttl": "168h",
+      "max_lease_ttl": "720h",
+      "ui": true
+      "api_addr": "http://0.0.0.0:8200"
+    }
+
+{{- end }}

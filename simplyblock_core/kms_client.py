@@ -22,11 +22,14 @@ class KMSClient:
 
     def __init__(self, cluster_id, timeout=300, retry=5):
         db_controller = DBController()
-        mnode = db_controller.get_mgmt_nodes(cluster_id)[0]
-        if not mnode:
-            raise KMSClientException("Cluster has no mgmt nodes")
         cluster = db_controller.get_cluster_by_id(cluster_id)
-        self.ip_address = f"{mnode.mgmt_ip}:8200"
+        if cluster.mode == "docker":
+            mnode = db_controller.get_mgmt_nodes(cluster_id)[0]
+            if not mnode:
+                raise KMSClientException("Cluster has no mgmt nodes")
+            self.ip_address = f"{mnode.mgmt_ip}:8200"
+        else:
+            self.ip_address = "simplyblock-kms:8200"
         self.url = 'http://%s/' % self.ip_address
         self.timeout = timeout
         self.session = requests.session()
@@ -102,3 +105,6 @@ class KMSClient:
             "ciphertext": ciphertext
         }
         return self._request("POST", f"v1/transit/decrypt/{key_name}", params)
+
+    def create_pool_key(self, pool_uuid):
+        return self._request("POST", f"v1/transit/keys/{pool_uuid}")
