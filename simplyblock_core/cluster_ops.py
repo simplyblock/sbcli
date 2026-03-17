@@ -403,6 +403,13 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
 
+    # configure kms vault
+    if cluster.deploy_kms:
+        if mode == "docker":
+            utils.configure_kms_on_docker(cluster, dev_ip)
+        elif mode == "kubernetes":
+            utils.configure_kms_on_k8s(cluster)
+
     logger.info("New Cluster has been created")
     logger.info(cluster.uuid)
     return cluster.uuid
