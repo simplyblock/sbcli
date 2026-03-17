@@ -288,9 +288,9 @@ def node_port_check_fun(snode):
         if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                 if n.lvstore_status == "ready":
-                    ports.append(n.lvol_subsys_port)
+                    ports.append(n.get_lvol_subsys_port(n.lvstore))
         if not snode.is_secondary_node:
-            ports.append(snode.lvol_subsys_port)
+            ports.append(snode.get_lvol_subsys_port(snode.lvstore))
 
         for port in ports:
             try:

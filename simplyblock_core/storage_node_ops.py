@@ -2133,8 +2133,9 @@ def restart_storage_node(
                     port_type = "tcp"
                     if sec_node.active_rdma:
                         port_type = "udp"
-                    fw_api.firewall_set_port(snode.lvol_subsys_port, port_type, "allow", sec_node.rpc_port)
-                    tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
+                    restart_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+                    fw_api.firewall_set_port(restart_lvs_port, port_type, "allow", sec_node.rpc_port)
+                    tcp_ports_events.port_allowed(sec_node, restart_lvs_port)
             return False
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if not ret:
@@ -2211,6 +2212,18 @@ def restart_storage_node(
             return True
 
 
+def _format_lvstore_ports(node):
+    """Format per-lvstore ports for display."""
+    if not node.lvstore_ports:
+        return "-"
+    parts = []
+    for lvs_name, ports in node.lvstore_ports.items():
+        lp = ports.get("lvol_subsys_port", "-")
+        hp = ports.get("hublvol_port", "-")
+        parts.append(f"{lvs_name}(L:{lp},H:{hp})")
+    return " ".join(parts)
+
+
 def list_storage_nodes(is_json, cluster_id=None):
     db_controller = DBController()
     if cluster_id:
@@ -2253,6 +2266,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "DEV P": node.nvmf_port,
             "HUB P": node.hublvol.nvmf_port if node.hublvol else "-",
             "FW P": node.firewall_port,
+            "LVS Ports": _format_lvstore_ports(node),
             # "Cloud ID": node.cloud_instance_id,
             # "JM VUID": node.jm_vuid,
             # "Ext IP": node.cloud_instance_public_ip,
@@ -2528,10 +2542,14 @@ def suspend_storage_node(node_id, force=False):
         if nodes:
             for node in nodes:
                 try:
+                    # Block per-lvstore ports for secondary lvstores on this node
+                    sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
+                    sec_hub_port = node.get_hublvol_port(node.lvstore)
+                    if sec_hub_port:
+                        fw_api.firewall_set_port(
+                            sec_hub_port, port_type, "block", snode.rpc_port, is_reject=True)
                     fw_api.firewall_set_port(
-                        node.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
-                    fw_api.firewall_set_port(
-                        node.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
+                        sec_lvs_port, port_type, "block", snode.rpc_port, is_reject=True)
                     time.sleep(0.5)
                     rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
                     rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
@@ -2540,10 +2558,14 @@ def suspend_storage_node(node_id, force=False):
                     return False
 
     try:
+        # Block per-lvstore ports for this node's own primary lvstore
+        own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+        own_hub_port = snode.get_hublvol_port(snode.lvstore)
+        if own_hub_port:
+            fw_api.firewall_set_port(
+                own_hub_port, port_type, "block", snode.rpc_port, is_reject=True)
         fw_api.firewall_set_port(
-            snode.hublvol.nvmf_port, port_type, "block", snode.rpc_port, is_reject=True)
-        fw_api.firewall_set_port(
-            snode.lvol_subsys_port, port_type, "block", snode.rpc_port, is_reject=True)
+            own_lvs_port, port_type, "block", snode.rpc_port, is_reject=True)
         time.sleep(0.5)
         rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
         rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -2605,19 +2627,27 @@ def resume_storage_node(node_id):
     if nodes:
         for node in nodes:
             try:
+                # Allow per-lvstore ports for secondary lvstores on this node
+                sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
+                sec_hub_port = node.get_hublvol_port(node.lvstore)
                 fw_api.firewall_set_port(
-                    node.lvol_subsys_port, port_type, "allow", snode.rpc_port)
-                fw_api.firewall_set_port(
-                    node.hublvol.nvmf_port, port_type, "allow", snode.rpc_port)
+                    sec_lvs_port, port_type, "allow", snode.rpc_port)
+                if sec_hub_port:
+                    fw_api.firewall_set_port(
+                        sec_hub_port, port_type, "allow", snode.rpc_port)
             except Exception as e:
                 logger.error(e)
                 return False
 
     try:
+        # Allow per-lvstore ports for this node's own primary lvstore
+        own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+        own_hub_port = snode.get_hublvol_port(snode.lvstore)
         fw_api.firewall_set_port(
-            snode.lvol_subsys_port, port_type, "allow", snode.rpc_port)
-        fw_api.firewall_set_port(
-            snode.hublvol.nvmf_port, port_type, "allow", snode.rpc_port)
+            own_lvs_port, port_type, "allow", snode.rpc_port)
+        if own_hub_port:
+            fw_api.firewall_set_port(
+                own_hub_port, port_type, "allow", snode.rpc_port)
     except Exception as e:
         logger.error(e)
         return False
@@ -3197,6 +3227,14 @@ def recreate_lvstore_on_sec(secondary_node):
         primary_node.lvstore_status = "in_creation"
         primary_node.write_to_db()
 
+        # Ensure secondary has per-lvstore ports from primary
+        if primary_node.lvstore_ports and primary_node.lvstore in primary_node.lvstore_ports:
+            if not secondary_node.lvstore_ports:
+                secondary_node.lvstore_ports = {}
+            secondary_node.lvstore_ports[primary_node.lvstore] = \
+                primary_node.lvstore_ports[primary_node.lvstore].copy()
+            secondary_node.write_to_db()
+
         lvol_list = []
         for lv in db_controller.get_lvols_by_node_id(primary_node.get_id()):
             if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
@@ -3237,11 +3275,13 @@ def recreate_lvstore_on_sec(secondary_node):
         if primary_node.active_rdma:
             port_type = "udp"
 
+        primary_lvs_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
+
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
             ### 3- block primary port
-            fw_api.firewall_set_port(primary_node.lvol_subsys_port, port_type, "block", primary_node.rpc_port)
-            tcp_ports_events.port_deny(primary_node, primary_node.lvol_subsys_port)
+            fw_api.firewall_set_port(primary_lvs_port, port_type, "block", primary_node.rpc_port)
+            tcp_ports_events.port_deny(primary_node, primary_lvs_port)
 
             ### 4- set leadership to false
             # primary_rpc_client.bdev_lvol_set_leader(primary_node.lvstore, leader=False)
@@ -3266,8 +3306,8 @@ def recreate_lvstore_on_sec(secondary_node):
 
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
             ### 8- allow port on primary
-            fw_api.firewall_set_port(primary_node.lvol_subsys_port, port_type, "allow", primary_node.rpc_port)
-            tcp_ports_events.port_allowed(primary_node, primary_node.lvol_subsys_port)
+            fw_api.firewall_set_port(primary_lvs_port, port_type, "allow", primary_node.rpc_port)
+            tcp_ports_events.port_allowed(primary_node, primary_lvs_port)
 
         ### 7- add lvols to subsystems
         executor = ThreadPoolExecutor(max_workers=50)
@@ -3369,8 +3409,9 @@ def recreate_lvstore(snode, force=False):
                 logger.error(msg)
                 storage_events.jm_repl_tasks_found(sec_node, snode.jm_vuid)
 
-            fw_api.firewall_set_port(snode.lvol_subsys_port, port_type, "block", sec_node.rpc_port)
-            tcp_ports_events.port_deny(sec_node, snode.lvol_subsys_port)
+            snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+            fw_api.firewall_set_port(snode_lvs_port, port_type, "block", sec_node.rpc_port)
+            tcp_ports_events.port_deny(sec_node, snode_lvs_port)
 
             time.sleep(0.5)
             ### 4- set leadership to false
@@ -3444,7 +3485,7 @@ def recreate_lvstore(snode, force=False):
     ret = rpc_client.bdev_lvol_set_lvs_opts(
         snode.lvstore,
         groupid=snode.jm_vuid,
-        subsystem_port=snode.lvol_subsys_port,
+        subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
         primary=True
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
@@ -3476,8 +3517,9 @@ def recreate_lvstore(snode, force=False):
             port_type = "tcp"
             if sec_node.active_rdma:
                 port_type = "udp"
-            fw_api.firewall_set_port(snode.lvol_subsys_port, port_type, "allow", sec_node.rpc_port)
-            tcp_ports_events.port_allowed(sec_node, snode.lvol_subsys_port)
+            snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+            fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", sec_node.rpc_port)
+            tcp_ports_events.port_allowed(sec_node, snode_lvs_port)
 
     if prim_node_suspend:
         logger.info("Node restart interrupted because secondary node is unreachable")
@@ -3523,15 +3565,17 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
+    # Use per-lvstore port for this lvol's lvstore
+    listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(
-                lvol.nqn, iface.trtype, iface.ip4_address, snode.lvol_subsys_port, ana_state=lvol_ana_state)
+                lvol.nqn, iface.trtype, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
         elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
             logger.info("adding listener for %s on IP %s, fabric TCP" % (lvol.nqn, iface.ip4_address))
             ret = rpc_client.listeners_create(
-                lvol.nqn, "TCP", iface.ip4_address, snode.lvol_subsys_port, ana_state=lvol_ana_state)
+                lvol.nqn, "TCP", iface.ip4_address, listener_port, ana_state=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     lvol_obj.status = LVol.STATUS_ONLINE
@@ -3684,7 +3728,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 1
     jm_ids = []
-    lvol_subsys_port = utils.get_next_port(snode.cluster_id)
+    lvol_subsys_port, hublvol_port = utils.get_next_lvstore_ports(snode.cluster_id)
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
@@ -3765,6 +3809,13 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
     snode.lvol_subsys_port = lvol_subsys_port
+    # Store per-lvstore ports (lvol_subsys + hublvol)
+    if not snode.lvstore_ports:
+        snode.lvstore_ports = {}
+    snode.lvstore_ports[lvs_name] = {
+        "lvol_subsys_port": lvol_subsys_port,
+        "hublvol_port": hublvol_port,
+    }
     snode.lvstore_status = "in_creation"
     snode.write_to_db()
 
@@ -3778,7 +3829,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     ret = rpc_client.bdev_lvol_set_lvs_opts(
         snode.lvstore,
         groupid=snode.jm_vuid,
-        subsystem_port=snode.lvol_subsys_port,
+        subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
         primary=True
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
@@ -3791,6 +3842,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
     for sec_node_id in secondary_ids:
         sec_node = db_controller.get_storage_node_by_id(sec_node_id)
+
+        # Propagate per-lvstore ports to secondary node
+        if not sec_node.lvstore_ports:
+            sec_node.lvstore_ports = {}
+        sec_node.lvstore_ports[lvs_name] = snode.lvstore_ports[lvs_name].copy()
 
         # creating lvstore on secondary
         sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node)

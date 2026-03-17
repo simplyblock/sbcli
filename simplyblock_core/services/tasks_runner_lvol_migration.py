@@ -312,7 +312,7 @@ def _expose_lvol_on_secondary(lvol, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid)
             if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                 ret, err = sec_rpc.nvmf_subsystem_add_listener(
                     lvol.nqn, iface.trtype, iface.ip4_address,
-                    tgt_sec.lvol_subsys_port, "non_optimized")
+                    tgt_sec.get_lvol_subsys_port(lvol.lvs_name), "non_optimized")
                 if not ret:
                     if err and isinstance(err, dict) and err.get("code") == -32602:
                         logger.warning("Listener already exists on secondary")
@@ -441,7 +441,8 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
         _delete_bdev_blocking(tgt_composite, tgt_rpc)
         return None, f"Failed to create migration subsystem for snap {snap_uuid}"
 
-    ret = tgt_rpc.listeners_create(temp_nqn, trtype, target_ip, tgt_node.lvol_subsys_port)
+    tgt_lvs_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+    ret = tgt_rpc.listeners_create(temp_nqn, trtype, target_ip, tgt_lvs_port)
     if not ret:
         tgt_rpc.subsystem_delete(temp_nqn)
         _delete_bdev_blocking(tgt_composite, tgt_rpc)
@@ -455,7 +456,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
 
     # Step 4: connect source to target
     ret = src_rpc.bdev_nvme_attach_controller(
-        ctrl_name, temp_nqn, target_ip, tgt_node.lvol_subsys_port, trtype)
+        ctrl_name, temp_nqn, target_ip, tgt_lvs_port, trtype)
     if not ret:
         tgt_rpc.subsystem_delete(temp_nqn)
         _delete_bdev_blocking(tgt_composite, tgt_rpc)
@@ -987,7 +988,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             return False, True, f"Failed to create subsystem {nqn} on target"
         subsystem_created_on_target = True
 
-        ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_node.lvol_subsys_port)
+        ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore))
         if not ret:
             tgt_rpc.subsystem_delete(nqn)
             _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
@@ -1090,11 +1091,11 @@ def _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         src_trtype, src_ip = _get_migration_nic(src_node)
 
         tgt_rpc.nvmf_subsystem_listener_set_ana_state(
-            nqn, tgt_ip, tgt_node.lvol_subsys_port, trtype=tgt_trtype, ana="optimized")
+            nqn, tgt_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore), trtype=tgt_trtype, ana="optimized")
         logger.info(f"ANA: {nqn} on target {tgt_ip} → optimized")
 
         src_rpc.nvmf_subsystem_listener_set_ana_state(
-            nqn, src_ip, src_node.lvol_subsys_port, trtype=src_trtype, ana="inaccessible")
+            nqn, src_ip, src_node.get_lvol_subsys_port(src_node.lvstore), trtype=src_trtype, ana="inaccessible")
         logger.info(f"ANA: {nqn} on source {src_ip} → inaccessible")
     except Exception as e:
         logger.error(f"ANA state update error (non-fatal): {e}")
