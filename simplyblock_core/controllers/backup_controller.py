@@ -993,12 +993,36 @@ def evaluate_schedule(lvol):
 
 
 def _auto_backup_lvol(lvol):
-    """Create an automatic snapshot + backup for scheduled backups."""
+    """Create an automatic snapshot + backup for scheduled backups.
+
+    Unlike manual backup_snapshot() which walks the full ancestor chain,
+    auto-backups create a single snapshot and a single backup for it.
+    The prev_backup_id is set to the latest existing backup so the
+    incremental chain is maintained without re-backing all ancestors.
+    """
     from simplyblock_core.controllers import snapshot_controller
     snap_name = f"auto_{lvol.lvol_name}_{int(time.time())}"
-    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name, backup=True)
+    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name)
     if error:
-        logger.warning(f"Auto-backup failed for lvol {lvol.get_id()}: {error}")
+        logger.warning(f"Auto-backup snapshot failed for lvol {lvol.get_id()}: {error}")
+        return
+
+    try:
+        snapshot = db_controller.get_snapshot_by_id(snap_id)
+    except KeyError:
+        logger.warning(f"Auto-backup: snapshot {snap_id} not found after creation")
+        return
+
+    node_id = lvol.node_id
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.warning(f"Auto-backup: node {node_id} not found")
+        return
+
+    cluster_id = snode.cluster_id
+    prev_backup = _get_latest_backup_for_lvol(lvol.get_id())
+    _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup)
 
 
 def _trigger_merge(keep_backup, old_backup):
