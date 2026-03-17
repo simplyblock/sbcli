@@ -281,14 +281,18 @@ class TestLvolSecurityCombinations(SecurityTestBase):
             self.logger.info(f"--- Creating lvol {lvol_name!r} (sec_type={sec_type}) ---")
 
             if sec_opts is not None:
-                out, err = self.ssh_obj.create_sec_lvol(
+                # DHCHAP volumes require allowed_hosts for the client to connect
+                host_nqn = self._get_client_host_nqn()
+                _, err = self.ssh_obj.create_sec_lvol(
                     self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
                     sec_options=sec_opts, encrypt=encrypt,
+                    allowed_hosts=[host_nqn],
                     key1=self.lvol_crypt_keys[0] if encrypt else None,
                     key2=self.lvol_crypt_keys[1] if encrypt else None)
                 assert not err or "error" not in err.lower(), \
                     f"Failed to create {sec_type} lvol: {err}"
             else:
+                host_nqn = None
                 self.sbcli_utils.add_lvol(
                     lvol_name=lvol_name,
                     pool_name=self.pool_name,
@@ -303,13 +307,8 @@ class TestLvolSecurityCombinations(SecurityTestBase):
             assert lvol_id, f"Could not get lvol ID for {lvol_name}"
             self._log_lvol_security(lvol_id, label=f"({sec_type})")
 
-            # Determine host_nqn: required for DH-HMAC-CHAP volumes
-            host_nqn = None
-            if sec_opts and sec_opts.get("dhchap_key"):
-                host_nqn = self._get_client_host_nqn()
-
             lvol_device, connect_ls = self._connect_and_get_device(
-                lvol_name, lvol_id, host_nqn)
+                lvol_name, lvol_id, host_nqn=host_nqn)
             self.logger.info(f"Connected {lvol_name} → {lvol_device}")
 
             fs_type = "ext4"

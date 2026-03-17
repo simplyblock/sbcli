@@ -41,6 +41,9 @@ class RandomFailoverTest(TestLvolHACluster):
         self.disconnect_thread = None
         self.outage_start_time = None
         self.outage_end_time = None
+        # Local log dir used when the outage node's NIC is cut (NFS unreachable).
+        # Set in perform_random_outage(), consumed in restart_nodes_after_failover().
+        self._outage_local_log_dir = None
         self.node_vs_lvol = {}
         self.sn_nodes_with_sec = []
         self.lvol_node = ""
@@ -75,6 +78,44 @@ class RandomFailoverTest(TestLvolHACluster):
         with open(self.outage_log_file, 'a') as log:
             log.write(f"{timestamp},{node},{outage_type},{event}\n")
 
+    def _switch_to_local_logging(self, node_ip):
+        """
+        Before a network-isolating outage (interface_full / interface_partial):
+
+        1. Kill existing docker-log tmux sessions on *node_ip* — they write to
+           NFS which will become unreachable once the NIC drops.
+        2. Start NEW tmux sessions writing to a LOCAL tmpfs path so log data
+           captured during the outage is not lost.
+
+        Sets self._outage_local_log_dir so restart_nodes_after_failover() can
+        later flush those files to NFS.
+        """
+        if self.k8s_test:
+            return  # K8s pods handle log persistence differently
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        local_log_dir = f"/tmp/sb_outage_logs/{self.test_name}_{ts}"
+        self._outage_local_log_dir = local_log_dir
+
+        # Stop sessions targeting NFS on the outage node
+        self.ssh_obj.stop_node_docker_logging(node_ip)
+
+        # Start fresh sessions targeting the local path
+        containers = self.container_nodes.get(node_ip, [])
+        if containers:
+            self.ssh_obj.start_local_docker_logging(
+                node_ip=node_ip,
+                containers=containers,
+                local_log_dir=local_log_dir,
+                test_name=self.test_name,
+            )
+            self.logger.info(
+                f"[local-log] Switched {node_ip} docker logging to local path {local_log_dir}"
+            )
+        else:
+            self.logger.warning(
+                f"[local-log] No containers known for {node_ip} — skipping local log switch"
+            )
 
     def create_lvols_with_fio(self, count):
         """Create lvols and start FIO with random configurations."""
@@ -327,7 +368,12 @@ class RandomFailoverTest(TestLvolHACluster):
             data_nics = node_details[0]["data_nics"]
             for data_nic in data_nics:
                 active_interfaces.append(data_nic["if_name"])
-            
+
+            # NIC will be brought down — NFS becomes unreachable on this node.
+            # Switch to local logging BEFORE the network drops so we don't lose
+            # log data written during the outage.
+            self._switch_to_local_logging(node_ip)
+
             self.disconnect_thread = threading.Thread(
                 target=self.ssh_obj.disconnect_all_active_interfaces,
                 args=(node_ip, active_interfaces, 600),
@@ -339,7 +385,10 @@ class RandomFailoverTest(TestLvolHACluster):
             data_nics = node_details[0]["data_nics"]
             for data_nic in data_nics:
                 active_interfaces.append(data_nic["if_name"])
-            
+
+            # Same as full interrupt — NFS path is unreachable during outage.
+            self._switch_to_local_logging(node_ip)
+
             self.disconnect_thread = threading.Thread(
                 target=self.ssh_obj.disconnect_all_active_interfaces,
                 args=(node_ip, active_interfaces, 600),
@@ -447,6 +496,17 @@ class RandomFailoverTest(TestLvolHACluster):
 
         
         if not self.k8s_test:
+            # If we switched to local logging before a network-isolating outage,
+            # copy those locally buffered logs to NFS now that the node is back.
+            if self._outage_local_log_dir:
+                nfs_node_dir = os.path.join(self.docker_logs_path, node_ip)
+                self.ssh_obj.flush_local_logs_to_nfs(
+                    node_ip=node_ip,
+                    local_log_dir=self._outage_local_log_dir,
+                    nfs_log_dir=nfs_node_dir,
+                )
+                self._outage_local_log_dir = None
+
             for node in self.storage_nodes:
                 self.ssh_obj.restart_docker_logging(
                     node_ip=node,

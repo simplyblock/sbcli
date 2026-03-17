@@ -1876,6 +1876,120 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to restart Docker log collection on node {node_ip}: {e}")
 
+    def stop_node_docker_logging(self, node_ip):
+        """
+        Kill all running 'docker logs --follow' processes on *node_ip*.
+
+        Called before a network-isolating outage (interface_full / interface_partial)
+        so that tmux sessions that write to NFS paths are cleanly stopped before the
+        NFS mount becomes unreachable.
+        """
+        try:
+            # Kill every tmux session whose command contains 'docker logs --follow'
+            # so we don't leave stale writers against a now-unavailable NFS path.
+            self.exec_command(
+                node_ip,
+                "sudo bash -c \"tmux list-sessions -F '#{session_name}' 2>/dev/null | "
+                "xargs -I{} sh -c \\\"tmux send-keys -t {} q Enter 2>/dev/null; "
+                "tmux kill-session -t {} 2>/dev/null\\\" || true\"",
+                supress_logs=True,
+            )
+            # Belt-and-suspenders: also kill any background docker-logs processes
+            self.exec_command(
+                node_ip,
+                "sudo pkill -f 'docker logs --follow' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            self.logger.info(f"[local-log] Stopped NFS-targeted docker logging on {node_ip}")
+        except Exception as e:
+            self.logger.warning(f"[local-log] stop_node_docker_logging error on {node_ip}: {e}")
+
+    def start_local_docker_logging(self, node_ip, containers, local_log_dir, test_name):
+        """
+        Start docker log collection writing to a LOCAL directory on *node_ip*.
+
+        Unlike start_docker_logging(), the target path is on the node's own
+        filesystem (e.g. /tmp/…) so it keeps working even when the NFS mount
+        becomes unreachable during a network-isolating outage.
+
+        Args:
+            node_ip (str):      IP of the storage node.
+            containers (list):  Container names to log.
+            local_log_dir (str): Local path on the node (e.g. /tmp/outage_logs/…).
+            test_name (str):    Test name embedded in the log file name.
+        """
+        try:
+            self.exec_command(
+                node_ip,
+                f"sudo mkdir -p {local_log_dir} && sudo chmod 777 {local_log_dir}",
+            )
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for container in containers:
+                log_file = (
+                    f"{local_log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_local_outage.txt"
+                )
+                session = f"{container}_local_{generate_random_string()}"
+                cmd = (
+                    f"sudo tmux new-session -d -s {session} "
+                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                )
+                self.exec_command(node_ip, cmd)
+                self.logger.info(
+                    f"[local-log] Local logging started for '{container}' on {node_ip} → {log_file}"
+                )
+        except Exception as e:
+            self.logger.warning(
+                f"[local-log] start_local_docker_logging error on {node_ip}: {e}"
+            )
+
+    def flush_local_logs_to_nfs(self, node_ip, local_log_dir, nfs_log_dir):
+        """
+        Copy logs accumulated in *local_log_dir* on *node_ip* to *nfs_log_dir*.
+
+        Called once the node's network is restored (after a network-isolating outage)
+        to preserve the log data that was written locally during the outage.
+
+        Requires rsync to be available on the node; falls back to cp -r if not.
+
+        Args:
+            node_ip (str):       IP of the storage node.
+            local_log_dir (str): Source directory on the node (e.g. /tmp/outage_logs/…).
+            nfs_log_dir (str):   Destination path on NFS (e.g. /mnt/nfs_share/…/node_ip/).
+        """
+        try:
+            # Ensure destination directory exists on NFS
+            self.exec_command(
+                node_ip,
+                f"sudo mkdir -p {nfs_log_dir} && sudo chmod 777 {nfs_log_dir}",
+            )
+            # Try rsync first (preserves timestamps and is idempotent)
+            out, err = self.exec_command(
+                node_ip,
+                f"which rsync 2>/dev/null",
+                supress_logs=True,
+            )
+            if out and "rsync" in out:
+                copy_cmd = (
+                    f"sudo rsync -av --ignore-errors {local_log_dir}/ {nfs_log_dir}/ 2>&1 || true"
+                )
+            else:
+                copy_cmd = f"sudo cp -r {local_log_dir}/. {nfs_log_dir}/ 2>&1 || true"
+
+            self.exec_command(node_ip, copy_cmd)
+            self.logger.info(
+                f"[local-log] Flushed local outage logs from {local_log_dir} → {nfs_log_dir} on {node_ip}"
+            )
+            # Clean up local temp dir after successful copy
+            self.exec_command(
+                node_ip,
+                f"sudo rm -rf {local_log_dir} 2>/dev/null || true",
+                supress_logs=True,
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"[local-log] flush_local_logs_to_nfs error on {node_ip}: {e}"
+            )
+
     def get_running_containers(self, node_ip):
         """
         Fetch running containers from all storage nodes.
@@ -3091,9 +3205,24 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         self.exec_command(node, f"echo '{json_str}' > {path}", supress_logs=True)
 
     def get_client_host_nqn(self, node):
-        """Return the NVMe host NQN of *node* via ``nvme gen-hostnqn``."""
-        out, _ = self.exec_command(node, "nvme gen-hostnqn")
-        return out.strip().split('\n')[0].strip()
+        """Generate a persistent NVMe host NQN on *node* and return it.
+
+        Writes the NQN to /etc/nvme/hostnqn so the kernel NVMe driver
+        uses the same NQN that is registered in the volume's allowed-hosts list.
+        Validates by reading both ``cat /etc/nvme/hostnqn`` and
+        ``nvme show-hostnqn``.
+        """
+        self.exec_command(node, "sudo mkdir -p /etc/nvme")
+        self.exec_command(
+            node, "sudo sh -c 'nvme gen-hostnqn > /etc/nvme/hostnqn'")
+        nqn_cat, _ = self.exec_command(node, "cat /etc/nvme/hostnqn")
+        nqn_show, _ = self.exec_command(node, "nvme show-hostnqn")
+        self.logger.info(
+            f"[get_client_host_nqn] cat /etc/nvme/hostnqn: {nqn_cat!r}")
+        self.logger.info(
+            f"[get_client_host_nqn] nvme show-hostnqn: {nqn_show!r}")
+        nqn = nqn_cat.strip().split('\n')[0].strip()
+        return nqn
 
     def get_lvol_connect_str_with_host_nqn(self, node, lvol_id, host_nqn,
                                             ctrl_loss_tmo=-1):

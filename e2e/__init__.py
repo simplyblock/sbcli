@@ -83,6 +83,25 @@ from e2e_tests.security.test_lvol_security import (
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
 
+from e2e_tests.backup.test_backup_restore import (
+    TestBackupBasicPositive,
+    TestBackupRestoreDataIntegrity,
+    TestBackupPolicy,
+    TestBackupNegative,
+    TestBackupCryptoLvol,
+    TestBackupCustomGeometry,
+    TestBackupCrossClusterRestore,  # NOT in get_backup_tests(); run explicitly only
+)
+
+from stress_test.continuous_backup_stress import (
+    BackupStressParallelSnapshots,
+    BackupStressTcpFailover,
+    BackupStressRdmaFailover,
+    BackupStressCryptoMix,
+    BackupStressPolicyRetention,
+    BackupStressRestoreConcurrent,
+)
+
 
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
 
@@ -128,6 +147,22 @@ ALL_TESTS = [
     # Security stress tests
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
+    # Backup E2E tests
+    TestBackupBasicPositive,
+    TestBackupRestoreDataIntegrity,
+    TestBackupPolicy,
+    TestBackupNegative,
+    TestBackupCryptoLvol,
+    TestBackupCustomGeometry,
+    # Backup stress tests
+    BackupStressParallelSnapshots,
+    BackupStressTcpFailover,
+    BackupStressRdmaFailover,
+    BackupStressCryptoMix,
+    BackupStressPolicyRetention,
+    BackupStressRestoreConcurrent,
+    # Cross-cluster restore — explicit-only (requires CLUSTER2_* env vars)
+    TestBackupCrossClusterRestore,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -229,6 +264,29 @@ def get_stress_tests():
         RandomMultiClientSingleNodeTest,
     ]
     return tests
+
+def get_backup_tests():
+    return [
+        # E2E backup tests
+        TestBackupBasicPositive,
+        TestBackupRestoreDataIntegrity,
+        TestBackupPolicy,
+        TestBackupNegative,
+        TestBackupCryptoLvol,
+        TestBackupCustomGeometry,
+    ]
+
+
+def get_backup_stress_tests():
+    return [
+        BackupStressParallelSnapshots,
+        BackupStressTcpFailover,
+        BackupStressRdmaFailover,
+        BackupStressCryptoMix,
+        BackupStressPolicyRetention,
+        BackupStressRestoreConcurrent,
+    ]
+
 
 def get_upgrade_tests():
     tests = [
