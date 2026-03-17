@@ -187,6 +187,24 @@ def get_all_tests(custom=True, ha_test=False):
         # tests.remove(TestHASingleNodeOutage)
     return tests
 
+def get_security_tests():
+    return [
+        # Security E2E tests
+        TestLvolSecurityCombinations,
+        TestLvolAllowedHostsPositive,
+        TestLvolAllowedHostsNegative,
+        TestLvolDynamicHostManagement,
+        TestLvolCryptoWithAllowedHosts,
+        TestLvolDhcapDirections,
+        TestLvolMultipleAllowedHosts,
+        TestLvolAllowedHostsNoDhchap,
+        # Security negative tests
+        TestLvolSecurityNegativeHostOps,
+        TestLvolSecurityNegativeCreation,
+        TestLvolSecurityNegativeConnect,
+    ]
+
+
 def get_stress_tests():
     tests = [
         TestStressLvolCloneClusterFioRun,

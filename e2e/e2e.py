@@ -1,7 +1,7 @@
 ### simplyblock e2e tests
 import argparse
 import traceback
-from __init__ import get_all_tests, ALL_TESTS
+from __init__ import get_all_tests, get_security_tests, ALL_TESTS
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -54,7 +54,11 @@ def main():
     test_class_run = []
     new_nodes = args.new_nodes.strip().split() if args.new_nodes else []
     skipped_cases = 0
-    if args.testname is None or len(args.testname.strip()) == 0:
+
+    # "security" is a special group keyword — runs all security E2E tests
+    if args.testname and args.testname.strip().lower() == "security":
+        test_class_run = get_security_tests()
+    elif args.testname is None or len(args.testname.strip()) == 0:
         for cls in tests:
             if cls.__name__ == "TestAddNodesDuringFioRun":
                 if len(new_nodes) == 0 or len(new_nodes) % 2 != 0:
