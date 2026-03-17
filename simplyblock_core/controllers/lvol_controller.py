@@ -1217,6 +1217,14 @@ def delete_lvol(id_or_name, force_delete=False):
         except KeyError:
             pass # already deleted
 
+    cl = db_controller.get_cluster_by_id(snode.cluster_id)
+    if cl.deploy_kms:
+        kms_client = KMSClient(cl.get_id())
+        ret, err = kms_client.delete_key(lvol.crypto_bdev)
+        if ret:
+            logger.info(ret)
+        if err:
+            logger.error(err)
     logger.info("Done")
     return True
 

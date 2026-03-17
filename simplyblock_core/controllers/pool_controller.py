@@ -239,6 +239,15 @@ def delete_pool(uuid):
     logger.info(f"Deleting pool {pool.get_id()}")
     pool_events.pool_remove(pool)
     pool.remove(db_controller.kv_store)
+    cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+    if cluster.deploy_kms:
+        kms_client = KMSClient(cluster.get_id())
+        ret, err = kms_client.delete_pool_key(pool.get_id())
+        if ret:
+            logger.info(ret)
+        if err:
+            logger.error(err)
+
     logger.info("Done")
     return True
 

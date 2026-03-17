@@ -115,3 +115,9 @@ class KMSClient:
             "exportable": False
         }
         return self._request("POST", f"v1/transit/keys/{pool_uuid}", params)
+
+    def delete_pool_key(self, pool_uuid):
+        return self._request("DELETE", f"v1/transit/keys/{pool_uuid}")
+
+    def delete_key(self, key_name):
+        return self._request("DELETE", f"v1/{self.cluster_id}/{key_name}")
