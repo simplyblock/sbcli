@@ -303,6 +303,18 @@ def delete(snapshot_uuid, force_delete=False):
             f"{snap.lvol.uuid} has active migration {active_mig.uuid}")
         return False
 
+    # Block deletion if a backup referencing this snapshot is still in progress
+    if not force_delete:
+        from simplyblock_core.models.backup import Backup
+        backups = db_controller.get_backups_by_snapshot_id(snapshot_uuid)
+        active_backups = [b for b in backups if b.status in (
+            Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)]
+        if active_backups:
+            logger.error(
+                f"Cannot delete snapshot {snapshot_uuid}: "
+                f"{len(active_backups)} backup(s) still in progress")
+            return False
+
     try:
         snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
     except KeyError:

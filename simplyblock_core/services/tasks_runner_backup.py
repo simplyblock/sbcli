@@ -83,7 +83,7 @@ def _run_backup(task):
 
     if backup.status == Backup.STATUS_PENDING:
         try:
-            ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name], cluster_batch=1)
+            ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name], cluster_batch=16)
             if not ret:
                 _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
                 return
@@ -93,6 +93,10 @@ def _run_backup(task):
 
         backup.status = Backup.STATUS_IN_PROGRESS
         backup.write_to_db()
+        # Give the data plane time to start the transfer before polling
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
 
     # Poll via bdev_lvol_transfer_stat on the snapshot bdev
     try:
@@ -115,8 +119,16 @@ def _run_backup(task):
             task.write_to_db(db.kv_store)
         elif state == "Failed":
             _fail_backup(backup, task, "Backup transfer failed on data plane")
+        elif state == "No process" and backup.status == Backup.STATUS_IN_PROGRESS:
+            # The data plane doesn't set transfer_status for S3 backups, so
+            # transfer_stat always returns "No process" while the backup runs.
+            # Keep polling — the backup completes on the data plane independently.
+            # When max_retry is reached the task runner marks it completed
+            # (the data plane returns "Failed" on actual failures).
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
         else:
-            # "In progress" or "No process" — still running, retry later
+            # "In progress" — still running, retry later
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
     else:
@@ -169,7 +181,7 @@ def _run_restore(task):
 
     if not recovery_started:
         try:
-            ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=1)
+            ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=16)
             if not ret:
                 task.function_result = "bdev_lvol_s3_recovery RPC failed"
                 task.retry += 1
@@ -185,6 +197,10 @@ def _run_restore(task):
 
         # Mark recovery as started so we don't re-issue the RPC on subsequent polls
         task.function_params["recovery_started"] = True
+        # Give the data plane time to start the transfer before polling
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
 
     # Poll via bdev_lvol_transfer_stat on the target lvol
     try:
@@ -209,12 +225,23 @@ def _run_restore(task):
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)
         elif state == "Failed":
-            task.function_result = "Restore failed on data plane"
-            task.retry += 1
+            fail_count = task.function_params.get("fail_count", 0) + 1
+            task.function_params["fail_count"] = fail_count
+            task.function_result = f"Restore failed on data plane (attempt {fail_count})"
+            if fail_count >= 3:
+                task.status = JobSchedule.STATUS_DONE
+            else:
+                task.retry += 1
+                task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+        elif state == "No process" and recovery_started:
+            # "No process" may mean the transfer hasn't registered yet or
+            # completed and was cleaned up.  Keep polling — the data plane
+            # returns "Failed" on actual failures.
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         else:
-            # "In progress" or "No process" — still running, retry later
+            # "In progress" — still running, retry later
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
     else:
@@ -258,7 +285,7 @@ def _run_merge(task):
 
     if not merge_started:
         try:
-            ret = rpc_client.bdev_lvol_s3_merge(keep_backup.s3_id, old_backup.s3_id, cluster_batch=16)
+            ret = rpc_client.bdev_lvol_s3_merge(keep_backup.s3_id, old_backup.s3_id, cluster_batch=16, lvs_name=snode.lvstore)
             if not ret:
                 task.function_result = "bdev_lvol_s3_merge RPC failed"
                 task.retry += 1
@@ -273,15 +300,23 @@ def _run_merge(task):
             return
 
         task.function_params["merge_started"] = True
+        task.write_to_db(db.kv_store)
+        # Give the data plane time to complete the merge before finalizing
+        return
 
-    # TODO: merge operates at lvstore level (lvol=NULL in data plane), so
-    # bdev_lvol_transfer_stat cannot poll it. The data plane needs a dedicated
-    # merge status RPC. For now, retry until max_retry — the merge completes
-    # on the data plane side regardless.
-    task.retry += 1
-    task.status = JobSchedule.STATUS_SUSPENDED
-    task.function_result = "Merge polling not yet supported"
+    # The merge RPC is synchronous on the data plane — once it returned
+    # successfully, the S3 data has been merged.  Finalize: update the
+    # chain links, remove the old backup, and mark the task done.
+    keep_backup.prev_backup_id = old_backup.prev_backup_id
+    keep_backup.status = Backup.STATUS_COMPLETED
+    keep_backup.write_to_db()
+
+    old_backup.remove(db.kv_store)
+
+    task.function_result = "Merge completed"
+    task.status = JobSchedule.STATUS_DONE
     task.write_to_db(db.kv_store)
+    logger.info(f"Merge completed: {old_backup_id} merged into {keep_backup_id}")
 
 
 logger.info("Starting backup tasks runner...")
@@ -304,18 +339,25 @@ while True:
                 task.write_to_db(db.kv_store)
                 continue
 
-            if task.retry >= task.max_retry:
-                task.function_result = "max retry reached"
+            # Time-based timeout for backup/restore tasks instead of retry count.
+            # These tasks poll "No process" while the data plane works — retries
+            # are not failures, they are poll cycles.  Only time out after the
+            # configured limit (default 4 hours).
+            backup_timeout_sec = getattr(cl, 'backup_timeout_seconds', 0) or 14400
+            elapsed = int(time.time()) - task.date if task.date else 0
+            timed_out = elapsed > backup_timeout_sec
+
+            if timed_out:
+                task.function_result = f"timeout after {elapsed}s"
                 task.status = JobSchedule.STATUS_DONE
                 task.write_to_db(db.kv_store)
-                # Mark associated backup as failed so it doesn't stay in pending/in_progress
                 if task.function_name == JobSchedule.FN_BACKUP:
                     bid = task.function_params.get("backup_id")
                     if bid:
                         try:
                             b = db.get_backup_by_id(bid)
                             if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS):
-                                _fail_backup(b, task, "max retry reached")
+                                _fail_backup(b, task, f"timeout after {elapsed}s")
                         except KeyError:
                             pass
                 elif task.function_name == JobSchedule.FN_BACKUP_MERGE:

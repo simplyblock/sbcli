@@ -292,7 +292,7 @@ def get_snapshot_chain(lvol_id, source_node_id=None):
     ]
     direct.sort(key=lambda s: s.created_at)
     for snap in direct:
-        _add(snap.snap_uuid or snap.uuid)
+        _add(snap.uuid)
 
     return result
 

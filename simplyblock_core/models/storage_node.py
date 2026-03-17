@@ -61,6 +61,7 @@ class StorageNode(BaseNodeObject):
     lvstore_stack_secondary_1: List[dict] = []
     lvstore_stack_secondary_2: List[dict] = []
     lvol_subsys_port: int = 9090
+    lvstore_ports: dict = {}  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M}}
     max_lvol: int = 0
     max_prov: int = 0
     max_snap: int = 0
@@ -106,6 +107,26 @@ class StorageNode(BaseNodeObject):
     active_rdma: bool = False
     socket: int = 0
     firewall_port: int = 5001
+
+    def get_lvol_subsys_port(self, lvs_name=None):
+        """Get the client-facing NVMeoF port for a specific lvstore.
+
+        Falls back to node-level lvol_subsys_port for backward compat.
+        """
+        if lvs_name and lvs_name in self.lvstore_ports:
+            return self.lvstore_ports[lvs_name].get("lvol_subsys_port", self.lvol_subsys_port)
+        return self.lvol_subsys_port
+
+    def get_hublvol_port(self, lvs_name=None):
+        """Get the hublvol NVMeoF port for a specific lvstore.
+
+        Falls back to node-level hublvol.nvmf_port for backward compat.
+        """
+        if lvs_name and lvs_name in self.lvstore_ports:
+            return self.lvstore_ports[lvs_name].get("hublvol_port", 0)
+        if self.hublvol:
+            return self.hublvol.nvmf_port
+        return 0
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -177,13 +198,17 @@ class StorageNode(BaseNodeObject):
             hublvol_uuid = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
             if not hublvol_uuid:
                 raise RPCException('Failed to create hublvol')
+            # Use pre-allocated hublvol port from lvstore_ports if available
+            hublvol_port = self.get_hublvol_port(self.lvstore)
+            if not hublvol_port:
+                hublvol_port = utils.next_free_hublvol_port(self.cluster_id)
             self.hublvol = HubLVol({
                 'uuid': hublvol_uuid,
                 'nqn': f'{self.host_nqn}:lvol:{hublvol_uuid}',
                 'bdev_name': f'{self.lvstore}/hublvol',
                 'model_number': str(uuid4()),
                 'nguid': utils.generate_hex_string(16),
-                'nvmf_port': utils.next_free_hublvol_port(self.cluster_id),
+                'nvmf_port': hublvol_port,
             })
 
             self.expose_bdev(
@@ -278,7 +303,7 @@ class StorageNode(BaseNodeObject):
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
                 groupid=primary_node.jm_vuid,
-                subsystem_port=primary_node.lvol_subsys_port,
+                subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
                 secondary=True,
         ):
             pass

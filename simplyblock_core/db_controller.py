@@ -283,6 +283,9 @@ class DBController(metaclass=Singleton):
                 ret.append(snap)
         return ret
 
+    def get_snapshots_by_lvol_id(self, lvol_id) -> List[SnapShot]:
+        return [s for s in self.get_snapshots() if s.lvol and s.lvol.get_id() == lvol_id]
+
     def get_snode_size(self, node_id) -> int:
         snode = self.get_storage_node_by_id(node_id)
         return sum(dev.size for dev in snode.nvme_devices)
