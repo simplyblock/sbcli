@@ -203,6 +203,7 @@ def spdk_process_start(body: SPDKParams):
         detach=True,
         network_mode="host",
         log_config=log_config,
+        ulimits=[docker.types.Ulimit(name='nofile', soft=65536, hard=65536)],
         volumes=[
             f'/var/tmp/spdk_{body.rpc_port}:/var/tmp',
             '/mnt/ramdisk:/mnt/ramdisk',

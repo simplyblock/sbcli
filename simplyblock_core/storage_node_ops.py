@@ -3811,9 +3811,10 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
     snode.lvol_subsys_port = lvol_subsys_port
-    # Store per-lvstore ports (lvol_subsys + hublvol)
-    if not snode.lvstore_ports:
-        snode.lvstore_ports = {}
+    # Re-read lvstore_ports from DB to preserve ports propagated by other
+    # nodes' create_lvstore calls (the in-memory snode may be stale).
+    fresh = db_controller.get_storage_node_by_id(snode.get_id())
+    snode.lvstore_ports = fresh.lvstore_ports if fresh.lvstore_ports else {}
     snode.lvstore_ports[lvs_name] = {
         "lvol_subsys_port": lvol_subsys_port,
         "hublvol_port": hublvol_port,
