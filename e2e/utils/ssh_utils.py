@@ -3141,21 +3141,41 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         if distr_ndcs and distr_npcs:
             cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
 
+        self.logger.info(f"[create_sec_lvol] sec_options={sec_options!r} allowed_hosts={allowed_hosts!r} "
+                         f"encrypt={encrypt} fabric={fabric} ndcs={distr_ndcs} npcs={distr_npcs}")
+
         tmp_files = []
         if sec_options is not None:
             p = f"/tmp/sec_{lvol_name}.json"
+            self.logger.info(f"[create_sec_lvol] Writing sec_options to {p} on {node}: {sec_options}")
             self.write_json_file(node, p, sec_options)
+            self.exec_command(node, f"chmod 600 {p}", supress_logs=False)
+            out_cat, _ = self.exec_command(node, f"cat {p}", supress_logs=False)
+            self.logger.info(f"[create_sec_lvol] sec_options file contents: {out_cat!r}")
             cmd += f" --sec-options {p}"
             tmp_files.append(p)
         if allowed_hosts is not None:
             p = f"/tmp/hosts_{lvol_name}.json"
+            self.logger.info(f"[create_sec_lvol] Writing allowed_hosts to {p} on {node}: {allowed_hosts}")
             self.write_json_file(node, p, allowed_hosts)
+            self.exec_command(node, f"chmod 600 {p}", supress_logs=False)
+            out_cat, _ = self.exec_command(node, f"cat {p}", supress_logs=False)
+            self.logger.info(f"[create_sec_lvol] allowed_hosts file contents: {out_cat!r}")
             cmd += f" --allowed-hosts {p}"
             tmp_files.append(p)
 
+        self.logger.info(f"[create_sec_lvol] FULL COMMAND: {cmd}")
         out, err = self.exec_command(node, cmd)
-        self.logger.info(
-            f"[create_sec_lvol] {lvol_name}: out={out!r}, err={err!r}")
+        self.logger.info(f"[create_sec_lvol] {lvol_name}: out={out!r}, err={err!r}")
+
+        # Log lvol details post-creation to verify security was applied
+        lvol_id_line = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        if lvol_id_line:
+            # try to show the volume details for debug
+            possible_id = lvol_id_line[-1]
+            get_out, get_err = self.exec_command(node, f"{self.base_cmd} volume get {possible_id}", supress_logs=False)
+            self.logger.info(f"[create_sec_lvol] volume get {possible_id}: out={get_out!r}, err={get_err!r}")
+
         for f in tmp_files:
             self.exec_command(node, f"rm -f {f}", supress_logs=True)
         return out, err

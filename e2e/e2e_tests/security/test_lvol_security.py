@@ -69,6 +69,36 @@ class SecurityTestBase(TestClusterBase):
         self.pool_name = "sec_test_pool"
         self._client_host_nqn = None
 
+    # ── debug helpers ─────────────────────────────────────────────────────────
+
+    def _log_cluster_security_config(self):
+        """Log cluster-level security fields for debugging."""
+        try:
+            details = self.sbcli_utils.get_cluster_details()
+            keys = ["ha_type", "sec_enabled", "host_sec", "tls_enabled",
+                    "fabric_tcp", "fabric_rdma", "status"]
+            summary = {k: details.get(k) for k in keys if k in details}
+            self.logger.info(f"[DEBUG] Cluster security fields: {summary}")
+            self.logger.info(f"[DEBUG] Full cluster details: {details}")
+        except Exception as exc:
+            self.logger.warning(f"[DEBUG] Could not get cluster details: {exc}")
+
+        # Also dump via CLI
+        try:
+            out, _ = self.ssh_obj.exec_command(
+                self.mgmt_nodes[0], f"{self.base_cmd} cluster list")
+            self.logger.info(f"[DEBUG] cluster list output:\n{out}")
+        except Exception as exc:
+            self.logger.warning(f"[DEBUG] cluster list failed: {exc}")
+
+    def _log_lvol_security(self, lvol_id, label=""):
+        """Log full lvol details via CLI after creation."""
+        try:
+            out = self._get_lvol_details_via_cli(lvol_id)
+            self.logger.info(f"[DEBUG] volume get {lvol_id} {label}:\n{out}")
+        except Exception as exc:
+            self.logger.warning(f"[DEBUG] volume get failed: {exc}")
+
     # ── NQN cache ────────────────────────────────────────────────────────────
 
     def _get_client_host_nqn(self, node=None, force_new=False):
@@ -113,22 +143,37 @@ class SecurityTestBase(TestClusterBase):
 
         Returns (device_path, connect_commands_list).
         """
+        self.logger.info(f"[DEBUG] _connect_and_get_device: lvol={lvol_name} id={lvol_id} host_nqn={host_nqn}")
         if host_nqn:
             connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn)
+            self.logger.info(f"[DEBUG] connect strings (with host_nqn): err={err!r} cmds={connect_ls}")
             if err or not connect_ls:
                 raise LvolNotConnectException(
                     f"No connect string for {lvol_name} (host_nqn={host_nqn}): {err}")
         else:
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+            self.logger.info(f"[DEBUG] connect strings (no host_nqn): cmds={connect_ls}")
 
         initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
+        self.logger.info(f"[DEBUG] initial devices on {self.fio_node}: {initial_devices}")
+
         for cmd in connect_ls:
-            _, err = self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+            self.logger.info(f"[DEBUG] executing nvme connect: {cmd}")
+            out, err = self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+            self.logger.info(f"[DEBUG] nvme connect result: out={out!r} err={err!r}")
             if err:
                 self.logger.warning(f"nvme connect warning: {err}")
+                # Dump dmesg nvme entries after failure for diagnosis
+                dmesg_out, _ = self.ssh_obj.exec_command(
+                    node=self.fio_node, command="dmesg | grep -i nvme | tail -20")
+                self.logger.info(f"[DEBUG] dmesg nvme tail after failed connect:\n{dmesg_out}")
 
         sleep_n_sec(3)
         final_devices = self.ssh_obj.get_devices(node=self.fio_node)
+        self.logger.info(f"[DEBUG] final devices on {self.fio_node}: {final_devices}")
+        new_devices = [d for d in final_devices if d not in initial_devices]
+        self.logger.info(f"[DEBUG] new devices after connect: {new_devices}")
+
         lvol_device = None
         for dev in final_devices:
             if dev not in initial_devices:
@@ -217,6 +262,7 @@ class TestLvolSecurityCombinations(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolSecurityCombinations START ===")
+        self._log_cluster_security_config()
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
@@ -255,6 +301,7 @@ class TestLvolSecurityCombinations(SecurityTestBase):
             sleep_n_sec(3)
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
             assert lvol_id, f"Could not get lvol ID for {lvol_name}"
+            self._log_lvol_security(lvol_id, label=f"({sec_type})")
 
             # Determine host_nqn: required for DH-HMAC-CHAP volumes
             host_nqn = None
@@ -324,6 +371,7 @@ class TestLvolAllowedHostsPositive(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolAllowedHostsPositive START ===")
+        self._log_cluster_security_config()
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
