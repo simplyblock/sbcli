@@ -2774,12 +2774,17 @@ def configure_kms_on_docker(cluster, dev_ip):
         )
         out = res.output.decode("utf-8")
         logger.debug(out)
-        with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
-            outfile.write(out)
+        try:
+            config_data = json.loads(out)
+            with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
+                outfile.write(json.dumps(config_data, indent=2))
+        except Exception as e:
+            logger.error(e)
+            return
 
         with open("/etc/simplyblock/kms/data/init.json", "r") as f:
             init_file = json.loads(f.read())
-            logger.debug(f"vault operator unseal {init_file['unseal_keys_b64'][0]}")
+            logger.debug("vault operator unseal")
             res = container.exec_run(
                 cmd=f"vault operator unseal {init_file['unseal_keys_b64'][0]}",
                 environment=environment)
@@ -2788,7 +2793,7 @@ def configure_kms_on_docker(cluster, dev_ip):
             logger.debug(out)
             if res.exit_code == 0:
                 cluster.kms_unseal_key = init_file['unseal_keys_b64'][0]
-            logger.debug(f"vault login {init_file['root_token']}")
+            logger.debug("vault login")
             res = container.exec_run(
                 cmd=f"vault login {init_file['root_token']}",
                 environment=environment)
@@ -2796,8 +2801,15 @@ def configure_kms_on_docker(cluster, dev_ip):
             logger.debug(out)
             if res.exit_code == 0:
                 cluster.kms_root_token = init_file['root_token']
+            logger.debug("vault enable v1 kv")
             res = container.exec_run(
                 cmd=f"vault secrets enable -path={cluster.uuid} -version=1 kv",
+                environment=environment)
+            out = res.output.decode("utf-8")
+            logger.debug(out)
+            logger.debug("vault enable v1 transit")
+            res = container.exec_run(
+                cmd="vault secrets enable transit",
                 environment=environment)
             out = res.output.decode("utf-8")
             logger.debug(out)
@@ -2860,6 +2872,9 @@ def configure_kms_on_k8s(cluster):
                 cluster.kms_root_token = kms_root_token
 
             exec_command = ['/bin/sh', '-c', f'vault secrets enable -path={cluster.uuid} -version=1 kv']
+            resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+            logger.debug(resp)
+            exec_command = ['/bin/sh', '-c', f'vault secrets enable transit']
             resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
             logger.debug(resp)
 

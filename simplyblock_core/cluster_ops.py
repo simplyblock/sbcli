@@ -371,10 +371,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring DB > Done")
         monitoring_secret = cluster.secret
 
-        if cluster.deploy_kms:
-            # configure kms vault
-            utils.configure_kms_on_docker(cluster, dev_ip)
-
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
@@ -382,10 +378,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         
         logger.info("Patching prometheus configmap...")
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
-
-        if cluster.deploy_kms:
-            # configure kms vault
-            utils.configure_kms_on_k8s(cluster)
 
         _set_max_result_window(dns_name)
 

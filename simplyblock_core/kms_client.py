@@ -42,7 +42,7 @@ class KMSClient:
 
     def _request(self, method, path, payload=None):
         try:
-            logger.error("Requesting path: %s, params: %s", path, payload)
+            logger.error("Requesting path: %s, params: %s", self.url+path, payload)
             data = None
             params = None
             if payload:
@@ -62,6 +62,9 @@ class KMSClient:
 
         result = None
         error = None
+        if ret_code == 204:
+            return True, None
+
         if ret_code == 200:
             try:
                 decoded_data = response.json()
@@ -107,4 +110,8 @@ class KMSClient:
         return self._request("POST", f"v1/transit/decrypt/{key_name}", params)
 
     def create_pool_key(self, pool_uuid):
-        return self._request("POST", f"v1/transit/keys/{pool_uuid}")
+        params = {
+            "type": "aes256-gcm96",
+            "exportable": False
+        }
+        return self._request("POST", f"v1/transit/keys/{pool_uuid}", params)
