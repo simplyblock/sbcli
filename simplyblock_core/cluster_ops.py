@@ -383,9 +383,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Patching prometheus configmap...")
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
-    if cluster.deploy_kms:
-        # configure kms vault
-        utils.configure_kms_on_k8s(cluster)
+        if cluster.deploy_kms:
+            # configure kms vault
+            utils.configure_kms_on_k8s(cluster)
 
         _set_max_result_window(dns_name)
 
