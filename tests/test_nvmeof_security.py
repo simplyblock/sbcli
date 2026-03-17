@@ -79,6 +79,35 @@ def _node(uuid="node-1", status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1
 # Validation utils
 # ---------------------------------------------------------------------------
 
+class TestGetDhchapGroup(unittest.TestCase):
+    """Tests for _get_dhchap_group helper."""
+
+    def test_returns_first_configured_group(self):
+        from simplyblock_core.controllers.lvol_controller import _get_dhchap_group
+        cl = _cluster(tls=True, tls_config={
+            "params": {"dhchap_dhgroups": ["ffdhe4096", "ffdhe2048"]}})
+        self.assertEqual(_get_dhchap_group(cl), "ffdhe4096")
+
+    def test_returns_null_when_no_groups(self):
+        from simplyblock_core.controllers.lvol_controller import _get_dhchap_group
+        cl = _cluster(tls=True, tls_config={"params": {"dhchap_digests": ["sha256"]}})
+        self.assertEqual(_get_dhchap_group(cl), "null")
+
+    def test_returns_null_when_tls_disabled(self):
+        from simplyblock_core.controllers.lvol_controller import _get_dhchap_group
+        cl = _cluster(tls=False)
+        self.assertEqual(_get_dhchap_group(cl), "null")
+
+    def test_returns_null_when_cluster_none(self):
+        from simplyblock_core.controllers.lvol_controller import _get_dhchap_group
+        self.assertEqual(_get_dhchap_group(None), "null")
+
+    def test_flat_config_without_params_key(self):
+        from simplyblock_core.controllers.lvol_controller import _get_dhchap_group
+        cl = _cluster(tls=True, tls_config={"dhchap_dhgroups": ["ffdhe3072"]})
+        self.assertEqual(_get_dhchap_group(cl), "ffdhe3072")
+
+
 class TestValidateTlsConfig(unittest.TestCase):
 
     def test_valid_config(self):
@@ -731,6 +760,26 @@ class TestSubsystemAddHostParams(unittest.TestCase):
         self.assertEqual(params["dhchap_key"], "dk")
         self.assertEqual(params["dhchap_ctrlr_key"], "dck")
 
+    def test_dhchap_group_passed(self):
+        client = self._client()
+        client.subsystem_add_host("nqn:sub", "nqn:host",
+                                  dhchap_key="dk", dhchap_group="ffdhe2048")
+        params = client._request.call_args[0][1]
+        self.assertEqual(params["dhchap_group"], "ffdhe2048")
+
+    def test_dhchap_group_null_passed(self):
+        client = self._client()
+        client.subsystem_add_host("nqn:sub", "nqn:host",
+                                  dhchap_key="dk", dhchap_group="null")
+        params = client._request.call_args[0][1]
+        self.assertEqual(params["dhchap_group"], "null")
+
+    def test_dhchap_group_omitted_when_none(self):
+        client = self._client()
+        client.subsystem_add_host("nqn:sub", "nqn:host", dhchap_key="dk")
+        params = client._request.call_args[0][1]
+        self.assertNotIn("dhchap_group", params)
+
 
 # ---------------------------------------------------------------------------
 # subsystem_remove_host
@@ -774,9 +823,18 @@ import simplyblock_core.storage_node_ops as snode_ops
 class TestReapplyAllowedHosts(unittest.TestCase):
     """Tests for _reapply_allowed_hosts helper in storage_node_ops."""
 
+    def _mock_db(self, tls=False, tls_config=None):
+        cl = _cluster(tls=tls, tls_config=tls_config)
+        mock_db = MagicMock()
+        mock_db.get_cluster_by_id.return_value = cl
+        return mock_db
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    def test_reapply_hosts_with_dhchap_keys(self, mock_register):
+    def test_reapply_hosts_with_dhchap_keys(self, mock_register, MockDB):
         """Hosts with DHCHAP keys get registered via keyring + subsystem_add_host."""
+        MockDB.return_value = self._mock_db(tls=True,
+            tls_config={"params": {"dhchap_dhgroups": ["ffdhe2048"]}})
         mock_register.return_value = {
             "dhchap_key": "key_name_dhchap",
             "dhchap_ctrlr_key": "key_name_ctrlr",
@@ -800,10 +858,13 @@ class TestReapplyAllowedHosts(unittest.TestCase):
             psk=None,
             dhchap_key="key_name_dhchap",
             dhchap_ctrlr_key="key_name_ctrlr",
+            dhchap_group="ffdhe2048",
         )
 
-    def test_reapply_hosts_without_keys(self):
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_reapply_hosts_without_keys(self, MockDB):
         """Hosts without security keys get added with just the NQN."""
+        MockDB.return_value = self._mock_db()
         mock_rpc = MagicMock()
         mock_rpc.subsystem_add_host.return_value = True
 
@@ -815,9 +876,11 @@ class TestReapplyAllowedHosts(unittest.TestCase):
         mock_rpc.subsystem_add_host.assert_called_once_with(
             lvol.nqn, "nqn:plain-host")
 
+    @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    def test_reapply_multiple_hosts(self, mock_register):
+    def test_reapply_multiple_hosts(self, mock_register, MockDB):
         """All hosts are re-registered, not just the first one."""
+        MockDB.return_value = self._mock_db()
         mock_register.return_value = {"dhchap_key": "kn"}
         mock_rpc = MagicMock()
         mock_rpc.subsystem_add_host.return_value = True
@@ -834,9 +897,11 @@ class TestReapplyAllowedHosts(unittest.TestCase):
         self.assertEqual(mock_rpc.subsystem_add_host.call_count, 3)
         self.assertEqual(mock_register.call_count, 2)  # h1 and h3 have keys
 
+    @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    def test_reapply_with_psk(self, mock_register):
+    def test_reapply_with_psk(self, mock_register, MockDB):
         """PSK-only host entry gets keyring registration."""
+        MockDB.return_value = self._mock_db()
         mock_register.return_value = {"psk": "psk_key_name"}
         mock_rpc = MagicMock()
         mock_rpc.subsystem_add_host.return_value = True
@@ -855,6 +920,7 @@ class TestReapplyAllowedHosts(unittest.TestCase):
             psk="psk_key_name",
             dhchap_key=None,
             dhchap_ctrlr_key=None,
+            dhchap_group="null",
         )
 
 
@@ -940,10 +1006,16 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         # _reapply_allowed_hosts called only for the secured lvol
         mock_reapply.assert_called_once_with(lvol_secured, sec_node, mock_rpc_inst)
 
+    @patch("simplyblock_core.controllers.lvol_controller.DBController")
     @patch("simplyblock_core.storage_node_ops._reapply_allowed_hosts")
-    def test_recreate_lvol_on_node_reapplies_hosts(self, mock_reapply):
+    def test_recreate_lvol_on_node_reapplies_hosts(self, mock_reapply, MockDBCtrl):
         """recreate_lvol_on_node (in lvol_controller) re-applies allowed hosts."""
         from simplyblock_core.controllers.lvol_controller import recreate_lvol_on_node
+
+        cl = _cluster(tls=True, tls_config={"params": {"dhchap_dhgroups": ["ffdhe2048"]}})
+        mock_db = MagicMock()
+        mock_db.get_cluster_by_id.return_value = cl
+        MockDBCtrl.return_value = mock_db
 
         dhchap_host = {"nqn": "nqn:host", "dhchap_key": "DHHC-1:01:k:"}
         node = _node()
@@ -975,12 +1047,13 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         _, kwargs = mock_rpc.subsystem_create.call_args
         self.assertFalse(kwargs.get("allow_any_host", True))
 
-        # Host re-applied with keyring key names
+        # Host re-applied with keyring key names and dhchap_group
         mock_reg.assert_called_once()
         mock_rpc.subsystem_add_host.assert_called_once()
         add_call = mock_rpc.subsystem_add_host.call_args
         self.assertEqual(add_call[0][1], "nqn:host")
         self.assertEqual(add_call[1].get("dhchap_key"), "kn_dhchap")
+        self.assertEqual(add_call[1].get("dhchap_group"), "ffdhe2048")
 
 
 class TestRemoveHostKeyringCleanup(unittest.TestCase):
