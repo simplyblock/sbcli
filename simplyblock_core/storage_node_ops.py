@@ -2422,21 +2422,19 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
+    time.sleep(3)
 
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
         logger.info("Setting JM unavailable")
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
+    time.sleep(1)
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
                           NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
             device_controller.device_set_unavailable(dev.get_id())
 
-    # # make other nodes disconnect from this node
-    # logger.info("disconnect all other nodes connections to this node")
-    # for dev in snode.nvme_devices:
-    #     distr_controller.disconnect_device(dev)
-
+    time.sleep(1)
     logger.info("Stopping SPDK")
     try:
         SNodeClient(snode.api_endpoint, timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
@@ -3400,14 +3398,18 @@ def recreate_lvstore(snode, force=False):
         lvol_ana_state = "inaccessible"
 
     ### 2- create lvols nvmf subsystems
+    created_subsystems = []
     for lvol in lvol_list:
-        allow_any = not bool(lvol.allowed_hosts)
-        logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
-        rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
-                                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
-                                    allow_any_host=allow_any)
-        if lvol.allowed_hosts:
-            _reapply_allowed_hosts(lvol, snode, rpc_client)
+        if lvol.nqn not in created_subsystems:
+            allow_any = not bool(lvol.allowed_hosts)
+            logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
+            ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
+                                              max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                              allow_any_host=allow_any)
+            if ret:
+                created_subsystems.append(lvol.nqn)
+            if lvol.allowed_hosts:
+                _reapply_allowed_hosts(lvol, snode, rpc_client)
 
     snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
     any_sec_unreachable = False

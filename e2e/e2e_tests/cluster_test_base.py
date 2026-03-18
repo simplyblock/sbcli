@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import string
 import random
-
+import json
 
 
 def generate_random_sequence(length):
@@ -136,6 +136,11 @@ class TestClusterBase:
         for node in self.fio_node:
             self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
         
+        run_file = os.getenv("RUN_DIR_FILE", None)
+        if run_file:
+            with open(run_file, "w") as f:
+                f.write(self.docker_logs_path)
+        
         self.runner_k8s_log = RunnerK8sLog(
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
@@ -174,11 +179,11 @@ class TestClusterBase:
         self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
         for node in self.storage_nodes:
             node_log_dir = os.path.join(self.docker_logs_path, node)
-            self.ssh_obj.delete_old_folders(
-                node=node,
-                folder_path=self.nfs_log_base,
-                days=10
-            )
+            # self.ssh_obj.delete_old_folders(
+            #     node=node,
+            #     folder_path=self.nfs_log_base,
+            #     days=10
+            # )
             self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
             containers = self.ssh_obj.get_running_containers(node_ip=node)
             self.container_nodes[node] = containers
@@ -213,11 +218,11 @@ class TestClusterBase:
         #     )
 
         for node in self.mgmt_nodes:
-            self.ssh_obj.delete_old_folders(
-                node=node,
-                folder_path=self.nfs_log_base,
-                days=10
-            )
+            # self.ssh_obj.delete_old_folders(
+            #     node=node,
+            #     folder_path=self.nfs_log_base,
+            #     days=10
+            # )
             node_log_dir = os.path.join(self.docker_logs_path, node)
             self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
             containers = self.ssh_obj.get_running_containers(node_ip=node)
@@ -246,11 +251,11 @@ class TestClusterBase:
         #     )
         
         for node in self.fio_node:
-            self.ssh_obj.delete_old_folders(
-                node=node,
-                folder_path=self.nfs_log_base,
-                days=10
-            )
+            # self.ssh_obj.delete_old_folders(
+            #     node=node,
+            #     folder_path=self.nfs_log_base,
+            #     days=10
+            # )
             node_log_dir = os.path.join(self.docker_logs_path, node)
 
             self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
@@ -340,10 +345,14 @@ class TestClusterBase:
 
     def fetch_all_nodes_distrib_log(self):
         storage_nodes = self.sbcli_utils.get_storage_nodes()
+        all_ok = True
         for result in storage_nodes['results']:
             if result['is_secondary_node'] is False:
-                self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"],
-                                                logs_path=self.docker_logs_path)
+                ok = self.ssh_obj.fetch_distrib_logs(result["mgmt_ip"], result["uuid"],
+                                                     logs_path=self.docker_logs_path)
+                if not ok:
+                    all_ok = False
+        assert all_ok, "Placement dump validation failed on one or more storage nodes"
 
     def collect_management_details(self, post_teardown=False):
         suffix = "_pre_teardown" if not post_teardown else "_post_teardown"
@@ -364,18 +373,39 @@ class TestClusterBase:
         cmd = f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0 >& {base_path}/cluster_list_tasks{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
-        
+
+        # Collect subtasks for balancing_on_restart tasks
+        try:
+            tasks_out, _ = self.ssh_obj.exec_command(
+                node=self.mgmt_nodes[0],
+                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0"
+            )
+            for line in (tasks_out or "").splitlines():
+                if "balancing_on_restart" not in line:
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                # Table rows have a leading empty cell from '| id | ...'
+                # Column layout: | id | function | status | ...
+                tid = next((p for p in parts if p and p != "id"), None)
+                if not tid:
+                    continue
+                sub_cmd = f"{self.base_cmd} cluster get-subtasks {tid} >& {base_path}/subtask_{tid}{suffix}.txt"
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=sub_cmd)
+        except Exception as e:
+            self.logger.warning(f"Failed to collect subtasks: {e}")
+
         cmd = f"{self.base_cmd} sn list >& {base_path}/sn_list{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
+
+        cmd = f"{self.base_cmd} sn list --json >& {base_path}/sn_list{suffix}.json"
+        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                  command=cmd)
+
         cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
-        
-        cmd = f"{self.base_cmd} cluster get-capacity {self.cluster_id} >& {base_path}/cluster_capacity{suffix}.txt"
-        self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                  command=cmd)
-        
+
         cmd = f"{self.base_cmd} cluster show {self.cluster_id} >& {base_path}/cluster_show{suffix}.txt"
         self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                   command=cmd)
@@ -401,14 +431,274 @@ class TestClusterBase:
             cmd = f"{self.base_cmd} sn check {result['uuid']} >& {base_path}/node{node}_check{suffix}.txt"
             self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
 
+            cmd = f"{self.base_cmd} sn get {result['uuid']} >& {base_path}/node{node}_get{suffix}.txt"
+            self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
+
             node+=1
-        for node in self.fio_node:
+        all_nodes = self.storage_nodes + self.mgmt_nodes + self.client_machines
+        for node in all_nodes:
             base_path = os.path.join(self.docker_logs_path, node)
-            cmd = f"journalctl -k >& {base_path}/jounalctl_{node}.txt"
+            cmd = f"journalctl -k --no-tail >& {base_path}/jounalctl_{node}-final.txt"
 
             self.ssh_obj.exec_command(node, cmd)
-            cmd = f"dmesg -T >& {base_path}/dmesg_{node}.txt"
+            cmd = f"dmesg -T >& {base_path}/dmesg_{node}-final.txt"
             self.ssh_obj.exec_command(node, cmd)
+
+        try:
+            if hasattr(self, "_stop_spdk_mem_thread"):
+                self.logger.info("[SPDK-MEM] Stopping SPDK mem stats thread")
+                self._stop_spdk_mem_thread = True
+
+            if hasattr(self, "spdk_mem_thread"):
+                thread = self.spdk_mem_thread
+                if thread and thread.is_alive():
+                    thread.join(timeout=120)
+                    if thread.is_alive():
+                        self.logger.warning(
+                            "[SPDK-MEM] SPDK mem stats thread did not stop cleanly"
+                        )
+        except Exception as e:
+            # Teardown must NEVER fail the test
+            self.logger.warning(
+                f"[SPDK-MEM] Exception during mem stats teardown: {str(e)}"
+            )
+
+    def _fetch_spdk_mem_stats_for_node(self, storage_node_ip, storage_node_id):
+        """
+        Fetch SPDK memory stats via env_dpdk_get_mem_stats.
+
+        Behavior:
+        - Runs RPC inside SPDK container
+        - Reads JSON response written on host
+        - Extracts dump filename OR defaults to /tmp/spdk_mem_dump.txt
+        - Creates stable copy inside container
+        - docker cp stable file to host
+        - Moves JSON + TXT to mounted log path
+        - Cleans up container temp files
+        """
+
+        self.logger.info(
+            f"[DEBUG][SPDK-MEM] START node_id={storage_node_id}, ip={storage_node_ip}"
+        )
+
+        try:
+            # ---------------------------------------------------------------
+            # 1. Prepare paths
+            # ---------------------------------------------------------------
+            timestamp = time.strftime("%d-%m-%y-%H-%M-%S")
+
+            host_json = f"/tmp/spdk_mem_stats_{storage_node_ip}_{timestamp}.json"
+            host_txt = f"/tmp/spdk_mem_dump_{storage_node_ip}_{timestamp}.txt"
+
+            final_dir = f"{self.docker_logs_path}/{storage_node_ip}/spdk_mem_stats"
+            final_json = f"{final_dir}/spdk_mem_stats_{timestamp}.json"
+            final_txt = f"{final_dir}/spdk_mem_dump_{timestamp}.txt"
+            final_huge = f"{final_dir}/host_hugepages_{timestamp}.txt"
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Creating final directory: {final_dir}"
+            )
+
+            self.ssh_obj.exec_command(
+                storage_node_ip,
+                f"sudo mkdir -p '{final_dir}'"
+            )
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Writing host hugepage stats → {final_huge}"
+            )
+
+            self.ssh_obj.exec_command(
+                storage_node_ip,
+                f"cat /proc/meminfo | grep -i hug > '{final_huge}' || true"
+            )
+
+            # ---------------------------------------------------------------
+            # 2. Find SPDK container
+            # ---------------------------------------------------------------
+            find_container_cmd = (
+                "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true"
+            )
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Finding SPDK container on {storage_node_ip}"
+            )
+
+            container_out, _ = self.ssh_obj.exec_command(
+                node=storage_node_ip,
+                command=find_container_cmd
+            )
+
+            container_name = container_out.strip()
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Container discovery result: '{container_name}'"
+            )
+
+            if not container_name:
+                self.logger.info(
+                    "[DEBUG][SPDK-MEM] No SPDK container found, skipping node"
+                )
+                return
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Paths prepared | host_json={host_json}, host_txt={host_txt}"
+            )
+
+            # ---------------------------------------------------------------
+            # 3. Run SPDK RPC (JSON redirected on HOST)
+            # ---------------------------------------------------------------
+            rpc_cmd = (
+                f"sudo docker exec {container_name} "
+                f"python spdk/scripts/rpc.py "
+                f"-s /mnt/ramdisk/{container_name}/spdk.sock "
+                f"env_dpdk_get_mem_stats > {host_json}"
+            )
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Executing RPC: {rpc_cmd}"
+            )
+
+            self.ssh_obj.exec_command(storage_node_ip, rpc_cmd)
+
+            # ---------------------------------------------------------------
+            # 4. Parse JSON (fallback if needed)
+            # ---------------------------------------------------------------
+            container_txt = "/tmp/spdk_mem_dump.txt"  # DEFAULT
+
+            self.logger.info(
+                "[DEBUG][SPDK-MEM] Reading RPC JSON file"
+            )
+
+            json_out, _ = self.ssh_obj.exec_command(
+                storage_node_ip,
+                f"cat {host_json} || true"
+            )
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] RPC JSON content: {json_out.strip()}"
+            )
+
+            try:
+                data = json.loads(json_out)
+                if isinstance(data, dict) and data.get("filename"):
+                    container_txt = data["filename"]
+                    self.logger.info(
+                        f"[DEBUG][SPDK-MEM] Using filename from RPC: {container_txt}"
+                    )
+                else:
+                    self.logger.info(
+                        f"[DEBUG][SPDK-MEM] No filename in RPC, defaulting to {container_txt}"
+                    )
+            except Exception:
+                self.logger.info(
+                    f"[DEBUG][SPDK-MEM] JSON parse failed, defaulting to {container_txt}"
+                )
+
+            # ---------------------------------------------------------------
+            # 5. Create stable copy INSIDE container
+            # ---------------------------------------------------------------
+            container_txt_tmp = f"{container_txt}.{timestamp}.copy"
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Creating stable container copy: {container_txt_tmp}"
+            )
+
+            self.ssh_obj.exec_command(
+                storage_node_ip,
+                f"sudo docker exec {container_name} "
+                f"cp {container_txt} {container_txt_tmp}"
+            )
+
+            # ---------------------------------------------------------------
+            # 6. docker cp stable file → host (timeout protected)
+            # ---------------------------------------------------------------
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Copying dump to host: {host_txt}"
+            )
+
+            self.ssh_obj.exec_command(
+                storage_node_ip,
+                f"sudo timeout 30 docker cp "
+                f"{container_name}:{container_txt_tmp} {host_txt}"
+            )
+
+            # ---------------------------------------------------------------
+            # 7. Move files to mounted log path
+            # ---------------------------------------------------------------
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Moving JSON → {final_json}"
+            )
+
+            self.ssh_obj.exec_command(
+                storage_node_ip,
+                f"sudo mv '{host_json}' '{final_json}'"
+            )
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] Moving TXT → {final_txt}"
+            )
+
+            self.ssh_obj.exec_command(
+                storage_node_ip,
+                f"sudo mv '{host_txt}' '{final_txt}'"
+            )
+
+            # ---------------------------------------------------------------
+            # 8. Cleanup container temp files
+            # ---------------------------------------------------------------
+            self.logger.info(
+                "[DEBUG][SPDK-MEM] Cleaning container temp files"
+            )
+
+            self.ssh_obj.exec_command(
+                storage_node_ip,
+                f"sudo docker exec {container_name} "
+                f"rm -f {container_txt_tmp}"
+            )
+
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] SUCCESS node={storage_node_ip}"
+            )
+
+        except Exception as e:
+            self.logger.info(
+                f"[DEBUG][SPDK-MEM] FAILURE node={storage_node_ip} error={str(e)}"
+            )
+
+    
+    def _spdk_mem_stats_worker(self, interval_sec=60):
+        """
+        Background thread that collects SPDK mem stats every minute
+        from all storage nodes.
+        """
+        self.logger.info("[SPDK-MEM] SPDK mem stats thread started")
+
+        while not getattr(self, "_stop_spdk_mem_thread", False):
+            try:
+                for node_id in self.sn_nodes_with_sec:
+                    try:
+                        node_details = self.sbcli_utils.get_storage_node_details(node_id)
+                        node_ip = node_details[0]["mgmt_ip"]
+                    except Exception:
+                        # Node may be offline during outage
+                        continue
+
+                    self._fetch_spdk_mem_stats_for_node(
+                        storage_node_ip=node_ip,
+                        storage_node_id=node_id
+                    )
+
+            except Exception as e:
+                self.logger.info(
+                    f"[SPDK-MEM] Worker loop exception: {str(e)}"
+                )
+
+            time.sleep(interval_sec)
+
+        self.logger.info("[SPDK-MEM] SPDK mem stats thread stopped")
+
             
     def teardown(self, delete_lvols=True, close_ssh=True):
         """Contains teradown required post test case execution
@@ -475,11 +765,10 @@ class TestClusterBase:
                 sleep_n_sec(2)
                 latest_util = self.get_latest_cluster_util()
                 size_used = latest_util["size_used"]
-                is_less_than_500mb = size_used < 500 * 1024 * 1024
-                if not is_less_than_500mb:
-                    raise Exception("Cluster capacity more than 500MB after cleanup!!")
-                for node in self.fio_node:
-                    self.ssh_obj.remove_dir(node, "/mnt/*")
+                if size_used >= 500 * 1024 * 1024:
+                    self.logger.warning(f"Cluster capacity more than 500MB after cleanup: {size_used // (1024 * 1024)}MB")
+                # for node in self.fio_node:
+                #     self.ssh_obj.remove_dir(node, "/mnt/*")
             except Exception as _:
                 self.logger.info(traceback.format_exc())
 

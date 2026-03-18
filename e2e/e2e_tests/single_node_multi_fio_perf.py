@@ -106,7 +106,7 @@ class TestLvolFioBase(TestClusterBase):
                 "bs": 4096,
                 "size": "2G",
                 "time_based": True,
-                "runtime": 100,
+                "runtime": 300,
                 "output_format": "json",
                 "output_file": f"{Path.home()}/{lvol_name}_log.json",
                 "nrfiles": 5,
@@ -187,10 +187,11 @@ class TestLvolFioBase(TestClusterBase):
         self.logger.info("Starting cleanup of LVOLs")
         for config in lvol_configs:
             lvol_name = config['lvol_name']
-            self.ssh_obj.unmount_path(node=self.client_machines[0],
-                                      device=self.lvol_devices[lvol_name]['MountPath'])
-            self.ssh_obj.remove_dir(node=self.client_machines[0], 
-                                    dir_path=self.lvol_devices[lvol_name]['MountPath'])
+            if config['mount']:
+                self.ssh_obj.unmount_path(node=self.client_machines[0],
+                                          device=self.lvol_devices[lvol_name]['MountPath'])
+                self.ssh_obj.remove_dir(node=self.client_machines[0], 
+                                        dir_path=self.lvol_devices[lvol_name]['MountPath'])
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
             subsystems = self.ssh_obj.get_nvme_subsystems(node=self.client_machines[0], 
                                                           nqn_filter=lvol_id)

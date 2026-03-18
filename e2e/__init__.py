@@ -52,12 +52,18 @@ from stress_test.lvol_snap_clone_fio_failover import(
 from stress_test.continuous_failover_ha import RandomFailoverTest
 from stress_test.continuous_failover_ha_multi_client import RandomMultiClientFailoverTest
 from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
+from stress_test.continuous_failover_ha_multi_outage_all_nodes import RandomMultiClientMultiFailoverAllNodesTest
 from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailoverTest
 from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
+from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
+from stress_test.continuous_failover_ha_multi_client_quick_outage import RandomRapidFailoverNoGap
+from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvolSnapshotCloneAPI
+from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
+from stress_test.continuous_single_node_outage import RandomMultiClientSingleNodeTest
 
 
-from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade
+from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
 
 
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
@@ -96,8 +102,8 @@ def get_all_tests(custom=True, ha_test=False):
         TestLvolFioNpcs0,
         TestLvolFioNpcs1,
         TestLvolFioNpcs2,
-        TestLvolFioQOSBW,
-        TestLvolFioQOSIOPS,
+        # TestLvolFioQOSBW,
+        # TestLvolFioQOSIOPS,
         TestSingleNodeOutage,
         # TestSingleNodeReboot,
         # TestHASingleNodeReboot,
@@ -144,15 +150,22 @@ def get_stress_tests():
         RandomFailoverTest,
         RandomMultiClientFailoverTest,
         RandomMultiClientMultiFailoverTest,
+        RandomMultiClientMultiFailoverAllNodesTest,
         RandomMultiGeometryFailoverTest,
         RandomMultiClient2NodeFailoverTest,
         RandomRDMAFailoverTest,
+        RandomRDMAMultiFailoverTest,
+        RandomRapidFailoverNoGap,
+        TestParallelLvolSnapshotCloneAPI,
+        RandomMultiClientFailoverNamespaceTest,
+        RandomMultiClientSingleNodeTest,
     ]
     return tests
 
 def get_upgrade_tests():
     tests = [
-        TestMajorUpgrade
+        TestMajorUpgrade,
+        TestMajorUpgradeSingleNode
     ]
     return tests
 

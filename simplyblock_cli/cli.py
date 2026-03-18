@@ -416,7 +416,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--qpair-count', help='NVMe/TCP transport qpair count per logical volume', type=range_type(0, 128), default=32, dest='qpair_count')
         argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
-        argument = subcommand.add_argument('--host-sec', '--tls', help='Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)', type=str, dest='nvmeof_tls')
+        argument = subcommand.add_argument('--host-sec', help='Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)', type=str, dest='host_sec')
         argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1', type=int, default=1, dest='max_fault_tolerance', choices=[1, 2])
         argument = subcommand.add_argument('--use-backup', help='Path to JSON file with S3/MinIO backup configuration', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420', type=int, default=4420, dest='nvmf_base_port')

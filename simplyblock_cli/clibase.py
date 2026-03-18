@@ -992,8 +992,8 @@ class CLIWrapperBase:
         client_data_nic = args.client_data_nic
 
         nvmeof_tls_config = None
-        if args.nvmeof_tls:
-            with open(args.nvmeof_tls, 'r') as f:
+        if args.host_sec:
+            with open(args.host_sec, 'r') as f:
                 nvmeof_tls_config = _json.load(f)
             from simplyblock_core.utils import validate_tls_config
             ok, err = validate_tls_config(nvmeof_tls_config)
