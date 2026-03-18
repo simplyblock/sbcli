@@ -68,11 +68,17 @@ spec:
           mountPath: /etc/foundationdb
       resources:
         requests:
-          cpu: "100m"
+          cpu: 2
           memory: "64Mi"
+          {% if CPU_TOPOLOGY_ENABLED %}
+          numa-align/numa-{{ NSOCKET }}: 1
+          {% endif %}
         limits:
-          cpu: "100m"
+          cpu: 2
           memory: "64Mi"
+          {% if CPU_TOPOLOGY_ENABLED %}
+          numa-align/numa-{{ NSOCKET }}: 1
+          {% endif %}
 
   containers:
     - name: spdk-container
@@ -138,6 +144,7 @@ spec:
           {% endif %}
         requests:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
+          cpu: {{ CORES }}
           {% if CPU_TOPOLOGY_ENABLED %}
           memory: {{ MEM2_MEGA }}Mi
           numa-align/numa-{{ NSOCKET }}: 1
@@ -166,11 +173,17 @@ spec:
       {% if CPU_TOPOLOGY_ENABLED %}
       resources:
         limits:
-          cpu: 1
+          cpu: 2
           memory: "128Mi"
+          {% if CPU_TOPOLOGY_ENABLED %}
+          numa-align/numa-{{ NSOCKET }}: 1
+          {% endif %}
         requests:
-          cpu: 1
+          cpu: 2
           memory: "128Mi"
+          {% if CPU_TOPOLOGY_ENABLED %}
+          numa-align/numa-{{ NSOCKET }}: 1
+          {% endif %}
       {% endif %}
 
 {% if MODE == "docker" %}
