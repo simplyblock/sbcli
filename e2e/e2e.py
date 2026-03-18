@@ -162,8 +162,9 @@ def main():
             test_obj.run()
             passed_cases.append(f"{test.__name__}")
         except Exception as exp:
-            logger.error(traceback.format_exc())
-            errors[f"{test.__name__}"] = [exp]
+            tb = traceback.format_exc()
+            logger.error(tb)
+            errors[f"{test.__name__}"] = [exp, tb]
         try:
             if i == (len(test_class_run) - 1) or check_for_dumps():
                 test_obj.collect_management_details(post_teardown=False)

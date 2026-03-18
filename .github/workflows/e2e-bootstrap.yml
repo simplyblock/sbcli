@@ -1269,12 +1269,12 @@ jobs:
           failure_reason = ""
           multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
           if multi:
-              failure_reason = multi[0][:600]
+              failure_reason = multi[0][:2000]
           elif content:
               exc_lines = [ansi.sub('', l) for l in content.splitlines()
                            if re.search(r'(Exception:|AssertionError|Input/output error)', l)]
               if exc_lines:
-                  failure_reason = '\n'.join(exc_lines[-3:])[:600]
+                  failure_reason = '\n'.join(exc_lines[-5:])[:2000]
 
           # --- Env ---
           s    = int(os.environ.get("TEST_START_EPOCH", "0") or "0")

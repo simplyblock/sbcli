@@ -11,8 +11,23 @@ class MultipleExceptions(Exception):
         super().__init__(self._create_message())
 
     def _create_message(self):
-        messages = [f"{case}: {ex}" for case, ex in self.exceptions.items()]
-        return "\n".join(messages)
+        messages = []
+        for case, ex_info in self.exceptions.items():
+            if isinstance(ex_info, list) and ex_info:
+                # ex_info may be [exception] or [exception, traceback_str]
+                exc = ex_info[0]
+                tb_str = ex_info[1] if len(ex_info) > 1 else None
+                if tb_str:
+                    # Include last meaningful line of traceback for context
+                    tb_lines = [l.strip() for l in tb_str.strip().splitlines() if l.strip()]
+                    detail = tb_lines[-1] if tb_lines else str(exc)
+                    messages.append(f"{case}: {detail}")
+                else:
+                    messages.append(f"{case}: {exc}")
+            else:
+                messages.append(f"{case}: {ex_info}")
+        # Join with ' || ' so all failures appear on one line — grep/CI can capture everything
+        return " || ".join(messages)
 
 class LvolNotConnectException(Exception):
     def __init__(self, message) -> None:
