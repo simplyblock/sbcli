@@ -269,7 +269,7 @@ class SPDKParams(BaseModel):
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
-    firewall_port: Optional[int] = Field(constants.FW_PORT_START)
+    firewall_port: Optional[int] = Field(0)
     cluster_id: str
 
 
