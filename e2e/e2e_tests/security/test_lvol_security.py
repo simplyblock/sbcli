@@ -566,15 +566,19 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         assert not err or "error" not in err.lower(), \
             f"remove-host failed: {err}"
 
-        # ── Step 6: Verify removed host is rejected ───────────────────────
+        # ── Step 6: Verify removed host is rejected ───────────────────────────
+        # After removing the host, any connect request for that NQN must be
+        # rejected — the backend returns an error when host_nqn is passed but
+        # is not found in allowed_hosts (bug fix: no longer falls back to a
+        # plain connect string).
         sleep_n_sec(3)
         connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
         rejected = bool(err) or not connect_ls
         self.logger.info(
             f"Connect after remove-host → connect_ls={connect_ls}, err={err!r}, "
             f"rejected={rejected}")
-        assert rejected, (
-            "Expected rejection after remove-host but still got connect string")
+        assert rejected, \
+            "Expected rejection after remove-host but still got a connect string"
 
         self.logger.info("=== TestLvolDynamicHostManagement PASSED ===")
 
