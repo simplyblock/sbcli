@@ -207,14 +207,33 @@ class SecurityTestBase(TestClusterBase):
 
     def _run_fio_and_validate(self, lvol_name, mount_point, log_file,
                                rw="randrw", bs="4K", numjobs=2, runtime=120):
-        """Run a blocking FIO job and validate the log."""
+        """Start FIO in a detached tmux session, wait for it to finish, then validate."""
+        job_name = f"{lvol_name}_fio"
         self.ssh_obj.run_fio_test(
             self.fio_node, None, mount_point, log_file,
             size=self.fio_size,
-            name=f"{lvol_name}_fio",
+            name=job_name,
             rw=rw, bs=bs, nrfiles=4, iodepth=1,
             numjobs=numjobs, time_based=True, runtime=runtime,
         )
+        # run_fio_test launches FIO inside a detached tmux session and returns
+        # immediately.  Poll until the process exits so that any subsequent
+        # unmount/disconnect never races with a still-running FIO job.
+        deadline = runtime + 60   # generous grace period
+        waited = 0
+        while waited < deadline:
+            procs = self.ssh_obj.find_process_name(self.fio_node, f"fio.*{job_name}")
+            running = [p for p in procs
+                       if p.strip() and "grep" not in p and "fio --name" in p]
+            if not running:
+                break
+            sleep_n_sec(5)
+            waited += 5
+        else:
+            self.logger.warning(
+                f"FIO job {job_name!r} did not finish after {deadline}s; killing")
+            self.ssh_obj.kill_processes(node=self.fio_node, process_name="fio")
+            sleep_n_sec(3)
         self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
 
 # ═══════════════════════════════════════════════════════════════════════════
