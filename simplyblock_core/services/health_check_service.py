@@ -36,10 +36,16 @@ def set_device_health_check(cluster_id, device, health_check_status):
             for dev in node.nvme_devices:
                 if dev.get_id() == device.get_id():
                     old_status = dev.health_check
-                    dev.health_check = health_check_status
-                    node.write_to_db()
+                    # Re-read node fresh before writing to avoid overwriting
+                    # concurrent changes (e.g. lvstore_ports during activation)
+                    fresh_node = db.get_storage_node_by_id(node.get_id())
+                    for fresh_dev in fresh_node.nvme_devices:
+                        if fresh_dev.get_id() == device.get_id():
+                            fresh_dev.health_check = health_check_status
+                            break
+                    fresh_node.write_to_db()
                     device_events.device_health_check_change(
-                        dev, dev.health_check, old_status, caused_by="monitor")
+                        dev, health_check_status, old_status, caused_by="monitor")
                     return
 
 
