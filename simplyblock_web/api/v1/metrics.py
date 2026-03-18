@@ -128,13 +128,13 @@ def get_data():
             for g in ng:
                 v = g.replace("cluster_", "")
                 if v in data:
-                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.name).set(data[v])
+                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.cluster_name).set(data[v])
                 elif v == "status_code":
-                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.name).set(cl.get_status_code())
+                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.cluster_name).set(cl.get_status_code())
                 elif v == "prov_cap_crit":
-                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.name).set(object_data[v])
+                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.cluster_name).set(object_data[v])
                 elif v == "cap_crit":
-                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.name).set(object_data[v])
+                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.cluster_name).set(object_data[v])
 
         snodes = db.get_storage_nodes_by_cluster_id(cl.get_id())
         for node in snodes:
