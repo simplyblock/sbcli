@@ -225,7 +225,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
-                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
+                   nvmf_base_port=4420, rpc_base_port=8080) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -345,7 +345,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
-    cluster.snode_api_port = snode_api_port
 
     if nvmeof_tls_config:
         cluster.tls = True
@@ -459,7 +458,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
-                nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
+                nvmf_base_port=4420, rpc_base_port=8080) -> str:
 
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -520,7 +519,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
-    cluster.snode_api_port = snode_api_port
     if backup_config:
         cluster.backup_config = backup_config
 
@@ -631,6 +629,9 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             continue
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
+        # Re-read node fresh before lvstore creation to avoid writing stale fields
+        # (previous create_lvstore calls may have modified this node as a secondary)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
         if snode.lvstore and force_lvstore_create is False:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             try:

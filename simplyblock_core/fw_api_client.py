@@ -19,8 +19,8 @@ class FirewallClient:
 
     def __init__(self, node, timeout=300, retry=5):
         self.node = node
-        self.ip_address = f"{node.mgmt_ip}:{node.firewall_port}"
-        self.url = 'http://%s/' % self.ip_address
+        self.ip_address = node.api_endpoint
+        self.url = 'http://%s/snode/' % self.ip_address
         self.timeout = timeout
         self.session = requests.session()
         self.session.verify = False
@@ -80,15 +80,7 @@ class FirewallClient:
             "rpc_port": rpc_port,
             "is_reject": is_reject,
         }
-        response = None
-        try:
-            response = self._request("POST", "firewall", params)
-        except Exception as e:
-            logger.warning(e)
-            logger.info("Using other firewall path: firewall_set_port")
-            mgmt_ip = self.ip_address.split(":")[0]
-            self.url = f"http://{mgmt_ip}:5000/"
-            response = self._request("POST", "snode/firewall_set_port", params)
+        response = self._request("POST", "firewall_set_port", params)
 
         if response and self.node.active_rdma:
             if action == "block":
@@ -99,11 +91,4 @@ class FirewallClient:
 
     def get_firewall(self, rpc_port=None):
         params = {"rpc_port": rpc_port}
-        try:
-            return self._request("GET", "firewall", params)
-        except Exception as e:
-            logger.warning(e)
-            logger.info("Using other firewall path: get_firewall")
-            mgmt_ip = self.ip_address.split(":")[0]
-            self.url = f"http://{mgmt_ip}:5000/"
-            return self._request("GET", "snode/get_firewall", params)
+        return self._request("GET", "get_firewall", params)

@@ -58,11 +58,18 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
             logger.error("Failed to write key file %s on node %s: %s", key_name, snode.get_id(), error)
             continue
         key_path = result
-        # Register in SPDK keyring
-        ret = rpc_client.keyring_file_add_key(key_name, key_path)
-        if not ret:
-            logger.error("Failed to register key %s in SPDK keyring on node %s", key_name, snode.get_id())
-            continue
+        # Register in SPDK keyring — "File exists" (code -17) means the key
+        # is already registered, which is fine (e.g. same host on another volume).
+        ret, err = rpc_client._request2("keyring_file_add_key",
+                                        {"name": key_name, "path": key_path})
+        if not ret and err:
+            if err.get("code") == -17:
+                logger.info("Key %s already in SPDK keyring on node %s, reusing",
+                            key_name, snode.get_id())
+            else:
+                logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
+                             key_name, snode.get_id(), err.get("message", err))
+                continue
         key_names[key_type] = key_name
 
     return key_names
@@ -1442,7 +1449,10 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
 
     # Look up host entry for secrets when host_nqn is provided
     host_entry = None
-    if host_nqn and lvol.allowed_hosts:
+    if lvol.allowed_hosts:
+        if not host_nqn:
+            logger.error(f"Volume {uuid} has allowed hosts configured; --host-nqn is required")
+            return False
         for h in lvol.allowed_hosts:
             if h["nqn"] == host_nqn:
                 host_entry = h
@@ -1450,6 +1460,10 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         if not host_entry:
             logger.error(f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}")
             return False
+    elif host_nqn:
+        # host_nqn provided but no allowed_hosts — volume allows any host,
+        # so just pass host_nqn through without secrets
+        pass
 
     out = []
     nodes_ids = []
@@ -1459,12 +1473,17 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     elif lvol.ha_type == "ha":
         nodes_ids.extend(lvol.nodes)
 
+    # Get the port from the primary node (first in list) — all nodes hosting
+    # the same lvstore must use the same client-facing port.
+    primary_snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    lvstore_port = primary_snode.get_lvol_subsys_port(lvol.lvs_name)
+
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
             ip = nic.ip4_address
-            port = snode.get_lvol_subsys_port(lvol.lvs_name)
+            port = lvstore_port
             transport = "tcp"
             if nic.ip4_address and lvol.fabric == nic.trtype.lower():
                 transport = nic.trtype.lower()

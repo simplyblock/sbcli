@@ -31,7 +31,7 @@ from simplyblock_core import constants
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _cluster(nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
+def _cluster(nvmf_base_port=4420, rpc_base_port=8080,
              ha_type="ha", distr_npcs=1):
     c = Cluster()
     c.uuid = "cluster-test-001"
@@ -40,12 +40,11 @@ def _cluster(nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
     c.distr_npcs = distr_npcs
     c.nvmf_base_port = nvmf_base_port
     c.rpc_base_port = rpc_base_port
-    c.snode_api_port = snode_api_port
     return c
 
 
 def _node(uuid, mgmt_ip="10.0.0.1", lvol_subsys_port=0, nvmf_port=0,
-          hublvol_port=0, rpc_port=0, firewall_port=0, cluster_id="cluster-test-001"):
+          hublvol_port=0, rpc_port=0, cluster_id="cluster-test-001"):
     n = StorageNode()
     n.uuid = uuid
     n.cluster_id = cluster_id
@@ -53,7 +52,6 @@ def _node(uuid, mgmt_ip="10.0.0.1", lvol_subsys_port=0, nvmf_port=0,
     n.lvol_subsys_port = lvol_subsys_port
     n.nvmf_port = nvmf_port
     n.rpc_port = rpc_port
-    n.firewall_port = firewall_port
     if hublvol_port > 0:
         n.hublvol = HubLVol({"nvmf_port": hublvol_port, "uuid": f"hub-{uuid}",
                               "nqn": f"nqn.hub.{uuid}", "bdev_name": "lvs/hublvol"})
@@ -72,20 +70,17 @@ class TestClusterModelPortFields(unittest.TestCase):
         c = Cluster()
         self.assertEqual(c.nvmf_base_port, 4420)
         self.assertEqual(c.rpc_base_port, 8080)
-        self.assertEqual(c.snode_api_port, 50001)
 
     def test_custom_values(self):
-        c = _cluster(nvmf_base_port=5000, rpc_base_port=9000, snode_api_port=60000)
+        c = _cluster(nvmf_base_port=5000, rpc_base_port=9000)
         self.assertEqual(c.nvmf_base_port, 5000)
         self.assertEqual(c.rpc_base_port, 9000)
-        self.assertEqual(c.snode_api_port, 60000)
 
     def test_port_fields_in_clean_dict(self):
         c = _cluster(nvmf_base_port=5000)
         data = c.get_clean_dict()
         self.assertEqual(data["nvmf_base_port"], 5000)
         self.assertEqual(data["rpc_base_port"], 8080)
-        self.assertEqual(data["snode_api_port"], 50001)
 
 
 # ---------------------------------------------------------------------------
@@ -97,11 +92,9 @@ class TestConstants(unittest.TestCase):
     def test_canonical_constants_exist(self):
         self.assertEqual(constants.NVMF_BASE_PORT, 4420)
         self.assertEqual(constants.RPC_BASE_PORT, 8080)
-        self.assertEqual(constants.SNODE_API_PORT, 50001)
 
     def test_backward_compat_aliases(self):
         self.assertEqual(constants.RPC_PORT_RANGE_START, constants.RPC_BASE_PORT)
-        self.assertEqual(constants.FW_PORT_START, constants.SNODE_API_PORT)
         self.assertEqual(constants.LVOL_NVMF_PORT_START, constants.NVMF_BASE_PORT)
         self.assertEqual(constants.NODE_NVMF_PORT_START, constants.NVMF_BASE_PORT)
         self.assertEqual(constants.NODE_HUBLVOL_PORT_START, constants.NVMF_BASE_PORT)
@@ -121,17 +114,17 @@ class TestGetClusterPortConfig(unittest.TestCase):
     @patch("simplyblock_core.db_controller.DBController")
     def test_returns_cluster_config(self, mock_db_cls):
         from simplyblock_core.utils import _get_cluster_port_config
-        cluster = _cluster(nvmf_base_port=5000, rpc_base_port=9000, snode_api_port=60000)
+        cluster = _cluster(nvmf_base_port=5000, rpc_base_port=9000)
         mock_db_cls.return_value.get_cluster_by_id.return_value = cluster
         result = _get_cluster_port_config("cluster-test-001")
-        self.assertEqual(result, (5000, 9000, 60000))
+        self.assertEqual(result, (5000, 9000))
 
     @patch("simplyblock_core.db_controller.DBController")
     def test_falls_back_to_constants_when_cluster_not_found(self, mock_db_cls):
         from simplyblock_core.utils import _get_cluster_port_config
         mock_db_cls.return_value.get_cluster_by_id.return_value = None
         result = _get_cluster_port_config("nonexistent")
-        self.assertEqual(result, (constants.NVMF_BASE_PORT, constants.RPC_BASE_PORT, constants.SNODE_API_PORT))
+        self.assertEqual(result, (constants.NVMF_BASE_PORT, constants.RPC_BASE_PORT))
 
     @patch("simplyblock_core.db_controller.DBController")
     def test_falls_back_to_constants_when_port_is_zero(self, mock_db_cls):
@@ -140,10 +133,9 @@ class TestGetClusterPortConfig(unittest.TestCase):
         cluster = _cluster()
         cluster.nvmf_base_port = 0
         cluster.rpc_base_port = 0
-        cluster.snode_api_port = 0
         mock_db_cls.return_value.get_cluster_by_id.return_value = cluster
         result = _get_cluster_port_config("cluster-test-001")
-        self.assertEqual(result, (constants.NVMF_BASE_PORT, constants.RPC_BASE_PORT, constants.SNODE_API_PORT))
+        self.assertEqual(result, (constants.NVMF_BASE_PORT, constants.RPC_BASE_PORT))
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +215,7 @@ class TestGetNextNvmfPort(unittest.TestCase):
     @patch("simplyblock_core.utils._get_cluster_port_config")
     def test_empty_cluster_returns_base_port(self, mock_config, mock_ports):
         from simplyblock_core.utils import get_next_nvmf_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         mock_ports.return_value = set()
         self.assertEqual(get_next_nvmf_port("c1"), 4420)
 
@@ -231,7 +223,7 @@ class TestGetNextNvmfPort(unittest.TestCase):
     @patch("simplyblock_core.utils._get_cluster_port_config")
     def test_skips_used_ports(self, mock_config, mock_ports):
         from simplyblock_core.utils import get_next_nvmf_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         mock_ports.return_value = {4420, 4421, 4422}
         self.assertEqual(get_next_nvmf_port("c1"), 4423)
 
@@ -239,7 +231,7 @@ class TestGetNextNvmfPort(unittest.TestCase):
     @patch("simplyblock_core.utils._get_cluster_port_config")
     def test_fills_gaps(self, mock_config, mock_ports):
         from simplyblock_core.utils import get_next_nvmf_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         mock_ports.return_value = {4420, 4422}  # gap at 4421
         self.assertEqual(get_next_nvmf_port("c1"), 4421)
 
@@ -247,7 +239,7 @@ class TestGetNextNvmfPort(unittest.TestCase):
     @patch("simplyblock_core.utils._get_cluster_port_config")
     def test_custom_base_port(self, mock_config, mock_ports):
         from simplyblock_core.utils import get_next_nvmf_port
-        mock_config.return_value = (5000, 8080, 50001)
+        mock_config.return_value = (5000, 8080)
         mock_ports.return_value = set()
         self.assertEqual(get_next_nvmf_port("c1"), 5000)
 
@@ -255,7 +247,7 @@ class TestGetNextNvmfPort(unittest.TestCase):
     @patch("simplyblock_core.utils._get_cluster_port_config")
     def test_custom_base_port_with_used_ports(self, mock_config, mock_ports):
         from simplyblock_core.utils import get_next_nvmf_port
-        mock_config.return_value = (5000, 8080, 50001)
+        mock_config.return_value = (5000, 8080)
         mock_ports.return_value = {5000, 5001, 5002}
         self.assertEqual(get_next_nvmf_port("c1"), 5003)
 
@@ -264,7 +256,7 @@ class TestGetNextNvmfPort(unittest.TestCase):
     def test_mixed_port_types_all_respected(self, mock_config, mock_ports):
         """Port 4420 used by lvol, 4421 by device, 4422 by hublvol → next is 4423."""
         from simplyblock_core.utils import get_next_nvmf_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         mock_ports.return_value = {4420, 4421, 4422}
         self.assertEqual(get_next_nvmf_port("c1"), 4423)
 
@@ -304,7 +296,7 @@ class TestGetNextRpcPort(unittest.TestCase):
     @patch("simplyblock_core.db_controller.DBController")
     def test_empty_cluster_returns_base(self, mock_db_cls, mock_config):
         from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = []
         self.assertEqual(get_next_rpc_port("c1"), 8080)
 
@@ -312,7 +304,7 @@ class TestGetNextRpcPort(unittest.TestCase):
     @patch("simplyblock_core.db_controller.DBController")
     def test_skips_used_rpc_ports(self, mock_db_cls, mock_config):
         from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         nodes = [_node("n1", rpc_port=8080), _node("n2", rpc_port=8081)]
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
         self.assertEqual(get_next_rpc_port("c1"), 8082)
@@ -321,7 +313,7 @@ class TestGetNextRpcPort(unittest.TestCase):
     @patch("simplyblock_core.db_controller.DBController")
     def test_custom_rpc_base(self, mock_db_cls, mock_config):
         from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 9000, 50001)
+        mock_config.return_value = (4420, 9000)
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = []
         self.assertEqual(get_next_rpc_port("c1"), 9000)
 
@@ -329,7 +321,7 @@ class TestGetNextRpcPort(unittest.TestCase):
     @patch("simplyblock_core.db_controller.DBController")
     def test_fills_rpc_gaps(self, mock_db_cls, mock_config):
         from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         nodes = [_node("n1", rpc_port=8080), _node("n2", rpc_port=8082)]  # gap at 8081
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
         self.assertEqual(get_next_rpc_port("c1"), 8081)
@@ -338,7 +330,7 @@ class TestGetNextRpcPort(unittest.TestCase):
     @patch("simplyblock_core.db_controller.DBController")
     def test_returns_zero_when_exhausted(self, mock_db_cls, mock_config):
         from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         # All 1000 ports in range are used
         nodes = [_node(f"n{i}", rpc_port=8080 + i) for i in range(1000)]
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
@@ -348,103 +340,10 @@ class TestGetNextRpcPort(unittest.TestCase):
     @patch("simplyblock_core.db_controller.DBController")
     def test_ignores_zero_rpc_ports(self, mock_db_cls, mock_config):
         from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         nodes = [_node("n1", rpc_port=0)]
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
         self.assertEqual(get_next_rpc_port("c1"), 8080)
-
-
-# ---------------------------------------------------------------------------
-# Test get_next_fw_port (SNodeAPI per-host-IP)
-# ---------------------------------------------------------------------------
-
-class TestGetNextFwPort(unittest.TestCase):
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_empty_cluster_returns_base(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_fw_port
-        mock_config.return_value = (4420, 8080, 50001)
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = []
-        self.assertEqual(get_next_fw_port("c1"), 50001)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_reuses_port_for_same_host_ip(self, mock_db_cls, mock_config):
-        """Two nodes on the same mgmt_ip should share the same firewall port."""
-        from simplyblock_core.utils import get_next_fw_port
-        mock_config.return_value = (4420, 8080, 50001)
-        nodes = [_node("n1", mgmt_ip="10.0.0.1", firewall_port=50001)]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        result = get_next_fw_port("c1", mgmt_ip="10.0.0.1")
-        self.assertEqual(result, 50001)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_new_port_for_different_host_ip(self, mock_db_cls, mock_config):
-        """A new host IP should get a new firewall port."""
-        from simplyblock_core.utils import get_next_fw_port
-        mock_config.return_value = (4420, 8080, 50001)
-        nodes = [_node("n1", mgmt_ip="10.0.0.1", firewall_port=50001)]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        result = get_next_fw_port("c1", mgmt_ip="10.0.0.2")
-        self.assertEqual(result, 50002)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_without_mgmt_ip_allocates_new(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_fw_port
-        mock_config.return_value = (4420, 8080, 50001)
-        nodes = [_node("n1", mgmt_ip="10.0.0.1", firewall_port=50001)]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        result = get_next_fw_port("c1")
-        self.assertEqual(result, 50002)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_custom_snode_api_port(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_fw_port
-        mock_config.return_value = (4420, 8080, 60000)
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = []
-        self.assertEqual(get_next_fw_port("c1"), 60000)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_multiple_hosts_sequential_ports(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_fw_port
-        mock_config.return_value = (4420, 8080, 50001)
-        nodes = [
-            _node("n1", mgmt_ip="10.0.0.1", firewall_port=50001),
-            _node("n2", mgmt_ip="10.0.0.2", firewall_port=50002),
-        ]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        # Third host gets 50003
-        self.assertEqual(get_next_fw_port("c1", mgmt_ip="10.0.0.3"), 50003)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_reuses_existing_for_third_node_same_ip(self, mock_db_cls, mock_config):
-        """Three nodes on same IP: all share same firewall port."""
-        from simplyblock_core.utils import get_next_fw_port
-        mock_config.return_value = (4420, 8080, 50001)
-        nodes = [
-            _node("n1", mgmt_ip="10.0.0.1", firewall_port=50001),
-            _node("n2", mgmt_ip="10.0.0.1", firewall_port=50001),
-        ]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        result = get_next_fw_port("c1", mgmt_ip="10.0.0.1")
-        self.assertEqual(result, 50001)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_ignores_zero_firewall_port_on_existing_node(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_fw_port
-        mock_config.return_value = (4420, 8080, 50001)
-        nodes = [_node("n1", mgmt_ip="10.0.0.1", firewall_port=0)]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        # Should not reuse the 0 port even though mgmt_ip matches
-        result = get_next_fw_port("c1", mgmt_ip="10.0.0.1")
-        self.assertEqual(result, 50001)
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +358,7 @@ class TestUnifiedPoolSequentialAllocation(unittest.TestCase):
     Each allocation should see the previous ones and return distinct ports.
     """
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_three_sequential_allocations_distinct(self, mock_ports, mock_config):
         from simplyblock_core.utils import get_next_nvmf_port
@@ -482,7 +381,7 @@ class TestUnifiedPoolSequentialAllocation(unittest.TestCase):
         # All three ports are distinct
         self.assertEqual(len({port1, port2, port3}), 3)
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_two_nodes_six_ports(self, mock_ports, mock_config):
         """Two nodes, each with 3 NVMe-oF ports, yield 6 distinct ports."""
@@ -504,7 +403,7 @@ class TestUnifiedPoolSequentialAllocation(unittest.TestCase):
 
 class TestPortGapsAndReuse(unittest.TestCase):
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_gap_at_start_not_possible(self, mock_ports, mock_config):
         """If base port is not in used_ports, it gets allocated first."""
@@ -512,14 +411,14 @@ class TestPortGapsAndReuse(unittest.TestCase):
         mock_ports.return_value = {4421, 4422}  # gap at 4420
         self.assertEqual(get_next_nvmf_port("c1"), 4420)
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_gap_in_middle(self, mock_ports, mock_config):
         from simplyblock_core.utils import get_next_nvmf_port
         mock_ports.return_value = {4420, 4422, 4423}  # gap at 4421
         self.assertEqual(get_next_nvmf_port("c1"), 4421)
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_node_removed_frees_port(self, mock_ports, mock_config):
         """If a node is removed, its ports leave the used set and can be reused."""
@@ -541,19 +440,7 @@ class TestMultiNodeSameHost(unittest.TestCase):
     """Test that multiple nodes on the same host IP get distinct NVMe-oF ports
     but share the same SNodeAPI/firewall port."""
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_two_nodes_same_ip_share_fw_port(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_fw_port
-        nodes = [
-            _node("n1", mgmt_ip="10.0.0.1", firewall_port=50001,
-                  lvol_subsys_port=4420, nvmf_port=4421, hublvol_port=4422),
-        ]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        # Second node on same IP gets same FW port
-        self.assertEqual(get_next_fw_port("c1", mgmt_ip="10.0.0.1"), 50001)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_two_nodes_same_ip_get_different_nvmf_ports(self, mock_ports, mock_config):
         """Even on same host, each node gets unique NVMe-oF ports."""
@@ -572,7 +459,7 @@ class TestSelectiveBlockingPorts(unittest.TestCase):
     """Verify that different lvstores and hublvols get different ports,
     which is a prerequisite for selective firewall blocking."""
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.db_controller.DBController")
     def test_lvstore_ports_differ_from_hublvol_ports(self, mock_db_cls, mock_config):
         from simplyblock_core.utils import _get_all_nvmf_ports
@@ -600,7 +487,7 @@ class TestSelectiveBlockingPorts(unittest.TestCase):
         self.assertNotIn(4420, hub_ports)
         self.assertNotIn(4420, dev_ports)
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.db_controller.DBController")
     def test_secondary_reuses_primary_lvol_port(self, mock_db_cls, mock_config):
         """Secondary node should use primary's lvol_subsys_port for that lvstore.
@@ -633,7 +520,6 @@ class TestClusterOpsPortConfig(unittest.TestCase):
         sig = inspect.signature(create_cluster)
         self.assertEqual(sig.parameters["nvmf_base_port"].default, 4420)
         self.assertEqual(sig.parameters["rpc_base_port"].default, 8080)
-        self.assertEqual(sig.parameters["snode_api_port"].default, 50001)
 
     def test_add_cluster_default_ports(self):
         """Verify add_cluster accepts default port params."""
@@ -642,7 +528,6 @@ class TestClusterOpsPortConfig(unittest.TestCase):
         sig = inspect.signature(add_cluster)
         self.assertEqual(sig.parameters["nvmf_base_port"].default, 4420)
         self.assertEqual(sig.parameters["rpc_base_port"].default, 8080)
-        self.assertEqual(sig.parameters["snode_api_port"].default, 50001)
 
 
 # ---------------------------------------------------------------------------
@@ -657,14 +542,12 @@ class TestCLIPortArgs(unittest.TestCase):
         parser = argparse.ArgumentParser()
         parser.add_argument('--nvmf-base-port', type=int, default=4420, dest='nvmf_base_port')
         parser.add_argument('--rpc-base-port', type=int, default=8080, dest='rpc_base_port')
-        parser.add_argument('--snode-api-port', type=int, default=50001, dest='snode_api_port')
         return parser.parse_args(extra_args or [])
 
     def test_default_port_args(self):
         args = self._parse_create_args()
         self.assertEqual(args.nvmf_base_port, 4420)
         self.assertEqual(args.rpc_base_port, 8080)
-        self.assertEqual(args.snode_api_port, 50001)
 
     def test_custom_nvmf_base_port(self):
         args = self._parse_create_args(["--nvmf-base-port", "5000"])
@@ -673,20 +556,6 @@ class TestCLIPortArgs(unittest.TestCase):
     def test_custom_rpc_base_port(self):
         args = self._parse_create_args(["--rpc-base-port", "9000"])
         self.assertEqual(args.rpc_base_port, 9000)
-
-    def test_custom_snode_api_port(self):
-        args = self._parse_create_args(["--snode-api-port", "60000"])
-        self.assertEqual(args.snode_api_port, 60000)
-
-    def test_all_custom_ports(self):
-        args = self._parse_create_args([
-            "--nvmf-base-port", "5000",
-            "--rpc-base-port", "9000",
-            "--snode-api-port", "60000",
-        ])
-        self.assertEqual(args.nvmf_base_port, 5000)
-        self.assertEqual(args.rpc_base_port, 9000)
-        self.assertEqual(args.snode_api_port, 60000)
 
     def test_standard_port_4420(self):
         """The standard NVMe-oF port 4420 should be the default."""
@@ -703,11 +572,10 @@ class TestEndToEndAllocationScenario(unittest.TestCase):
     2 hosts, 2 nodes each (4 nodes total), allocate all ports.
     """
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.db_controller.DBController")
     def test_four_nodes_two_hosts(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_nvmf_port, get_next_rpc_port, get_next_fw_port
-        from simplyblock_core.utils import _get_all_nvmf_ports
+        from simplyblock_core.utils import get_next_nvmf_port, get_next_rpc_port
 
         # Simulate progressive node creation
         nodes = []
@@ -718,42 +586,34 @@ class TestEndToEndAllocationScenario(unittest.TestCase):
         # ---- Node 1, Host A (10.0.0.1) ----
         refresh_mock()
         rpc1 = get_next_rpc_port("c1")
-        fw1 = get_next_fw_port("c1", mgmt_ip="10.0.0.1")
         self.assertEqual(rpc1, 8080)
-        self.assertEqual(fw1, 50001)
 
-        n1 = _node("n1", mgmt_ip="10.0.0.1", rpc_port=rpc1, firewall_port=fw1,
+        n1 = _node("n1", mgmt_ip="10.0.0.1", rpc_port=rpc1,
                     lvol_subsys_port=4420, nvmf_port=4421, hublvol_port=4422)
         nodes.append(n1)
 
         # ---- Node 2, Host A (same IP) ----
         refresh_mock()
         rpc2 = get_next_rpc_port("c1")
-        fw2 = get_next_fw_port("c1", mgmt_ip="10.0.0.1")
         self.assertEqual(rpc2, 8081)
-        self.assertEqual(fw2, 50001)  # reused
 
-        n2 = _node("n2", mgmt_ip="10.0.0.1", rpc_port=rpc2, firewall_port=fw2,
+        n2 = _node("n2", mgmt_ip="10.0.0.1", rpc_port=rpc2,
                     lvol_subsys_port=4423, nvmf_port=4424, hublvol_port=4425)
         nodes.append(n2)
 
         # ---- Node 3, Host B (10.0.0.2) ----
         refresh_mock()
         rpc3 = get_next_rpc_port("c1")
-        fw3 = get_next_fw_port("c1", mgmt_ip="10.0.0.2")
         self.assertEqual(rpc3, 8082)
-        self.assertEqual(fw3, 50002)  # new host, new port
 
-        n3 = _node("n3", mgmt_ip="10.0.0.2", rpc_port=rpc3, firewall_port=fw3,
+        n3 = _node("n3", mgmt_ip="10.0.0.2", rpc_port=rpc3,
                     lvol_subsys_port=4426, nvmf_port=4427, hublvol_port=4428)
         nodes.append(n3)
 
         # ---- Node 4, Host B (same IP as node 3) ----
         refresh_mock()
         rpc4 = get_next_rpc_port("c1")
-        fw4 = get_next_fw_port("c1", mgmt_ip="10.0.0.2")
         self.assertEqual(rpc4, 8083)
-        self.assertEqual(fw4, 50002)  # reused for same host
 
         # Verify all NVMe-oF ports are unique
         all_nvmf = set()
@@ -768,10 +628,6 @@ class TestEndToEndAllocationScenario(unittest.TestCase):
         all_rpc = {rpc1, rpc2, rpc3, rpc4}
         self.assertEqual(len(all_rpc), 4)
 
-        # Verify FW ports: 2 unique (one per host)
-        all_fw = {fw1, fw2, fw3, fw4}
-        self.assertEqual(all_fw, {50001, 50002})
-
 
 # ---------------------------------------------------------------------------
 # Test edge cases
@@ -783,7 +639,7 @@ class TestEdgeCases(unittest.TestCase):
     @patch("simplyblock_core.utils._get_cluster_port_config")
     def test_large_port_numbers(self, mock_config, mock_ports):
         from simplyblock_core.utils import get_next_nvmf_port
-        mock_config.return_value = (60000, 8080, 50001)
+        mock_config.return_value = (60000, 8080)
         mock_ports.return_value = set()
         self.assertEqual(get_next_nvmf_port("c1"), 60000)
 
@@ -792,7 +648,7 @@ class TestEdgeCases(unittest.TestCase):
     def test_many_ports_allocated(self, mock_config, mock_ports):
         """Stress test: 100 ports allocated, next should be correct."""
         from simplyblock_core.utils import get_next_nvmf_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         mock_ports.return_value = set(range(4420, 4520))
         self.assertEqual(get_next_nvmf_port("c1"), 4520)
 
@@ -801,7 +657,7 @@ class TestEdgeCases(unittest.TestCase):
     def test_scattered_ports(self, mock_config, mock_ports):
         """Non-contiguous ports: should fill from base."""
         from simplyblock_core.utils import get_next_nvmf_port
-        mock_config.return_value = (4420, 8080, 50001)
+        mock_config.return_value = (4420, 8080)
         mock_ports.return_value = {4421, 4425, 4430}  # 4420 is free
         self.assertEqual(get_next_nvmf_port("c1"), 4420)
 
@@ -813,7 +669,6 @@ class TestEdgeCases(unittest.TestCase):
         n = StorageNode()
         self.assertEqual(n.lvol_subsys_port, 9090)  # legacy default in model
         self.assertEqual(n.nvmf_port, 4420)
-        self.assertEqual(n.firewall_port, 5001)
         self.assertEqual(n.rpc_port, -1)
 
 
@@ -840,7 +695,7 @@ class TestEnvVarOverride(unittest.TestCase):
 class TestPortCollisionPrevention(unittest.TestCase):
     """The unified pool ensures lvol, device, and hublvol ports never collide."""
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_sequential_type_allocations_are_unique(self, mock_ports, mock_config):
         """Simulate: allocate device port, then lvol port, then hublvol port."""
@@ -862,7 +717,7 @@ class TestPortCollisionPrevention(unittest.TestCase):
         # All unique
         self.assertEqual(len({dev_port, lvol_port, hub_port}), 3)
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_nvmf_ports_independent_from_rpc_ports(self, mock_ports, mock_config):
         """NVMe-oF and RPC are separate pools; they can use the same port number."""
@@ -871,7 +726,7 @@ class TestPortCollisionPrevention(unittest.TestCase):
         # Even if RPC uses 8080, NVMe-oF still starts at 4420
         self.assertEqual(get_next_nvmf_port("c1"), 4420)
 
-    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(8080, 8080, 50001))
+    @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(8080, 8080))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
     def test_overlapping_base_ports_still_work(self, mock_ports, mock_config):
         """If user sets nvmf_base=8080 same as rpc_base, each pool tracks independently."""
@@ -887,30 +742,26 @@ class TestPortCollisionPrevention(unittest.TestCase):
 class TestClusterModelSerialization(unittest.TestCase):
 
     def test_port_fields_in_dict(self):
-        c = _cluster(nvmf_base_port=5555, rpc_base_port=9999, snode_api_port=55555)
+        c = _cluster(nvmf_base_port=5555, rpc_base_port=9999)
         d = c.get_clean_dict()
         self.assertIn("nvmf_base_port", d)
         self.assertIn("rpc_base_port", d)
-        self.assertIn("snode_api_port", d)
         self.assertEqual(d["nvmf_base_port"], 5555)
         self.assertEqual(d["rpc_base_port"], 9999)
-        self.assertEqual(d["snode_api_port"], 55555)
 
     def test_cluster_from_dict_preserves_ports(self):
         """Verify Cluster can be reconstructed from dict with port fields."""
-        c1 = _cluster(nvmf_base_port=5555, rpc_base_port=9999, snode_api_port=55555)
+        c1 = _cluster(nvmf_base_port=5555, rpc_base_port=9999)
         d = c1.get_clean_dict()
         c2 = Cluster(d)
         self.assertEqual(c2.nvmf_base_port, 5555)
         self.assertEqual(c2.rpc_base_port, 9999)
-        self.assertEqual(c2.snode_api_port, 55555)
 
     def test_cluster_from_dict_without_port_fields_uses_defaults(self):
         """Old cluster records without port fields should use defaults."""
         c = Cluster({})
         self.assertEqual(c.nvmf_base_port, 4420)
         self.assertEqual(c.rpc_base_port, 8080)
-        self.assertEqual(c.snode_api_port, 50001)
 
 
 # ---------------------------------------------------------------------------
@@ -922,42 +773,29 @@ class TestPartialPortConfig(unittest.TestCase):
     @patch("simplyblock_core.db_controller.DBController")
     def test_only_nvmf_overridden(self, mock_db_cls):
         from simplyblock_core.utils import _get_cluster_port_config
-        cluster = _cluster(nvmf_base_port=5000, rpc_base_port=8080, snode_api_port=50001)
+        cluster = _cluster(nvmf_base_port=5000, rpc_base_port=8080)
         mock_db_cls.return_value.get_cluster_by_id.return_value = cluster
-        nvmf, rpc, fw = _get_cluster_port_config("c1")
+        nvmf, rpc = _get_cluster_port_config("c1")
         self.assertEqual(nvmf, 5000)
         self.assertEqual(rpc, 8080)
-        self.assertEqual(fw, 50001)
 
     @patch("simplyblock_core.db_controller.DBController")
     def test_only_rpc_overridden(self, mock_db_cls):
         from simplyblock_core.utils import _get_cluster_port_config
-        cluster = _cluster(nvmf_base_port=4420, rpc_base_port=9000, snode_api_port=50001)
+        cluster = _cluster(nvmf_base_port=4420, rpc_base_port=9000)
         mock_db_cls.return_value.get_cluster_by_id.return_value = cluster
-        nvmf, rpc, fw = _get_cluster_port_config("c1")
+        nvmf, rpc = _get_cluster_port_config("c1")
         self.assertEqual(nvmf, 4420)
         self.assertEqual(rpc, 9000)
-        self.assertEqual(fw, 50001)
-
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_only_fw_overridden(self, mock_db_cls):
-        from simplyblock_core.utils import _get_cluster_port_config
-        cluster = _cluster(nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=60000)
-        mock_db_cls.return_value.get_cluster_by_id.return_value = cluster
-        nvmf, rpc, fw = _get_cluster_port_config("c1")
-        self.assertEqual(nvmf, 4420)
-        self.assertEqual(rpc, 8080)
-        self.assertEqual(fw, 60000)
 
     @patch("simplyblock_core.db_controller.DBController")
     def test_all_overridden(self, mock_db_cls):
         from simplyblock_core.utils import _get_cluster_port_config
-        cluster = _cluster(nvmf_base_port=5000, rpc_base_port=9000, snode_api_port=60000)
+        cluster = _cluster(nvmf_base_port=5000, rpc_base_port=9000)
         mock_db_cls.return_value.get_cluster_by_id.return_value = cluster
-        nvmf, rpc, fw = _get_cluster_port_config("c1")
+        nvmf, rpc = _get_cluster_port_config("c1")
         self.assertEqual(nvmf, 5000)
         self.assertEqual(rpc, 9000)
-        self.assertEqual(fw, 60000)
 
 
 # ---------------------------------------------------------------------------
@@ -968,12 +806,11 @@ class TestNodeDisplayPorts(unittest.TestCase):
 
     def test_node_port_fields_are_readable(self):
         n = _node("n1", lvol_subsys_port=4420, nvmf_port=4421, hublvol_port=4422,
-                  rpc_port=8080, firewall_port=50001)
+                  rpc_port=8080)
         self.assertEqual(n.lvol_subsys_port, 4420)
         self.assertEqual(n.nvmf_port, 4421)
         self.assertEqual(n.hublvol.nvmf_port, 4422)
         self.assertEqual(n.rpc_port, 8080)
-        self.assertEqual(n.firewall_port, 50001)
 
     def test_node_without_hublvol(self):
         n = _node("n1", lvol_subsys_port=4420, nvmf_port=4421)

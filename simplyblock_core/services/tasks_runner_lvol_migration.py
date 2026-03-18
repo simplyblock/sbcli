@@ -464,7 +464,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
 
     # Step 5: fire async transfer
     remote_bdev = f"{ctrl_name}n1"
-    ret = src_rpc.bdev_lvol_transfer(src_composite, 0, 4, remote_bdev, "migrate")
+    ret = src_rpc.bdev_lvol_transfer(src_composite, 0, 16, remote_bdev, "migrate")
     if ret is None:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
         tgt_rpc.subsystem_delete(temp_nqn)
@@ -573,8 +573,10 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     trtype, target_ip = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
 
-    # ── A. Launch / resume planned snapshots in batches ──────────────────────
-    _PARALLEL_BATCH = 3  # max concurrent NVMe-oF transfers per run
+    # ── A. Launch / resume planned snapshots one at a time ───────────────────
+    # SPDK only supports one bdev_lvol_transfer per poller group at a time;
+    # launching multiple causes "poller already exists" and stuck transfers.
+    _PARALLEL_BATCH = 1
     if ctx.get('stage') != 'parallel_transfer':
         all_unprocessed = [u for u in plan if u not in migration.snaps_migrated]
         unprocessed = all_unprocessed[:_PARALLEL_BATCH]

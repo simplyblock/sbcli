@@ -818,9 +818,8 @@ def _get_cluster_port_config(cluster_id):
         return (
             cluster.nvmf_base_port or constants.NVMF_BASE_PORT,
             cluster.rpc_base_port or constants.RPC_BASE_PORT,
-            cluster.snode_api_port or constants.SNODE_API_PORT,
         )
-    return constants.NVMF_BASE_PORT, constants.RPC_BASE_PORT, constants.SNODE_API_PORT
+    return constants.NVMF_BASE_PORT, constants.RPC_BASE_PORT
 
 
 def _get_all_nvmf_ports(cluster_id):
@@ -846,7 +845,7 @@ def _get_all_nvmf_ports(cluster_id):
 
 def get_next_nvmf_port(cluster_id):
     """Allocate the next free NVMe-oF port from the unified pool."""
-    nvmf_base, _, _ = _get_cluster_port_config(cluster_id)
+    nvmf_base, _ = _get_cluster_port_config(cluster_id)
     used_ports = _get_all_nvmf_ports(cluster_id)
     next_port = nvmf_base
     while next_port in used_ports:
@@ -862,7 +861,7 @@ def get_next_rpc_port(cluster_id):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
 
-    _, rpc_base, _ = _get_cluster_port_config(cluster_id)
+    _, rpc_base = _get_cluster_port_config(cluster_id)
     used_ports = []
     for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
         if node.rpc_port > 0:
@@ -876,30 +875,11 @@ def get_next_rpc_port(cluster_id):
     return 0
 
 
-def get_next_fw_port(cluster_id, mgmt_ip=None):
-    """Get the SNodeAPI/firewall port. One per host IP."""
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-
-    if mgmt_ip:
-        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.mgmt_ip == mgmt_ip and node.firewall_port > 0:
-                return node.firewall_port
-
-    _, _, snode_api_port = _get_cluster_port_config(cluster_id)
-    used_ports = set()
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.firewall_port > 0:
-            used_ports.add(node.firewall_port)
-    next_port = snode_api_port
-    while next_port in used_ports:
-        next_port += 1
-    return next_port
 
 
 def get_next_lvstore_ports(cluster_id):
     """Allocate two consecutive NVMe-oF ports for a new lvstore (lvol_subsys + hublvol)."""
-    nvmf_base, _, _ = _get_cluster_port_config(cluster_id)
+    nvmf_base, _ = _get_cluster_port_config(cluster_id)
     used_ports = _get_all_nvmf_ports(cluster_id)
     ports = []
     next_port = nvmf_base

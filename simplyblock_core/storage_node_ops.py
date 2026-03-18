@@ -1069,7 +1069,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         mgmt_ip, mgmt_iface = mgmt_info
-        firewall_port = utils.get_next_fw_port(cluster_id, mgmt_ip=mgmt_ip)
         rpc_port = utils.get_next_rpc_port(cluster_id)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
@@ -1104,7 +1103,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=node_socket, firewall_port=firewall_port, cluster_id=cluster_id)
+                socket=node_socket, cluster_id=cluster_id)
             time.sleep(5)
 
         except Exception as e:
@@ -1259,7 +1258,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.iobuf_small_bufsize = small_bufsize or 0
         snode.iobuf_large_bufsize = large_bufsize or 0
         snode.enable_test_device = enable_test_device
-        snode.firewall_port = firewall_port
+
 
         if cluster.is_single_node:
             snode.physical_label = 0
@@ -1833,7 +1832,7 @@ def restart_storage_node(
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-            socket=snode.socket, firewall_port=snode.firewall_port, cluster_id=snode.cluster_id)
+            socket=snode.socket, cluster_id=snode.cluster_id)
 
     except Exception as e:
         logger.error(e)
@@ -2100,6 +2099,8 @@ def restart_storage_node(
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             try:
+                # Re-read node from DB to avoid overwriting concurrent changes
+                node = db_controller.get_storage_node_by_id(node.get_id())
                 node.remote_devices = _connect_to_remote_devs(node, reattach=True, force_connect_restarting_nodes=True)
             except RuntimeError:
                 logger.error('Failed to connect to remote devices')
@@ -2130,14 +2131,16 @@ def restart_storage_node(
             snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
-            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node:
-                if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            restart_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+                if not sec_id:
+                    continue
+                sec_node = db_controller.get_storage_node_by_id(sec_id)
+                if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                     fw_api = FirewallClient(sec_node, timeout=5, retry=2)
                     port_type = "tcp"
                     if sec_node.active_rdma:
                         port_type = "udp"
-                    restart_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
                     fw_api.firewall_set_port(restart_lvs_port, port_type, "allow", sec_node.rpc_port)
                     tcp_ports_events.port_allowed(sec_node, restart_lvs_port)
             return False
@@ -2167,6 +2170,8 @@ def restart_storage_node(
                     continue
 
                 try:
+                    # Re-read node from DB to avoid overwriting concurrent changes
+                    node = db_controller.get_storage_node_by_id(node.get_id())
                     node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
                 except RuntimeError:
                     logger.error('Failed to connect to remote devices')
@@ -2269,7 +2274,6 @@ def list_storage_nodes(is_json, cluster_id=None):
             "LVOL P": node.lvol_subsys_port,
             "DEV P": node.nvmf_port,
             "HUB P": node.hublvol.nvmf_port if node.hublvol else "-",
-            "FW P": node.firewall_port,
             "LVS Ports": _format_lvstore_ports(node),
             # "Cloud ID": node.cloud_instance_id,
             # "JM VUID": node.jm_vuid,
@@ -3182,6 +3186,8 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 continue
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                 try:
+                    # Re-read node from DB to avoid overwriting concurrent changes
+                    node = db_controller.get_storage_node_by_id(node.get_id())
                     node.remote_devices = _connect_to_remote_devs(node)
                     node.write_to_db()
                     distr_controller.send_cluster_map_to_node(node)
@@ -3332,19 +3338,28 @@ def recreate_lvstore(snode, force=False):
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db()
-    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        # check jc_compression status
-        jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
-        retries = 10
-        while jc_compression_is_active:
-            if retries <= 0:
-                logger.warning("Timeout waiting for JC compression task to finish")
-                break
-            retries -= 1
-            logger.info(f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
-            time.sleep(60)
-            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(sec_node.jm_vuid)
+
+    # Gather all secondary nodes for this primary
+    sec_nodes = []
+    for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+        if sec_id:
+            sec = db_controller.get_storage_node_by_id(sec_id)
+            if sec:
+                sec_nodes.append(sec)
+
+    for sec_node in sec_nodes:
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            # check jc_compression status
+            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
+            retries = 10
+            while jc_compression_is_active:
+                if retries <= 0:
+                    logger.warning("Timeout waiting for JC compression task to finish")
+                    break
+                retries -= 1
+                logger.info(f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
+                time.sleep(60)
+                jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(sec_node.jm_vuid)
 
     ### 1- create distribs and raid
     ret, err = _create_bdev_stack(snode, [])
@@ -3368,9 +3383,10 @@ def recreate_lvstore(snode, force=False):
                 lvol_list.append(lv)
 
     prim_node_suspend = False
-    if sec_node:
+    for sec_node in sec_nodes:
         if sec_node.status == StorageNode.STATUS_UNREACHABLE:
             prim_node_suspend = True
+            break
     if not lvol_list:
         prim_node_suspend = False
 
@@ -3393,8 +3409,9 @@ def recreate_lvstore(snode, force=False):
             if lvol.allowed_hosts:
                 _reapply_allowed_hosts(lvol, snode, rpc_client)
 
-    if sec_node:
-
+    snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+    any_sec_unreachable = False
+    for sec_node in sec_nodes:
         if sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
                                        sec_node.rpc_password)
@@ -3415,7 +3432,6 @@ def recreate_lvstore(snode, force=False):
                 logger.error(msg)
                 storage_events.jm_repl_tasks_found(sec_node, snode.jm_vuid)
 
-            snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
             fw_api.firewall_set_port(snode_lvs_port, port_type, "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode_lvs_port)
 
@@ -3424,7 +3440,7 @@ def recreate_lvstore(snode, force=False):
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             ### 4-1 check for inflight IO. retry every 100ms up to 10 seconds
-            logger.info(f"Checking for inflight IO from node: {snode.secondary_node_id}")
+            logger.info(f"Checking for inflight IO from node: {sec_node.get_id()}")
             for i in range(100):
                 is_inflight = sec_rpc_client.bdev_distrib_check_inflight_io(snode.jm_vuid)
                 if is_inflight:
@@ -3435,11 +3451,14 @@ def recreate_lvstore(snode, force=False):
                     break
             else:
                 logger.error(
-                    f"Timeout while checking for inflight IO after 10 seconds on node {snode.secondary_node_id}")
+                    f"Timeout while checking for inflight IO after 10 seconds on node {sec_node.get_id()}")
 
         if sec_node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN]:
-            logger.info(f"Secondary node is not online, forcing journal replication on node: {snode.get_id()}")
-            rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+            any_sec_unreachable = True
+
+    if any_sec_unreachable:
+        logger.info(f"Secondary node is not online, forcing journal replication on node: {snode.get_id()}")
+        rpc_client.jc_explicit_synchronization(snode.jm_vuid)
 
     ### 5- examine
     # time.sleep(0.2)
@@ -3496,7 +3515,7 @@ def recreate_lvstore(snode, force=False):
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
-    if sec_node:
+    if sec_nodes:
         ### 7- create and connect hublvol
         try:
             snode.recreate_hublvol()
@@ -3509,7 +3528,7 @@ def recreate_lvstore(snode, force=False):
     for lvol in lvol_list:
         executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
-    if sec_node:
+    for sec_node in sec_nodes:
         if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
                 sec_node.connect_to_hublvol(snode)
@@ -3519,11 +3538,9 @@ def recreate_lvstore(snode, force=False):
             ### 8- allow secondary port
 
             fw_api = FirewallClient(sec_node, timeout=5, retry=2)
-            ### 3- block secondary port
             port_type = "tcp"
             if sec_node.active_rdma:
                 port_type = "udp"
-            snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
             fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode_lvs_port)
 
@@ -3533,10 +3550,11 @@ def recreate_lvstore(snode, force=False):
         return False
 
     ### 10- finish
-    if sec_node.status == StorageNode.STATUS_ONLINE:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        sec_node.lvstore_status = "ready"
-        sec_node.write_to_db()
+    for sec_node in sec_nodes:
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_node = db_controller.get_storage_node_by_id(sec_node.get_id())
+            sec_node.lvstore_status = "ready"
+            sec_node.write_to_db()
 
     # all lvols to their respect loops
     if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
