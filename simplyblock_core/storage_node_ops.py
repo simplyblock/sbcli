@@ -1069,7 +1069,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         mgmt_ip, mgmt_iface = mgmt_info
-        firewall_port = utils.get_next_fw_port(cluster_id, mgmt_ip=mgmt_ip)
         rpc_port = utils.get_next_rpc_port(cluster_id)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
@@ -1104,7 +1103,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=node_socket, firewall_port=firewall_port, cluster_id=cluster_id)
+                socket=node_socket, cluster_id=cluster_id)
             time.sleep(5)
 
         except Exception as e:
@@ -1259,7 +1258,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.iobuf_small_bufsize = small_bufsize or 0
         snode.iobuf_large_bufsize = large_bufsize or 0
         snode.enable_test_device = enable_test_device
-        snode.firewall_port = firewall_port
+
 
         if cluster.is_single_node:
             snode.physical_label = 0
@@ -1833,7 +1832,7 @@ def restart_storage_node(
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-            socket=snode.socket, firewall_port=snode.firewall_port, cluster_id=snode.cluster_id)
+            socket=snode.socket, cluster_id=snode.cluster_id)
 
     except Exception as e:
         logger.error(e)
@@ -2275,7 +2274,6 @@ def list_storage_nodes(is_json, cluster_id=None):
             "LVOL P": node.lvol_subsys_port,
             "DEV P": node.nvmf_port,
             "HUB P": node.hublvol.nvmf_port if node.hublvol else "-",
-            "FW P": node.firewall_port,
             "LVS Ports": _format_lvstore_ports(node),
             # "Cloud ID": node.cloud_instance_id,
             # "JM VUID": node.jm_vuid,

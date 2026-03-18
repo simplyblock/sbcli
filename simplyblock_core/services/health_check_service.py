@@ -155,12 +155,13 @@ def check_node(snode):
                         bdev_names=list(node_bdev_names), reattach=False,
                     )
                     connected_devices.append(org_dev.get_id())
+                    # Re-read right before write to avoid overwriting concurrent changes
                     sn = db.get_storage_node_by_id(snode.get_id())
                     for d in sn.remote_devices:
                         if d.get_id() == remote_device.get_id():
                             d.status = NVMeDevice.STATUS_ONLINE
-                            sn.write_to_db()
                             break
+                    sn.write_to_db()
                     distr_controller.send_dev_status_event(org_dev, NVMeDevice.STATUS_ONLINE, snode)
                 except RuntimeError:
                     logger.error(f"Failed to connect to device: {org_dev.get_id()}")

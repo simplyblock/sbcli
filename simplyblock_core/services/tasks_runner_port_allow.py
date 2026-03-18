@@ -108,6 +108,7 @@ def exec_port_allow_task(task):
             task.write_to_db(db.kv_store)
             return
         else:
+            # Re-read fresh before writing to avoid overwriting concurrent changes
             node = db.get_storage_node_by_id(task.node_id)
             node.remote_devices = remote_devices
             node.write_to_db()
@@ -122,6 +123,7 @@ def exec_port_allow_task(task):
             task.write_to_db(db.kv_store)
             return
         else:
+            # Re-read fresh before writing to avoid overwriting concurrent changes
             node = db.get_storage_node_by_id(task.node_id)
             node.remote_jm_devices = remote_jm_devices
             node.write_to_db()

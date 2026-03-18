@@ -953,7 +953,7 @@ class CLIWrapperBase:
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
             client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
-            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port)
 
     def cluster_create(self, args):
         import json as _json
@@ -1017,7 +1017,7 @@ class CLIWrapperBase:
             strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
             nvmeof_tls_config=nvmeof_tls_config, max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
-            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
