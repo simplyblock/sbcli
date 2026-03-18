@@ -802,8 +802,9 @@ jobs:
           done
 
           for ip in $CLIENTNODES; do
-            echo "---- $ip: kill fio ----"
+            echo "---- $ip: kill fio and tmux----"
             run_remote "$ip" "pkill -9 fio || true"
+            run_remote "$ip" "pkill -9 tmux || true"
           done
 
       - name: Mark test end time (always)

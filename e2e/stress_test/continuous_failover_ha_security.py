@@ -217,7 +217,7 @@ class RandomSecurityFailoverTest(RandomFailoverTest):
         try:
             if host_nqn:
                 connect_ls, err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
-                    self.mgmt_nodes[0], lvol_id, host_nqn, ctrl_loss_tmo=-1)
+                    self.mgmt_nodes[0], lvol_id, host_nqn)
                 if err or not connect_ls:
                     self.logger.warning(
                         f"No connect string for auth lvol {lvol_name}: {err}")
@@ -331,7 +331,7 @@ class RandomSecurityFailoverTest(RandomFailoverTest):
         host_nqn = details.get("host_nqn")
         if host_nqn:
             connect_ls, err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
-                self.mgmt_nodes[0], lvol_id, host_nqn, ctrl_loss_tmo=-1)
+                self.mgmt_nodes[0], lvol_id, host_nqn)
             if err or not connect_ls:
                 self.logger.warning(
                     f"Could not get auth connect str for {lvol_name}: {err}")
@@ -437,7 +437,7 @@ class RandomAllSecurityFailoverTest(RandomSecurityFailoverTest):
 
         # Connect string requires host_nqn (with --ctrl-loss-tmo -1)
         connect_ls, err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
-            self.mgmt_nodes[0], lvol_id, host_nqn, ctrl_loss_tmo=-1)
+            self.mgmt_nodes[0], lvol_id, host_nqn)
         if err or not connect_ls:
             self.logger.warning(
                 f"No connect string for {lvol_name}: {err}")
@@ -529,7 +529,7 @@ class RandomAllSecurityFailoverTest(RandomSecurityFailoverTest):
         # ── Negative check: wrong NQN should be rejected ──────────────────
         wrong_nqn = f"nqn.2024-01.io.simplyblock:stress:wrong-{_rand_suffix()}"
         wrong_connect, wrong_err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
-            self.mgmt_nodes[0], lvol_id, wrong_nqn, ctrl_loss_tmo=-1)
+            self.mgmt_nodes[0], lvol_id, wrong_nqn)
         if not wrong_err and wrong_connect:
             self.logger.warning(
                 f"WARNING: wrong NQN {wrong_nqn!r} was NOT rejected for "
@@ -706,7 +706,7 @@ class RandomAllSecurityMultiFailoverTest(RandomRDMAMultiFailoverTest):
         try:
             if host_nqn:
                 connect_ls, err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
-                    self.mgmt_nodes[0], lvol_id, host_nqn, ctrl_loss_tmo=-1)
+                    self.mgmt_nodes[0], lvol_id, host_nqn)
                 if err or not connect_ls:
                     self.logger.warning(f"No connect string for auth lvol {lvol_name}: {err}")
                     self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
@@ -782,7 +782,7 @@ class RandomAllSecurityMultiFailoverTest(RandomRDMAMultiFailoverTest):
         if is_allowed:
             wrong_nqn = f"nqn.2024-01.io.simplyblock:stress:wrong-{_rand_suffix()}"
             wrong_connect, wrong_err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
-                self.mgmt_nodes[0], lvol_id, wrong_nqn, ctrl_loss_tmo=-1)
+                self.mgmt_nodes[0], lvol_id, wrong_nqn)
             if not wrong_err and wrong_connect:
                 self.logger.warning(
                     f"WARNING: wrong NQN {wrong_nqn!r} was NOT rejected for {lvol_name!r}")

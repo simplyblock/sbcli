@@ -126,7 +126,7 @@ class SecurityTestBase(TestClusterBase):
         """
         if host_nqn:
             return self.ssh_obj.get_lvol_connect_str_with_host_nqn(
-                self.mgmt_nodes[0], lvol_id, host_nqn, ctrl_loss_tmo=-1)
+                self.mgmt_nodes[0], lvol_id, host_nqn)
         # Unauthenticated path — use existing API helper via CLI
         cmd = f"{self.base_cmd} volume connect {lvol_id}"
         out, err = self.ssh_obj.exec_command(self.mgmt_nodes[0], cmd)
@@ -158,7 +158,8 @@ class SecurityTestBase(TestClusterBase):
         self.logger.info(f"[DEBUG] initial devices on {self.fio_node}: {initial_devices}")
 
         for cmd in connect_ls:
-            self.logger.info(f"[DEBUG] executing nvme connect: {cmd}")
+            cmd = ' '.join(cmd.split())  # normalise any embedded whitespace / stray \r\n
+            self.logger.info(f"[DEBUG] executing nvme connect (repr): {cmd!r}")
             out, err = self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
             self.logger.info(f"[DEBUG] nvme connect result: out={out!r} err={err!r}")
             if err:

@@ -3230,9 +3230,8 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         Run ``volume connect <id> --host-nqn <nqn> --ctrl-loss-tmo <tmo>``
         and return (list_of_connect_commands, stderr).
 
-        Using ``ctrl_loss_tmo=-1`` matches the behaviour of the existing
-        API-based ``get_lvol_connect_str`` helper so that NVMe controllers
-        never time out during a storage-node outage.
+        Using ``ctrl_loss_tmo=-1`` means NVMe controllers never time out
+        during a storage-node outage.
         """
         cmd = (f"{self.base_cmd} volume connect {lvol_id}"
                f" --host-nqn {host_nqn}"
@@ -3242,9 +3241,11 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
             f"[get_lvol_connect_str_with_host_nqn] id={lvol_id} "
             f"host_nqn={host_nqn}: out={out!r}, err={err!r}")
         connect_lines = [
-            line.strip() for line in out.strip().split('\n')
+            ' '.join(line.split()) for line in out.strip().split('\n')
             if line.strip() and 'nvme connect' in line
         ]
+        self.logger.info(
+            f"[get_lvol_connect_str_with_host_nqn] connect_lines repr: {connect_lines!r}")
         return connect_lines, err
 
     def create_sec_lvol(self, node, lvol_name, size, pool,
