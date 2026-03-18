@@ -69,19 +69,33 @@ def process_snap_delete_finish(snap, leader_node):
 
     # 3-1 async delete lvol bdev from primary
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
-    non_leader_id = snode.secondary_node_id
+
+    # Collect all non-leader secondary nodes
+    non_leaders = []
+    secondary_ids = []
+    if snode.secondary_node_id:
+        secondary_ids.append(snode.secondary_node_id)
+    if snode.secondary_node_id_2:
+        secondary_ids.append(snode.secondary_node_id_2)
+    # If the host node itself is not the leader, it's also a non-leader
     if snode.get_id() != leader_node.get_id():
-        non_leader_id = snode.get_id()
-    non_leader = db.get_storage_node_by_id(non_leader_id)
+        non_leaders.append(db.get_storage_node_by_id(snode.get_id()))
+    for sec_id in secondary_ids:
+        if sec_id != leader_node.get_id():
+            non_leaders.append(db.get_storage_node_by_id(sec_id))
+
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        if non_leader and non_leader.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+        any_sec_down = any(
+            nl.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]
+            for nl in non_leaders)
+        if any_sec_down:
             primary_node.lvol_del_sync_lock()
         ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
 
     lvol_bdev_name = snap.snap_bdev
-    if non_leader:
+    for non_leader in non_leaders:
         if non_leader.status in [StorageNode.STATUS_ONLINE]:
             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}")
             ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
@@ -89,12 +103,11 @@ def process_snap_delete_finish(snap, leader_node):
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")
                 else:
-                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}, ading task..."
+                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}, adding task..."
                     logger.error(msg)
                     tasks_controller.add_lvol_sync_del_task(non_leader.cluster_id, non_leader.get_id(), lvol_bdev_name, primary_node.get_id())
 
         elif non_leader.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-            # 3-2 async delete lvol bdev from secondary
             tasks_controller.add_lvol_sync_del_task(non_leader.cluster_id, non_leader.get_id(), lvol_bdev_name, primary_node.get_id())
     snapshot_events.snapshot_delete(snap)
     snap.remove(db.kv_store)

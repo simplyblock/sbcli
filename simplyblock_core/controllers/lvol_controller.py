@@ -1275,9 +1275,14 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     if not ret:
         return "Error setting qos limits"
 
+    secondary_ids = []
     if snode.secondary_node_id:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node and sec_node.status == [StorageNode.STATUS_ONLINE,  StorageNode.STATUS_DOWN]:
+        secondary_ids.append(snode.secondary_node_id)
+    if snode.secondary_node_id_2:
+        secondary_ids.append(snode.secondary_node_id_2)
+    for sec_id in secondary_ids:
+        sec_node = db_controller.get_storage_node_by_id(sec_id)
+        if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             ret = sec_node.rpc_client().bdev_set_qos_limit(
                 lvol.top_bdev, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec)
             if not ret:
