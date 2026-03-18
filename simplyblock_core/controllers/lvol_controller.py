@@ -1459,12 +1459,17 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     elif lvol.ha_type == "ha":
         nodes_ids.extend(lvol.nodes)
 
+    # Get the port from the primary node (first in list) — all nodes hosting
+    # the same lvstore must use the same client-facing port.
+    primary_snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    lvstore_port = primary_snode.get_lvol_subsys_port(lvol.lvs_name)
+
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
             ip = nic.ip4_address
-            port = snode.get_lvol_subsys_port(lvol.lvs_name)
+            port = lvstore_port
             transport = "tcp"
             if nic.ip4_address and lvol.fabric == nic.trtype.lower():
                 transport = nic.trtype.lower()
