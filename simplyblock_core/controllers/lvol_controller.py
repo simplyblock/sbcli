@@ -1449,7 +1449,10 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
 
     # Look up host entry for secrets when host_nqn is provided
     host_entry = None
-    if host_nqn and lvol.allowed_hosts:
+    if lvol.allowed_hosts:
+        if not host_nqn:
+            logger.error(f"Volume {uuid} has allowed hosts configured; --host-nqn is required")
+            return False
         for h in lvol.allowed_hosts:
             if h["nqn"] == host_nqn:
                 host_entry = h
@@ -1457,6 +1460,10 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         if not host_entry:
             logger.error(f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}")
             return False
+    elif host_nqn:
+        # host_nqn provided but no allowed_hosts — volume allows any host,
+        # so just pass host_nqn through without secrets
+        pass
 
     out = []
     nodes_ids = []
