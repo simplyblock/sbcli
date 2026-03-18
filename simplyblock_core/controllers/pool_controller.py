@@ -97,6 +97,11 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
             logger.info(ret)
         if err:
             logger.error(err)
+        ret, err = kms_client.update_pool_key(pool.get_id())
+        if ret:
+            logger.info(ret)
+        if err:
+            logger.error(err)
 
     return pool.get_id()
 

@@ -116,6 +116,12 @@ class KMSClient:
         }
         return self._request("POST", f"v1/transit/keys/{pool_uuid}", params)
 
+    def update_pool_key(self, pool_uuid):
+        params = {
+            "deletion_allowed": True
+        }
+        return self._request("POST", f"v1/transit/keys/{pool_uuid}/config", params)
+
     def delete_pool_key(self, pool_uuid):
         return self._request("DELETE", f"v1/transit/keys/{pool_uuid}")
 
