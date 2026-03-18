@@ -217,30 +217,6 @@ class SecurityTestBase(TestClusterBase):
         )
         self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
 
-    # ── teardown ──────────────────────────────────────────────────────────────
-
-    def teardown(self):
-        """Unmount, disconnect, and delete all tracked lvols, then delete pool."""
-        self.logger.info("Security test teardown started.")
-        for lvol_name, details in list(self.lvol_mount_details.items()):
-            try:
-                mount = details.get("Mount")
-                if mount:
-                    self.ssh_obj.unmount_path(self.fio_node, mount)
-                    sleep_n_sec(2)
-                self._disconnect_lvol(details["ID"])
-                sleep_n_sec(2)
-                self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
-            except Exception as exc:
-                self.logger.warning(f"Teardown error for {lvol_name}: {exc}")
-        self.lvol_mount_details.clear()
-        try:
-            self.sbcli_utils.delete_storage_pools(pool_name=self.pool_name, skip_error=True)
-        except Exception:
-            pass
-        super().teardown()
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  Test 1 – All 4 core security combinations with FIO validation
 # ═══════════════════════════════════════════════════════════════════════════
