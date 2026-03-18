@@ -511,10 +511,13 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
             f"add-host failed: {err}"
 
         # ── Step 3: Verify host appears in lvol details ───────────────────
-        detail_out = self._get_lvol_details_via_cli(lvol_id)
-        self.logger.info(f"lvol get after add-host:\n{detail_out}")
-        assert host_nqn in detail_out, \
-            f"Expected {host_nqn!r} in lvol details, got: {detail_out}"
+        # Use the API (structured data) rather than the CLI table output,
+        # because the table wraps long NQN strings across multiple lines.
+        lvol_api = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        allowed_nqns = [h.get("nqn") for h in lvol_api[0].get("allowed_hosts", [])]
+        self.logger.info(f"allowed_hosts NQNs after add-host: {allowed_nqns}")
+        assert host_nqn in allowed_nqns, \
+            f"Expected {host_nqn!r} in allowed_hosts, got: {allowed_nqns}"
 
         # ── Step 4: Connect with the new host NQN and run FIO ─────────────
         lvol_device, connect_ls = self._connect_and_get_device(
@@ -735,10 +738,11 @@ class TestLvolMultipleAllowedHosts(SecurityTestBase):
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
         # Both NQNs should appear in lvol details
-        detail_out = self._get_lvol_details_via_cli(lvol_id)
-        self.logger.info(f"lvol get (2 hosts):\n{detail_out}")
-        assert real_nqn in detail_out, "real NQN missing from lvol details"
-        assert fake_nqn in detail_out, "fake NQN missing from lvol details"
+        lvol_api = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        allowed_nqns = [h.get("nqn") for h in lvol_api[0].get("allowed_hosts", [])]
+        self.logger.info(f"allowed_hosts NQNs (2 hosts): {allowed_nqns}")
+        assert real_nqn in allowed_nqns, f"real NQN missing from allowed_hosts: {allowed_nqns}"
+        assert fake_nqn in allowed_nqns, f"fake NQN missing from allowed_hosts: {allowed_nqns}"
 
         # Connect with real NQN
         lvol_device, connect_ls = self._connect_and_get_device(
@@ -768,10 +772,11 @@ class TestLvolMultipleAllowedHosts(SecurityTestBase):
         assert not err or "error" not in err.lower(), f"remove-host failed: {err}"
 
         # Verify fake NQN no longer in details, real NQN still there
-        detail_out = self._get_lvol_details_via_cli(lvol_id)
-        self.logger.info(f"lvol get (after removal):\n{detail_out}")
-        assert fake_nqn not in detail_out, "fake NQN should have been removed"
-        assert real_nqn in detail_out, "real NQN should still be present"
+        lvol_api = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        allowed_nqns = [h.get("nqn") for h in lvol_api[0].get("allowed_hosts", [])]
+        self.logger.info(f"allowed_hosts NQNs (after removal): {allowed_nqns}")
+        assert fake_nqn not in allowed_nqns, f"fake NQN should have been removed: {allowed_nqns}"
+        assert real_nqn in allowed_nqns, f"real NQN should still be present: {allowed_nqns}"
 
         # Real NQN should still be able to get a connect string
         connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=real_nqn)
@@ -872,9 +877,10 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
         sleep_n_sec(2)
 
         # Verify host NQN is back and can get a connect string
-        detail_out = self._get_lvol_details_via_cli(lvol_id)
-        assert host_nqn in detail_out, \
-            "Re-added NQN should appear in lvol details"
+        lvol_api = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        allowed_nqns = [h.get("nqn") for h in lvol_api[0].get("allowed_hosts", [])]
+        assert host_nqn in allowed_nqns, \
+            f"Re-added NQN should appear in allowed_hosts: {allowed_nqns}"
         connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn)
         assert connect_ls and not err, \
             f"Re-added NQN should produce a valid connect string; err={err!r}"
@@ -1185,3 +1191,187 @@ class TestLvolAllowedHostsNoDhchap(SecurityTestBase):
         self._run_fio_and_validate(lvol_name, mount_point, log_file, runtime=60)
 
         self.logger.info("=== TestLvolAllowedHostsNoDhchap PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 12 – Snapshot & clone inherit security settings from the parent lvol
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestLvolSecuritySnapshotClone(SecurityTestBase):
+    """
+    Verifies that snapshots and clones inherit security settings from their
+    parent lvol.  The backend copies ``allowed_hosts`` (including embedded
+    DHCHAP keys) and crypto settings at clone-creation time.
+
+    Scenarios:
+      A) auth parent   – DHCHAP only, no encryption
+         * Clone connects with the same host NQN / DHCHAP keys  (positive)
+         * Clone rejects a different host NQN                    (negative)
+
+      B) crypto_auth parent – DHCHAP + encryption
+         * Clone connects with the same host NQN / DHCHAP keys  (positive)
+         * Connect string includes dhchap keys                   (assertion)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_snapshot_clone"
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _create_snap_and_clone(self, parent_id, label):
+        """Snapshot *parent_id* then clone it; return (snap_id, clone_id, clone_name)."""
+        snap_name = f"snap_{label}{_rand_suffix()}"
+        snap_result = self.sbcli_utils.add_snapshot(parent_id, snap_name)
+        assert snap_result, f"Snapshot creation failed for {snap_name}"
+        sleep_n_sec(3)
+        snap_id = self.sbcli_utils.get_snapshot_id(snap_name)
+        assert snap_id, f"Could not find snapshot ID for {snap_name}"
+
+        clone_name = f"clone_{label}{_rand_suffix()}"
+        clone_result = self.sbcli_utils.add_clone(snap_id, clone_name)
+        assert clone_result, f"Clone creation failed for {clone_name}"
+        sleep_n_sec(3)
+        clone_id = self.sbcli_utils.get_lvol_id(clone_name)
+        assert clone_id, f"Could not find clone ID for {clone_name}"
+
+        self.lvol_mount_details[clone_name] = {"ID": clone_id, "Mount": None}
+        return snap_id, clone_id, clone_name
+
+    def _verify_clone_security(self, clone_name, clone_id, host_nqn, wrong_nqn,
+                                expect_dhchap=True):
+        """
+        Core clone security assertions:
+          - wrong NQN is rejected
+          - correct host NQN connects successfully (with DHCHAP keys if expected)
+          - FIO read workload succeeds on the mounted clone
+        """
+        # Negative: wrong NQN should be rejected
+        wrong_connect, wrong_err = self._get_connect_str_cli(
+            clone_id, host_nqn=wrong_nqn)
+        rejected = bool(wrong_err) or not wrong_connect
+        assert rejected, \
+            f"Wrong NQN should be rejected on clone {clone_name}; got: {wrong_connect}"
+        self.logger.info(f"[{clone_name}] Wrong-NQN rejected as expected")
+
+        # Positive: correct host NQN connects
+        clone_device, clone_cmds = self._connect_and_get_device(
+            clone_name, clone_id, host_nqn=host_nqn)
+        self.logger.info(f"[{clone_name}] Connected → {clone_device}")
+
+        if expect_dhchap:
+            has_dhchap = any("dhchap" in c.lower() for c in clone_cmds)
+            assert has_dhchap, \
+                f"Clone {clone_name} connect string should include DHCHAP keys"
+
+        mount_clone = f"{self.mount_path}/{clone_name}"
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=clone_device, mount_path=mount_clone)
+        self.lvol_mount_details[clone_name]["Mount"] = mount_clone
+
+        log_clone = f"{self.log_path}/{clone_name}.log"
+        self._run_fio_and_validate(
+            clone_name, mount_clone, log_clone, rw="read", runtime=30)
+        self.logger.info(f"[{clone_name}] FIO read validated")
+
+    # ── main test ─────────────────────────────────────────────────────────────
+
+    def run(self):
+        self.logger.info("=== TestLvolSecuritySnapshotClone START ===")
+        self._log_cluster_security_config()
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        host_nqn = self._get_client_host_nqn()
+        wrong_nqn = f"nqn.2024-01.io.simplyblock:test:wrong-{_rand_suffix()}"
+
+        # ── Scenario A: auth (DHCHAP only, no crypto) ────────────────────────
+        self.logger.info("--- Scenario A: auth parent (DHCHAP only) ---")
+        auth_parent = f"secsnap_auth{_rand_suffix()}"
+
+        _, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], auth_parent, self.lvol_size, self.pool_name,
+            sec_options=SEC_BOTH, allowed_hosts=[host_nqn])
+        assert not err or "error" not in err.lower(), \
+            f"auth parent creation failed: {err}"
+        sleep_n_sec(3)
+
+        auth_parent_id = self.sbcli_utils.get_lvol_id(auth_parent)
+        assert auth_parent_id, f"Could not find ID for {auth_parent}"
+        self._log_lvol_security(auth_parent_id, label="(auth parent)")
+
+        # Write data to parent so we can verify clone is readable
+        auth_device, _ = self._connect_and_get_device(
+            auth_parent, auth_parent_id, host_nqn=host_nqn)
+        mount_auth = f"{self.mount_path}/{auth_parent}"
+        self.ssh_obj.format_disk(
+            node=self.fio_node, device=auth_device, fs_type="ext4")
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=auth_device, mount_path=mount_auth)
+        self.lvol_mount_details[auth_parent] = {
+            "ID": auth_parent_id, "Mount": mount_auth, "Device": auth_device}
+
+        log_auth = f"{self.log_path}/{auth_parent}.log"
+        self._run_fio_and_validate(
+            auth_parent, mount_auth, log_auth, rw="write", runtime=30)
+
+        # Unmount parent before snapshotting
+        self.ssh_obj.unmount_path(self.fio_node, mount_auth)
+        self.lvol_mount_details[auth_parent]["Mount"] = None
+        sleep_n_sec(2)
+
+        _, auth_clone_id, auth_clone_name = self._create_snap_and_clone(
+            auth_parent_id, "auth")
+        self._log_lvol_security(auth_clone_id, label="(auth clone)")
+
+        self._verify_clone_security(
+            auth_clone_name, auth_clone_id, host_nqn, wrong_nqn,
+            expect_dhchap=True)
+
+        self.logger.info("--- Scenario A PASSED ---")
+
+        # ── Scenario B: crypto_auth (DHCHAP + encryption) ────────────────────
+        self.logger.info("--- Scenario B: crypto_auth parent (DHCHAP + crypto) ---")
+        ca_parent = f"secsnap_ca{_rand_suffix()}"
+
+        _, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], ca_parent, self.lvol_size, self.pool_name,
+            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            encrypt=True,
+            key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
+        assert not err or "error" not in err.lower(), \
+            f"crypto_auth parent creation failed: {err}"
+        sleep_n_sec(3)
+
+        ca_parent_id = self.sbcli_utils.get_lvol_id(ca_parent)
+        assert ca_parent_id, f"Could not find ID for {ca_parent}"
+        self._log_lvol_security(ca_parent_id, label="(crypto_auth parent)")
+
+        ca_device, _ = self._connect_and_get_device(
+            ca_parent, ca_parent_id, host_nqn=host_nqn)
+        mount_ca = f"{self.mount_path}/{ca_parent}"
+        self.ssh_obj.format_disk(
+            node=self.fio_node, device=ca_device, fs_type="ext4")
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=ca_device, mount_path=mount_ca)
+        self.lvol_mount_details[ca_parent] = {
+            "ID": ca_parent_id, "Mount": mount_ca, "Device": ca_device}
+
+        log_ca = f"{self.log_path}/{ca_parent}.log"
+        self._run_fio_and_validate(
+            ca_parent, mount_ca, log_ca, rw="write", runtime=30)
+
+        self.ssh_obj.unmount_path(self.fio_node, mount_ca)
+        self.lvol_mount_details[ca_parent]["Mount"] = None
+        sleep_n_sec(2)
+
+        _, ca_clone_id, ca_clone_name = self._create_snap_and_clone(
+            ca_parent_id, "ca")
+        self._log_lvol_security(ca_clone_id, label="(crypto_auth clone)")
+
+        self._verify_clone_security(
+            ca_clone_name, ca_clone_id, host_nqn, wrong_nqn,
+            expect_dhchap=True)
+
+        self.logger.info("--- Scenario B PASSED ---")
+        self.logger.info("=== TestLvolSecuritySnapshotClone PASSED ===")

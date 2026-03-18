@@ -705,7 +705,8 @@ class TestClusterBase:
         """
         self.logger.info("Inside teardown function")
 
-        for node in self.fio_node:
+        fio_nodes = self.fio_node if isinstance(self.fio_node, list) else [self.fio_node]
+        for node in fio_nodes:
             self.ssh_obj.exec_command(node=node,
                                       command="sudo tmux kill-server")
         
@@ -717,7 +718,7 @@ class TestClusterBase:
         retry_check = 100
         while retry_check:
             exit_while = True
-            for node in self.fio_node:
+            for node in fio_nodes:
                 fio_process = self.ssh_obj.find_process_name(
                     node=node,
                     process_name="fio --name"
@@ -740,7 +741,7 @@ class TestClusterBase:
                 self.unmount_all(base_path=self.mount_path)
                 self.unmount_all(base_path="/mnt/")
                 sleep_n_sec(2)
-                for node in self.fio_node:
+                for node in fio_nodes:
                     self.ssh_obj.unmount_path(node=node,
                                             device=self.mount_path)
                 sleep_n_sec(2)
@@ -748,7 +749,7 @@ class TestClusterBase:
                     for _, lvol_id in lvols.items():
                         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
                         nqn = lvol_details[0]["nqn"]
-                        for node in self.fio_node:
+                        for node in fio_nodes:
                             self.ssh_obj.unmount_path(node=node,
                                                     device=self.mount_path)
                             sleep_n_sec(2)
