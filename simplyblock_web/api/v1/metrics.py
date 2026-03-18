@@ -69,7 +69,7 @@ def get_device_metrics():
 def get_snode_metrics():
     global ng
     if not ng:
-        labels = ['cluster', "snode"]
+        labels = ['cluster', "snode", "hostname"]
         for k in io_stats_keys + ["status_code", "health_check"]:
             ng["snode_" + k] = Gauge("snode_" + k, "snode_" + k, labelnames=labels, registry=registry)
 
@@ -77,13 +77,13 @@ def get_snode_metrics():
         ng["snode_cpu_busy_percentage"] = Gauge(
             "snode_cpu_busy_percentage",
             "Per-thread CPU Busy %",
-            labelnames=['cluster', 'snode', 'thread_name'],
+            labelnames=['cluster', 'snode', 'hostname', 'thread_name'],
             registry=registry
         )
         ng["snode_cpu_core_utilization"] = Gauge(
             "snode_cpu_core_utilization",
             "Per-core CPU Utilization %",
-            labelnames=['cluster', 'snode', 'core_id', 'thread_names'],
+            labelnames=['cluster', 'snode', 'hostname', 'core_id', 'thread_names'],
             registry=registry
         )
     return ng
@@ -91,7 +91,7 @@ def get_snode_metrics():
 def get_cluster_metrics():
     global cg
     if not cg:
-        labels = ['cluster']
+        labels = ['cluster', "cluster_name"]
         for k in io_stats_keys + ["status_code", "prov_cap_crit", "cap_crit"]:
             cg["cluster_" + k] = Gauge("cluster_" + k, "cluster_" + k, labelnames=labels, registry=registry)
     return cg
@@ -128,13 +128,13 @@ def get_data():
             for g in ng:
                 v = g.replace("cluster_", "")
                 if v in data:
-                    ng[g].labels(cluster=cl.get_id()).set(data[v])
+                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.name).set(data[v])
                 elif v == "status_code":
-                    ng[g].labels(cluster=cl.get_id()).set(cl.get_status_code())
+                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.name).set(cl.get_status_code())
                 elif v == "prov_cap_crit":
-                    ng[g].labels(cluster=cl.get_id()).set(object_data[v])
+                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.name).set(object_data[v])
                 elif v == "cap_crit":
-                    ng[g].labels(cluster=cl.get_id()).set(object_data[v])
+                    ng[g].labels(cluster=cl.get_id(), cluster_name=cl.name).set(object_data[v])
 
         snodes = db.get_storage_nodes_by_cluster_id(cl.get_id())
         for node in snodes:
@@ -164,11 +164,11 @@ def get_data():
                 for g in ng:
                     v = g.replace("snode_", "")
                     if v in data:
-                        ng[g].labels(cluster=cl.get_id(), snode=node.get_id()).set(data[v])
+                        ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), hostname=node.hostname).set(data[v])
                     elif v == "status_code":
-                        ng[g].labels(cluster=cl.get_id(), snode=node.get_id()).set(node.get_status_code())
+                        ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), hostname=node.hostname).set(node.get_status_code())
                     elif v == "health_check":
-                        ng[g].labels(cluster=cl.get_id(), snode=node.get_id()).set(node.health_check)
+                        ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), hostname=node.hostname).set(node.health_check)
                     if reactor_data and "reactors" in reactor_data:
                         for reactor in reactor_data.get("reactors", []):
                             lcore = reactor.get("lcore")
@@ -187,14 +187,14 @@ def get_data():
                                     total_core_cycles = core_busy + core_idle
                                     cpu_usage_percent = (thread_busy / total_core_cycles) * 100 if total_core_cycles > 0 else 0
 
-                                    ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), thread_name=thread_name).set(cpu_usage_percent)
+                                    ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), hostname=node.hostname, thread_name=thread_name).set(cpu_usage_percent)
 
                             elif v == "cpu_core_utilization":
 
                                 total_cycle = core_busy + irq + sys
                                 total_with_idle = total_cycle + core_idle
                                 core_utilization = (total_cycle / total_with_idle) * 100 if total_with_idle > 0 else 0
-                                ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), core_id=str(lcore), thread_names=thread_names).set(core_utilization)
+                                ng[g].labels(cluster=cl.get_id(), snode=node.get_id(), hostname=node.hostname, core_id=str(lcore), thread_names=thread_names).set(core_utilization)
 
 
             for device in node.nvme_devices:

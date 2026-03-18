@@ -55,6 +55,10 @@ spec:
         env:
         - name: LVOL_NVMF_PORT_START
           value: "{{ .Values.ports.lvolNvmfPortStart }}"
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: K8S_NAMESPACE
           valueFrom:
             fieldRef:
@@ -144,6 +148,10 @@ spec:
           value: "False"
         - name: FLASK_ENV
           value: "production"
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         volumeMounts:
         - name: fdb-cluster-file
           mountPath: /etc/foundationdb/fdb.cluster
