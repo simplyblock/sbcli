@@ -146,9 +146,7 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client_node, command=connect_str)
                 if error:
-                    self.record_failed_nvme_connect(lvol_name, connect_str)
-                    sleep_n_sec(30)
-                    continue
+                    self.record_failed_nvme_connect(lvol_name, connect_str, client=client_node)
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client_node)

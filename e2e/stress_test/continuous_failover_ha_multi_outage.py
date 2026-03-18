@@ -474,10 +474,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     # self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
                     # self.logger.info(f"Connecting clone {clone_name} has error: {error}. Disconnect all connections for that clone!!")
                     # self.sbcli_utils.delete_lvol(lvol_name=clone_name, max_attempt=20, skip_error=True)
-                    self.record_failed_nvme_connect(clone_name, connect_str)
-                    sleep_n_sec(30)
-                    # del self.clone_mount_details[clone_name]
-                    continue
+                    self.record_failed_nvme_connect(clone_name, connect_str, client=client)
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client)

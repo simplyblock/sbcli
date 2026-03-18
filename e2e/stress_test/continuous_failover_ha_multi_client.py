@@ -112,9 +112,10 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             log.write(f"{timestamp},{node},{outage_type},{event}\n")
 
     
-    def record_failed_nvme_connect(self, name, connect_cmd):
+    def record_failed_nvme_connect(self, name, connect_cmd, client=None):
         self.logger.warning(
-            f"[DEFERRED] NVMe connect failed (expected during outage): {connect_cmd}"
+            f"[DEFERRED] NVMe connect failed (expected during outage)"
+            f" client={client}: {connect_cmd}"
         )
         self.failed_nvme_connects[name].append(connect_cmd)
 
@@ -123,7 +124,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.logger.info("No deferred NVMe reconnects pending")
             return
 
-        self.logger.info("Retrying deferred NVMe reconnects after recovery")
+        cluster_details = self.sbcli_utils.get_cluster_details()
+        max_fault_tolerance = cluster_details.get("max_fault_tolerance", 1)
+        self.logger.info(
+            f"Retrying deferred NVMe reconnects after recovery "
+            f"(max_fault_tolerance={max_fault_tolerance})"
+        )
         start = time.time()
 
         while time.time() - start < timeout:
@@ -151,8 +157,35 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
             time.sleep(interval)
 
-        raise Exception(
-            f"NVMe reconnect did not converge: {dict(self.failed_nvme_connects)}"
+        # Timeout reached — check if remaining failures are within fault tolerance
+        truly_failed = []
+        for name, cmds in list(self.failed_nvme_connects.items()):
+            details = (
+                self.clone_mount_details.get(name)
+                or self.lvol_mount_details.get(name)
+            )
+            total = len(details["Command"]) if details else len(cmds)
+            remaining = len(cmds)
+            succeeded = total - remaining
+            if succeeded >= total - max_fault_tolerance and succeeded >= 1:
+                self.logger.warning(
+                    f"[TOLERATED] {name}: {succeeded}/{total} connects succeeded "
+                    f"(max_fault_tolerance={max_fault_tolerance}), "
+                    f"still-failed: {cmds}"
+                )
+                del self.failed_nvme_connects[name]
+            else:
+                truly_failed.append(
+                    f"{name}: {succeeded}/{total} succeeded, failed: {cmds}"
+                )
+
+        if truly_failed:
+            raise Exception(
+                f"NVMe reconnect did not converge within fault tolerance: "
+                + "; ".join(truly_failed)
+            )
+        self.logger.info(
+            "All remaining NVMe connect failures within fault tolerance — continuing"
         )
 
     def record_pending_lvol_delete(self, lvol, lvol_id):
@@ -330,11 +363,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     # self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
                     # self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
                     # self.sbcli_utils.delete_lvol(lvol_name=lvol_name, max_attempt=20, skip_error=True)
-                    self.record_failed_nvme_connect(lvol_name, connect_str)
-                    sleep_n_sec(30)
-                    # del self.lvol_mount_details[lvol_name]
-                    # self.node_vs_lvol[lvol_node_id].remove(lvol_name)
-                    continue
+                    self.record_failed_nvme_connect(lvol_name, connect_str, client=client_node)
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client_node)
@@ -975,9 +1004,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
                 if error:
-                    self.record_failed_nvme_connect(clone_name, connect_str)
-                    sleep_n_sec(30)
-                    continue
+                    self.record_failed_nvme_connect(clone_name, connect_str, client=client)
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client)

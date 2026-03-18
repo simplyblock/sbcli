@@ -736,7 +736,7 @@ class SshUtils:
 
                 try:
                     if not supress_logs:
-                        self.logger.info(f"Executing command: {command}")
+                        self.logger.info(f"Executing command on {node}: {command}")
                     stdin, stdout, stderr = ssh.exec_command(command, timeout=timeout)
                     output_chunks, error_chunks = [], []
 
@@ -771,9 +771,9 @@ class SshUtils:
                         exit_status = stdout.channel.recv_exit_status()
 
                     if (not supress_logs) and out:
-                        self.logger.info(f"Command output: {out.strip()}")
+                        self.logger.info(f"Command output [{node}]: {out.strip()}")
                     if (not supress_logs) and err:
-                        self.logger.error(f"Command error: {err.strip()}")
+                        self.logger.error(f"Command error [{node}]: {err.strip()}")
 
                     if exit_status != 0 and not err:
                         # some tools write nothing on stderr but non-zero exit

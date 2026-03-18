@@ -102,12 +102,34 @@ class SecurityTestBase(TestClusterBase):
     # ── NQN cache ────────────────────────────────────────────────────────────
 
     def _get_client_host_nqn(self, node=None, force_new=False):
-        """Return (and cache) the client NQN via ssh_obj.get_client_host_nqn."""
+        """Return (and cache) a unique random UUID-based NQN for the client.
+
+        Uses uuidgen (not nvme gen-hostnqn) so that every call with
+        force_new=True — or every new test instance — gets a brand-new NQN.
+        This prevents SPDK keyring key-name collisions when the same cluster
+        hosts multiple DHCHAP volumes sequentially:
+          key_name = "{type}_{safe_host_nqn}"
+        Two volumes with the same host NQN share the same key_name; if the
+        SPDK version in CI rejects re-registration, the second volume's key
+        is never stored and auth fails.  A unique NQN per volume gives a
+        unique key_name, so each registration is always the first for that
+        name.
+        """
         if self._client_host_nqn and not force_new:
             return self._client_host_nqn
         target = node or self.fio_node
-        nqn = self.ssh_obj.get_client_host_nqn(target)
-        self.logger.info(f"Client host NQN on {target}: {nqn}")
+        # Generate a fresh random UUID on the remote node.
+        uuid_out, _ = self.ssh_obj.exec_command(
+            target,
+            "uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid")
+        random_uuid = uuid_out.strip().split('\n')[0].strip()
+        nqn = f"nqn.2014-08.org.nvmexpress:uuid:{random_uuid}"
+        # Persist to /etc/nvme/hostnqn so the kernel NVMe driver uses this
+        # same NQN when the subsequent nvme-connect command runs.
+        self.ssh_obj.exec_command(target, "sudo mkdir -p /etc/nvme")
+        self.ssh_obj.exec_command(
+            target, f"sudo sh -c \"echo '{nqn}' > /etc/nvme/hostnqn\"")
+        self.logger.info(f"[_get_client_host_nqn] unique NQN on {target}: {nqn!r}")
         self._client_host_nqn = nqn
         return nqn
 
@@ -277,7 +299,9 @@ class TestLvolSecurityCombinations(SecurityTestBase):
             self.logger.info(f"--- Creating lvol {lvol_name!r} (sec_type={sec_type}) ---")
 
             if sec_opts is not None:
-                # DHCHAP volumes require allowed_hosts for the client to connect
+                # Each DHCHAP volume gets its own unique NQN so SPDK keyring
+                # key names never collide across volumes.
+                self._client_host_nqn = None
                 host_nqn = self._get_client_host_nqn()
                 _, err = self.ssh_obj.create_sec_lvol(
                     self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
