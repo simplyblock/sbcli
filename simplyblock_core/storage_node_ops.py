@@ -64,6 +64,83 @@ def _reapply_allowed_hosts(lvol, snode, rpc_client):
             rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
 
+def _set_lvol_ana_on_node(lvol, node, ana_state):
+    """Set ANA state for a single lvol's listeners on a given node."""
+    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10, retry=2)
+    listener_port = node.get_lvol_subsys_port(lvol.lvs_name)
+    for iface in node.data_nics:
+        if iface.ip4_address and (lvol.fabric == iface.trtype.lower() or (lvol.fabric == "tcp" and node.active_tcp)):
+            trtype = iface.trtype if lvol.fabric == iface.trtype.lower() else "TCP"
+            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state)
+            if not ret:
+                logger.warning("Failed to set ANA state %s for %s on %s", ana_state, lvol.nqn, node.get_id())
+            else:
+                logger.info("ANA: %s on %s (%s) → %s", lvol.nqn, node.get_id(), iface.ip4_address, ana_state)
+
+
+def _failover_primary_ana(primary_node):
+    """Primary failed: promote first_sec→optimized, second_sec→non_optimized."""
+    db_controller = DBController()
+    lvol_list = [lv for lv in db_controller.get_lvols_by_node_id(primary_node.get_id())
+                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
+
+    first_sec = None
+    second_sec = None
+    if primary_node.secondary_node_id:
+        first_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+    if primary_node.secondary_node_id_2:
+        second_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id_2)
+
+    for lvol in lvol_list:
+        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+            _set_lvol_ana_on_node(lvol, first_sec, "optimized")
+        if second_sec and second_sec.status == StorageNode.STATUS_ONLINE:
+            _set_lvol_ana_on_node(lvol, second_sec, "non_optimized")
+
+
+def _failback_primary_ana(primary_node):
+    """Primary restarting: second_sec→inaccessible, then first_sec→non_optimized."""
+    db_controller = DBController()
+    lvol_list = [lv for lv in db_controller.get_lvols_by_node_id(primary_node.get_id())
+                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
+
+    first_sec = None
+    second_sec = None
+    if primary_node.secondary_node_id:
+        first_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+    if primary_node.secondary_node_id_2:
+        second_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id_2)
+
+    # Order matters: demote second_sec FIRST, then first_sec
+    for lvol in lvol_list:
+        if second_sec and second_sec.status == StorageNode.STATUS_ONLINE:
+            _set_lvol_ana_on_node(lvol, second_sec, "inaccessible")
+    for lvol in lvol_list:
+        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+            _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
+
+
+def _failover_first_sec_ana(primary_node, second_sec_node):
+    """First sec failed: promote second_sec from inaccessible→non_optimized."""
+    db_controller = DBController()
+    lvol_list = [lv for lv in db_controller.get_lvols_by_node_id(primary_node.get_id())
+                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
+
+    for lvol in lvol_list:
+        _set_lvol_ana_on_node(lvol, second_sec_node, "non_optimized")
+
+
+def _failback_first_sec_ana(primary_node, second_sec_node):
+    """First sec restarting: demote second_sec from non_optimized→inaccessible."""
+    db_controller = DBController()
+    lvol_list = [lv for lv in db_controller.get_lvols_by_node_id(primary_node.get_id())
+                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
+
+    for lvol in lvol_list:
+        _set_lvol_ana_on_node(lvol, second_sec_node, "inaccessible")
+
+
 def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool):
     """Connect snode to device
 
@@ -3286,6 +3363,14 @@ def recreate_lvstore_on_sec(secondary_node):
 
         primary_lvs_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
 
+        # Failback ANA: if first secondary restarting, demote second secondary BEFORE blocking primary port
+        is_second_sec = (primary_node.secondary_node_id_2 == secondary_node.get_id())
+        if not is_second_sec and primary_node.secondary_node_id_2:
+            second_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id_2)
+            if second_sec and second_sec.status == StorageNode.STATUS_ONLINE:
+                if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+                    _failback_first_sec_ana(primary_node, second_sec)
+
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
             ### 3- block primary port
@@ -3319,9 +3404,11 @@ def recreate_lvstore_on_sec(secondary_node):
             tcp_ports_events.port_allowed(primary_node, primary_lvs_port)
 
         ### 7- add lvols to subsystems
+        lvol_ana_state = "inaccessible" if is_second_sec else "non_optimized"
+
         executor = ThreadPoolExecutor(max_workers=50)
         for lvol in lvol_list:
-            executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state="non_optimized")
+            executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state=lvol_ana_state)
 
         primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
         primary_node.lvstore_status = "ready"
@@ -3409,6 +3496,11 @@ def recreate_lvstore(snode, force=False):
                 created_subsystems.append(lvol.nqn)
             if lvol.allowed_hosts:
                 _reapply_allowed_hosts(lvol, snode, rpc_client)
+
+    # Failback ANA: demote secondaries BEFORE blocking ports
+    # Order: second_sec→inaccessible FIRST, then first_sec→non_optimized
+    if snode.secondary_node_id_2 and lvol_list:
+        _failback_primary_ana(snode)
 
     snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
     any_sec_unreachable = False
