@@ -243,15 +243,6 @@ def set_node_unreachable(node):
             logger.debug("Setting node to UNREACHABLE state failed")
             logger.error(e)
 
-        # Promote first secondary to optimized ANA when primary goes unreachable
-        if node.secondary_node_id and node.lvstore:
-            try:
-                first_sec = db.get_storage_node_by_id(node.secondary_node_id)
-                if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
-                    storage_node_ops._set_first_sec_ana_state(node, first_sec, "optimized")
-            except Exception as e:
-                logger.error("Failed to promote first secondary ANA: %s", e)
-
 
 def set_node_schedulable(node):
     node = db.get_storage_node_by_id(node.get_id())

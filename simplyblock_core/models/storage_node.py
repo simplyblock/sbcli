@@ -61,8 +61,7 @@ class StorageNode(BaseNodeObject):
     lvstore_stack_secondary_1: List[dict] = []
     lvstore_stack_secondary_2: List[dict] = []
     lvol_subsys_port: int = 9090
-    lvstore_ports: dict = {}  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M, "sec_hublvol_port": P}}
-    sec_hublvols: dict = {}   # {lvs_name: HubLVol-dict} — relay hublvols for first-secondary role
+    lvstore_ports: dict = {}  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M}}
     max_lvol: int = 0
     max_prov: int = 0
     max_snap: int = 0
@@ -128,22 +127,6 @@ class StorageNode(BaseNodeObject):
         if self.hublvol:
             return self.hublvol.nvmf_port
         return 0
-
-    def get_sec_hublvol_port(self, lvs_name):
-        """Get the relay hublvol port for a lvstore where this node is first-secondary."""
-        if lvs_name and lvs_name in self.lvstore_ports:
-            return self.lvstore_ports[lvs_name].get("sec_hublvol_port", 0)
-        return 0
-
-    def get_sec_hublvol(self, lvs_name):
-        """Get the HubLVol object for a secondary relay hublvol, or None."""
-        data = self.sec_hublvols.get(lvs_name)
-        if not data:
-            return None
-        if isinstance(data, HubLVol):
-            return data
-        # Reconstruct from dict (after DB deserialization)
-        return HubLVol(data)
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
@@ -329,139 +312,6 @@ class StorageNode(BaseNodeObject):
         if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
             pass
             # raise RPCException('Failed to connect secondary lvstore to primary')
-
-    def create_sec_hublvol(self, primary_node):
-        """Create a relay hublvol on this (first-secondary) node for the primary's lvstore.
-
-        This allows the second secondary to chain through this node instead of
-        connecting directly to the primary, preventing IO conflicts on failover.
-        """
-        lvs_name = primary_node.lvstore
-        logger.info(f'Creating sec hublvol on {self.get_id()} for lvstore {lvs_name}')
-        rpc_client = self.rpc_client()
-
-        hublvol_uuid = None
-        try:
-            hublvol_uuid = rpc_client.bdev_lvol_create_hublvol(lvs_name)
-            if not hublvol_uuid:
-                raise RPCException('Failed to create sec hublvol')
-            sec_hub_port = self.get_sec_hublvol_port(lvs_name)
-            if not sec_hub_port:
-                sec_hub_port = utils.get_next_nvmf_port(self.cluster_id)
-                # Persist the allocated port
-                if lvs_name not in self.lvstore_ports:
-                    self.lvstore_ports[lvs_name] = {}
-                self.lvstore_ports[lvs_name]["sec_hublvol_port"] = sec_hub_port
-
-            sec_hublvol = HubLVol({
-                'uuid': hublvol_uuid,
-                'nqn': f'{self.host_nqn}:sechub:{hublvol_uuid}',
-                'bdev_name': f'{lvs_name}/hublvol',
-                'model_number': str(uuid4()),
-                'nguid': utils.generate_hex_string(16),
-                'nvmf_port': sec_hub_port,
-            })
-
-            self.expose_bdev(
-                nqn=sec_hublvol.nqn,
-                bdev_name=sec_hublvol.bdev_name,
-                model_number=sec_hublvol.model_number,
-                uuid=sec_hublvol.uuid,
-                nguid=sec_hublvol.nguid,
-                port=sec_hublvol.nvmf_port,
-            )
-        except RPCException:
-            if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
-                rpc_client.bdev_lvol_delete_hublvol(lvs_name)
-            raise
-
-        if not self.sec_hublvols:
-            self.sec_hublvols = {}
-        self.sec_hublvols[lvs_name] = sec_hublvol.to_dict()
-        self.write_to_db()
-        return sec_hublvol
-
-    def recreate_sec_hublvol(self, primary_node):
-        """Re-create the relay hublvol on this (first-secondary) node after restart."""
-        lvs_name = primary_node.lvstore
-        sec_hublvol = self.get_sec_hublvol(lvs_name)
-
-        if sec_hublvol and sec_hublvol.uuid:
-            logger.info(f'Recreating sec hublvol on {self.get_id()} for {lvs_name}')
-            rpc_client = self.rpc_client()
-            try:
-                if not rpc_client.get_bdevs(sec_hublvol.bdev_name):
-                    ret = rpc_client.bdev_lvol_create_hublvol(lvs_name)
-                    if not ret:
-                        logger.warning(f'Failed to recreate sec hublvol on {self.get_id()}')
-                else:
-                    logger.info(f'Sec hublvol already exists {sec_hublvol.bdev_name}')
-
-                self.expose_bdev(
-                    nqn=sec_hublvol.nqn,
-                    bdev_name=sec_hublvol.bdev_name,
-                    model_number=sec_hublvol.model_number,
-                    uuid=sec_hublvol.uuid,
-                    nguid=sec_hublvol.nguid,
-                    port=sec_hublvol.nvmf_port,
-                )
-                return True
-            except RPCException:
-                pass
-        else:
-            try:
-                self.create_sec_hublvol(primary_node)
-                return True
-            except RPCException as e:
-                logger.error("Error creating sec hublvol: %s", e.message)
-
-        return False
-
-    def connect_to_sec_hublvol(self, first_sec_node, primary_node):
-        """Connect this (second-secondary) node to the first secondary's relay hublvol.
-
-        Instead of connecting directly to the primary, the second secondary
-        chains through the first secondary to avoid IO conflicts on failover.
-        """
-        lvs_name = primary_node.lvstore
-        sec_hublvol = first_sec_node.get_sec_hublvol(lvs_name)
-        if sec_hublvol is None:
-            raise ValueError(
-                f"First secondary {first_sec_node.get_id()} has no sec hublvol for {lvs_name}")
-
-        logger.info(f'Connecting node {self.get_id()} to sec hublvol on '
-                     f'{first_sec_node.get_id()} for {lvs_name}')
-
-        rpc_client = self.rpc_client()
-        remote_bdev = f"{sec_hublvol.bdev_name}n1"
-
-        if not rpc_client.get_bdevs(remote_bdev):
-            ip_lst = []
-            for iface in first_sec_node.data_nics:
-                if first_sec_node.active_rdma and iface.trtype == "RDMA":
-                    ip_lst.append((iface.ip4_address, iface.trtype))
-                elif not first_sec_node.active_rdma and first_sec_node.active_tcp and iface.trtype == "TCP":
-                    ip_lst.append((iface.ip4_address, iface.trtype))
-                else:
-                    raise ValueError(f"{first_sec_node.get_id()} has no active fabric.")
-            multipath = bool(len(ip_lst) > 1)
-            for (ip, tr_type) in ip_lst:
-                ret = rpc_client.bdev_nvme_attach_controller(
-                    sec_hublvol.bdev_name, sec_hublvol.nqn,
-                    ip, sec_hublvol.nvmf_port, tr_type, multipath=multipath)
-                if not ret and not multipath:
-                    logger.warning(f'Failed to connect to sec hublvol on {ip}')
-
-        if not rpc_client.bdev_lvol_set_lvs_opts(
-                primary_node.lvstore,
-                groupid=primary_node.jm_vuid,
-                subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
-                secondary=True,
-        ):
-            pass
-
-        if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
-            pass
 
     def create_alceml(self, name, nvme_bdev, uuid, **kwargs):
         logger.info(f"Adding {name}")
