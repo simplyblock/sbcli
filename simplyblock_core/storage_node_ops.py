@@ -2465,6 +2465,30 @@ def shutdown_storage_node(node_id, force=False):
     return True
 
 
+def _set_first_sec_ana_state(primary_node, first_sec_node, ana_state):
+    """Set ANA state on first secondary's listeners for all lvols of this primary's lvstore.
+
+    Used during failover (optimized) and failback (non_optimized) to redirect
+    IO to the first secondary when the primary is down.
+    """
+    db_controller = DBController()
+    try:
+        sec_rpc = first_sec_node.rpc_client()
+        lvs_port = first_sec_node.get_lvol_subsys_port(primary_node.lvstore)
+        for lvol in db_controller.get_lvols_by_node_id(primary_node.get_id()):
+            if lvol.status not in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]:
+                continue
+            for iface in first_sec_node.data_nics:
+                if iface.ip4_address:
+                    sec_rpc.nvmf_subsystem_listener_set_ana_state(
+                        lvol.nqn, iface.ip4_address, str(lvs_port),
+                        trtype=iface.trtype, ana=ana_state)
+        logger.info("Set ANA state to %s on %s for %s's lvols",
+                     ana_state, first_sec_node.get_id(), primary_node.get_id())
+    except Exception as e:
+        logger.error("Failed to set ANA state on first secondary: %s", e)
+
+
 def suspend_storage_node(node_id, force=False):
     db_controller = DBController()
     try:
@@ -2581,6 +2605,12 @@ def suspend_storage_node(node_id, force=False):
         logger.error(e)
         return False
 
+    # Promote first secondary to optimized ANA so IO redirects there
+    if snode.secondary_node_id:
+        first_sec = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+            _set_first_sec_ana_state(snode, first_sec, "optimized")
+
     logger.info("Done")
     return True
 
@@ -2658,6 +2688,12 @@ def resume_storage_node(node_id):
     except Exception as e:
         logger.error(e)
         return False
+
+    # Demote first secondary back to non_optimized ANA (primary resuming)
+    if snode.secondary_node_id:
+        first_sec = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        if first_sec and first_sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            _set_first_sec_ana_state(snode, first_sec, "non_optimized")
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -3198,17 +3234,41 @@ def set_node_status(node_id, status, reconnect_on_online=True):
 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
-                if not sec_id:
-                    continue
-                sec_node = db_controller.get_storage_node_by_id(sec_id)
-                if sec_node and snode.lvstore_status == "ready":
-                    if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            # Connect secondaries to this node's primary hublvol (ordered for chaining)
+            if snode.lvstore_status == "ready":
+                first_sec_id = snode.secondary_node_id
+                second_sec_id = snode.secondary_node_id_2
+
+                if first_sec_id:
+                    first_sec = db_controller.get_storage_node_by_id(first_sec_id)
+                    if first_sec and first_sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                         try:
-                            sec_node.connect_to_hublvol(snode)
+                            first_sec.connect_to_hublvol(snode)
+                        except Exception as e:
+                            logger.error("Error establishing hublvol: %s", e)
+                        # Expose relay hublvol for second secondary
+                        if second_sec_id:
+                            try:
+                                first_sec.recreate_sec_hublvol(snode)
+                            except Exception as e:
+                                logger.error("Error recreating sec hublvol: %s", e)
+
+                if second_sec_id:
+                    second_sec = db_controller.get_storage_node_by_id(second_sec_id)
+                    if second_sec and second_sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                        try:
+                            if first_sec_id:
+                                first_sec = db_controller.get_storage_node_by_id(first_sec_id)
+                                if first_sec.get_sec_hublvol(snode.lvstore):
+                                    second_sec.connect_to_sec_hublvol(first_sec, snode)
+                                else:
+                                    second_sec.connect_to_hublvol(snode)
+                            else:
+                                second_sec.connect_to_hublvol(snode)
                         except Exception as e:
                             logger.error("Error establishing hublvol: %s", e)
 
+            # Connect this node to primaries' hublvols (as secondary)
             for sec_attr in ['lvstore_stack_secondary_1', 'lvstore_stack_secondary_2']:
                 primary_id = getattr(snode, sec_attr, None)
                 if not primary_id:
@@ -3216,10 +3276,26 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 primary_node = db_controller.get_storage_node_by_id(primary_id)
                 if primary_node and primary_node.lvstore_status == "ready":
                     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                        # Determine if this node is first or second secondary
+                        is_second_sec = (primary_node.secondary_node_id_2 == snode.get_id())
+                        if is_second_sec and primary_node.secondary_node_id:
+                            first_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+                            if first_sec and first_sec.status == StorageNode.STATUS_ONLINE and first_sec.get_sec_hublvol(primary_node.lvstore):
+                                try:
+                                    snode.connect_to_sec_hublvol(first_sec, primary_node)
+                                except Exception as e:
+                                    logger.error("Error connecting to sec hublvol: %s", e)
+                                continue
                         try:
                             snode.connect_to_hublvol(primary_node)
                         except Exception as e:
                             logger.error("Error establishing hublvol: %s", e)
+                        # If first secondary, expose relay hublvol
+                        if not is_second_sec and primary_node.secondary_node_id_2:
+                            try:
+                                snode.recreate_sec_hublvol(primary_node)
+                            except Exception as e:
+                                logger.error("Error recreating sec hublvol: %s", e)
 
     return True
 
@@ -3306,12 +3382,41 @@ def recreate_lvstore_on_sec(secondary_node):
             logger.warning("Failed to examine bdevs on secondary node")
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-            try:
-                secondary_node.connect_to_hublvol(primary_node)
+            # Determine if this secondary is first or second for this primary
+            is_second_secondary = (primary_node.secondary_node_id_2 == secondary_node.get_id())
 
-            except Exception as e:
-                logger.error("Error connecting to hublvol: %s", e)
-                # return False
+            if is_second_secondary and primary_node.secondary_node_id:
+                # Second secondary: chain through first secondary's relay hublvol
+                first_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+                if first_sec and first_sec.status == StorageNode.STATUS_ONLINE and first_sec.get_sec_hublvol(primary_node.lvstore):
+                    try:
+                        secondary_node.connect_to_sec_hublvol(first_sec, primary_node)
+                    except Exception as e:
+                        logger.error("Error connecting to sec hublvol: %s", e)
+                        # Fallback to direct connection
+                        try:
+                            secondary_node.connect_to_hublvol(primary_node)
+                        except Exception as e2:
+                            logger.error("Error connecting to primary hublvol (fallback): %s", e2)
+                else:
+                    # First secondary unavailable, connect directly to primary
+                    try:
+                        secondary_node.connect_to_hublvol(primary_node)
+                    except Exception as e:
+                        logger.error("Error connecting to hublvol: %s", e)
+            else:
+                # First secondary: connect to primary's hublvol
+                try:
+                    secondary_node.connect_to_hublvol(primary_node)
+                except Exception as e:
+                    logger.error("Error connecting to hublvol: %s", e)
+
+                # Expose relay hublvol for the second secondary
+                if primary_node.secondary_node_id_2:
+                    try:
+                        secondary_node.recreate_sec_hublvol(primary_node)
+                    except Exception as e:
+                        logger.error("Error recreating sec hublvol: %s", e)
 
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
             ### 8- allow port on primary
@@ -3529,21 +3634,54 @@ def recreate_lvstore(snode, force=False):
     for lvol in lvol_list:
         executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
+    # Ordered hublvol connection: first secondary connects to primary,
+    # exposes relay hublvol, then second secondary chains through first.
+    first_sec = None
+    second_sec = None
     for sec_node in sec_nodes:
-        if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-            try:
-                sec_node.connect_to_hublvol(snode)
-            except Exception as e:
-                logger.error("Error establishing hublvol: %s", e)
-                # return False
-            ### 8- allow secondary port
+        if snode.secondary_node_id and sec_node.get_id() == db_controller.get_storage_node_by_id(snode.secondary_node_id).get_id():
+            first_sec = sec_node
+        else:
+            second_sec = sec_node
 
-            fw_api = FirewallClient(sec_node, timeout=5, retry=2)
-            port_type = "tcp"
-            if sec_node.active_rdma:
-                port_type = "udp"
-            fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", sec_node.rpc_port)
-            tcp_ports_events.port_allowed(sec_node, snode_lvs_port)
+    if first_sec and first_sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+        try:
+            first_sec.connect_to_hublvol(snode)
+        except Exception as e:
+            logger.error("Error establishing hublvol on first secondary: %s", e)
+
+        # Expose relay hublvol for the second secondary
+        if second_sec:
+            try:
+                first_sec.recreate_sec_hublvol(snode)
+            except Exception as e:
+                logger.error("Error recreating sec hublvol on first secondary: %s", e)
+
+        ### 8- allow secondary port
+        fw_api = FirewallClient(first_sec, timeout=5, retry=2)
+        port_type = "tcp"
+        if first_sec.active_rdma:
+            port_type = "udp"
+        fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", first_sec.rpc_port)
+        tcp_ports_events.port_allowed(first_sec, snode_lvs_port)
+
+    if second_sec and second_sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+        try:
+            if first_sec and first_sec.get_sec_hublvol(snode.lvstore):
+                second_sec.connect_to_sec_hublvol(first_sec, snode)
+            else:
+                logger.warning("First secondary has no sec hublvol, "
+                               "connecting second secondary directly to primary")
+                second_sec.connect_to_hublvol(snode)
+        except Exception as e:
+            logger.error("Error establishing hublvol on second secondary: %s", e)
+
+        fw_api = FirewallClient(second_sec, timeout=5, retry=2)
+        port_type = "tcp"
+        if second_sec.active_rdma:
+            port_type = "udp"
+        fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", second_sec.rpc_port)
+        tcp_ports_events.port_allowed(second_sec, snode_lvs_port)
 
     if prim_node_suspend:
         logger.info("Node restart interrupted because secondary node is unreachable")
@@ -3903,15 +4041,45 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             logger.error("Error establishing hublvol: %s", e.message)
             # return False
 
-        for sec_node_id in secondary_ids:
-            sec_node = db_controller.get_storage_node_by_id(sec_node_id)
-            if sec_node.status == StorageNode.STATUS_ONLINE:
+        # Ordered connection: first secondary connects to primary, then exposes
+        # its own relay hublvol so the second secondary can chain through it.
+        first_sec_id = snode.secondary_node_id
+        second_sec_id = snode.secondary_node_id_2
+
+        if first_sec_id:
+            first_sec = db_controller.get_storage_node_by_id(first_sec_id)
+            if first_sec.status == StorageNode.STATUS_ONLINE:
                 try:
                     time.sleep(1)
-                    sec_node.connect_to_hublvol(snode)
+                    first_sec.connect_to_hublvol(snode)
                 except Exception as e:
-                    logger.error("Error establishing hublvol: %s", e)
-                    # return False
+                    logger.error("Error establishing hublvol on first secondary: %s", e)
+
+                # First secondary exposes relay hublvol for the second secondary
+                if second_sec_id:
+                    try:
+                        first_sec.create_sec_hublvol(snode)
+                    except Exception as e:
+                        logger.error("Error creating sec hublvol on first secondary: %s", e)
+
+        if second_sec_id:
+            second_sec = db_controller.get_storage_node_by_id(second_sec_id)
+            if second_sec.status == StorageNode.STATUS_ONLINE:
+                try:
+                    time.sleep(1)
+                    if first_sec_id:
+                        first_sec = db_controller.get_storage_node_by_id(first_sec_id)
+                        if first_sec.get_sec_hublvol(snode.lvstore):
+                            second_sec.connect_to_sec_hublvol(first_sec, snode)
+                        else:
+                            # Fallback: connect directly to primary if relay not available
+                            logger.warning("First secondary has no sec hublvol, "
+                                           "connecting second secondary directly to primary")
+                            second_sec.connect_to_hublvol(snode)
+                    else:
+                        second_sec.connect_to_hublvol(snode)
+                except Exception as e:
+                    logger.error("Error establishing hublvol on second secondary: %s", e)
 
     return True
 
