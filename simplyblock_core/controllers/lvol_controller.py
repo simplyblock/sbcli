@@ -2234,7 +2234,7 @@ def replicate_lvol_on_source_cluster(lvol_id):
 
     logger.debug(f"new lvol from_source: {new_lvol.from_source}")
 
-    lvol = db_controller.get_lvol_by_id(lvol_id)
+    # lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.uuid = str(uuid.uuid4())
     lvol.from_source = True
     lvol.write_to_db()
