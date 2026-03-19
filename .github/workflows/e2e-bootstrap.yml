@@ -497,7 +497,7 @@ jobs:
               for d in \$dirs; do rm -rf \"\$d\" || true; done"
           done
 
-      - name: Remove /etc/simplyblock on MNODES + storage, reboot storage, wait online, disk reset + PCI rebind + mklabel
+      - name: Reboot storage nodes, wait online, disk reset + PCI rebind + mklabel
         shell: bash
         run: |
           set -euxo pipefail
@@ -510,13 +510,6 @@ jobs:
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
-
-          # remove /etc/simplyblock on MNODES + storage
-          targets="$MNODES $STORAGE_PRIVATE_IPS"
-          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
-          for ip in $uniq_targets; do
-            run_remote "$ip" "rm -rf /etc/simplyblock || true"
-          done
 
           # reboot storage nodes
           for ip in $STORAGE_PRIVATE_IPS; do
@@ -608,6 +601,43 @@ jobs:
             echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --host-sec /root/host-sec.json" >> "$GITHUB_ENV"
             echo "Appended --host-sec /root/host-sec.json to EXTRA_CLUSTER_ARGS"
           fi
+
+      - name: Remove /etc/simplyblock on all nodes and verify it is gone
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
+          }
+
+          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          for ip in $uniq_targets; do
+            echo "---- removing /etc/simplyblock on $ip ----"
+            run_remote "$ip" "rm -rf /etc/simplyblock || true"
+          done
+
+          # Verify the folder is actually gone on every node
+          failed=0
+          for ip in $uniq_targets; do
+            if sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "test -e /etc/simplyblock"; then
+              echo "ERROR: /etc/simplyblock still exists on ${ip}"
+              failed=1
+            else
+              echo "OK: /etc/simplyblock is absent on ${ip}"
+            fi
+          done
+          [[ "$failed" -eq 0 ]] || exit 1
 
       - name: Bootstrap cluster (all params are inputs; --spdk-image only if set)
         shell: bash

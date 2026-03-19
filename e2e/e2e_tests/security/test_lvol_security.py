@@ -102,20 +102,29 @@ class SecurityTestBase(TestClusterBase):
     # ── NQN cache ────────────────────────────────────────────────────────────
 
     def _get_client_host_nqn(self, node=None, force_new=False):
-        """Return (and cache) the host NQN for the client node.
+        """Return (and cache) a unique host NQN for the client node.
 
-        Runs nvme gen-hostnqn and redirects the output to /etc/nvme/hostnqn
-        so that the kernel NVMe driver uses the same NQN that is registered
-        in the volume's allowed-hosts list.
+        Uses uuidgen to produce a random UUID so that every call with an
+        empty cache generates a *unique* NQN.  This is critical when
+        multiple DHCHAP volumes are created in the same test: two volumes
+        with the same host NQN share the same SPDK keyring key_name.  If
+        SPDK rejects re-registration the second volume's key is never
+        stored and auth fails.  A unique NQN per volume gives a unique
+        key_name so each registration is always the first for that name.
+
+        The NQN is written to /etc/nvme/hostnqn so the kernel NVMe driver
+        uses the same NQN that was registered in the volume's allowed-hosts
+        list.
         """
         if self._client_host_nqn and not force_new:
             return self._client_host_nqn
         target = node or self.fio_node
         self.ssh_obj.exec_command(target, "sudo mkdir -p /etc/nvme")
+        uuid_out, _ = self.ssh_obj.exec_command(target, "uuidgen")
+        uuid = uuid_out.strip().split('\n')[0].strip().lower()
+        nqn = f"nqn.2014-08.org.nvmexpress:uuid:{uuid}"
         self.ssh_obj.exec_command(
-            target, "sudo sh -c 'nvme gen-hostnqn > /etc/nvme/hostnqn'")
-        nqn, _ = self.ssh_obj.exec_command(target, "cat /etc/nvme/hostnqn")
-        nqn = nqn.strip().split('\n')[0].strip()
+            target, f"echo '{nqn}' | sudo tee /etc/nvme/hostnqn")
         self.logger.info(f"[_get_client_host_nqn] NQN on {target}: {nqn!r}")
         self._client_host_nqn = nqn
         return nqn
@@ -685,8 +694,6 @@ class TestLvolDhcapDirections(SecurityTestBase):
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
-        host_nqn = self._get_client_host_nqn()
-
         directions = [
             ("host_only", SEC_HOST_ONLY),
             ("ctrl_only", SEC_CTRL_ONLY),
@@ -694,6 +701,11 @@ class TestLvolDhcapDirections(SecurityTestBase):
         ]
 
         for label, sec_opts in directions:
+            # Each volume needs its own unique NQN to avoid SPDK keyring
+            # key-name collisions when multiple DHCHAP volumes are created.
+            self._client_host_nqn = None
+            host_nqn = self._get_client_host_nqn()
+
             lvol_name = f"secdir{label}{_rand_suffix()}"
             self.logger.info(f"--- Testing direction: {label} ---")
 
@@ -1080,6 +1092,11 @@ class TestLvolSecurityNegativeConnect(SecurityTestBase):
         # ── TC-SEC-013: allowed-hosts lvol, connect without --host-nqn ────
         self.logger.info(
             "TC-SEC-013: allowed-hosts lvol, connect without --host-nqn …")
+        # Fresh NQN for this volume to avoid SPDK keyring key-name collision
+        # with lvol_009 which was created with the same host_nqn.
+        self._client_host_nqn = None
+        host_nqn = self._get_client_host_nqn()
+
         lvol_name_013 = f"secneg013{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name_013, self.lvol_size, self.pool_name,
@@ -1366,6 +1383,12 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
 
         # ── Scenario B: crypto_auth (DHCHAP + encryption) ────────────────────
         self.logger.info("--- Scenario B: crypto_auth parent (DHCHAP + crypto) ---")
+        # Fresh NQN for Scenario B to avoid SPDK keyring key-name collision
+        # with Scenario A's volumes (same host_nqn → same key_name → re-
+        # registration rejected → Scenario B auth would fail).
+        self._client_host_nqn = None
+        host_nqn = self._get_client_host_nqn()
+
         ca_parent = f"secsnap_ca{_rand_suffix()}"
 
         _, err = self.ssh_obj.create_sec_lvol(
