@@ -2199,9 +2199,11 @@ def replicate_lvol_on_source_cluster(lvol_id):
     lvol.from_source = True
     lvol.write_to_db()
 
-    ret = delete_lvol(lvol.uuid)
-    if not ret:
-        logger.info(f"deleting lvol: {lvol.uuid} failed")
+    ret, err = delete_lvol(lvol.uuid)
+    if ret:
+        logger.info(f"deleted lvol: {lvol.uuid}, results {ret}")
+    if err:
+        logger.error(f"deleting lvol: {lvol.uuid} failed with error: {err}")
 
     # create lvol on target node
     new_lvol = copy.deepcopy(lvol)
