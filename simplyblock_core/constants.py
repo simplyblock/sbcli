@@ -166,7 +166,8 @@ K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
-PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
+PROMETHEUS_STATEFULSET_NAME = os.getenv('PROMETHEUS_URL', "simplyblock-prometheus")
+PROMETHEUS_STATEFULSET_PORT = os.getenv('PROMETHEUS_PORT', "9090")
 FDB_SERVICE_NAME = "simplyblock-fdb-cluster"
 FDB_CONFIG_NAME = "simplyblock-fdb-cluster-config"
 ADMIN_DEPLOY_NAME = "simplyblock-admin-control"
@@ -235,6 +236,7 @@ VALID_DHCHAP_DHGROUPS = ["null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe61
 # Default port ranges (configurable per-cluster via Cluster model fields)
 NVMF_BASE_PORT = 4420         # Base port for ALL NVMe-oF listeners (lvol, hublvol, device)
 RPC_BASE_PORT = 8080          # Base port for SPDK JSON-RPC
+SNODE_API_PORT = 50001        # SNodeAPI/firewall port (one per host IP)
 
 # Legacy constants kept for backward compatibility with env override
 LVOL_NVMF_PORT_ENV = os.getenv("LVOL_NVMF_PORT_START", "")
@@ -243,6 +245,7 @@ if LVOL_NVMF_PORT_ENV:
 
 # Backward compatibility aliases
 RPC_PORT_RANGE_START = RPC_BASE_PORT
+FW_PORT_START = SNODE_API_PORT
 LVOL_NVMF_PORT_START = NVMF_BASE_PORT
 NODE_NVMF_PORT_START = NVMF_BASE_PORT
 NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT

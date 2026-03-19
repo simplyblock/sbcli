@@ -361,32 +361,40 @@ def delete(snapshot_uuid, force_delete=False):
 
         primary_node = None
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        sec_nodes = []
+        if snode.secondary_node_id:
+            sec_nodes.append(db_controller.get_storage_node_by_id(snode.secondary_node_id))
+        if snode.secondary_node_id_2:
+            sec_nodes.append(db_controller.get_storage_node_by_id(snode.secondary_node_id_2))
+
         if host_node.status == StorageNode.STATUS_ONLINE:
             if lvol_controller.is_node_leader(host_node, snap.lvol.lvs_name):
                 primary_node = host_node
-                if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = "Secondary node is in down status, can not delete snapshot"
-                    logger.error(msg)
-                    return False
-
-            elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if lvol_controller.is_node_leader(sec_node, snap.lvol.lvs_name):
-                    primary_node = sec_node
-                else:
-                    # both nodes are non leaders and online, set primary as leader
+                # Check if any secondary is in DOWN status
+                for sec_node in sec_nodes:
+                    if sec_node.status == StorageNode.STATUS_DOWN:
+                        msg = "Secondary node is in down status, can not delete snapshot"
+                        logger.error(msg)
+                        return False
+            else:
+                # Check if any secondary is the leader
+                for sec_node in sec_nodes:
+                    if sec_node.status == StorageNode.STATUS_ONLINE and \
+                            lvol_controller.is_node_leader(sec_node, snap.lvol.lvs_name):
+                        primary_node = sec_node
+                        break
+                if not primary_node:
+                    # no secondary is leader, use host as leader
                     primary_node = host_node
 
-            else:
-                # sec node is not online, set primary as leader
-                primary_node = host_node
-
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            # primary is not online but secondary is, create on secondary and set leader if needed,
-            primary_node = sec_node
-
         else:
-            # both primary and secondary are not online
+            # host is not online, find an online secondary
+            for sec_node in sec_nodes:
+                if sec_node.status == StorageNode.STATUS_ONLINE:
+                    primary_node = sec_node
+                    break
+
+        if not primary_node:
             msg = "Host nodes are not online"
             logger.error(msg)
             return False
