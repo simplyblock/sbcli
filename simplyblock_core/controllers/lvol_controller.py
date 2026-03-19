@@ -2230,13 +2230,16 @@ def replicate_lvol_on_source_cluster(lvol_id):
 
     new_lvol.write_to_db(db_controller.kv_store)
 
+    time.sleep(3)
+
     lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.uuid = str(uuid.uuid4())
     lvol.from_source = True
     lvol.write_to_db()
-    delete_lvol(lvol.uuid)
 
     time.sleep(3)
+
+    delete_lvol(lvol.uuid)
 
     lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:
