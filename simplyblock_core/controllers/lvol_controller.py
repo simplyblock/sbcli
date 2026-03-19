@@ -2161,6 +2161,7 @@ def replicate_lvol_on_source_cluster(lvol_id):
         return False
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
 
     if not source_node:
         logger.error(f"Node not found: {lvol.node_id}")
@@ -2169,6 +2170,11 @@ def replicate_lvol_on_source_cluster(lvol_id):
     if source_node.status != StorageNode.STATUS_ONLINE:
         logger.error(f"Node is not online!: {source_node.get_id()}, status: {source_node.status}")
         return False
+
+    # for lv in db_controller.get_lvols(source_cluster.snapshot_replication_target_cluster):
+    #     if lv.nqn == lvol.nqn:
+    #         logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+    #         return lv.get_id()
 
     snaps = []
     snapshot = None
@@ -2192,31 +2198,13 @@ def replicate_lvol_on_source_cluster(lvol_id):
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
         return False
 
-    original_lvol_id = lvol.get_id()
-
-    lvol = db_controller.get_lvol_by_id(lvol_id)
-    lvol.uuid = str(uuid.uuid4())
-    lvol.from_source = True
-    lvol.write_to_db()
-
-    ret, err = delete_lvol(lvol.uuid)
-    if ret:
-        logger.info(f"deleted lvol: {lvol.uuid}, results {ret}")
-    if err:
-        logger.error(f"deleting lvol: {lvol.uuid} failed with error: {err}")
-
     # create lvol on target node
     new_lvol = copy.deepcopy(lvol)
-    new_lvol.uuid = original_lvol_id
-    new_lvol.size = snapshot.lvol.size
-    new_lvol.max_size = snapshot.lvol.max_size
-    new_lvol.base_bdev = snapshot.lvol.base_bdev
-    new_lvol.lvol_bdev = f"CLN_{utils.get_random_vuid()}"
-    new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.from_source = True
     new_lvol.status = LVol.STATUS_IN_CREATION
+
     new_lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
@@ -2227,6 +2215,7 @@ def replicate_lvol_on_source_cluster(lvol_id):
             }
         }
     ]
+
     if new_lvol.crypto_bdev:
         new_lvol.bdev_stack.append({
             "type": "crypto",
@@ -2239,7 +2228,15 @@ def replicate_lvol_on_source_cluster(lvol_id):
             }
         })
 
-    new_lvol.write_to_db()
+    new_lvol.write_to_db(db_controller.kv_store)
+
+    lvol = db_controller.get_lvol_by_id(lvol_id)
+    lvol.uuid = str(uuid.uuid4())
+    lvol.from_source = True
+    lvol.write_to_db()
+    delete_lvol(lvol.uuid)
+
+    time.sleep(3)
 
     lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:
@@ -2264,7 +2261,6 @@ def replicate_lvol_on_source_cluster(lvol_id):
 
     new_lvol.status = LVol.STATUS_ONLINE
     new_lvol.write_to_db(db_controller.kv_store)
-    logger.info(new_lvol.to_dict())
     lvol_events.lvol_replicated(lvol, new_lvol)
 
     return new_lvol.lvol_uuid
