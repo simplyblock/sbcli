@@ -3,7 +3,7 @@ import time
 import uuid
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import lvol_controller, snapshot_events
+from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -111,6 +111,29 @@ def process_snap_replicate_start(task, snapshot):
         snapshot.write_to_db()
 
 
+def delete_last_snapshot_if_needed(this_task, lvol):
+    snaps = []
+    for task in db.get_job_tasks(this_task.cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            if task.get_id() == this_task.get_id():
+                continue
+            logger.debug(task)
+            try:
+                snap = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+            if snap.lvol.get_id() != lvol.get_id():
+                continue
+            snaps.append(snap)
+
+    if snaps:
+        snaps = sorted(snaps, key=lambda x: x.created_at)
+        snapshot = snaps[-1]
+        logger.info("Deleting snapshot: %s", snapshot.get_id())
+        ret = snapshot_controller.delete(snapshot)
+        logger.debug(ret)
+
+
 def process_snap_replicate_finish(task, snapshot):
 
     # detach remote lvol
@@ -213,7 +236,7 @@ def process_snap_replicate_finish(task, snapshot):
     lvol_controller.delete_lvol(remote_lv.get_id(), True)
     remote_lv.remove(db.kv_store)
     snapshot_events.replication_task_finished(snapshot)
-
+    delete_last_snapshot_if_needed(task, snapshot.lvol)
     return new_snapshot_uuid
 
 
