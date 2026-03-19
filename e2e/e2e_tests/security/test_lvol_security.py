@@ -102,46 +102,21 @@ class SecurityTestBase(TestClusterBase):
     # ── NQN cache ────────────────────────────────────────────────────────────
 
     def _get_client_host_nqn(self, node=None, force_new=False):
-        """Return (and cache) a unique random UUID-based NQN for the client.
+        """Return (and cache) the host NQN for the client node.
 
-        Uses uuidgen (not nvme gen-hostnqn) so that every call with
-        force_new=True — or every new test instance — gets a brand-new NQN.
-        This prevents SPDK keyring key-name collisions when the same cluster
-        hosts multiple DHCHAP volumes sequentially:
-          key_name = "{type}_{safe_host_nqn}"
-        Two volumes with the same host NQN share the same key_name; if the
-        SPDK version in CI rejects re-registration, the second volume's key
-        is never stored and auth fails.  A unique NQN per volume gives a
-        unique key_name, so each registration is always the first for that
-        name.
+        Runs nvme gen-hostnqn and redirects the output to /etc/nvme/hostnqn
+        so that the kernel NVMe driver uses the same NQN that is registered
+        in the volume's allowed-hosts list.
         """
-        import re as _re
-        _UUID_RE = _re.compile(
-            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-            _re.IGNORECASE)
-
         if self._client_host_nqn and not force_new:
             return self._client_host_nqn
         target = node or self.fio_node
-        # Generate a fresh random UUID on the remote node.
-        # Try three methods in order: uuidgen, /proc/sys/kernel/random/uuid, python3.
-        uuid_out, _ = self.ssh_obj.exec_command(
-            target,
-            "uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null "
-            "|| python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null")
-        random_uuid = uuid_out.strip().split('\n')[0].strip()
-        if not _UUID_RE.match(random_uuid):
-            raise RuntimeError(
-                f"[_get_client_host_nqn] Could not generate a valid UUID on "
-                f"{target!r}: got {random_uuid!r}. "
-                "Ensure uuidgen, /proc/sys/kernel/random/uuid, or python3 is available.")
-        nqn = f"nqn.2014-08.org.nvmexpress:uuid:{random_uuid.lower()}"
-        # Persist to /etc/nvme/hostnqn so the kernel NVMe driver uses this
-        # same NQN when the subsequent nvme-connect command runs.
         self.ssh_obj.exec_command(target, "sudo mkdir -p /etc/nvme")
         self.ssh_obj.exec_command(
-            target, f"sudo sh -c \"echo '{nqn}' > /etc/nvme/hostnqn\"")
-        self.logger.info(f"[_get_client_host_nqn] unique NQN on {target}: {nqn!r}")
+            target, "sudo sh -c 'nvme gen-hostnqn > /etc/nvme/hostnqn'")
+        nqn, _ = self.ssh_obj.exec_command(target, "cat /etc/nvme/hostnqn")
+        nqn = nqn.strip().split('\n')[0].strip()
+        self.logger.info(f"[_get_client_host_nqn] NQN on {target}: {nqn!r}")
         self._client_host_nqn = nqn
         return nqn
 

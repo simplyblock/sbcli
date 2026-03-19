@@ -249,7 +249,9 @@ def main():
             logger.error(f"Failed to update Test Run status: {e}")
 
     if errors:
-        raise MultipleExceptions(errors)
+        exc = MultipleExceptions(errors)
+        logger.error(f"MultipleExceptions: {exc}")
+        raise exc
     if skipped_cases:
         raise SkippedTestsException("There are SKIPPED Tests. Please check!!")
     
