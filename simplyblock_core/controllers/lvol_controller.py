@@ -2267,8 +2267,10 @@ def replicate_lvol_on_source_cluster(lvol_id):
             return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
+    new_lvol.from_source = True
     new_lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_replicated(lvol, new_lvol)
+    logger.debug(f"new lvol from_source: {new_lvol.from_source}")
 
     return new_lvol.lvol_uuid
 
