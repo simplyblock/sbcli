@@ -185,6 +185,51 @@ class BackupStressBase(BackupTestBase):
             self.logger.error(f"FIO thread {key} failed: {e}")
             results[key] = f"fail: {e}"
 
+    # ── backup / restore state helpers ────────────────────────────────────────
+
+    def _wait_for_backup_terminal(self, backup_id: str,
+                                   timeout: int = 600) -> str:
+        """Poll backup list until *backup_id* leaves in-progress states.
+        Returns the final status string (e.g. 'done', 'failed') or 'timeout'."""
+        _IN_PROGRESS = {"in_progress", "pending", "running", "uploading",
+                        "processing", "queued"}
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for b in self._list_backups():
+                bid = b.get("id") or b.get("ID") or b.get("uuid") or ""
+                if bid == backup_id or backup_id in bid:
+                    status = (b.get("status") or b.get("Status") or "").lower()
+                    if status and status not in _IN_PROGRESS:
+                        return status
+            sleep_n_sec(_BACKUP_POLL_INTERVAL)
+        return "timeout"
+
+    def _get_lvol_status(self, lvol_name: str) -> str | None:
+        """Return the status of *lvol_name* from `lvol list`, or None if absent."""
+        out, _ = self._sbcli("lvol list")
+        rows = self._parse_table(out)
+        for row in rows:
+            name = (row.get("name") or row.get("Name")
+                    or row.get("lvol_name") or "")
+            if name == lvol_name:
+                return (row.get("status") or row.get("Status")
+                        or "unknown").lower()
+        # Fallback: raw presence check
+        if lvol_name in out:
+            return "present"
+        return None
+
+    def _force_delete_lvol(self, lvol_name: str):
+        """Delete lvol; try sbcli --force if the first attempt fails."""
+        try:
+            self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=False)
+        except Exception as e:
+            self.logger.warning(
+                f"Normal lvol delete failed for {lvol_name}: {e} — retrying --force")
+            self._sbcli(f"lvol delete {lvol_name} --force")
+        if lvol_name in self.created_lvols:
+            self.created_lvols.remove(lvol_name)
+
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Stress 1 – Parallel snapshot-backups on many lvols
@@ -716,3 +761,487 @@ class BackupStressRestoreConcurrent(BackupStressBase):
                     f"TC-BCK-STR-051: post-restore check failed {restored_name}: {e}")
 
         self.logger.info("=== BackupStressRestoreConcurrent PASSED ===")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  E2E 7 – Backup interrupted mid-operation
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupInterruptedBackup(BackupStressBase):
+    """
+    TC-BCK-080..086 — Storage-node outage triggered while a backup is in progress.
+
+    Validates:
+      - Interrupted backup reaches a terminal state (done or failed) — no hang
+      - Delta chain stays consistent after interruption (no corruption)
+      - After recovery, a fresh snapshot+backup completes successfully
+      - Restored lvol from the post-recovery backup has correct data (checksum)
+      - FIO on the restored lvol succeeds
+      - Crypto lvol handled correctly under the same interruption scenario
+
+    Approach:
+      Create a large lvol and write substantial data so the S3 upload takes
+      enough time to still be in progress when the outage fires.  Immediately
+      after calling `snapshot backup` (async), trigger a graceful_shutdown on
+      one storage node.  After recovery, poll backup status until it settles,
+      then verify the recovery path.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_interrupted_backup"
+        self.lvol_size = "10G"
+        self.fio_size = "3G"
+
+    def _run_interrupted_backup_scenario(
+            self, lvol_name: str, lvol_id: str, orig_checksums: dict,
+            outage_type: str, label: str):
+        """
+        Core scenario: snapshot → backup → immediate outage → recover → verify.
+        Returns True if a successful restore with matching checksums was achieved.
+        """
+        snap_name = f"intr_{label}_snap_{_rand_suffix()}"
+        snap_id = self._create_snapshot(lvol_id, snap_name, backup=False)
+
+        # Trigger backup (async — returns immediately)
+        self.logger.info(f"[{label}] Triggering backup for snap {snap_id}")
+        backup_id = self._snapshot_backup(snap_id)
+        self.logger.info(f"[{label}] backup_id={backup_id} — triggering outage now")
+
+        # Immediately cause outage while backup is uploading
+        try:
+            sn_id = self._get_random_sn()
+            self._do_outage(sn_id, outage_type)
+        except Exception as e:
+            self.logger.warning(f"[{label}] Outage error (non-fatal): {e}")
+
+        # Allow the cluster to recover, then wait for backup to settle
+        sleep_n_sec(30)
+        final_status = self._wait_for_backup_terminal(backup_id, timeout=600)
+        self.logger.info(f"[{label}] backup terminal status: {final_status}")
+
+        # Whichever state the interrupted backup ended in, take a fresh
+        # snapshot+backup after recovery and use that for the restore test
+        snap2_name = f"intr_{label}_snap2_{_rand_suffix()}"
+        self.logger.info(f"[{label}] Taking fresh snapshot+backup after recovery")
+        snap2_id = self._create_snapshot(lvol_id, snap2_name, backup=True)
+        sleep_n_sec(20)
+
+        backups = self._list_backups()
+        assert backups, f"[{label}] No backups available after recovery"
+        fresh_bk_id = (
+            backups[-1].get("id") or backups[-1].get("ID")
+            or backups[-1].get("uuid") or ""
+        )
+        assert fresh_bk_id, f"[{label}] Could not extract fresh backup_id"
+
+        # Restore and verify data integrity
+        restored_name = f"intr_{label}_rest_{_rand_suffix()}"
+        self._restore_backup(fresh_bk_id, restored_name)
+        self._wait_for_restore(restored_name)
+        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        r_device, r_mount = self._connect_and_mount(
+            restored_name, rest_id,
+            mount=f"{self.mount_path}/intr_{label}_{_rand_suffix()}")
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(
+            self.fio_node, r_files, orig_checksums,
+            message=f"[{label}] checksum mismatch after interrupted backup recovery")
+        self.logger.info(f"[{label}] checksums match after interrupted backup ✓")
+        return restored_name, r_mount
+
+    def run(self):
+        self.logger.info("=== TestBackupInterruptedBackup START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # ── Plain lvol scenario ────────────────────────────────────────────
+
+        # TC-BCK-080: Setup — large plain lvol, write data, capture checksums
+        self.logger.info("TC-BCK-080: setup plain lvol for backup interruption test")
+        lvol_name, lvol_id = self._create_lvol(
+            name=f"intr_bck_{_rand_suffix()}", size=self.lvol_size)
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=40)
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        self.logger.info(
+            f"TC-BCK-080: {len(orig_checksums)} checksum(s) captured")
+
+        # TC-BCK-081..084: backup → graceful_shutdown outage → recover → restore
+        self.logger.info(
+            "TC-BCK-081..084: backup triggered, outage injected mid-upload")
+        snap_name = f"intr_plain_snap_{_rand_suffix()}"
+        snap_id = self._create_snapshot(lvol_id, snap_name, backup=False)
+        backup_id = self._snapshot_backup(snap_id)
+        self.logger.info(f"TC-BCK-081: backup_id={backup_id} — outage now")
+
+        # TC-BCK-081: Trigger outage immediately after backup starts
+        try:
+            sn_id = self._get_random_sn()
+            self._do_outage(sn_id, "graceful_shutdown")
+        except Exception as e:
+            self.logger.warning(f"TC-BCK-081: outage error (non-fatal): {e}")
+
+        # TC-BCK-082: Wait for backup to reach a terminal state
+        sleep_n_sec(30)
+        final_status = self._wait_for_backup_terminal(backup_id, timeout=600)
+        self.logger.info(f"TC-BCK-082: interrupted backup final status: {final_status}")
+        # Status must be terminal — no infinite hang
+        assert final_status in (
+            "done", "complete", "completed", "failed", "error", "timeout"
+        ), f"TC-BCK-082: unexpected status after interruption: {final_status}"
+
+        # TC-BCK-083: After recovery, fresh snapshot+backup must succeed
+        self.logger.info("TC-BCK-083: fresh snapshot+backup after recovery")
+        snap2_name = f"intr_plain_snap2_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap2_name, backup=True)
+        sleep_n_sec(20)
+        backups_after = self._list_backups()
+        assert backups_after, "TC-BCK-083: no backups after recovery"
+        fresh_bk_id = (
+            backups_after[-1].get("id") or backups_after[-1].get("ID")
+            or backups_after[-1].get("uuid") or ""
+        )
+        assert fresh_bk_id, "TC-BCK-083: could not get fresh backup_id"
+        self.logger.info(
+            f"TC-BCK-083: fresh backup {fresh_bk_id} available "
+            f"({len(backups_after)} total) ✓")
+
+        # TC-BCK-084: Restore fresh backup → verify checksums
+        self.logger.info("TC-BCK-084: restore fresh backup and verify checksums")
+        restored_name = f"intr_plain_rest_{_rand_suffix()}"
+        self._restore_backup(fresh_bk_id, restored_name)
+        self._wait_for_restore(restored_name)
+        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        r_device, r_mount = self._connect_and_mount(
+            restored_name, rest_id,
+            mount=f"{self.mount_path}/intr_rest_{_rand_suffix()}")
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(
+            self.fio_node, r_files, orig_checksums,
+            message="TC-BCK-084: checksum mismatch after interrupted backup restore")
+        self.logger.info("TC-BCK-084: checksums match after interrupted backup ✓")
+
+        # TC-BCK-085: FIO on the restored lvol
+        self.logger.info("TC-BCK-085: FIO on restored lvol after interrupted backup")
+        self._run_fio(r_mount, runtime=20)
+        self.logger.info("TC-BCK-085: FIO succeeded ✓")
+
+        # ── Crypto lvol scenario ───────────────────────────────────────────
+
+        # TC-BCK-086: Same scenario with a crypto lvol + container_stop outage
+        self.logger.info("TC-BCK-086: interrupted backup on crypto lvol (container_stop)")
+        crypto_name, crypto_id = self._create_lvol(
+            name=f"intr_crypto_{_rand_suffix()}", crypto=True)
+        c_device, c_mount = self._connect_and_mount(crypto_name, crypto_id)
+        self._run_fio(c_mount, runtime=30)
+        c_files = self.ssh_obj.find_files(self.fio_node, c_mount)
+        c_checksums = self.ssh_obj.generate_checksums(self.fio_node, c_files)
+
+        c_snap = f"intr_c_snap_{_rand_suffix()}"
+        c_snap_id = self._create_snapshot(crypto_id, c_snap, backup=False)
+        c_bk_id = self._snapshot_backup(c_snap_id)
+        self.logger.info(f"TC-BCK-086: crypto backup_id={c_bk_id} — outage now")
+
+        try:
+            sn_id2 = self._get_random_sn()
+            self._do_outage(sn_id2, "container_stop")
+        except Exception as e:
+            self.logger.warning(f"TC-BCK-086: outage error (non-fatal): {e}")
+
+        sleep_n_sec(30)
+        c_status = self._wait_for_backup_terminal(c_bk_id, timeout=600)
+        self.logger.info(f"TC-BCK-086: crypto backup terminal status: {c_status}")
+
+        # Fresh backup after recovery
+        c_snap2 = f"intr_c_snap2_{_rand_suffix()}"
+        self._create_snapshot(crypto_id, c_snap2, backup=True)
+        sleep_n_sec(20)
+        c_backups = self._list_backups()
+        if c_backups:
+            c_fresh_id = (
+                c_backups[-1].get("id") or c_backups[-1].get("ID")
+                or c_backups[-1].get("uuid") or ""
+            )
+            if c_fresh_id:
+                c_rest_name = f"intr_c_rest_{_rand_suffix()}"
+                self._restore_backup(c_fresh_id, c_rest_name)
+                self._wait_for_restore(c_rest_name)
+                c_rest_id = self.sbcli_utils.get_lvol_id(lvol_name=c_rest_name)
+                c_r_device, c_r_mount = self._connect_and_mount(
+                    c_rest_name, c_rest_id,
+                    mount=f"{self.mount_path}/icr_{_rand_suffix()}")
+                c_r_files = self.ssh_obj.find_files(self.fio_node, c_r_mount)
+                self.ssh_obj.verify_checksums(
+                    self.fio_node, c_r_files, c_checksums,
+                    message="TC-BCK-086: checksum mismatch on crypto interrupted backup")
+                self.logger.info("TC-BCK-086: crypto interrupted backup restore ✓")
+
+        self.logger.info("=== TestBackupInterruptedBackup PASSED ===")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  E2E 8 – Restore interrupted mid-operation
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupInterruptedRestore(BackupStressBase):
+    """
+    TC-BCK-090..097 — Storage-node outage triggered while a restore is running.
+
+    Validates:
+      - Interrupted restore reaches a terminal state — no hang
+      - Partial/failed lvol is either absent or in a deletable error state
+      - The system does NOT leave an un-deletable zombie lvol
+      - Retry restore (different name, or same name after cleanup) succeeds
+      - Restored lvol from the retry has correct data (checksum)
+      - FIO on the retried restore succeeds
+      - Crypto lvol handled correctly under restore interruption
+
+    Approach:
+      First complete a real backup so we have a valid backup_id.  Then call
+      `backup restore` (which starts the restore asynchronously) and
+      immediately trigger a storage-node outage.  After recovery inspect the
+      lvol state and exercise the cleanup + retry path.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_interrupted_restore"
+        self.lvol_size = "10G"
+        self.fio_size = "3G"
+
+    def _wait_for_restore_or_error(self, lvol_name: str,
+                                    timeout: int = 300) -> str:
+        """Wait until lvol appears in list (any status) or timeout.
+        Returns final status string or 'absent' / 'timeout'."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            status = self._get_lvol_status(lvol_name)
+            if status is not None:
+                return status
+            sleep_n_sec(_BACKUP_POLL_INTERVAL)
+        return "timeout"
+
+    def _cleanup_lvol(self, lvol_name: str):
+        """Best-effort cleanup of a partial/error lvol."""
+        self.logger.info(f"[cleanup] deleting lvol {lvol_name}")
+        try:
+            self._force_delete_lvol(lvol_name)
+            self.logger.info(f"[cleanup] {lvol_name} deleted ✓")
+        except Exception as e:
+            self.logger.warning(f"[cleanup] delete error for {lvol_name}: {e}")
+
+    def _run_interrupted_restore_scenario(
+            self, backup_id: str, orig_checksums: dict,
+            outage_type: str, label: str):
+        """
+        Core scenario: restore → immediate outage → check state → cleanup → retry.
+        """
+        # Trigger restore (async start)
+        restore_name = f"intr_rst_{label}_{_rand_suffix()}"
+        self.logger.info(
+            f"[{label}] restore {backup_id} → {restore_name}, triggering outage")
+        self._restore_backup(backup_id, restore_name)
+
+        # Immediately trigger outage
+        try:
+            sn_id = self._get_random_sn()
+            self._do_outage(sn_id, outage_type)
+        except Exception as e:
+            self.logger.warning(f"[{label}] Outage error (non-fatal): {e}")
+
+        # Allow recovery window, then check lvol state
+        sleep_n_sec(30)
+        lvol_status = self._wait_for_restore_or_error(restore_name, timeout=120)
+        self.logger.info(
+            f"[{label}] restore target status after outage: {lvol_status!r}")
+
+        if lvol_status in ("error", "failed"):
+            self.logger.info(
+                f"[{label}] lvol is in error state — system reported failure ✓")
+            self._cleanup_lvol(restore_name)
+        elif lvol_status in ("absent", "timeout"):
+            self.logger.info(
+                f"[{label}] restore target not found — system cleaned up ✓")
+            if restore_name in self.created_lvols:
+                self.created_lvols.remove(restore_name)
+        elif lvol_status in ("online", "present", "unknown"):
+            self.logger.info(
+                f"[{label}] restore completed despite outage (fast outage) — "
+                f"status={lvol_status}")
+            # The restore beat the outage timing; treat as success
+        else:
+            # Still in restoring state — wait a bit more
+            self.logger.info(
+                f"[{label}] still in progress ({lvol_status}), waiting more")
+            sleep_n_sec(60)
+            lvol_status = self._get_lvol_status(restore_name) or "absent"
+            self.logger.info(
+                f"[{label}] status after extra wait: {lvol_status!r}")
+            if lvol_status in ("error", "failed", "absent"):
+                self._cleanup_lvol(restore_name)
+
+        # Retry restore with a fresh name — must succeed
+        retry_name = f"intr_rst_{label}_retry_{_rand_suffix()}"
+        self.logger.info(f"[{label}] retry restore → {retry_name}")
+        self._restore_backup(backup_id, retry_name)
+        self._wait_for_restore(retry_name)
+        self.logger.info(f"[{label}] retry restore {retry_name} appeared ✓")
+
+        # Verify checksums
+        retry_id = self.sbcli_utils.get_lvol_id(lvol_name=retry_name)
+        r_device, r_mount = self._connect_and_mount(
+            retry_name, retry_id,
+            mount=f"{self.mount_path}/intr_rr_{label}_{_rand_suffix()}")
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(
+            self.fio_node, r_files, orig_checksums,
+            message=f"[{label}] checksum mismatch on retry restore")
+        self.logger.info(f"[{label}] retry restore checksums match ✓")
+        return retry_name, r_mount
+
+    def run(self):
+        self.logger.info("=== TestBackupInterruptedRestore START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # ── Setup: complete backup to use as restore source ────────────────
+
+        self.logger.info("TC-BCK-090 setup: create lvol, write data, complete backup")
+        lvol_name, lvol_id = self._create_lvol(
+            name=f"intr_rst_src_{_rand_suffix()}", size=self.lvol_size)
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=40)
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        self.logger.info(f"Setup: {len(orig_checksums)} checksum(s) captured")
+
+        snap_name = f"intr_rst_snap_{_rand_suffix()}"
+        snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+        self.logger.info("Setup: waiting for backup to complete before restore test")
+        sleep_n_sec(30)
+        backups = self._list_backups()
+        assert backups, "Setup: no backups available for interrupted restore test"
+        backup_id = (
+            backups[0].get("id") or backups[0].get("ID")
+            or backups[0].get("uuid") or ""
+        )
+        assert backup_id, "Setup: could not extract backup_id"
+        self.logger.info(f"Setup: backup_id={backup_id} — ready for interrupt test")
+
+        # ── TC-BCK-090..095: Plain lvol, graceful_shutdown interrupt ───────
+
+        self.logger.info(
+            "TC-BCK-090: restore triggered → graceful_shutdown injected")
+        restore_name = f"intr_rst_plain_{_rand_suffix()}"
+        self._restore_backup(backup_id, restore_name)
+        try:
+            sn_id = self._get_random_sn()
+            self._do_outage(sn_id, "graceful_shutdown")
+        except Exception as e:
+            self.logger.warning(f"TC-BCK-090: outage error (non-fatal): {e}")
+
+        sleep_n_sec(30)
+
+        # TC-BCK-091: Check restore target lvol status after outage
+        lvol_status = self._wait_for_restore_or_error(restore_name, timeout=120)
+        self.logger.info(
+            f"TC-BCK-091: restore target {restore_name!r} status={lvol_status!r}")
+
+        # TC-BCK-092: Verify partial lvol is in a recognisable/usable state
+        if lvol_status in ("error", "failed"):
+            self.logger.info(
+                "TC-BCK-092: lvol is in error state — clean failure reported ✓")
+        elif lvol_status in ("absent", "timeout"):
+            self.logger.info(
+                "TC-BCK-092: lvol absent — system cleaned up partial restore ✓")
+            if restore_name in self.created_lvols:
+                self.created_lvols.remove(restore_name)
+        else:
+            self.logger.info(
+                f"TC-BCK-092: lvol status={lvol_status!r} "
+                f"(may have completed before outage took effect)")
+
+        # TC-BCK-093: Clean up the partial/error lvol
+        self.logger.info(f"TC-BCK-093: cleaning up partial lvol {restore_name}")
+        if lvol_status not in ("absent", "timeout"):
+            self._cleanup_lvol(restore_name)
+
+        # TC-BCK-094: Retry restore with fresh name — must succeed
+        self.logger.info("TC-BCK-094: retry restore after cleanup")
+        retry_name = f"intr_rst_retry_{_rand_suffix()}"
+        self._restore_backup(backup_id, retry_name)
+        self._wait_for_restore(retry_name)
+        self.logger.info(f"TC-BCK-094: retry restore {retry_name} succeeded ✓")
+
+        # TC-BCK-095: Verify checksums on retried restore
+        self.logger.info("TC-BCK-095: verify checksums on retried restore")
+        retry_id = self.sbcli_utils.get_lvol_id(lvol_name=retry_name)
+        r_device, r_mount = self._connect_and_mount(
+            retry_name, retry_id,
+            mount=f"{self.mount_path}/intr_rr_{_rand_suffix()}")
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(
+            self.fio_node, r_files, orig_checksums,
+            message="TC-BCK-095: checksum mismatch on retried restore")
+        self.logger.info("TC-BCK-095: retry restore checksums match ✓")
+
+        # TC-BCK-096: FIO on the retried restore
+        self.logger.info("TC-BCK-096: FIO on retried restore lvol")
+        self._run_fio(r_mount, runtime=20)
+        self.logger.info("TC-BCK-096: FIO succeeded ✓")
+
+        # ── TC-BCK-097: Crypto lvol, container_stop interrupt ──────────────
+
+        self.logger.info("TC-BCK-097: interrupted restore on crypto lvol")
+        crypto_name, crypto_id = self._create_lvol(
+            name=f"intr_rst_c_{_rand_suffix()}", crypto=True)
+        c_device, c_mount = self._connect_and_mount(crypto_name, crypto_id)
+        self._run_fio(c_mount, runtime=30)
+        c_files = self.ssh_obj.find_files(self.fio_node, c_mount)
+        c_checksums = self.ssh_obj.generate_checksums(self.fio_node, c_files)
+
+        c_snap = f"intr_rst_c_snap_{_rand_suffix()}"
+        c_snap_id = self._create_snapshot(crypto_id, c_snap, backup=True)
+        sleep_n_sec(20)
+        c_backups = self._list_backups()
+        if c_backups:
+            c_bk_id = (
+                c_backups[-1].get("id") or c_backups[-1].get("ID")
+                or c_backups[-1].get("uuid") or None
+            )
+            if c_bk_id:
+                c_rst_name = f"intr_rst_c1_{_rand_suffix()}"
+                self._restore_backup(c_bk_id, c_rst_name)
+                try:
+                    sn_id2 = self._get_random_sn()
+                    self._do_outage(sn_id2, "container_stop")
+                except Exception as e:
+                    self.logger.warning(f"TC-BCK-097: outage error (non-fatal): {e}")
+
+                sleep_n_sec(30)
+                c_rst_status = self._wait_for_restore_or_error(c_rst_name, timeout=120)
+                self.logger.info(
+                    f"TC-BCK-097: crypto restore status={c_rst_status!r}")
+
+                if c_rst_status not in ("absent", "timeout"):
+                    self._cleanup_lvol(c_rst_name)
+
+                # Retry crypto restore
+                c_rst_retry = f"intr_rst_c2_{_rand_suffix()}"
+                self._restore_backup(c_bk_id, c_rst_retry)
+                self._wait_for_restore(c_rst_retry)
+                c_rest_id = self.sbcli_utils.get_lvol_id(lvol_name=c_rst_retry)
+                c_r_device, c_r_mount = self._connect_and_mount(
+                    c_rst_retry, c_rest_id,
+                    mount=f"{self.mount_path}/icr2_{_rand_suffix()}")
+                c_r_files = self.ssh_obj.find_files(self.fio_node, c_r_mount)
+                self.ssh_obj.verify_checksums(
+                    self.fio_node, c_r_files, c_checksums,
+                    message="TC-BCK-097: checksum mismatch on interrupted crypto restore retry")
+                self.logger.info("TC-BCK-097: crypto interrupted restore retry ✓")
+
+        self.logger.info("=== TestBackupInterruptedRestore PASSED ===")

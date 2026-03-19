@@ -1040,7 +1040,8 @@ class TestClusterBase:
         self.logger.info("Unmounting all mount points")
         if not base_path:
             base_path = self.mount_path
-        for node in self.fio_node:
+        fio_nodes = self.fio_node if isinstance(self.fio_node, list) else [self.fio_node]
+        for node in fio_nodes:
             mount_points = self.ssh_obj.get_mount_points(node=node, base_path=base_path)
             for mount_point in mount_points:
                 if "/mnt/nfs_share" not in mount_point:
@@ -1050,7 +1051,8 @@ class TestClusterBase:
     def remove_mount_dirs(self):
         """ Remove all mount point directories """
         self.logger.info("Removing all mount point directories")
-        for node in self.fio_node:
+        fio_nodes = self.fio_node if isinstance(self.fio_node, list) else [self.fio_node]
+        for node in fio_nodes:
             mount_dirs = self.ssh_obj.get_mount_points(node=node, base_path=self.mount_path)
             for mount_dir in mount_dirs:
                 if "/mnt/nfs_share" not in mount_dir:

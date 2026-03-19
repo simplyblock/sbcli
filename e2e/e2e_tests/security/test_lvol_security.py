@@ -115,15 +115,27 @@ class SecurityTestBase(TestClusterBase):
         unique key_name, so each registration is always the first for that
         name.
         """
+        import re as _re
+        _UUID_RE = _re.compile(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+            _re.IGNORECASE)
+
         if self._client_host_nqn and not force_new:
             return self._client_host_nqn
         target = node or self.fio_node
         # Generate a fresh random UUID on the remote node.
+        # Try three methods in order: uuidgen, /proc/sys/kernel/random/uuid, python3.
         uuid_out, _ = self.ssh_obj.exec_command(
             target,
-            "uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid")
+            "uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null "
+            "|| python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null")
         random_uuid = uuid_out.strip().split('\n')[0].strip()
-        nqn = f"nqn.2014-08.org.nvmexpress:uuid:{random_uuid}"
+        if not _UUID_RE.match(random_uuid):
+            raise RuntimeError(
+                f"[_get_client_host_nqn] Could not generate a valid UUID on "
+                f"{target!r}: got {random_uuid!r}. "
+                "Ensure uuidgen, /proc/sys/kernel/random/uuid, or python3 is available.")
+        nqn = f"nqn.2014-08.org.nvmexpress:uuid:{random_uuid.lower()}"
         # Persist to /etc/nvme/hostnqn so the kernel NVMe driver uses this
         # same NQN when the subsequent nvme-connect command runs.
         self.ssh_obj.exec_command(target, "sudo mkdir -p /etc/nvme")

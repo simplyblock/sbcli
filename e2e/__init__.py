@@ -100,6 +100,8 @@ from stress_test.continuous_backup_stress import (
     BackupStressCryptoMix,
     BackupStressPolicyRetention,
     BackupStressRestoreConcurrent,
+    TestBackupInterruptedBackup,
+    TestBackupInterruptedRestore,
 )
 
 
@@ -154,6 +156,8 @@ ALL_TESTS = [
     TestBackupNegative,
     TestBackupCryptoLvol,
     TestBackupCustomGeometry,
+    TestBackupInterruptedBackup,
+    TestBackupInterruptedRestore,
     # Backup stress tests
     BackupStressParallelSnapshots,
     BackupStressTcpFailover,
@@ -274,6 +278,9 @@ def get_backup_tests():
         TestBackupNegative,
         TestBackupCryptoLvol,
         TestBackupCustomGeometry,
+        # Interrupted-operation tests
+        TestBackupInterruptedBackup,
+        TestBackupInterruptedRestore,
     ]
 
 
