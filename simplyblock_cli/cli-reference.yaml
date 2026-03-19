@@ -1452,14 +1452,6 @@ commands:
             dest: encrypt
             type: bool
             action: store_true
-          - name: "--crypto-key1"
-            help: "Hex value of key1 to be used for logical volume encryption"
-            dest: crypto_key1
-            type: str
-          - name: "--crypto-key2"
-            help: "Hex value of key2 to be used for logical volume encryption"
-            dest: crypto_key2
-            type: str
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second"
             dest: max_rw_iops

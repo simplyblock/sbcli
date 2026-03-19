@@ -537,8 +537,6 @@ class CLIWrapperBase:
             args.max_w_mbytes,
             with_snapshot=with_snapshot,
             max_size=max_size,
-            crypto_key1=args.crypto_key1,
-            crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace,
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,

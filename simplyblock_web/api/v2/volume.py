@@ -31,7 +31,6 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDT
 class _CreateParams(BaseModel):
     name: str
     size: util.Size
-    crypto_key: Optional[Tuple[str, str]] = None
     max_rw_iops: util.Unsigned = 0
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
@@ -78,8 +77,6 @@ def add(
             max_w_mbytes=data.max_w_mbytes,
             host_id_or_name=data.host_id,
             ha_type=data.ha_type if data.ha_type is not None else 'default',
-            crypto_key1=data.crypto_key[0] if data.crypto_key is not None else None,
-            crypto_key2=data.crypto_key[1] if data.crypto_key is not None else None,
             use_comp=False,
             distr_vuid=0,
             lvol_priority_class=data.priority_class,
