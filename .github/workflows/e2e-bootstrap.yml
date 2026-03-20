@@ -607,7 +607,7 @@ jobs:
           fi
           if [[ "${CLUSTER_SECURITY}" == "backup" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
             echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
-            S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":false}'
+            S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \

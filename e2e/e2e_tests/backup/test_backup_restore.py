@@ -190,27 +190,31 @@ class BackupTestBase(TestClusterBase):
         raise TimeoutError(f"Restored lvol {lvol_name} not visible after {timeout}s")
 
     def _validate_backup_fields(self, backup: dict, lvol_id: str = None,
-                                 snap_id: str = None) -> None:
-        """Assert that *backup* entry references the expected lvol and/or snapshot IDs.
+                                 snap_name: str = None) -> None:
+        """Assert that *backup* entry references the expected lvol and/or snapshot name.
 
         Searches all field values in the backup dict so it is resilient to
         varying column names across sbcli versions.
+        Note: backup list shows snapshot name (not snapshot UUID) and lvol_id.
         """
         all_values = " ".join(str(v) for v in backup.values())
         if lvol_id:
             assert lvol_id in all_values, \
                 f"Backup entry does not reference lvol_id {lvol_id}: {backup}"
-        if snap_id:
-            assert snap_id in all_values, \
-                f"Backup entry does not reference snapshot_id {snap_id}: {backup}"
+        if snap_name:
+            assert snap_name in all_values, \
+                f"Backup entry does not reference snapshot name {snap_name}: {backup}"
 
-    def _get_backup_for_snapshot(self, snap_id: str,
+    def _get_backup_for_snapshot(self, snap_name: str,
                                   backups: list = None) -> dict:
-        """Return the backup entry that references *snap_id*, or None."""
+        """Return the backup entry that references *snap_name*, or None.
+
+        Note: backup list shows snapshot name (not snapshot UUID).
+        """
         if backups is None:
             backups = self._list_backups()
         for b in backups:
-            if any(snap_id in str(v) for v in b.values()):
+            if any(snap_name in str(v) for v in b.values()):
                 return b
         return None
 
@@ -464,9 +468,9 @@ class TestBackupBasicPositive(BackupTestBase):
             assert any(k in keys_lower for k in ("id", "uuid", "backup_id")), \
                 f"TC-BCK-003: backup entry missing ID field: {b}"
         # Validate first backup entry references the correct lvol and snapshot
-        self.logger.info("TC-BCK-003: validating backup entry references correct lvol_id and snap_id")
-        self._validate_backup_fields(backups[0], lvol_id=lvol_id, snap_id=snap1_id)
-        self.logger.info("TC-BCK-003: lvol_id and snap1_id found in backup entry ✓")
+        self.logger.info("TC-BCK-003: validating backup entry references correct lvol_id and snap_name")
+        self._validate_backup_fields(backups[0], lvol_id=lvol_id, snap_name=snap1_name)
+        self.logger.info("TC-BCK-003: lvol_id and snap1_name found in backup entry ✓")
 
         # --- TC-BCK-004: Trigger backup via `snapshot backup` on new snapshot ---
         snap2_name = f"snap2_{_rand_suffix()}"
@@ -481,13 +485,13 @@ class TestBackupBasicPositive(BackupTestBase):
         assert len(backups_after) >= 2, \
             f"TC-BCK-005: expected ≥2 backups, got {len(backups_after)}"
         # Verify both snap1 and snap2 are referenced somewhere in the backup list
-        snap1_entry = self._get_backup_for_snapshot(snap1_id, backups_after)
-        snap2_entry = self._get_backup_for_snapshot(snap2_id, backups_after)
+        snap1_entry = self._get_backup_for_snapshot(snap1_name, backups_after)
+        snap2_entry = self._get_backup_for_snapshot(snap2_name, backups_after)
         self.logger.info(
             f"TC-BCK-005: snap1 covered={snap1_entry is not None}, "
             f"snap2 covered={snap2_entry is not None}")
         assert snap1_entry is not None or snap2_entry is not None, (
-            f"TC-BCK-005: neither snap1 ({snap1_id}) nor snap2 ({snap2_id}) "
+            f"TC-BCK-005: neither snap1 ({snap1_name}) nor snap2 ({snap2_name}) "
             f"referenced in backup list: {backups_after}"
         )
         # Verify backup_id returned from snapshot-backup command is in the list
@@ -547,7 +551,7 @@ class TestBackupBasicPositive(BackupTestBase):
 
         # Find and wait for the backup associated with snap10
         backups_10 = self._list_backups()
-        snap10_entry = self._get_backup_for_snapshot(snap10_id, backups_10)
+        snap10_entry = self._get_backup_for_snapshot(snap10_name, backups_10)
         if snap10_entry is None and backups_10:
             snap10_entry = backups_10[-1]
         assert snap10_entry, "TC-BCK-010: no backup entry found after snap10"
@@ -639,7 +643,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         backups = self._list_backups()
         assert backups, "TC-BCK-011: no backups after snapshot+backup"
-        bk_entry = self._get_backup_for_snapshot(snap_id, backups) or backups[0]
+        bk_entry = self._get_backup_for_snapshot(snap_name, backups) or backups[0]
         backup_id = (
             bk_entry.get("id")
             or bk_entry.get("ID")
@@ -648,7 +652,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         )
         assert backup_id, f"TC-BCK-011: could not extract backup_id from {bk_entry}"
         self.logger.info("TC-BCK-011: validating backup entry references correct lvol and snapshot")
-        self._validate_backup_fields(bk_entry, lvol_id=lvol_id, snap_id=snap_id)
+        self._validate_backup_fields(bk_entry, lvol_id=lvol_id, snap_name=snap_name)
         self._wait_for_backup(backup_id)
         self.logger.info(f"TC-BCK-011: backup {backup_id} is done ✓")
 
@@ -1058,7 +1062,7 @@ class TestBackupCryptoLvol(BackupTestBase):
 
         backups = self._list_backups()
         assert backups, "TC-BCK-051: no backups after crypto snapshot+backup"
-        bk_entry = self._get_backup_for_snapshot(snap_id, backups) or backups[0]
+        bk_entry = self._get_backup_for_snapshot(snap_name, backups) or backups[0]
         bk_id = (
             bk_entry.get("id")
             or bk_entry.get("ID")
@@ -1067,7 +1071,7 @@ class TestBackupCryptoLvol(BackupTestBase):
         )
         assert bk_id, "TC-BCK-051: could not extract backup_id"
         self.logger.info("TC-BCK-051: validating backup entry references correct lvol and snapshot")
-        self._validate_backup_fields(bk_entry, lvol_id=crypto_id, snap_id=snap_id)
+        self._validate_backup_fields(bk_entry, lvol_id=crypto_id, snap_name=snap_name)
         self._wait_for_backup(bk_id)
         self.logger.info(f"TC-BCK-051: backup {bk_id} is done ✓")
 
@@ -1143,7 +1147,7 @@ class TestBackupCustomGeometry(BackupTestBase):
                     f"TC-BCK-060: no backup found for ndcs={ndcs} npcs={npcs}")
                 continue
 
-            bk_entry = self._get_backup_for_snapshot(snap_id, backups) or backups[0]
+            bk_entry = self._get_backup_for_snapshot(snap_name, backups) or backups[0]
             bk_id = (
                 bk_entry.get("id")
                 or bk_entry.get("ID")
@@ -1154,7 +1158,7 @@ class TestBackupCustomGeometry(BackupTestBase):
                 continue
             self.logger.info(
                 f"TC-BCK-060: validating backup entry for ndcs={ndcs} npcs={npcs}")
-            self._validate_backup_fields(bk_entry, lvol_id=lvol_id, snap_id=snap_id)
+            self._validate_backup_fields(bk_entry, lvol_id=lvol_id, snap_name=snap_name)
             self._wait_for_backup(bk_id)
             self.logger.info(f"TC-BCK-060: backup {bk_id} is done (ndcs={ndcs} npcs={npcs}) ✓")
 
@@ -1325,7 +1329,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
         backups = self._list_backups()
         assert backups, "TC-BCK-071: no backups found on Cluster-1 after snapshot"
-        bk_entry = self._get_backup_for_snapshot(snap_id, backups) or backups[0]
+        bk_entry = self._get_backup_for_snapshot(snap_name, backups) or backups[0]
         backup_id = (
             bk_entry.get("id") or bk_entry.get("ID") or bk_entry.get("uuid") or ""
         )
