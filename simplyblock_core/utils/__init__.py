@@ -2307,17 +2307,17 @@ def patch_cr_lvol_status(
         )
 
         status = cr.get("status", {})
-        lvols = status.get("lvols", [])
+        lvols = status.get("lvols", []) or []
 
-        # Ensure list exists
-        if lvols is None:
-            lvols = []
+        changed = False
 
         # ---- ADD ----
         if add is not None:
+            add = dict(add)
             add.setdefault("createDt", now)
             add["updateDt"] = now
             lvols.append(add)
+            changed = True
 
         # ---- UPDATE / REMOVE ----
         if lvol_uuid:
@@ -2329,18 +2329,47 @@ def patch_cr_lvol_status(
                     found = True
 
                     if remove:
+                        changed = True
                         continue
 
                     if updates:
-                        lvol.update(updates)
-                        lvol["updateDt"] = now
+                        updated_lvol = dict(lvol)
+                        updated_lvol.update(updates)
+                        updated_lvol["updateDt"] = now
+                        new_lvols.append(updated_lvol)
+                        changed = True
+                        continue
 
                 new_lvols.append(lvol)
 
             if not found:
-                raise RuntimeError(f"LVOL not found (uuid={lvol_uuid})")
+                if remove:
+                    logger.warning(
+                        "Skipping LVOL removal from CR status because LVOL was not found",
+                        extra={
+                            "cr_name": name,
+                            "namespace": namespace,
+                            "lvol_uuid": lvol_uuid,
+                        },
+                    )
+                    return
+
+                if updates:
+                    logger.warning(
+                        "Skipping LVOL status update because LVOL was not found",
+                        extra={
+                            "cr_name": name,
+                            "namespace": namespace,
+                            "lvol_uuid": lvol_uuid,
+                            "updates": updates,
+                        },
+                    )
+                    return
 
             lvols = new_lvols
+
+        if not changed:
+            return
 
         body = {
             "status": {
@@ -2361,7 +2390,6 @@ def patch_cr_lvol_status(
         logger.error(
             f"Failed to patch lvol status for {name}: {e.reason} {e.body}"
         )
-
 
 def get_node_name_by_ip(target_ip: str) -> str:
     load_kube_config_with_fallback()
