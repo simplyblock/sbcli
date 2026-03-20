@@ -1027,7 +1027,10 @@ def delete_lvol(id_or_name, force_delete=False):
     old_status = lvol.status
     lvol.status = LVol.STATUS_IN_DELETION
     lvol.write_to_db()
-    lvol_events.lvol_status_change(lvol, lvol.status, old_status)
+    try:
+        lvol_events.lvol_status_change(lvol, lvol.status, old_status)
+    except KeyError:
+        pass
 
     # if lvol is clone and snapshot is deleted, then delete snapshot
     if lvol.cloned_from_snap:
@@ -2152,7 +2155,7 @@ def resume_lvol(lvol_id):
     return True
 
 
-def replicate_lvol_on_source_cluster(lvol_id):
+def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2161,7 +2164,17 @@ def replicate_lvol_on_source_cluster(lvol_id):
         return False
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
-    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
+
+    if cluster_id and source_node.cluster_id == cluster_id:
+        new_source_cluster = db_controller.get_cluster_by_id(cluster_id)
+        if new_source_cluster.status != Cluster.STATUS_ACTIVE:
+            logger.error(f"Cluster is not active: {cluster_id}")
+            return False
+        # get new source node from the new cluster
+        nodes = _get_next_3_nodes(new_source_cluster.get_id(), lvol.size)
+        if not nodes:
+            return False, "No nodes found with enough resources to create the LVol"
+        source_node = nodes[0]
 
     if not source_node:
         logger.error(f"Node not found: {lvol.node_id}")
@@ -2171,10 +2184,6 @@ def replicate_lvol_on_source_cluster(lvol_id):
         logger.error(f"Node is not online!: {source_node.get_id()}, status: {source_node.status}")
         return False
 
-    # for lv in db_controller.get_lvols(source_cluster.snapshot_replication_target_cluster):
-    #     if lv.nqn == lvol.nqn:
-    #         logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
-    #         return lv.get_id()
 
     snaps = []
     snapshot = None
@@ -2203,6 +2212,8 @@ def replicate_lvol_on_source_cluster(lvol_id):
     new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.from_source = True
+    new_lvol.node_id = source_node.get_id()
+    new_lvol.nodes = [source_node.get_id(), source_node.secondary_node_id]
     new_lvol.status = LVol.STATUS_IN_CREATION
 
     new_lvol.bdev_stack = [
