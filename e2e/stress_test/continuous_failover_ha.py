@@ -954,7 +954,7 @@ class RandomFailoverTest(TestLvolHACluster):
             for clone, clone_details in self.clone_mount_details.items():
                 self.common_utils.validate_fio_test(self.fio_node,
                                                     log_file=clone_details["Log"])
-            
+
             for lvol, lvol_details in self.lvol_mount_details.items():
                 self.common_utils.validate_fio_test(self.fio_node,
                                                     log_file=lvol_details["Log"])

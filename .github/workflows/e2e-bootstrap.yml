@@ -213,8 +213,10 @@ on:
       # =========================
       CLUSTER_SECURITY:
         description: |
-          Enable cluster host security.
-          'host-sec' writes dhchap JSON to /root/host-sec.json on mgmt and passes --host-sec to cluster create.
+          Cluster setup mode.
+          'host-sec'        — writes dhchap JSON and passes --host-sec to cluster create.
+          'backup'          — writes s3-backup.json and passes --use-backup to cluster create.
+          'host-sec+backup' — applies both.
           Required for security E2E tests (TestLvolSecurity*, TestLvolAllowedHosts*, etc.)
         required: false
         type: choice
@@ -222,6 +224,8 @@ on:
         options:
           - none
           - host-sec
+          - backup
+          - host-sec+backup
 
 concurrency:
   group: simplyblock-lab-e2e-${{ inputs.MNODES }}
@@ -581,18 +585,18 @@ jobs:
           git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
           test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
 
-      - name: Write cluster security config to mgmt node
+      - name: Write cluster security/backup config to mgmt node
         shell: bash
         run: |
           set -euxo pipefail
           if [[ "${CLUSTER_SECURITY:-none}" == "none" || -z "${CLUSTER_SECURITY:-}" ]]; then
-            echo "Cluster security disabled; skipping."
+            echo "CLUSTER_SECURITY=none; skipping."
             exit 0
           fi
           mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
-          if [[ "${CLUSTER_SECURITY}" == "host-sec" ]]; then
+          if [[ "${CLUSTER_SECURITY}" == "host-sec" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
             echo "Writing /root/host-sec.json to ${mgmt_ip}..."
-            HOST_SEC_JSON='{"dhchap_digests":["sha256","sha384"],"dhchap_dhgroups":["ffdhe2048","ffdhe4096"]}'
+            HOST_SEC_JSON='{"dhchap_digests":["sha256","sha384"],"dhchap_dhgroups":["ffdhe2048","ffdhe3072","ffdhe4096","ffdhe6144","ffdhe8192"]}'
             sshpass -p "${SSH_PASSWORD}" ssh \
               -o StrictHostKeyChecking=no \
               -o UserKnownHostsFile=/dev/null \
@@ -600,6 +604,17 @@ jobs:
               "echo '${HOST_SEC_JSON}' > /root/host-sec.json && echo 'Written:' && cat /root/host-sec.json"
             echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --host-sec /root/host-sec.json" >> "$GITHUB_ENV"
             echo "Appended --host-sec /root/host-sec.json to EXTRA_CLUSTER_ARGS"
+          fi
+          if [[ "${CLUSTER_SECURITY}" == "backup" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
+            echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
+            S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":false}'
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${mgmt_ip}" \
+              "echo '${S3_BACKUP_JSON}' > /root/s3-backup.json && echo 'Written:' && cat /root/s3-backup.json"
+            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --use-backup /root/s3-backup.json" >> "$GITHUB_ENV"
+            echo "Appended --use-backup /root/s3-backup.json to EXTRA_CLUSTER_ARGS"
           fi
 
       - name: Remove /etc/simplyblock on all nodes and verify it is gone
