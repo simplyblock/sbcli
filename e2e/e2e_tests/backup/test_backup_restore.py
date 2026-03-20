@@ -172,7 +172,7 @@ class BackupTestBase(TestClusterBase):
         """Restore a backup to a new lvol; return the new lvol name."""
         pool = pool_name or self.pool_name
         out, err = self._sbcli(
-            f"backup restore {backup_id} --lvol-name {lvol_name} --pool {pool}")
+            f"backup restore {backup_id} --lvol {lvol_name} --pool {pool}")
         assert not (err and "error" in err.lower()), \
             f"backup restore failed: {err}"
         self.logger.info(f"Restore output: {out}")
@@ -189,18 +189,18 @@ class BackupTestBase(TestClusterBase):
             sleep_n_sec(_POLL_INTERVAL)
         raise TimeoutError(f"Restored lvol {lvol_name} not visible after {timeout}s")
 
-    def _validate_backup_fields(self, backup: dict, lvol_id: str = None,
+    def _validate_backup_fields(self, backup: dict, lvol_name: str = None,
                                  snap_name: str = None) -> None:
-        """Assert that *backup* entry references the expected lvol and/or snapshot name.
+        """Assert that *backup* entry references the expected lvol name and/or snapshot name.
 
         Searches all field values in the backup dict so it is resilient to
         varying column names across sbcli versions.
-        Note: backup list shows snapshot name (not snapshot UUID) and lvol_id.
+        Note: backup list shows lvol name (not UUID) and snapshot name (not UUID).
         """
         all_values = " ".join(str(v) for v in backup.values())
-        if lvol_id:
-            assert lvol_id in all_values, \
-                f"Backup entry does not reference lvol_id {lvol_id}: {backup}"
+        if lvol_name:
+            assert lvol_name in all_values, \
+                f"Backup entry does not reference lvol_name {lvol_name}: {backup}"
         if snap_name:
             assert snap_name in all_values, \
                 f"Backup entry does not reference snapshot name {snap_name}: {backup}"
@@ -222,6 +222,7 @@ class BackupTestBase(TestClusterBase):
 
     def _add_policy(self, name: str, versions: int = 0, age: str = "") -> str:
         """Create a backup policy; return policy ID."""
+        import re as _re
         cmd = f"backup policy-add {self.cluster_id} {name}"
         if versions:
             cmd += f" --versions {versions}"
@@ -230,7 +231,10 @@ class BackupTestBase(TestClusterBase):
         out, err = self._sbcli(cmd)
         assert not (err and "error" in err.lower()), \
             f"policy-add failed: {err}"
-        policy_id = out.strip().split()[-1] if out.strip() else ""
+        # Output is "Policy created: <uuid>\nTrue" — extract UUID explicitly
+        match = _re.search(
+            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', out)
+        policy_id = match.group() if match else ""
         assert policy_id, f"No policy ID returned: {out}"
         self.created_policies.append(policy_id)
         return policy_id
@@ -273,9 +277,9 @@ class BackupTestBase(TestClusterBase):
             key2=self.lvol_crypt_keys[1] if crypto else None,
         )
         if ndcs is not None:
-            kwargs["ndcs"] = ndcs
+            kwargs["distr_ndcs"] = ndcs
         if npcs is not None:
-            kwargs["npcs"] = npcs
+            kwargs["distr_npcs"] = npcs
         self.sbcli_utils.add_lvol(**kwargs)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=name)
         self.created_lvols.append(name)
@@ -469,7 +473,7 @@ class TestBackupBasicPositive(BackupTestBase):
                 f"TC-BCK-003: backup entry missing ID field: {b}"
         # Validate first backup entry references the correct lvol and snapshot
         self.logger.info("TC-BCK-003: validating backup entry references correct lvol_id and snap_name")
-        self._validate_backup_fields(backups[0], lvol_id=lvol_id, snap_name=snap1_name)
+        self._validate_backup_fields(backups[0], lvol_name=lvol_name, snap_name=snap1_name)
         self.logger.info("TC-BCK-003: lvol_id and snap1_name found in backup entry ✓")
 
         # --- TC-BCK-004: Trigger backup via `snapshot backup` on new snapshot ---
@@ -533,7 +537,7 @@ class TestBackupBasicPositive(BackupTestBase):
         if parsed_8:
             self.logger.info(
                 "TC-BCK-008: validating --cluster-id filter entry references correct lvol_id")
-            self._validate_backup_fields(parsed_8[0], lvol_id=lvol_id)
+            self._validate_backup_fields(parsed_8[0], lvol_name=lvol_name)
             self.logger.info("TC-BCK-008: cluster-id filter backup entry references correct lvol ✓")
 
         # --- TC-BCK-009: policy-list returns no error even when empty ---
@@ -652,7 +656,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         )
         assert backup_id, f"TC-BCK-011: could not extract backup_id from {bk_entry}"
         self.logger.info("TC-BCK-011: validating backup entry references correct lvol and snapshot")
-        self._validate_backup_fields(bk_entry, lvol_id=lvol_id, snap_name=snap_name)
+        self._validate_backup_fields(bk_entry, lvol_name=lvol_name, snap_name=snap_name)
         self._wait_for_backup(backup_id)
         self.logger.info(f"TC-BCK-011: backup {backup_id} is done ✓")
 
@@ -1071,7 +1075,7 @@ class TestBackupCryptoLvol(BackupTestBase):
         )
         assert bk_id, "TC-BCK-051: could not extract backup_id"
         self.logger.info("TC-BCK-051: validating backup entry references correct lvol and snapshot")
-        self._validate_backup_fields(bk_entry, lvol_id=crypto_id, snap_name=snap_name)
+        self._validate_backup_fields(bk_entry, lvol_name=crypto_name, snap_name=snap_name)
         self._wait_for_backup(bk_id)
         self.logger.info(f"TC-BCK-051: backup {bk_id} is done ✓")
 
@@ -1158,7 +1162,7 @@ class TestBackupCustomGeometry(BackupTestBase):
                 continue
             self.logger.info(
                 f"TC-BCK-060: validating backup entry for ndcs={ndcs} npcs={npcs}")
-            self._validate_backup_fields(bk_entry, lvol_id=lvol_id, snap_name=snap_name)
+            self._validate_backup_fields(bk_entry, lvol_name=lvol_name, snap_name=snap_name)
             self._wait_for_backup(bk_id)
             self.logger.info(f"TC-BCK-060: backup {bk_id} is done (ndcs={ndcs} npcs={npcs}) ✓")
 
