@@ -146,8 +146,9 @@ def add(lvol_id, snapshot_name, backup=False):
         try:
             # Build nodes list with all secondaries
             secondary_ids = [host_node.secondary_node_id]
-            if host_node.secondary_node_id_2:
-                secondary_ids.append(host_node.secondary_node_id_2)
+            second_secondary_id = getattr(host_node, "secondary_node_id_2", "")
+            if second_secondary_id:
+                secondary_ids.append(second_secondary_id)
             lvol.nodes = [host_node.get_id()] + secondary_ids
 
             if host_node.status == StorageNode.STATUS_ONLINE:
@@ -578,8 +579,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         host_node = snode
         # Build nodes list with all secondaries
         secondary_ids = [host_node.secondary_node_id]
-        if host_node.secondary_node_id_2:
-            secondary_ids.append(host_node.secondary_node_id_2)
+        second_secondary_id = getattr(host_node, "secondary_node_id_2", "")
+        if second_secondary_id:
+            secondary_ids.append(second_secondary_id)
         lvol.nodes = [host_node.get_id()] + secondary_ids
         had_lock = _acquire_lvol_mutation_lock(host_node)
 
