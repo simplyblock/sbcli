@@ -471,10 +471,12 @@ class TestBackupBasicPositive(BackupTestBase):
             keys_lower = {k.lower() for k in b.keys()}
             assert any(k in keys_lower for k in ("id", "uuid", "backup_id")), \
                 f"TC-BCK-003: backup entry missing ID field: {b}"
-        # Validate first backup entry references the correct lvol and snapshot
-        self.logger.info("TC-BCK-003: validating backup entry references correct lvol_id and snap_name")
-        self._validate_backup_fields(backups[0], lvol_name=lvol_name, snap_name=snap1_name)
-        self.logger.info("TC-BCK-003: lvol_id and snap1_name found in backup entry ✓")
+        # Validate the entry for snap1 references the correct lvol and snapshot
+        self.logger.info("TC-BCK-003: validating backup entry references correct lvol_name and snap_name")
+        snap1_bk = self._get_backup_for_snapshot(snap1_name, backups)
+        assert snap1_bk, f"TC-BCK-003: no backup entry found for snap1 ({snap1_name})"
+        self._validate_backup_fields(snap1_bk, lvol_name=lvol_name, snap_name=snap1_name)
+        self.logger.info("TC-BCK-003: lvol_name and snap1_name found in backup entry ✓")
 
         # --- TC-BCK-004: Trigger backup via `snapshot backup` on new snapshot ---
         snap2_name = f"snap2_{_rand_suffix()}"
@@ -593,8 +595,7 @@ class TestBackupBasicPositive(BackupTestBase):
             mount=f"{self.mount_path}/rest10_{_rand_suffix()}")
         r10_files = self.ssh_obj.find_files(self.fio_node, r10_mount)
         self.ssh_obj.verify_checksums(
-            self.fio_node, r10_files, original_checksums,
-            message="TC-BCK-010: checksum mismatch after delete-snapshot-then-restore")
+            self.fio_node, r10_files, original_checksums)
         self.logger.info("TC-BCK-010: delete-snapshot-then-restore checksums match ✓")
 
         self.logger.info("=== TestBackupBasicPositive PASSED ===")
@@ -678,8 +679,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         restored_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         restored_checksums = self.ssh_obj.generate_checksums(self.fio_node, restored_files)
         self.ssh_obj.verify_checksums(
-            self.fio_node, restored_files, original_checksums,
-            message="TC-BCK-014: checksum mismatch after restore")
+            self.fio_node, restored_files, original_checksums)
         self.logger.info("TC-BCK-014: checksums match ✓")
 
         # --- TC-BCK-015: FIO on restored lvol ---
@@ -715,8 +715,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             dr_name, dr_id, mount=f"{self.mount_path}/dr_{_rand_suffix()}")
         dr_files = self.ssh_obj.find_files(self.fio_node, dr_mount)
         self.ssh_obj.verify_checksums(
-            self.fio_node, dr_files, original_checksums,
-            message="TC-BCK-016: checksum mismatch on disaster-recovery restore")
+            self.fio_node, dr_files, original_checksums)
         self.logger.info("TC-BCK-016: disaster recovery checksums match ✓")
 
         # --- TC-BCK-017: Restore to a second pool; verify checksum ---
@@ -731,8 +730,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             self._connect_and_mount(pool2_name, pool2_id, mount=p2_mount)
             p2_files = self.ssh_obj.find_files(self.fio_node, p2_mount)
             self.ssh_obj.verify_checksums(
-                self.fio_node, p2_files, original_checksums,
-                message="TC-BCK-017: checksum mismatch after restore to second pool")
+                self.fio_node, p2_files, original_checksums)
             self.logger.info("TC-BCK-017: restore to second pool checksums match ✓")
         finally:
             try:
@@ -1096,8 +1094,7 @@ class TestBackupCryptoLvol(BackupTestBase):
         self.logger.info("TC-BCK-054: checksum validation on restored crypto lvol")
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
-            self.fio_node, r_files, orig_checksums,
-            message="TC-BCK-054: checksum mismatch on restored crypto lvol")
+            self.fio_node, r_files, orig_checksums)
         self.logger.info("TC-BCK-054: checksums match ✓")
 
         # --- TC-BCK-055: FIO on restored crypto lvol ---
@@ -1175,8 +1172,7 @@ class TestBackupCustomGeometry(BackupTestBase):
                 mount=f"{self.mount_path}/geom_{ndcs}_{npcs}_{_rand_suffix()}")
             r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
             self.ssh_obj.verify_checksums(
-                self.fio_node, r_files, orig_checksums,
-                message=f"TC-BCK-060: checksum mismatch ndcs={ndcs} npcs={npcs}")
+                self.fio_node, r_files, orig_checksums)
             self.logger.info(f"TC-BCK-060: ndcs={ndcs} npcs={npcs} ✓")
 
         self.logger.info("=== TestBackupCustomGeometry PASSED ===")
@@ -1426,8 +1422,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
             r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
             self.ssh_obj.verify_checksums(
-                self.fio_node, r_files, orig_checksums,
-                message="TC-BCK-076: cross-cluster restore checksum mismatch")
+                self.fio_node, r_files, orig_checksums)
             self.logger.info("TC-BCK-076: cross-cluster restore checksums match ✓")
 
         finally:
