@@ -987,6 +987,21 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     return new_devs
 
 
+def _refresh_cluster_maps_after_node_recovery(snode: StorageNode):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+
+    # Push a full cluster map after reconnect/restart recovery so peers do not
+    # remain on stale per-device availability derived from transient reconnect state.
+    distr_controller.send_cluster_map_to_node(snode)
+
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.get_id() == snode.get_id():
+            continue
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            distr_controller.send_cluster_map_to_node(node)
+
+
 def ifc_is_tcp(nic):
     addrs = psutil.net_if_addrs().get(nic, [])
     for addr in addrs:
@@ -2196,6 +2211,7 @@ def restart_storage_node(
         logger.info("Cluster is not ready yet")
         logger.info("Setting node status to Online")
         set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
+        _refresh_cluster_maps_after_node_recovery(snode)
         return True
 
     else:
@@ -2266,6 +2282,7 @@ def restart_storage_node(
 
             logger.info("Setting node status to Online")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+            _refresh_cluster_maps_after_node_recovery(snode)
 
             lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
             logger.info(f"Found {len(lvol_list)} lvols")
@@ -2702,6 +2719,7 @@ def resume_storage_node(node_id):
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db()
+    _refresh_cluster_maps_after_node_recovery(snode)
 
     fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
