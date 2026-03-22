@@ -25,9 +25,9 @@ on:
       SBCLI_BRANCH:
         type: string
         default: "R25.10-Hotfix"
-      SIMPLY_BLOCK_SPDK_ULTRA_IMAGE:
+      CUSTOM_IMAGES:
         type: string
-        default: ""
+        default: 'spdk="" docker=""'
       SSH_USER:
         type: string
         default: "root"
@@ -120,8 +120,9 @@ on:
         required: true
         default: "R25.10-Hotfix"
 
-      SIMPLY_BLOCK_SPDK_ULTRA_IMAGE:
-        description: "Optional SPDK image (if set, pass --spdk-image)"
+      CUSTOM_IMAGES:
+        description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
+        default: 'spdk="" docker=""'
         required: false
 
       # =========================
@@ -325,16 +326,25 @@ jobs:
             exit 1
           fi
 
-      - name: Export SPDK image env (only if provided)
+      - name: Parse CUSTOM_IMAGES overrides
         shell: bash
         run: |
           set -euxo pipefail
-          if [[ -n "${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" ]]; then
-            echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" >> "$GITHUB_ENV"
-            echo "SPDK image exported"
-          else
-            echo "SPDK image not provided; skipping export"
-          fi
+          custom="${{ inputs.CUSTOM_IMAGES }}"
+          for item in $custom; do
+            key="${item%%=*}"
+            value="${item#*=}"
+            value="${value//\"/}"   # strip surrounding quotes
+            if [[ -z "$value" ]]; then
+              echo "Skipping $key (empty)"
+              continue
+            fi
+            case "$key" in
+              spdk)   echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=$value" >> "$GITHUB_ENV" ; echo "SPDK image set: $value" ;;
+              docker) echo "SIMPLY_BLOCK_DOCKER_IMAGE=$value"     >> "$GITHUB_ENV" ; echo "Docker image set: $value" ;;
+              *)      echo "Unknown image key: $key (ignored)" ;;
+            esac
+          done
 
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash

@@ -11,18 +11,14 @@ on:
         type: string
         required: true
         description: "sbcli branch / version tag to bootstrap the cluster with (e.g. R25.10-Hotfix)"
-      BASE_SPDK_IMAGE:
+      CUSTOM_IMAGES:
         type: string
-        default: ""
-        description: "SPDK image for the base deployment (empty = bootstrap default)"
+        default: 'base_spdk="" target_spdk="" base_docker="" target_docker=""'
+        description: "Image overrides: set base_spdk, target_spdk, base_docker and/or target_docker values, leave as \"\" to skip."
       TARGET_SBCLI_BRANCH:
         type: string
         required: true
         description: "sbcli branch / version tag to upgrade to (e.g. main)"
-      TARGET_SPDK_IMAGE:
-        type: string
-        default: ""
-        description: "SPDK image for the target version (empty = default)"
       STORAGE_PRIVATE_IPS:
         type: string
         default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
@@ -93,17 +89,13 @@ on:
       BASE_SBCLI_BRANCH:
         description: "sbcli branch / version tag to bootstrap the cluster with (e.g. R25.10-Hotfix)"
         required: true
-      BASE_SPDK_IMAGE:
-        description: "SPDK image for the base deployment (empty = bootstrap default)"
+      CUSTOM_IMAGES:
+        description: "Image overrides: set base_spdk, target_spdk, base_docker and/or target_docker values, leave as \"\" to skip."
         required: false
-        default: ""
+        default: 'base_spdk="" target_spdk="" base_docker="" target_docker=""'
       TARGET_SBCLI_BRANCH:
         description: "sbcli branch / version tag to upgrade to (e.g. main)"
         required: true
-      TARGET_SPDK_IMAGE:
-        description: "SPDK image for the target version (empty = default)"
-        required: false
-        default: ""
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
@@ -199,10 +191,9 @@ jobs:
 
     env:
       # Upgrade-specific
-      BASE_SBCLI_BRANCH:  ${{ inputs.BASE_SBCLI_BRANCH }}
-      BASE_SPDK_IMAGE:    ${{ inputs.BASE_SPDK_IMAGE || '' }}
+      BASE_SBCLI_BRANCH:   ${{ inputs.BASE_SBCLI_BRANCH }}
       TARGET_SBCLI_BRANCH: ${{ inputs.TARGET_SBCLI_BRANCH }}
-      TARGET_SPDK_IMAGE:  ${{ inputs.TARGET_SPDK_IMAGE || '' }}
+      CUSTOM_IMAGES:       ${{ inputs.CUSTOM_IMAGES || 'base_spdk="" target_spdk="" base_docker="" target_docker=""' }}
 
       # Cluster/lab env
       STORAGE_PRIVATE_IPS:     ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208' }}
@@ -282,16 +273,33 @@ jobs:
             exit 1
           fi
 
-      - name: Export BASE_SPDK_IMAGE env (only if provided)
+      - name: Parse CUSTOM_IMAGES overrides
         shell: bash
         run: |
           set -euxo pipefail
-          if [[ -n "${BASE_SPDK_IMAGE}" ]]; then
-            echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=${BASE_SPDK_IMAGE}" >> "$GITHUB_ENV"
-            echo "Base SPDK image exported: ${BASE_SPDK_IMAGE}"
-          else
-            echo "Base SPDK image not provided; bootstrap will use its default"
-          fi
+          custom="${CUSTOM_IMAGES}"
+          for item in $custom; do
+            key="${item%%=*}"
+            value="${item#*=}"
+            value="${value//\"/}"
+            if [[ -z "$value" ]]; then
+              echo "Skipping $key (empty)"
+              continue
+            fi
+            case "$key" in
+              base_spdk)    echo "BASE_SPDK_IMAGE=$value"               >> "$GITHUB_ENV"
+                            echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=$value"  >> "$GITHUB_ENV"
+                            echo "Base SPDK image set: $value" ;;
+              target_spdk)  echo "TARGET_SPDK_IMAGE=$value"             >> "$GITHUB_ENV"
+                            echo "Target SPDK image set: $value" ;;
+              base_docker)  echo "BASE_DOCKER_IMAGE=$value"             >> "$GITHUB_ENV"
+                            echo "SIMPLY_BLOCK_DOCKER_IMAGE=$value"      >> "$GITHUB_ENV"
+                            echo "Base Docker image set: $value" ;;
+              target_docker) echo "TARGET_DOCKER_IMAGE=$value"          >> "$GITHUB_ENV"
+                            echo "Target Docker image set: $value" ;;
+              *)            echo "Unknown image key: $key (ignored)" ;;
+            esac
+          done
 
       - name: Resolve KEY_PATH and validate key exists
         shell: bash
@@ -534,9 +542,12 @@ jobs:
           chmod +x ./bootstrap-cluster.sh
 
           extra_args=()
-          # BASE_SPDK_IMAGE exported as SIMPLY_BLOCK_SPDK_ULTRA_IMAGE in an earlier step
+          # Images exported by the "Parse CUSTOM_IMAGES overrides" step
           if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
             extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
+          fi
+          if [[ -n "${SIMPLY_BLOCK_DOCKER_IMAGE-}" ]]; then
+            extra_args+=( --docker-image "${SIMPLY_BLOCK_DOCKER_IMAGE}" )
           fi
           # Always force single-node for this workflow
           extra_args+=( --is-single-node true )
@@ -661,8 +672,9 @@ jobs:
           python3 -u upgrade_e2e.py \
             --base_version "${BASE_SBCLI_BRANCH}" \
             --target_version "${TARGET_SBCLI_BRANCH}" \
-            --base_spdk_image "${BASE_SPDK_IMAGE}" \
-            --target_spdk_image "${TARGET_SPDK_IMAGE}" \
+            --base_spdk_image "${BASE_SPDK_IMAGE:-}" \
+            --target_spdk_image "${TARGET_SPDK_IMAGE:-}" \
+            --target_docker_image "${TARGET_DOCKER_IMAGE:-}" \
             "${TESTNAME_ARGS[@]}" \
             2>&1 | tee output.log
 

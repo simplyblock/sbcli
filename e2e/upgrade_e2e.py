@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--target_version', type=str, required=False, default="latest", help="Target version to upgrade to")
     parser.add_argument('--base_spdk_image', type=str, required=False, default="", help="SPDK image used for the base deployment")
     parser.add_argument('--target_spdk_image', type=str, required=False, default="", help="SPDK image to use when upgrading to target version")
+    parser.add_argument('--target_docker_image', type=str, required=False, default="", help="Docker image to use on storage nodes when upgrading to target version")
     parser.add_argument('--fio_debug', type=bool, help="Add debug flag to fio", default=False)
     parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
@@ -41,6 +42,7 @@ def main():
                         target_version=args.target_version,
                         base_spdk_image=args.base_spdk_image,
                         target_spdk_image=args.target_spdk_image,
+                        target_docker_image=args.target_docker_image,
                         fio_debug=args.fio_debug,
                         k8s_run=args.run_k8s)
         try:
