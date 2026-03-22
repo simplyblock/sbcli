@@ -546,9 +546,6 @@ jobs:
           if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
             extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
           fi
-          if [[ -n "${SIMPLY_BLOCK_DOCKER_IMAGE-}" ]]; then
-            extra_args+=( --docker-image "${SIMPLY_BLOCK_DOCKER_IMAGE}" )
-          fi
           # Always force single-node for this workflow
           extra_args+=( --is-single-node true )
           if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
