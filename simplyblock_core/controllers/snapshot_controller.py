@@ -648,9 +648,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 lvol.lvol_uuid = lvol_bdev['uuid']
                 lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-            for sec_idx, sec in enumerate(secondary_nodes):
+            for sec in secondary_nodes:
                 lvol_bdev, error = lvol_controller.add_lvol_on_node(
-                    lvol, sec, is_primary=False, secondary_index=sec_idx)
+                    lvol, sec, is_primary=False)
                 if error:
                     logger.error(error)
                     _rollback_lvol_creation(lvol, created_nodes)
