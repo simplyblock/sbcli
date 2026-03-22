@@ -784,9 +784,12 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 else:
                     rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
-        ana_state = "non_optimized"
-        if lvol.node_id == snode.get_id():
+        if is_primary or lvol.node_id == snode.get_id():
             ana_state = "optimized"
+        elif secondary_index >= 1:
+            ana_state = "inaccessible"
+        else:
+            ana_state = "non_optimized"
 
         # add listeners
         # Use the per-lvstore port for the lvol's lvstore
