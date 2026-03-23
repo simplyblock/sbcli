@@ -192,6 +192,7 @@ jobs:
     env:
       # Upgrade-specific
       BASE_SBCLI_BRANCH:   ${{ inputs.BASE_SBCLI_BRANCH }}
+      SBCLI_BRANCH:   ${{ inputs.BASE_SBCLI_BRANCH }}
       TARGET_SBCLI_BRANCH: ${{ inputs.TARGET_SBCLI_BRANCH }}
       CUSTOM_IMAGES:       ${{ inputs.CUSTOM_IMAGES || 'base_spdk="" target_spdk="" base_docker="" target_docker=""' }}
 
