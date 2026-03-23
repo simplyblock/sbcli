@@ -1277,7 +1277,7 @@ def get_replication_info(lvol_id_or_name):
 
     if not lvol:
         logger.error(f"LVol id or name not found: {lvol_id_or_name}")
-        return False
+        return None
 
     tasks = []
     snaps = []
