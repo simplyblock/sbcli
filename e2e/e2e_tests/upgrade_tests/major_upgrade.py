@@ -496,6 +496,9 @@ class TestMajorUpgrade(TestClusterBase):
     # ------------------------------------------------------------------
 
     def run(self):
+        # Resolve base_log_root now that setup() has populated docker_logs_path
+        self.base_log_root = f"{self.docker_logs_path}/upgrade_fio_logs"
+
         # ----------------------------------------------------------------
         # Step 1: Verify base version
         # ----------------------------------------------------------------

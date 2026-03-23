@@ -58,6 +58,7 @@ Test class map
 
 import json
 import os
+import re
 import random
 import string
 import threading
@@ -142,7 +143,8 @@ class BackupTestBase(TestClusterBase):
         out, err = self._sbcli(f"snapshot backup {snapshot_id}")
         assert not (err and "error" in err.lower()), \
             f"snapshot backup failed: {err}"
-        backup_id = out.strip().split()[-1] if out.strip() else ""
+        match = re.search(r"Backup task created:\s*([0-9a-f-]{36})", out or "")
+        backup_id = match.group(1) if match else ""
         assert backup_id, f"No backup ID returned: {out}"
         return backup_id
 
