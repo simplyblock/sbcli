@@ -716,11 +716,11 @@ class SshUtils:
     #     return "", "Command failed after max retries"
 
     def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None, supress_logs=False, raise_on_error=False):
-        “””
+        '''
         Execute a command with auto-reconnect (serialized per node), optional streaming,
         and proper exit-status capture to reduce “ran but no output” confusion.
         If raise_on_error=True, raises RuntimeError when exit_status != 0.
-        “””
+        '''
         retry = 0
         while retry < max_retries:
             with self.ssh_semaphore:
