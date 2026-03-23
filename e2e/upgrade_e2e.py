@@ -31,7 +31,8 @@ def main():
         test_class_run = upgrade_tests
     else:
         for cls in upgrade_tests:
-            if args.testname.lower() in cls.__name__.lower():
+            needle = args.testname.lower().replace("_", "")
+            if needle in cls.__name__.lower():
                 test_class_run.append(cls)
     passed_cases = []
     errors = {}
