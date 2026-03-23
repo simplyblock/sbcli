@@ -118,6 +118,7 @@ class DBController(metaclass=Singleton):
 
     def get_lvols(self, cluster_id=None) -> List[LVol]:
         lvols = self.get_all_lvols()
+        lvols = [lvol for lvol in lvols if lvol.status != LVol.STATUS_DELETED]
         if not cluster_id:
             return lvols
 

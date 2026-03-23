@@ -2246,17 +2246,17 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None):
 
     logger.debug(f"new lvol from_source: {new_lvol.from_source}")
 
-    # lvol = db_controller.get_lvol_by_id(lvol_id)
-    lvol.uuid = str(uuid.uuid4())
-    lvol.from_source = True
-    lvol.write_to_db()
-    time.sleep(3)
-
-    logger.debug(f"old lvol from_source: {lvol.from_source}")
-
-    delete_lvol(lvol.uuid)
-
-    time.sleep(3)
+    # # lvol = db_controller.get_lvol_by_id(lvol_id)
+    # lvol.uuid = str(uuid.uuid4())
+    # lvol.from_source = True
+    # lvol.write_to_db()
+    # time.sleep(3)
+    #
+    # logger.debug(f"old lvol from_source: {lvol.from_source}")
+    #
+    # delete_lvol(lvol.uuid)
+    #
+    # time.sleep(3)
 
     lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:

@@ -12,6 +12,7 @@ class LVol(BaseModel):
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
+    STATUS_DELETED = 'deleted'
 
     _STATUS_CODE_MAP = {
         STATUS_ONLINE: 1,
