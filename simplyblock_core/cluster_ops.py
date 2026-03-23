@@ -1445,13 +1445,25 @@ def delete_cluster(cl_id) -> None:
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
 
-def set(cl_id, attr, value) -> None:
+def set(cl_id, attr, value) -> bool:
     cluster = db_controller.get_cluster_by_id(cl_id)
-
-    if attr not in cluster.get_attrs_map():
+    key_splits = attr.split(".")
+    key = key_splits[0]
+    if key not in cluster.get_attrs_map():
         raise KeyError('Attribute not found')
 
-    value = cluster.get_attrs_map()[attr]['type'](value)
-    logger.info(f"Setting {attr} to {value}")
-    setattr(cluster, attr, value)
-    cluster.write_to_db()
+    if len(key_splits) > 1:
+        key_info = cluster.get_attrs_map()[key]
+        if key_info["type"] == dict:
+            sub_key = key_splits[1]
+            if sub_key in cluster[key]:
+                cluster[key][sub_key] = value
+                logger.info(f"Setting {attr} to {value}")
+                cluster.write_to_db()
+                return True
+    else:
+        value = cluster.get_attrs_map()[attr]['type'](value)
+        logger.info(f"Setting {attr} to {value}")
+        setattr(cluster, attr, value)
+        cluster.write_to_db()
+    return True
