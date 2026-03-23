@@ -2215,7 +2215,10 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None):
     new_lvol.node_id = source_node.get_id()
     new_lvol.nodes = [source_node.get_id(), source_node.secondary_node_id]
     new_lvol.status = LVol.STATUS_IN_CREATION
-
+    new_lvol.vuid = utils.get_random_vuid()
+    new_lvol.lvol_bdev = f"LVOL_{new_lvol.vuid}"
+    new_lvol.lvs_name = source_node.lvstore
+    new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     new_lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
