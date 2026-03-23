@@ -1,2 +1,0 @@
-- import_playbook: plays/delete_instances.yaml
-- import_playbook: plays/delete_key_pairs.yaml

@@ -1,5 +1,0 @@
-ansible-core
-botocore
-boto3
-cryptography
-pyOpenSSL

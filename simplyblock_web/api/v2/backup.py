@@ -17,6 +17,7 @@ db = DBController()
 @api.get('/', name='clusters:backups:list')
 def list_backups(cluster: Cluster) -> List[BackupDTO]:
     backups = db.get_backups(cluster.get_id())
+    backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
     return [BackupDTO.from_model(b) for b in backups]
 
 
