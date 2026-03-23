@@ -2155,7 +2155,7 @@ def resume_lvol(lvol_id):
     return True
 
 
-def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None):
+def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2219,6 +2219,10 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None):
     new_lvol.lvol_bdev = f"LVOL_{new_lvol.vuid}"
     new_lvol.lvs_name = source_node.lvstore
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
+    if pool_uuid:
+        new_pool = db_controller.get_pool_by_id(pool_uuid)
+        new_lvol.pool_uuid = new_pool.get_id()
+        new_lvol.pool_name = new_pool.pool_name
     new_lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
