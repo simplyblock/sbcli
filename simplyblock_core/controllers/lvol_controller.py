@@ -1191,7 +1191,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         except KeyError:
             pass
     else:
-        lvols = db_controller.get_all_lvols()
+        lvols = db_controller.get_lvols()
 
     data = []
 
