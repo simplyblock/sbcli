@@ -1,0 +1,808 @@
+name: Bootstrap K8s Cluster + Stress Run Until Failure
+run-name: "K8s Stress Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.K3S_MNODES }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # =========================
+      # Cluster / Lab inputs
+      # =========================
+      K3S_MNODES:
+        description: "K3s master node IP (also used as API endpoint)"
+        required: true
+        default: "192.168.10.81"
+
+      STORAGE_PRIVATE_IPS:
+        description: "Space-separated storage node IPs (K8s worker nodes)"
+        required: true
+        default: "192.168.10.82 192.168.10.83 192.168.10.84"
+
+      API_INVOKE_URL:
+        description: "Cluster API URL (default: http://<K3S_MNODES>/)"
+        required: false
+        default: ""
+
+      GRAFANA_ENDPOINT:
+        description: "Grafana endpoint"
+        required: false
+        default: ""
+
+      SBCLI_CMD:
+        description: "sbcli command name (inside admin pod)"
+        required: true
+        default: "sbctl"
+
+      SBCLI_BRANCH:
+        description: "sbcli repo branch for test code"
+        required: true
+        default: "main"
+
+      K8S_CHARTS_BRANCH:
+        description: "sbcli branch that contains simplyblock_core/scripts/charts"
+        required: false
+        default: "main-sfam-2359"
+
+      K8S_NAMESPACE:
+        description: "Kubernetes namespace for simplyblock"
+        required: false
+        default: "simplyblock"
+
+      # =========================
+      # SSH / client inputs
+      # =========================
+      SSH_USER:
+        description: "SSH user for all nodes"
+        required: true
+        default: "root"
+
+      KEY_PATH:
+        description: "SSH private key path on runner"
+        required: true
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+
+      CLIENTNODES:
+        description: "Space-separated client node IPs"
+        required: true
+        default: "192.168.10.165 192.168.10.166"
+
+      # =========================
+      # Cleanup inputs
+      # =========================
+      NFS_MOUNTPOINT:
+        description: "NFS mountpoint to unmount everywhere"
+        required: true
+        default: "/mnt/nfs_share"
+
+      # =========================
+      # Bootstrap params
+      # =========================
+      BOOTSTRAP_DATA_NIC:
+        description: "Data NIC on storage nodes (passed to k3s bootstrap)"
+        required: true
+        default: "eth1"
+
+      EXTRA_HELM_ARGS:
+        description: "Extra --set flags for helm upgrade --install (space-separated)"
+        required: false
+        default: ""
+
+      # =========================
+      # Stress test inputs
+      # =========================
+      TEST_CLASS:
+        description: "Stress test class name (default: RandomK8sMultiOutageFailoverTest)"
+        required: true
+        default: "RandomK8sMultiOutageFailoverTest"
+
+      NDCS:
+        description: "ndcs passed to stress.py"
+        required: false
+        default: "1"
+
+      NPCS:
+        description: "npcs passed to stress.py"
+        required: false
+        default: "1"
+
+      CUSTOM_IMAGES:
+        description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
+        default: 'spdk="" docker=""'
+        required: false
+
+concurrency:
+  group: simplyblock-lab-k8s-stress-${{ inputs.K3S_MNODES }}
+  cancel-in-progress: false
+
+jobs:
+  bootstrap-and-stress-k8s:
+    name: K8s Pre-clean -> Bootstrap -> Helm -> Stress
+    runs-on: [self-hosted]
+    timeout-minutes: 4320
+
+    env:
+      # Cluster/lab env
+      K3S_MNODES:          ${{ inputs.K3S_MNODES }}
+      MNODES:              ${{ inputs.K3S_MNODES }}
+      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
+      BASTION_SERVER:      ${{ inputs.K3S_MNODES }}
+      BASTION_IP:          ${{ inputs.K3S_MNODES }}
+      K8S_NAMESPACE:       ${{ inputs.K8S_NAMESPACE || 'simplyblock' }}
+      GRAFANA_ENDPOINT:    ${{ inputs.GRAFANA_ENDPOINT || '' }}
+      SBCLI_CMD:           ${{ inputs.SBCLI_CMD }}
+      SBCLI_BRANCH:        ${{ inputs.SBCLI_BRANCH }}
+      K8S_CHARTS_BRANCH:   ${{ inputs.K8S_CHARTS_BRANCH || 'main-sfam-2359' }}
+      BOOTSTRAP_DATA_NIC:  ${{ inputs.BOOTSTRAP_DATA_NIC }}
+      EXTRA_HELM_ARGS:     ${{ inputs.EXTRA_HELM_ARGS || '' }}
+
+      # SSH/client env
+      SSH_USER:    ${{ inputs.SSH_USER }}
+      KEY_PATH:    ${{ inputs.KEY_PATH }}
+      CLIENTNODES: ${{ inputs.CLIENTNODES }}
+      CLIENT_IP:   ${{ inputs.CLIENTNODES }}
+
+      # Cleanup
+      NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT }}
+
+      # Stress
+      TEST_CLASS: ${{ inputs.TEST_CLASS }}
+      NDCS:       ${{ inputs.NDCS || '1' }}
+      NPCS:       ${{ inputs.NPCS || '1' }}
+      CUSTOM_IMAGES: ${{ inputs.CUSTOM_IMAGES || 'spdk="" docker=""' }}
+
+      # Secrets
+      SSH_PASSWORD:      ${{ secrets.SSH_PASSWORD }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      MINIO_ACCESS_KEY:  ${{ secrets.MINIO_ACCESS_KEY }}
+      MINIO_SECRET_KEY:  ${{ secrets.MINIO_SECRET_KEY }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+      # Filled during run
+      API_BASE_URL:   ""
+      API_INVOKE_URL: ""
+      CLUSTER_ID:     ""
+      CLUSTER_SECRET: ""
+
+    steps:
+      - name: Runner diagnostics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a; whoami; pwd
+          python3 --version || true
+          git --version
+          kubectl version --client 2>/dev/null || echo "kubectl not yet installed"
+          helm version 2>/dev/null || echo "helm not yet installed"
+
+      - name: Clear stale test artifacts from previous run
+        shell: bash
+        run: rm -f sbcli/e2e/output.log || true
+
+      # ============================================================
+      # TOOL INSTALL
+      # ============================================================
+      - name: Install kubectl (if missing)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if command -v kubectl >/dev/null 2>&1; then echo "kubectl present"; exit 0; fi
+          curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install helm (if missing)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if command -v helm >/dev/null 2>&1; then echo "helm present"; exit 0; fi
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
+
+      - name: Install prereqs (sshpass)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if command -v sshpass >/dev/null 2>&1; then exit 0; fi
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y sshpass
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y epel-release || true && sudo yum install -y sshpass
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y sshpass
+          else
+            echo "ERROR: Cannot install sshpass" && exit 1
+          fi
+
+      # ============================================================
+      # IMAGE OVERRIDES
+      # ============================================================
+      - name: Parse CUSTOM_IMAGES overrides
+        shell: bash
+        run: |
+          set -euxo pipefail
+          custom="${{ inputs.CUSTOM_IMAGES }}"
+          for item in $custom; do
+            key="${item%%=*}"
+            value="${item#*=}"
+            value="${value//\"/}"
+            if [[ -z "$value" ]]; then echo "Skipping $key (empty)"; continue; fi
+            case "$key" in
+              spdk)   echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=$value" >> "$GITHUB_ENV" ;;
+              docker) echo "SIMPLY_BLOCK_DOCKER_IMAGE=$value"     >> "$GITHUB_ENV" ;;
+              *)      echo "Unknown image key: $key (ignored)" ;;
+            esac
+          done
+
+      # ============================================================
+      # KEY SETUP
+      # ============================================================
+      - name: Resolve and validate SSH KEY_PATH
+        shell: bash
+        run: |
+          set -euxo pipefail
+          kp="${KEY_PATH}"
+          kp="${kp%\"}"; kp="${kp#\"}"; kp="${kp%\'}"; kp="${kp#\'}"
+          [[ "$kp" == .ssh/* ]]  && kp="${HOME}/${kp}"
+          [[ "$kp" == ~/* ]]     && kp="${HOME}/${kp#~/}"
+          echo "Resolved KEY_PATH=$kp"
+          echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
+          test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
+          chmod 600 "$kp" || true
+
+      - name: Export KEY_NAME from KEY_PATH
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "KEY_NAME=$(basename "${KEY_PATH}")" >> "$GITHUB_ENV"
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          [[ -n "${SSH_PASSWORD}" ]] || (echo "ERROR: secrets.SSH_PASSWORD required" && exit 1)
+
+      # ============================================================
+      # PRE-BOOTSTRAP CLEANUP
+      # ============================================================
+      - name: Pre-clean — kill fio/tmux, unmount NFS on all nodes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2"
+          }
+          run_remote_with_retry() {
+            local ip="$1"
+            local script="$2"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+          targets="$K3S_MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+          for ip in $uniq_targets; do
+            echo "---- $ip: kill fio/tmux + umount NFS ----"
+            run_remote_with_retry "$ip" "set -euxo pipefail
+              pkill -9 fio || true; pkill -9 tmux || true
+              mp='${NFS_MOUNTPOINT}'
+              if mountpoint -q \"\$mp\"; then umount -f \"\$mp\" || true
+              elif mount | grep -q \" \$mp \"; then umount -f \"\$mp\" || true; fi"
+          done
+
+      - name: Pre-clean — uninstall k3s / k3s-agent, remove containers and sbcli
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2"
+          }
+
+          # K3s master — full uninstall
+          echo "---- k3s master uninstall: $K3S_MNODES ----"
+          run_remote "$K3S_MNODES" "set -euxo pipefail
+            systemctl stop firewalld || true; systemctl stop ufw || true
+            sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true
+            k3s-uninstall.sh || true
+            docker stop \$(docker ps -aq) || true
+            docker rm -f \$(docker ps -aq) || true
+            docker system prune -af || true
+            pip uninstall -y '${SBCLI_CMD}' || true
+            pip uninstall -y sbctl || true
+            rm -rf /usr/local/bin/sbc* || true"
+
+          # Storage nodes — k3s agent uninstall
+          for ip in $STORAGE_PRIVATE_IPS; do
+            echo "---- k3s agent uninstall: $ip ----"
+            run_remote "$ip" "set -euxo pipefail
+              systemctl stop firewalld || true; systemctl stop ufw || true
+              sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true
+              k3s-agent-uninstall.sh || true
+              docker stop \$(docker ps -aq) || true
+              docker rm -f \$(docker ps -aq) || true
+              docker system prune -af || true
+              pip uninstall -y '${SBCLI_CMD}' || true
+              pip uninstall -y sbctl || true
+              rm -rf /usr/local/bin/sbc* || true"
+            sleep 10
+          done
+
+      - name: Pre-clean — disconnect lvols and unmount /mnt on clients
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2"
+          }
+          for ip in $CLIENTNODES; do
+            echo "---- client disconnect lvols: $ip ----"
+            run_remote "$ip" "set -euxo pipefail
+              subsystems=\$(nvme list-subsys 2>/dev/null | grep -i lvol | awk '{print \$3}' | cut -d '=' -f 2 || true)
+              for s in \$subsystems; do nvme disconnect -n \"\$s\" || true; done
+              mps=\$(mount | grep ' /mnt' | awk '{print \$3}' || true)
+              for mp in \$mps; do umount -f \"\$mp\" || true; done
+              dirs=\$(find /mnt -mindepth 1 -type d 2>/dev/null || true)
+              for d in \$dirs; do rm -rf \"\$d\" || true; done"
+          done
+
+      - name: Pre-clean — remove /etc/simplyblock on all nodes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2"
+          }
+          targets="$K3S_MNODES $STORAGE_PRIVATE_IPS"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+          for ip in $uniq_targets; do
+            run_remote "$ip" "rm -rf /etc/simplyblock || true"
+          done
+
+      - name: Reboot storage nodes + wait online + disk reset
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2"
+          }
+          for ip in $STORAGE_PRIVATE_IPS; do
+            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+              "nohup reboot >/dev/null 2>&1 &" || true
+          done
+          for ip in $STORAGE_PRIVATE_IPS; do
+            echo "Waiting for $ip..."
+            for i in {1..60}; do
+              if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+                "${SSH_USER}@${ip}" "echo online" >/dev/null 2>&1; then
+                echo "$ip online"; break
+              fi
+              sleep 10
+              [[ "$i" -lt 60 ]] || (echo "ERROR: $ip did not come online" && exit 1)
+            done
+          done
+          for ip in $STORAGE_PRIVATE_IPS; do
+            echo "---- disk reset on $ip ----"
+            run_remote "$ip" "set -euxo pipefail
+              for dev in /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1; do
+                if [[ -b \$dev ]]; then
+                  parted \$dev --script rm 1 || true
+                  parted \$dev --script rm 2 || true
+                  parted \$dev --script rm 3 || true
+                fi
+              done
+              for pci in \$(lspci -D | grep 'QEMU NVM Express' | awk '{print \$1}' || true); do
+                echo \$pci > /sys/bus/pci/drivers/nvme/unbind || true
+              done
+              for i in 0 1 2 3; do
+                dev=/dev/nvme\${i}n1
+                if [[ -b \$dev ]]; then parted -fs \$dev mklabel gpt || true; fi
+              done"
+          done
+
+      # ============================================================
+      # K3S BOOTSTRAP
+      # ============================================================
+      - name: Clone simplyBlockDeploy (bootstrap repo)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf simplyBlockDeploy
+          git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
+          test -f simplyBlockDeploy/bare-metal/bootstrap-k3s.sh
+
+      - name: Bootstrap K3s cluster (--k8s-snode)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd simplyBlockDeploy/bare-metal
+          chmod +x ./bootstrap-k3s.sh
+
+          extra_args=()
+          if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
+            extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
+          fi
+          if [[ -n "${SIMPLY_BLOCK_DOCKER_IMAGE-}" ]]; then
+            extra_args+=( --docker-image "${SIMPLY_BLOCK_DOCKER_IMAGE}" )
+          fi
+          if [[ -n "${BOOTSTRAP_DATA_NIC:-}" ]]; then
+            extra_args+=( --data-nics "${BOOTSTRAP_DATA_NIC}" )
+          fi
+
+          export K3S_MNODES="${K3S_MNODES}"
+          export STORAGE_PRIVATE_IPS="${STORAGE_PRIVATE_IPS}"
+
+          set +e
+          ./bootstrap-k3s.sh --k8s-snode "${extra_args[@]}" | tee bootstrap-k3s.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          [[ "$rc" -eq 0 ]] || (echo "ERROR: bootstrap-k3s.sh failed (rc=$rc)" && exit "$rc")
+
+      # ============================================================
+      # COPY KUBECONFIG FROM K3S MASTER TO RUNNER
+      # ============================================================
+      - name: Copy kubeconfig from K3s master to runner
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/.kube
+          sshpass -p "${SSH_PASSWORD}" scp \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "${SSH_USER}@${K3S_MNODES}:/etc/rancher/k3s/k3s.yaml" ~/.kube/config_k3s
+          # Replace default server address with the actual master IP
+          sed -i "s|127.0.0.1|${K3S_MNODES}|g" ~/.kube/config_k3s
+          sed -i "s|localhost|${K3S_MNODES}|g" ~/.kube/config_k3s
+          export KUBECONFIG=~/.kube/config_k3s
+          echo "KUBECONFIG=${HOME}/.kube/config_k3s" >> "$GITHUB_ENV"
+          kubectl get nodes
+
+      # ============================================================
+      # HELM DEPLOY
+      # ============================================================
+      - name: Clone sbcli charts branch
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf sbcli-charts
+          git clone --branch "${K8S_CHARTS_BRANCH}" --single-branch \
+            https://github.com/simplyblock-io/sbcli.git sbcli-charts
+          test -d sbcli-charts/simplyblock_core/scripts/charts
+
+      - name: Deploy simplyblock via Helm
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd sbcli-charts/simplyblock_core/scripts/charts
+
+          extra_set=()
+          if [[ -n "${SIMPLY_BLOCK_DOCKER_IMAGE-}" ]]; then
+            extra_set+=( --set "image.repository=${SIMPLY_BLOCK_DOCKER_IMAGE%%:*}" )
+            extra_set+=( --set "image.tag=${SIMPLY_BLOCK_DOCKER_IMAGE##*:}" )
+          fi
+          if [[ -n "${EXTRA_HELM_ARGS:-}" ]]; then
+            # Allow caller to pass raw --set flags as space-separated string
+            read -ra extra_caller <<< "${EXTRA_HELM_ARGS}"
+            extra_set+=( "${extra_caller[@]}" )
+          fi
+
+          helm upgrade --install sbcli \
+            --namespace "${K8S_NAMESPACE}" \
+            --create-namespace \
+            "${extra_set[@]}" \
+            ./ | tee helm-install.log
+
+      - name: Wait for simplyblock admin-control pod to be Running
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "Waiting for simplyblock-admin-control pod..."
+          for i in {1..60}; do
+            status=$(kubectl get pods -n "${K8S_NAMESPACE}" --no-headers \
+              -o custom-columns=:metadata.name,:status.phase \
+              | grep simplyblock-admin-control | awk '{print $2}' || true)
+            if [[ "${status}" == "Running" ]]; then
+              echo "Admin pod is Running."
+              break
+            fi
+            echo "Attempt $i: status=${status:-pending}. Waiting 10s..."
+            sleep 10
+            [[ "$i" -lt 60 ]] || (echo "ERROR: admin pod did not start" && exit 1)
+          done
+          kubectl get pods -n "${K8S_NAMESPACE}"
+
+      # ============================================================
+      # SET API_BASE_URL
+      # ============================================================
+      - name: Resolve API_BASE_URL
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ -n "${{ inputs.API_INVOKE_URL }}" ]]; then
+            url="${{ inputs.API_INVOKE_URL }}"
+          else
+            url="http://${K3S_MNODES}/"
+          fi
+          echo "API_BASE_URL=${url}" >> "$GITHUB_ENV"
+          echo "API_INVOKE_URL=${url}" >> "$GITHUB_ENV"
+          echo "Resolved API_BASE_URL=${url}"
+
+      # ============================================================
+      # FETCH CLUSTER CREDENTIALS
+      # ============================================================
+      - name: Fetch CLUSTER_ID and CLUSTER_SECRET via kubectl exec
+        shell: bash
+        run: |
+          set -euxo pipefail
+          admin_pod="$(kubectl get pods -n "${K8S_NAMESPACE}" --no-headers \
+            -o custom-columns=:metadata.name | grep simplyblock-admin-control | head -1)"
+          echo "Admin pod: ${admin_pod}"
+
+          # Get cluster UUID
+          cluster_id="$(kubectl exec -n "${K8S_NAMESPACE}" "${admin_pod}" -- \
+            bash -c "${SBCLI_CMD} cluster list" \
+            | grep -Eo '[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}' | head -1 || true)"
+
+          if [[ -z "${cluster_id}" ]]; then
+            echo "ERROR: Could not extract cluster_id from admin pod"
+            kubectl exec -n "${K8S_NAMESPACE}" "${admin_pod}" -- \
+              bash -c "${SBCLI_CMD} cluster list" || true
+            exit 1
+          fi
+
+          # Get cluster secret
+          cluster_secret="$(kubectl exec -n "${K8S_NAMESPACE}" "${admin_pod}" -- \
+            bash -c "${SBCLI_CMD} cluster get-secret ${cluster_id}" \
+            | tr -d '\r' | tail -n 1 | xargs)"
+
+          if [[ -z "${cluster_secret}" ]]; then
+            echo "ERROR: Could not get cluster_secret from admin pod"
+            exit 1
+          fi
+
+          echo "CLUSTER_ID=${cluster_id}" >> "$GITHUB_ENV"
+          echo "CLUSTER_SECRET=${cluster_secret}" >> "$GITHUB_ENV"
+          echo "Fetched CLUSTER_ID=${cluster_id}"
+          echo "Fetched CLUSTER_SECRET=***set***"
+
+      # ============================================================
+      # STRESS TEST
+      # ============================================================
+      - name: Clone sbcli repo (test code)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf sbcli
+          wf_branch="${{ github.ref_name }}"
+          fallback_branch="${SBCLI_BRANCH}"
+          if git ls-remote --heads https://github.com/simplyblock-io/sbcli.git "$wf_branch" | grep -q "$wf_branch"; then
+            echo "Cloning sbcli on workflow branch: $wf_branch"
+            git clone --branch "$wf_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          else
+            echo "Branch '$wf_branch' not found; cloning fallback: $fallback_branch"
+            git clone --branch "$fallback_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          fi
+          test -f sbcli/e2e/stress.py
+
+      - name: Install Python deps
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --upgrade pip
+          [[ -f "sbcli/e2e/requirements.txt" ]] && pip install -r sbcli/e2e/requirements.txt || true
+
+      - name: Cleanup logs before stress
+        shell: bash
+        working-directory: sbcli/e2e
+        run: |
+          set -euxo pipefail
+          python3 logs/cleanup.py
+
+      - name: Set RUN_DIR_FILE
+        shell: bash
+        run: echo "RUN_DIR_FILE=/tmp/sb_k8s_run_dir_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.txt" >> "$GITHUB_ENV"
+
+      - name: Record test start time
+        shell: bash
+        run: |
+          echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+          echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
+
+      - name: Run stress (foreground; runs until failure)
+        shell: bash
+        working-directory: sbcli/e2e
+        run: |
+          set -euxo pipefail
+          python3 -u stress.py \
+            --testname "${TEST_CLASS}" \
+            --ndcs "${NDCS}" \
+            --npcs "${NPCS}" \
+            --run_k8s True \
+            2>&1 | tee output.log
+
+      # ============================================================
+      # POST-TEST CLEANUP & ARTIFACTS
+      # ============================================================
+      - name: Post-test cleanup (kill tmux/fio on clients)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null "${SSH_USER}@$1" \
+              "bash -s" <<< "$2" || true
+          }
+          for ip in $CLIENTNODES; do
+            run_remote "$ip" "pkill -9 fio || true; pkill -9 tmux || true"
+          done
+
+      - name: Export RUN_BASE_DIR from RUN_DIR_FILE
+        if: always()
+        shell: bash
+        run: |
+          test -f "${RUN_DIR_FILE}" || (echo "RUN_DIR_FILE not found — skipping"; exit 0)
+          RUN_BASE_DIR="$(cat "${RUN_DIR_FILE}" | tr -d '\r\n')"
+          [[ -n "${RUN_BASE_DIR}" ]] && echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV" || true
+          echo "RUN_BASE_DIR=${RUN_BASE_DIR}"
+
+      - name: Mark test end time
+        if: always()
+        shell: bash
+        run: |
+          echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+          echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
+
+      - name: Collect mgmt snapshots (kubectl exec on admin pod)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          admin_pod="$(kubectl get pods -n "${K8S_NAMESPACE}" --no-headers \
+            -o custom-columns=:metadata.name | grep simplyblock-admin-control | head -1 || true)"
+          [[ -z "${admin_pod}" ]] && echo "No admin pod found; skipping." && exit 0
+
+          run_base="${RUN_BASE_DIR:-/tmp/k8s_run_$(date +%s)}"
+          outdir="${run_base}/mgmt_details/mgmt"
+          mkdir -p "${outdir}"
+
+          for cmd in "cluster list" "pool list" "lvol list" "snapshot list" "sn list"; do
+            fname="${outdir}/${cmd// /_}.txt"
+            kubectl exec -n "${K8S_NAMESPACE}" "${admin_pod}" -- \
+              bash -c "${SBCLI_CMD} ${cmd}" > "${fname}" 2>&1 || true
+          done
+          echo "Mgmt snapshots saved to ${outdir}"
+
+      - name: Collect K8s pod logs
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_base="${RUN_BASE_DIR:-/tmp/k8s_run_$(date +%s)}"
+          pod_log_dir="${run_base}/k8s_pod_logs_final"
+          mkdir -p "${pod_log_dir}"
+          pods="$(kubectl get pods -n "${K8S_NAMESPACE}" --no-headers \
+            -o custom-columns=:metadata.name 2>/dev/null || true)"
+          for pod in $pods; do
+            kubectl logs -n "${K8S_NAMESPACE}" "${pod}" \
+              --all-containers=true --timestamps=true \
+              > "${pod_log_dir}/${pod}.log" 2>&1 || true
+          done
+          echo "Pod logs saved to ${pod_log_dir}"
+
+      - name: Write Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          out_log="sbcli/e2e/output.log"
+          start="${TEST_START_EPOCH:-0}"; end="${TEST_END_EPOCH:-0}"; dur_sec=0
+          [[ "$end" -ge "$start" && "$start" -gt 0 ]] && dur_sec=$((end-start))
+          dur_fmt="${dur_sec}s ($(( dur_sec/3600 ))h $(( (dur_sec%3600)/60 ))m)"
+          failure_summary="(unknown)"
+          if [[ -f "${out_log}" ]]; then
+            failure_summary="$(grep -oE 'MultipleExceptions: .+' "${out_log}" | tail -1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            [[ -z "${failure_summary}" ]] && failure_summary="$(grep -E 'RuntimeError:|AssertionError:' "${out_log}" | tail -1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
+          fi
+          conclusion="SUCCESS"
+          [[ "${{ job.status }}" != "success" ]] && conclusion="FAILED"
+          {
+            echo "## SimplyBlock K8s Stress Run Summary"
+            echo "**Result:** ${conclusion}"
+            echo "### Run Info"
+            echo "- **Test class:** \`${TEST_CLASS}\`"
+            echo "- **K3s master:** \`${K3S_MNODES}\`"
+            echo "- **CLUSTER_ID:** \`${CLUSTER_ID}\`"
+            echo "- **Start (UTC):** ${TEST_START_HUMAN:-unknown}"
+            echo "- **End (UTC):** ${TEST_END_HUMAN:-unknown}"
+            echo "- **Duration:** ${dur_fmt}"
+            echo "### Failure Reason"
+            echo '```'
+            printf '%s\n' "${failure_summary}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Slack Notification
+        if: always()
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "K8s Stress (Bootstrap)"
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping."); sys.exit(0)
+          out_log = "sbcli/e2e/output.log"
+          total = passed = failed = skipped = 0
+          if os.path.isfile(out_log):
+              content = open(out_log).read()
+              def px(pat):
+                  m = re.search(pat, content); return int(m.group(1)) if m else 0
+              total  = px(r'Number of Total Cases:\s*(\d+)')
+              passed = px(r'Number of Passed Cases:\s*(\d+)')
+              failed = px(r'Number of Failed Cases:\s*(\d+)')
+              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          s = int(os.environ.get("TEST_START_EPOCH","0") or "0")
+          e = int(os.environ.get("TEST_END_EPOCH","0") or "0")
+          secs = max(0, e-s) if e>=s>0 else 0
+          dur = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          ok = os.environ.get("JOB_STATUS","") == "success"
+          icon = ":white_check_mark:" if ok else ":x:"
+          status = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+          branch = os.environ.get("GITHUB_REF_NAME","?")
+          wf_name = os.environ.get("SLACK_WF_NAME","Run")
+          run_url = os.environ.get("SLACK_RUN_URL","")
+          test_cls = os.environ.get("TEST_CLASS","") or "all"
+          k3s = os.environ.get("K3S_MNODES","?")
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *K3s master:* `{k3s}`  |  *Test:* `{test_cls}`",
+              "",
+          ]
+          if total > 0:
+              pass_pct = passed*100//total
+              lines += [f":white_check_mark: *Passed:* {passed}/{total} ({pass_pct}%)",
+                        f":x: *Failed:* {failed}", f":fast_forward: *Skipped:* {skipped}"]
+          lines.append(f":link: *Run:* <{run_url}|View on GitHub>")
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(webhook, data=json.dumps(payload).encode(),
+                                        headers={"Content-Type":"application/json"})
+          try:
+              urllib.request.urlopen(req, timeout=15); print("Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack failed: {exc}", file=sys.stderr)
+          PYEOF
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simplyblock-k8s-stress-logs-${{ github.run_id }}
+          path: |
+            simplyBlockDeploy/bare-metal/bootstrap-k3s.log
+            sbcli-charts/simplyblock_core/scripts/charts/helm-install.log
+            sbcli/e2e/output.log
+            sbcli/e2e/logs/**
+          if-no-files-found: warn

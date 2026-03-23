@@ -417,12 +417,25 @@ jobs:
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
+          run_remote_with_retry() {
+            local ip="$1"
+            local script="$2"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+
           targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for ip in $uniq_targets; do
             echo "---- $ip: kill fio/tmux + umount ${NFS_MOUNTPOINT} ----"
-            run_remote "$ip" "set -euxo pipefail;
+            run_remote_with_retry "$ip" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
               mp='${NFS_MOUNTPOINT}';

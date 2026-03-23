@@ -85,7 +85,8 @@ def main():
             test_class_run.append(cls)
     else:
         for cls in ALL_TESTS:
-            if args.testname.lower() in cls.__name__.lower():
+            needle = args.testname.lower().replace("_", "")
+            if needle in cls.__name__.lower():
                 if cls.__name__ == "TestAddNodesDuringFioRun" and (len(new_nodes) == 0 or len(new_nodes) % 2 != 0):
                     raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
                 if cls.__name__ == "TestRestartNodeOnAnotherHost" and len(new_nodes) == 0:

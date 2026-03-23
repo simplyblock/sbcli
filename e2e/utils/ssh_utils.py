@@ -1436,7 +1436,7 @@ class SshUtils:
             checksums[file] = checksum
         return checksums
 
-    def verify_checksums(self, node, files, checksums, clone_base=False):
+    def verify_checksums(self, node, files, checksums, clone_base=False, message=None):
         for file in files:
             command = f"md5sum {file}"
             stdout, _ = self.exec_command(node, command)
@@ -1447,13 +1447,13 @@ class SshUtils:
                 base_file_complete = base_dir_name[0] + "_" + base_dir_name[1] + "/" + file_name
                 self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {checksums[base_file_complete]}")
                 if checksum != checksums[base_file_complete]:
-                    raise ValueError(f"Checksum mismatch for file {file}")
+                    raise ValueError(message or f"Checksum mismatch for file {file}")
                 else:
                     self.logger.info(f"Checksum match for file: {file}")
             else:
                 self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {checksums[file]}")
                 if checksum != checksums[file]:
-                    raise ValueError(f"Checksum mismatch for file {file}")
+                    raise ValueError(message or f"Checksum mismatch for file {file}")
                 else:
                     self.logger.info(f"Checksum match for file: {file}")
 
