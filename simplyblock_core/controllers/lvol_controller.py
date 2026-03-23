@@ -1969,6 +1969,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
     source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
+    target_cluster = db_controller.get_cluster_by_id(source_cluster.snapshot_replication_target_cluster)
 
     for lv in db_controller.get_lvols(source_cluster.snapshot_replication_target_cluster):
         if lv.nqn == lvol.nqn:
@@ -2013,6 +2014,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.status = LVol.STATUS_IN_CREATION
+    new_lvol.nqn = target_cluster.nqn + ":lvol:" + lvol.uuid
 
     new_lvol.bdev_stack = [
         {
@@ -2164,7 +2166,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         return False
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
-
+    new_source_cluster = None
     if cluster_id and source_node.cluster_id == cluster_id:
         new_source_cluster = db_controller.get_cluster_by_id(cluster_id)
         if new_source_cluster.status != Cluster.STATUS_ACTIVE:
@@ -2223,6 +2225,8 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         new_pool = db_controller.get_pool_by_id(pool_uuid)
         new_lvol.pool_uuid = new_pool.get_id()
         new_lvol.pool_name = new_pool.pool_name
+    if new_source_cluster:
+        new_lvol.nqn = new_source_cluster.nqn + ":lvol:" + new_lvol.uuid
     new_lvol.bdev_stack = [
         {
             "type": "bdev_lvol_clone",
@@ -2249,18 +2253,6 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     new_lvol.write_to_db(db_controller.kv_store)
 
     logger.debug(f"new lvol from_source: {new_lvol.from_source}")
-
-    # # lvol = db_controller.get_lvol_by_id(lvol_id)
-    # lvol.uuid = str(uuid.uuid4())
-    # lvol.from_source = True
-    # lvol.write_to_db()
-    # time.sleep(3)
-    #
-    # logger.debug(f"old lvol from_source: {lvol.from_source}")
-    #
-    # delete_lvol(lvol.uuid)
-    #
-    # time.sleep(3)
 
     lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:
