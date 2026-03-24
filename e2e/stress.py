@@ -54,7 +54,8 @@ def main():
         test_class_run = tests
     else:
         for cls in tests:
-            if args.testname.lower() in cls.__name__.lower():
+            needle = args.testname.lower().replace("_", "")
+            if needle in cls.__name__.lower():
                 test_class_run.append(cls)
 
     if not test_class_run:

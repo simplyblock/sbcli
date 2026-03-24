@@ -15,13 +15,18 @@ Adds:
   - npcs (simultaneous outage count) derived from cluster max_fault_tolerance
   - TCP fabric only — no RDMA, no security types
   - K8s pod log monitoring via runner_k8s_log (when k8s_test=True)
+  - Container-crash via kubectl delete pod (stop_spdk_pod) instead of docker stop
+  - sbcli CLI commands via kubectl exec into simplyblock-admin-control pod
 
-Usage (bare-metal or K8s):
+K8s failover mapping:
+  container_stop               → kubectl delete pod snode-spdk-pod-<x> (pod auto-restarts)
+  graceful_shutdown            → REST API (sbcli_utils) — unchanged
+  interface_full_network_interrupt  → SSH to SN host, iptables block — unchanged
+  interface_partial_network_interrupt → same as above
+
+Usage (K8s):
   test = RandomK8sMultiOutageFailoverTest(k8s_run=True, ...)
   test.run()
-
-The npcs value can still be forced via the --npcs CLI arg; cluster detection
-in run() only applies when --npcs default (1) is in use.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from stress_test.continuous_failover_ha_multi_outage import (
     generate_random_sequence,
 )
 from utils.common_utils import sleep_n_sec
+from utils.k8s_utils import K8sUtils
 
 _NDCS_NPCS_CHOICES = [(1, 1), (1, 2), (2, 1)]
 
@@ -51,16 +57,38 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
 
     Fabric is always TCP. No security types or RDMA.
 
-    K8s pod logging:
-      When k8s_test=True, the inherited restart_nodes_after_failover()
-      calls self.runner_k8s_log.restart_logging() instead of docker logging.
-      On startup, TestClusterBase.setup() starts runner_k8s_log automatically.
+    K8s differences (active when k8s_test=True):
+      - container_stop outage uses kubectl delete pod (K8sUtils.stop_spdk_pod)
+        instead of ssh_obj.stop_spdk_process (docker stop).
+      - sbcli list/info commands use kubectl exec via K8sUtils.exec_sbcli.
+      - Pod logging managed by runner_k8s_log (same as before).
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
         self.test_name = "n_plus_k_k8s_geometry_failover_ha"
+        self.k8s_utils: K8sUtils | None = None
+
+    # ── Setup ────────────────────────────────────────────────────────────────
+
+    def setup(self) -> None:
+        """
+        Run parent setup, then initialize K8sUtils when k8s_test=True.
+
+        K8sUtils wraps kubectl exec commands and SPDK pod operations.
+        It is only created when k8s_test=True to avoid side-effects in
+        bare-metal runs.
+        """
+        super().setup()
+        if self.k8s_test and self.mgmt_nodes:
+            self.k8s_utils = K8sUtils(
+                ssh_obj=self.ssh_obj,
+                mgmt_node=self.mgmt_nodes[0],
+            )
+            self.logger.info(
+                f"[K8s] K8sUtils initialized for mgmt_node={self.mgmt_nodes[0]}"
+            )
 
     # ── lvol creation ────────────────────────────────────────────────────────
 
@@ -166,8 +194,13 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
 
             self.logger.info(f"Created lvol {lvol_name!r}.")
             sleep_n_sec(3)
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                      command=f"{self.base_cmd} lvol list")
+
+            # List lvols — route through kubectl exec in K8s mode
+            list_cmd = f"{self.base_cmd} lvol list"
+            if self.k8s_test and self.k8s_utils:
+                self.k8s_utils.exec_sbcli(list_cmd, supress_logs=True)
+            else:
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=list_cmd)
 
             lvol_node_id = self.sbcli_utils.get_lvol_details(
                 lvol_id=self.lvol_mount_details[lvol_name]["ID"])[0]["node_id"]
@@ -235,6 +268,105 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             self.fio_threads.append(fio_thread)
             sleep_n_sec(10)
 
+    # ── Container crash override ─────────────────────────────────────────────
+
+    def _k8s_stop_spdk_pod(self, node_ip: str, node_id: str) -> None:
+        """
+        K8s equivalent of stop_spdk_process: force-delete the snode-spdk-pod.
+
+        Kubernetes automatically recreates the pod via the managing controller,
+        so no manual restart is needed — only waiting for it to become Running
+        again (done in restart_nodes_after_failover via node status polling).
+        """
+        if not self.k8s_utils:
+            raise RuntimeError(
+                "[K8s] k8s_utils not initialised — was setup() called with k8s_run=True?"
+            )
+        pod_name = self.k8s_utils.stop_spdk_pod(node_ip)
+        self.logger.info(
+            f"[K8s] container_stop: deleted SPDK pod {pod_name!r} for node {node_ip}"
+        )
+
+    def perform_n_plus_k_outages(self):
+        """
+        K8s override of perform_n_plus_k_outages.
+
+        Identical to the parent except that ``container_stop`` outage type
+        calls ``_k8s_stop_spdk_pod`` (kubectl delete pod) instead of
+        ``ssh_obj.stop_spdk_process`` (docker stop).
+        """
+        from datetime import datetime
+
+        # Candidates are nodes that are primary *for someone* (map keys)
+        primary_candidates = list(self.sn_primary_secondary_map.keys())
+        self.current_outage_nodes = []
+
+        if len(primary_candidates) < self.npcs:
+            raise Exception(
+                f"Need {self.npcs} outage nodes, but only "
+                f"{len(primary_candidates)} primary-role nodes exist."
+            )
+
+        outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
+        self.logger.info(f"Selected outage nodes: {outage_nodes}")
+        outage_combinations = []
+        outage_num = 0
+
+        for node in outage_nodes:
+            if outage_num == 0:
+                if self.npcs == 1:
+                    outage_type = random.choice(self.outage_types2)
+                else:
+                    outage_type = random.choice(self.outage_types)
+                outage_num = 1
+            else:
+                outage_type = random.choice(self.outage_types2)
+
+            node_details = self.sbcli_utils.get_storage_node_details(node)
+            node_ip = node_details[0]["mgmt_ip"]
+            node_rpc_port = node_details[0]["rpc_port"]
+
+            self.ssh_obj.dump_lvstore(
+                node_ip=self.mgmt_nodes[0], storage_node_id=node
+            )
+
+            status = self.ssh_obj.fetch_distrib_logs(
+                storage_node_ip=node_ip,
+                storage_node_id=node,
+                logs_path=self.docker_logs_path,
+            )
+            if not status:
+                raise RuntimeError("Placement Dump Status incorrect!!!")
+
+            self.logger.info(
+                f"Performing {outage_type} on primary node {node} (K8s mode)."
+            )
+            self.log_outage_event(node, outage_type, "Outage started")
+
+            node_outage_dur = 0
+            if outage_type == "container_stop":
+                # ── K8s: delete SPDK pod instead of docker stop ──────────────
+                if self.k8s_test and self.k8s_utils:
+                    self._k8s_stop_spdk_pod(node_ip, node)
+                else:
+                    # Fall back to bare-metal docker stop (k8s_test=False)
+                    self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
+            elif outage_type == "graceful_shutdown":
+                self._graceful_shutdown_node(node)
+            elif outage_type == "interface_partial_network_interrupt":
+                # Network interface block goes directly to SN host via SSH
+                self._disconnect_partial_interface(node, node_ip)
+                node_outage_dur = 300
+            elif outage_type == "interface_full_network_interrupt":
+                # Same — SSH to SN host, iptables block
+                node_outage_dur = self._disconnect_full_interface(node, node_ip)
+
+            outage_combinations.append((node, outage_type, node_outage_dur))
+            self.current_outage_nodes.append(node)
+
+        self.outage_start_time = int(datetime.now().timestamp())
+        return outage_combinations
+
     # ── run ──────────────────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -262,7 +394,11 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
 
         if self.k8s_test:
             self.logger.info(
-                "K8s mode: pod logging via runner_k8s_log. "
-                "Docker logging calls will be skipped automatically.")
+                "K8s mode: pod logging via runner_k8s_log; "
+                "container_stop uses kubectl delete pod; "
+                "network outage uses SSH iptables on SN host."
+            )
 
+        # Skip parent run() and call grandparent directly since we override
+        # perform_n_plus_k_outages; the rest of the loop is inherited.
         super().run()

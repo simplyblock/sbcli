@@ -638,7 +638,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
         self.logger.info(f"Performing/Waiting for {outage_type} restart on node {self.current_outage_node}.")
         if outage_type == "graceful_shutdown":
-            max_retries = 10
+            max_retries = 4
             retry_delay = 10  # seconds
 
             # Retry mechanism for restarting the node
@@ -665,7 +665,17 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                               force=force)
                     # else:
                     #     self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+                    if not self.k8s_test:
+                        for node in self.storage_nodes:
+                            self.ssh_obj.restart_docker_logging(
+                                node_ip=node,
+                                containers=self.container_nodes[node],
+                                log_dir=os.path.join(self.docker_logs_path, node),
+                                test_name=self.test_name
+                            )
+                    else:
+                        self.runner_k8s_log.restart_logging()
+                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
                     break  # Exit loop if successful
                 except Exception as _:
                     if attempt < max_retries - 2:
@@ -677,8 +687,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     else:
                         self.logger.info("Max retries reached. Failed to restart node.")
                         raise  # Rethrow the last exception
-            
-            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+
+            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
             # Log the restart event
             self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=0)
 
@@ -703,7 +713,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         
         elif outage_type == "container_stop":
             if restart:
-                max_retries = 10
+                max_retries = 4
                 retry_delay = 10  # seconds
                 try:
                     if not self.k8s_test:
@@ -719,7 +729,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=60)
                     self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=2)
                 except Exception as _:
-                    max_retries = 10
+                    max_retries = 4
                     retry_delay = 10  # seconds
 
                     # Retry mechanism for restarting the node
@@ -746,7 +756,17 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                     force=force)
                             # else:
                             #     self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-                            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+                            if not self.k8s_test:
+                                for node in self.storage_nodes:
+                                    self.ssh_obj.restart_docker_logging(
+                                        node_ip=node,
+                                        containers=self.container_nodes[node],
+                                        log_dir=os.path.join(self.docker_logs_path, node),
+                                        test_name=self.test_name
+                                    )
+                            else:
+                                self.runner_k8s_log.restart_logging()
+                            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
                             break  # Exit loop if successful
                         except Exception as _:
                             if attempt < max_retries - 2:
@@ -758,7 +778,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                             else:
                                 self.logger.info("Max retries reached. Failed to restart node.")
                                 raise  # Rethrow the last exception
-                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
                     # Log the restart event
                     self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=0)
             else:
@@ -772,13 +792,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         )
                 else:
                     self.runner_k8s_log.restart_logging()
-                self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+                self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
                 # Log the restart event
                 self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=2)
 
         elif "network_interrupt" in outage_type:
             if restart:
-                max_retries = 10
+                max_retries = 4
                 retry_delay = 10  # seconds
                 try:
                     if not self.k8s_test:
@@ -819,7 +839,17 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                     force=force)
                             # else:
                             #     self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-                            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+                            if not self.k8s_test:
+                                for node in self.storage_nodes:
+                                    self.ssh_obj.restart_docker_logging(
+                                        node_ip=node,
+                                        containers=self.container_nodes[node],
+                                        log_dir=os.path.join(self.docker_logs_path, node),
+                                        test_name=self.test_name
+                                    )
+                            else:
+                                self.runner_k8s_log.restart_logging()
+                            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
                             break  # Exit loop if successful
                         except Exception as _:
                             if attempt < max_retries - 2:
@@ -831,7 +861,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                             else:
                                 self.logger.info("Max retries reached. Failed to restart node.")
                                 raise  # Rethrow the last exception
-                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
                     # Log the restart event
                     self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=0)
             else:
@@ -845,7 +875,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         )
                 else:
                     self.runner_k8s_log.restart_logging()
-                self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=1000)
+                self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
                 # Log the restart event
                 self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=(self.outage_dur//60)+1)
         
@@ -860,7 +890,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         else:
             self.runner_k8s_log.restart_logging()
 
-        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
+        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=300)
         self.outage_end_time = int(datetime.now().timestamp())
 
         if self.secondary_outage:

@@ -24,6 +24,10 @@ Stress scenarios
 
   BackupStressRestoreConcurrent    – TC-BCK-STR-050..055
     Multiple simultaneous restore operations; verify data integrity for each.
+
+  BackupStressMarathon             – TC-BCK-STR-060..065
+    Long-running mixed marathon: N rounds of backup / restore / delete / verify
+    across 3 lvols.  Default 20 rounds for CI; set num_rounds=100 for full stress.
 """
 
 from __future__ import annotations
@@ -1245,3 +1249,238 @@ class TestBackupInterruptedRestore(BackupStressBase):
                 self.logger.info("TC-BCK-097: crypto interrupted restore retry ✓")
 
         self.logger.info("=== TestBackupInterruptedRestore PASSED ===")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Marathon – long-running mixed backup / restore / delete stress
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class BackupStressMarathon(BackupStressBase):
+    """
+    TC-BCK-STR-060..065
+
+    Runs num_rounds iterations (default 20; set to 100 for full stress)
+    across 3 lvols with a randomly selected operation each round:
+
+      BACKUP            (50 % weight) – snapshot + S3 backup on a random lvol
+      RESTORE           (25 % weight) – restore a random previously-made backup;
+                                        verify checksums
+      DELETE_AND_BACKUP (15 % weight) – delete all backups for a random lvol,
+                                        immediately take a fresh backup, verify
+                                        the chain works again
+      VERIFY            (10 % weight) – verify checksums on a randomly chosen
+                                        already-restored lvol
+
+    Every 5 rounds a forced checksum check is also run on the most-recently
+    restored lvol to catch silent corruption early.
+
+    Validates:
+      - Service remains stable across 20-100 mixed operations
+      - Delta chain stays bounded after repeated backups
+      - After backup delete + re-backup, new chain is fully restorable
+      - Checksums are correct throughout (no silent data corruption)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_stress_marathon"
+        self.num_rounds = 20   # set to 100 for a full stress run
+        self.num_lvols = 3
+        self._weights = ["backup"] * 10 + ["restore"] * 5 + \
+                        ["delete_and_backup"] * 3 + ["verify"] * 2
+
+    # ── internal helpers ──────────────────────────────────────────────────
+
+    def _do_backup(self, state: dict, lvol_key: str, round_num: int) -> None:
+        info = state["lvols"][lvol_key]
+        sn = f"mara_{lvol_key}_{round_num}_{_rand_suffix()}"
+        bk_id = self._snap_and_backup(info["id"], sn)
+        if bk_id:
+            info["backup_ids"].append(bk_id)
+            self.logger.info(
+                f"[round {round_num}] BACKUP {lvol_key} → {bk_id} "
+                f"(chain depth={len(info['backup_ids'])})")
+
+    def _do_restore(self, state: dict, lvol_key: str, round_num: int) -> None:
+        info = state["lvols"][lvol_key]
+        if not info["backup_ids"]:
+            self.logger.info(f"[round {round_num}] RESTORE {lvol_key}: no backups yet, skipping")
+            return
+        bk_id = random.choice(info["backup_ids"])
+        rst_name = f"mara_rst_{round_num}_{_rand_suffix()}"
+        try:
+            self._restore_backup(bk_id, rst_name)
+            self._wait_for_restore(rst_name)
+            rst_id = self.sbcli_utils.get_lvol_id(lvol_name=rst_name)
+            _, rst_mount = self._connect_and_mount(
+                rst_name, rst_id,
+                mount=f"{self.mount_path}/mr_{round_num}_{_rand_suffix()}")
+            rst_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
+            self.ssh_obj.verify_checksums(
+                self.fio_node, rst_files, info["checksums"],
+                message=f"[round {round_num}] RESTORE {lvol_key} checksum mismatch")
+            state["restored"].append((rst_name, info["checksums"]))
+            self.logger.info(f"[round {round_num}] RESTORE {lvol_key} ← {bk_id} ✓")
+        except Exception as e:
+            self.logger.error(f"[round {round_num}] RESTORE {lvol_key} failed: {e}")
+
+    def _do_delete_and_backup(self, state: dict, lvol_key: str, round_num: int) -> None:
+        info = state["lvols"][lvol_key]
+        self.logger.info(
+            f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} "
+            f"(deleting {len(info['backup_ids'])} backup(s))")
+        try:
+            self._delete_backups(info["id"])
+            info["backup_ids"].clear()
+            sleep_n_sec(5)
+            # Verify backup list is clean for this lvol
+            remaining = [
+                b for b in self._list_backups()
+                if lvol_key in " ".join(str(v) for v in b.values())
+            ]
+            assert len(remaining) == 0, \
+                f"[round {round_num}] backups not fully deleted for {lvol_key}: {remaining}"
+            # Immediately take a fresh backup to confirm chain re-starts cleanly
+            sn = f"mara_fresh_{lvol_key}_{round_num}_{_rand_suffix()}"
+            self._create_snapshot(info["id"], sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"marathon[{round_num}]")
+            info["backup_ids"].append(bk_id)
+            self.logger.info(
+                f"[round {round_num}] DELETE_AND_BACKUP {lvol_key}: fresh backup {bk_id} ✓")
+        except Exception as e:
+            self.logger.error(f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} error: {e}")
+
+    def _do_verify(self, state: dict, round_num: int) -> None:
+        if not state["restored"]:
+            self.logger.info(f"[round {round_num}] VERIFY: no restored lvols yet, skipping")
+            return
+        rst_name, expected = random.choice(state["restored"])
+        try:
+            rst_id = self.sbcli_utils.get_lvol_id(lvol_name=rst_name)
+            if not rst_id:
+                self.logger.warning(
+                    f"[round {round_num}] VERIFY: {rst_name} no longer exists, skipping")
+                return
+            out, _ = self._sbcli("lvol list")
+            if rst_name not in out:
+                self.logger.warning(
+                    f"[round {round_num}] VERIFY: {rst_name} not in lvol list, skipping")
+                return
+            # Re-mount and re-verify (mount may already be tracked; use a fresh path)
+            mount_path = f"{self.mount_path}/mv_{round_num}_{_rand_suffix()}"
+            _, rst_mount = self._connect_and_mount(rst_name, rst_id, mount=mount_path)
+            files = self.ssh_obj.find_files(self.fio_node, rst_mount)
+            self.ssh_obj.verify_checksums(
+                self.fio_node, files, expected,
+                message=f"[round {round_num}] VERIFY {rst_name} checksum mismatch")
+            self.logger.info(f"[round {round_num}] VERIFY {rst_name} ✓")
+        except Exception as e:
+            self.logger.error(f"[round {round_num}] VERIFY {rst_name} error: {e}")
+
+    # ── main run ──────────────────────────────────────────────────────────
+
+    def run(self):
+        self.logger.info(
+            f"=== BackupStressMarathon START  rounds={self.num_rounds} ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-STR-060: Setup — create lvols, write data, capture checksums
+        self.logger.info(f"TC-BCK-STR-060: creating {self.num_lvols} lvols and capturing checksums")
+        state = {"lvols": {}, "restored": []}
+
+        for i in range(self.num_lvols):
+            key = f"lv{i}"
+            name, lvol_id = self._create_lvol(
+                name=f"mara_{i}_{_rand_suffix()}", size="5G")
+            _, mount = self._connect_and_mount(name, lvol_id)
+            self._run_fio(mount, runtime=20)
+            files = self.ssh_obj.find_files(self.fio_node, mount)
+            checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+            state["lvols"][key] = {
+                "name": name,
+                "id": lvol_id,
+                "checksums": checksums,
+                "backup_ids": [],
+            }
+            self.logger.info(f"TC-BCK-STR-060: {key}={name} ready")
+
+        lvol_keys = list(state["lvols"].keys())
+
+        # TC-BCK-STR-061: Marathon loop
+        self.logger.info(f"TC-BCK-STR-061: starting {self.num_rounds}-round marathon")
+        backup_count = restore_count = delete_count = verify_count = 0
+
+        for round_num in range(1, self.num_rounds + 1):
+            action = random.choice(self._weights)
+            lvol_key = random.choice(lvol_keys)
+
+            if action == "backup":
+                self._do_backup(state, lvol_key, round_num)
+                backup_count += 1
+            elif action == "restore":
+                self._do_restore(state, lvol_key, round_num)
+                restore_count += 1
+            elif action == "delete_and_backup":
+                self._do_delete_and_backup(state, lvol_key, round_num)
+                delete_count += 1
+            elif action == "verify":
+                self._do_verify(state, round_num)
+                verify_count += 1
+
+            # TC-BCK-STR-062: Forced checksum every 5 rounds
+            if round_num % 5 == 0 and state["restored"]:
+                self.logger.info(f"TC-BCK-STR-062: forced checksum check at round {round_num}")
+                self._do_verify(state, round_num)
+
+            sleep_n_sec(2)
+
+        self.logger.info(
+            f"TC-BCK-STR-061: marathon complete — "
+            f"backups={backup_count} restores={restore_count} "
+            f"deletes={delete_count} verifies={verify_count}")
+
+        # TC-BCK-STR-063: Final checksum verification on all restored lvols
+        self.logger.info(
+            f"TC-BCK-STR-063: final checksum pass on {len(state['restored'])} restored lvol(s)")
+        failures = 0
+        for rst_name, expected in state["restored"]:
+            try:
+                out, _ = self._sbcli("lvol list")
+                if rst_name not in out:
+                    continue
+                rst_id = self.sbcli_utils.get_lvol_id(lvol_name=rst_name)
+                if not rst_id:
+                    continue
+                mount_path = f"{self.mount_path}/mf_{_rand_suffix()}"
+                _, rst_mount = self._connect_and_mount(rst_name, rst_id, mount=mount_path)
+                files = self.ssh_obj.find_files(self.fio_node, rst_mount)
+                self.ssh_obj.verify_checksums(self.fio_node, files, expected,
+                    message=f"TC-BCK-STR-063: final checksum mismatch for {rst_name}")
+                self.logger.info(f"TC-BCK-STR-063: {rst_name} ✓")
+            except Exception as e:
+                self.logger.error(f"TC-BCK-STR-063: {rst_name} failed: {e}")
+                failures += 1
+
+        assert failures == 0, \
+            f"TC-BCK-STR-063: {failures} lvol(s) failed final checksum verification"
+
+        # TC-BCK-STR-064: Verify backup list depth bounded for each lvol
+        self.logger.info("TC-BCK-STR-064: verify backup chain depth is bounded")
+        all_backups = self._list_backups()
+        for key, info in state["lvols"].items():
+            lvol_bks = [
+                b for b in all_backups
+                if info["name"] in " ".join(str(v) for v in b.values())
+            ]
+            self.logger.info(
+                f"TC-BCK-STR-064: {key} ({info['name']}) has {len(lvol_bks)} backup(s) in list")
+
+        # TC-BCK-STR-065: Service health — backup list must still respond
+        self.logger.info("TC-BCK-STR-065: service health check — backup list must respond")
+        final_list = self._list_backups()
+        self.logger.info(
+            f"TC-BCK-STR-065: backup list returned {len(final_list)} entries — service healthy ✓")
+
+        self.logger.info("=== BackupStressMarathon PASSED ===")

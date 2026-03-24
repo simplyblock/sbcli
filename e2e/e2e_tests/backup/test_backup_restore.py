@@ -36,11 +36,12 @@ Delta / merge behaviour
 Test class map
 --------------
   TestBackupBasicPositive          – TC-BCK-001..010
-  TestBackupRestoreDataIntegrity   – TC-BCK-011..017
+  TestBackupRestoreDataIntegrity   – TC-BCK-011..018
   TestBackupPolicy                 – TC-BCK-020..028
   TestBackupNegative               – TC-BCK-030..040
   TestBackupCryptoLvol             – TC-BCK-050..055
   TestBackupCustomGeometry         – TC-BCK-060..063
+  TestBackupDeleteAndRestore       – TC-BCK-077..081
 
   NOTE – Cross-cluster restore
   ----------------------------
@@ -123,6 +124,13 @@ class BackupTestBase(TestClusterBase):
 
     def _sbcli(self, subcmd: str, node: str = None) -> tuple[str, str]:
         return self._run(f"{self.base_cmd} {subcmd}", node=node)
+
+    def _delete_backups(self, lvol_id: str) -> None:
+        """Delete all S3 backups for lvol_id via `backup delete <lvol_id>`."""
+        out, err = self._sbcli(f"-d backup delete {lvol_id}")
+        assert not (err and "error" in err.lower()), \
+            f"backup delete failed: {err}"
+        self.logger.info(f"backup delete {lvol_id}: {(out or '').strip()}")
 
     # ── snapshot/backup helpers ───────────────────────────────────────────────
 
@@ -1253,7 +1261,144 @@ class TestBackupCustomGeometry(BackupTestBase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Test 7 – Cross-cluster restore
+#  Test 7 – Backup delete and post-merge restore
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupDeleteAndRestore(BackupTestBase):
+    """
+    TC-BCK-077..081 — backup delete and post-retention-merge restore.
+
+    Covers:
+      - `backup delete <lvol_id>` removes all backups from list
+      - Restore of a deleted backup_id returns an error (negative)
+      - Service remains healthy after delete; fresh backup succeeds
+      - Retention policy (versions=3): after 5 backups the two oldest are
+        merged/pruned; restoring each retained backup still yields correct
+        checksums (the merged data is incorporated into the chain, not lost)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_delete_and_restore"
+
+    def run(self):
+        self.logger.info("=== TestBackupDeleteAndRestore START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # ── TC-BCK-077: Setup — lvol + 3 chain backups ────────────────────
+        self.logger.info("TC-BCK-077: create lvol, write data, build 3-backup chain")
+        lvol_name, lvol_id = self._create_lvol()
+        _, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=30)
+
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        original_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+
+        collected_bk_ids = []
+        for i in range(3):
+            sn = f"del_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-077[{i}]")
+            collected_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-077[{i}]: backup {bk_id} complete")
+
+        self.logger.info(f"TC-BCK-077: chain of {len(collected_bk_ids)} backups built ✓")
+
+        # ── TC-BCK-078: backup delete → backup list shows 0 for this lvol ─
+        self.logger.info(f"TC-BCK-078: backup delete {lvol_id}")
+        self._delete_backups(lvol_id)
+        sleep_n_sec(5)
+
+        backups_after_delete = self._list_backups()
+        lvol_backups_remaining = [
+            b for b in backups_after_delete
+            if lvol_name in " ".join(str(v) for v in b.values())
+        ]
+        assert len(lvol_backups_remaining) == 0, (
+            f"TC-BCK-078: expected 0 backups for {lvol_name} after delete, "
+            f"got {len(lvol_backups_remaining)}: {lvol_backups_remaining}"
+        )
+        self.logger.info("TC-BCK-078: backup list empty for deleted lvol ✓")
+
+        # ── TC-BCK-079: restore of deleted backup_id → expect error ────────
+        self.logger.info("TC-BCK-079: restore of deleted backup_id must fail")
+        for bk_id in collected_bk_ids[:1]:  # test just one; all should fail
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol del_rst_{_rand_suffix()} --pool {self.pool_name}")
+            assert err or "error" in (out or "").lower(), (
+                f"TC-BCK-079: expected error restoring deleted backup {bk_id}, "
+                f"got out={out!r} err={err!r}"
+            )
+            self.logger.info(f"TC-BCK-079: restore of deleted backup {bk_id} correctly returned error ✓")
+
+        # ── TC-BCK-080: fresh backup after delete succeeds ──────────────────
+        self.logger.info("TC-BCK-080: take fresh backup after delete — service must be healthy")
+        fresh_snap = f"del_fresh_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, fresh_snap, backup=True)
+        fresh_bk_id = self._wait_for_backup_by_snap(fresh_snap, "TC-BCK-080")
+        self.logger.info(f"TC-BCK-080: fresh backup {fresh_bk_id} after delete succeeded ✓")
+
+        fresh_restored = f"del_fresh_rst_{_rand_suffix()}"
+        self._restore_backup(fresh_bk_id, fresh_restored)
+        self._wait_for_restore(fresh_restored)
+        fresh_rst_id = self.sbcli_utils.get_lvol_id(lvol_name=fresh_restored)
+        _, fr_mount = self._connect_and_mount(
+            fresh_restored, fresh_rst_id,
+            mount=f"{self.mount_path}/del_fr_{_rand_suffix()}")
+        fr_files = self.ssh_obj.find_files(self.fio_node, fr_mount)
+        self.ssh_obj.verify_checksums(self.fio_node, fr_files, original_checksums)
+        self.logger.info("TC-BCK-080: fresh post-delete backup → restore → checksums match ✓")
+
+        # ── TC-BCK-081: Retention merge — restore from retained backups ─────
+        # With versions=3 policy: create 5 backups → oldest 2 are pruned/merged
+        # into the chain. Restoring the 3 retained backup_ids must succeed and
+        # produce correct checksums (merged data is incorporated, not lost).
+        self.logger.info("TC-BCK-081: retention merge — 5 backups with policy versions=3")
+        policy_name = f"del_pol_{_rand_suffix()}"
+        policy_id = self._add_policy(policy_name, versions=3, age="1d")
+        self._attach_policy(policy_id, "lvol", lvol_id)
+
+        retained_bk_ids = []
+        for i in range(5):
+            sn = f"ret_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-081[{i}]")
+            retained_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-081[{i}]: backup {bk_id} complete")
+            sleep_n_sec(3)
+
+        sleep_n_sec(15)  # allow merge/pruning to settle
+        backups_retained = self._list_backups()
+        self.logger.info(
+            f"TC-BCK-081: {len(backups_retained)} backups after 5 snaps "
+            f"(policy versions=3 — oldest 2 should be merged)")
+
+        # Restore each backup that still appears in the list; all must yield correct checksums
+        visible_ids = {
+            b.get("id") or b.get("ID") or b.get("uuid") or ""
+            for b in backups_retained
+            if lvol_name in " ".join(str(v) for v in b.values())
+        }
+        assert visible_ids, "TC-BCK-081: expected at least 1 retained backup after policy merge"
+        for bk_id in visible_ids:
+            rst_name = f"ret_rst_{_rand_suffix()}"
+            self._restore_backup(bk_id, rst_name)
+            self._wait_for_restore(rst_name)
+            rst_id = self.sbcli_utils.get_lvol_id(lvol_name=rst_name)
+            _, rst_mount = self._connect_and_mount(
+                rst_name, rst_id,
+                mount=f"{self.mount_path}/ret_{_rand_suffix()}")
+            rst_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
+            self.ssh_obj.verify_checksums(self.fio_node, rst_files, original_checksums)
+            self.logger.info(f"TC-BCK-081: retained backup {bk_id} → restore → checksums match ✓")
+
+        self.logger.info("=== TestBackupDeleteAndRestore PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 8 – Cross-cluster restore
 #
 #  IMPORTANT: This test is intentionally NOT included in get_backup_tests().
 #  Run explicitly only:  python e2e.py --testname TestBackupCrossClusterRestore
