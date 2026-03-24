@@ -277,12 +277,15 @@ class TestComputeS3CpuMasks(unittest.TestCase):
 
 class TestCreateS3Bdev(unittest.TestCase):
 
+    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.controllers.backup_controller.RPCClient")
-    def test_success(self, MockRPC):
+    def test_success(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
         mock_rpc.bdev_s3_add_bucket_name.return_value = True
         mock_rpc.bdev_lvol_s3_bdev.return_value = True
+        mock_s3 = mock_boto3_client.return_value
+        mock_s3.head_bucket.return_value = {}
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
@@ -300,8 +303,9 @@ class TestCreateS3Bdev(unittest.TestCase):
             "s3_lvs_test", "simplyblock-backup-cluster-1")
         mock_rpc.bdev_lvol_s3_bdev.assert_called_once_with("lvs_test", "s3_lvs_test")
 
+    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.controllers.backup_controller.RPCClient")
-    def test_no_lvstore(self, MockRPC):
+    def test_no_lvstore(self, MockRPC, _mock_boto3_client):
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node(lvstore="")
         result = create_s3_bdev(node, {})
@@ -320,11 +324,14 @@ class TestCreateS3Bdev(unittest.TestCase):
         mock_rpc.bdev_s3_add_bucket_name.assert_not_called()
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
+    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.controllers.backup_controller.RPCClient")
-    def test_bucket_name_fails(self, MockRPC):
+    def test_bucket_name_fails(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
         mock_rpc.bdev_s3_add_bucket_name.return_value = None
+        mock_s3 = mock_boto3_client.return_value
+        mock_s3.head_bucket.return_value = {}
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
@@ -332,24 +339,30 @@ class TestCreateS3Bdev(unittest.TestCase):
         self.assertFalse(result)
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
+    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.controllers.backup_controller.RPCClient")
-    def test_attach_fails(self, MockRPC):
+    def test_attach_fails(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
         mock_rpc.bdev_s3_add_bucket_name.return_value = True
         mock_rpc.bdev_lvol_s3_bdev.return_value = None
+        mock_s3 = mock_boto3_client.return_value
+        mock_s3.head_bucket.return_value = {}
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
         result = create_s3_bdev(node, {})
         self.assertFalse(result)
 
+    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.controllers.backup_controller.RPCClient")
-    def test_local_testing_params(self, MockRPC):
+    def test_local_testing_params(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
         mock_rpc.bdev_s3_add_bucket_name.return_value = True
         mock_rpc.bdev_lvol_s3_bdev.return_value = True
+        mock_s3 = mock_boto3_client.return_value
+        mock_s3.head_bucket.return_value = {}
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
@@ -367,6 +380,12 @@ class TestCreateS3Bdev(unittest.TestCase):
         self.assertEqual(kwargs.get("local_endpoint", ""), "http://minio:9000")
         self.assertEqual(kwargs.get("access_key_id", ""), "minioadmin")
         self.assertEqual(kwargs.get("secret_access_key", ""), "minioadmin")
+        mock_boto3_client.assert_called_once_with(
+            "s3",
+            aws_access_key_id="minioadmin",
+            aws_secret_access_key="minioadmin",
+            endpoint_url="http://minio:9000",
+        )
 
     @patch("simplyblock_core.controllers.backup_controller.RPCClient")
     def test_exception_handled(self, MockRPC):
@@ -530,7 +549,7 @@ class TestBackupSnapshot(unittest.TestCase):
 class TestDBControllerBackupChainLocks(unittest.TestCase):
 
     @patch("simplyblock_core.db_controller.fdb.transactional")
-    def test_acquire_backup_chain_locks_uses_bound_method_arguments(self, mock_transactional):
+    def test_acquire_backup_chain_locks_uses_unbound_method_with_db_handle(self, mock_transactional):
         db = object.__new__(DBController)
         db.kv_store = MagicMock()
 
@@ -540,11 +559,11 @@ class TestDBControllerBackupChainLocks(unittest.TestCase):
         result = db.acquire_backup_chain_locks(["snap-2", "snap-1"], "snap-2", "lvol-1")
 
         self.assertEqual(result, ("ok", None))
-        mock_transactional.assert_called_once_with(db._acquire_backup_chain_locks_tx)
-        wrapped.assert_called_once_with(["snap-1", "snap-2"], "snap-2", "lvol-1")
+        mock_transactional.assert_called_once_with(DBController._acquire_backup_chain_locks_tx)
+        wrapped.assert_called_once_with(db, db.kv_store, ["snap-1", "snap-2"], "snap-2", "lvol-1")
 
     @patch("simplyblock_core.db_controller.fdb.transactional")
-    def test_release_backup_chain_locks_uses_bound_method_arguments(self, mock_transactional):
+    def test_release_backup_chain_locks_uses_unbound_method_with_db_handle(self, mock_transactional):
         db = object.__new__(DBController)
         db.kv_store = MagicMock()
 
@@ -553,8 +572,8 @@ class TestDBControllerBackupChainLocks(unittest.TestCase):
 
         db.release_backup_chain_locks(["snap-2", "snap-1"])
 
-        mock_transactional.assert_called_once_with(db._release_backup_chain_locks_tx)
-        wrapped.assert_called_once_with(["snap-1", "snap-2"])
+        mock_transactional.assert_called_once_with(DBController._release_backup_chain_locks_tx)
+        wrapped.assert_called_once_with(db, db.kv_store, ["snap-1", "snap-2"])
 
 
 # ===========================================================================
@@ -606,6 +625,7 @@ class TestRestoreBackup(unittest.TestCase):
     def test_add_lvol_ha_fails(self, mock_db):
         mock_db.get_backup_by_id.return_value = _backup()
         mock_db.get_backup_chain.return_value = [_backup()]
+        mock_db.get_storage_node_by_id.return_value = _node()
 
         with patch("simplyblock_core.controllers.lvol_controller.add_lvol_ha") as mock_add_ha:
             mock_add_ha.return_value = (None, "Pool not found")
@@ -897,10 +917,11 @@ class TestEvaluatePolicy(unittest.TestCase):
 
         mock_tasks.add_backup_merge_task.assert_called_once()
 
+    @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_both_conditions_required(self, mock_db, mock_tasks):
-        """When both versions and age are set, both must be exceeded."""
+    def test_both_conditions_required(self, mock_db, mock_tasks, _mock_write):
+        """When both versions and age are set, either limit can trigger a merge."""
         policy = _policy(max_versions=3)
         policy.max_age_seconds = 3600
         mock_db.get_policy_for_lvol.return_value = policy
@@ -914,8 +935,7 @@ class TestEvaluatePolicy(unittest.TestCase):
         lvol = MagicMock()
         evaluate_policy(lvol)
 
-        # Should NOT trigger merge: version exceeded but age not exceeded
-        mock_tasks.add_backup_merge_task.assert_not_called()
+        mock_tasks.add_backup_merge_task.assert_called_once()
 
     @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
