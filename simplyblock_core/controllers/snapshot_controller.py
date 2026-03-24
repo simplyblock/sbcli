@@ -35,16 +35,19 @@ def add(lvol_id, snapshot_name):
         return False, msg
 
     if lvol.cloned_from_snap:
-        snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
-        ref_count = snap.ref_count
-        if snap.snap_ref_id:
-            ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
-            ref_count = ref_snap.ref_count
+        try:
+            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            ref_count = snap.ref_count
+            if snap.snap_ref_id:
+                ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
+                ref_count = ref_snap.ref_count
 
-        if ref_count >= constants.MAX_SNAP_COUNT:
-            msg = f"Can not create more than {constants.MAX_SNAP_COUNT} snaps from this clone"
-            logger.error(msg)
-            return False, msg
+            if ref_count >= constants.MAX_SNAP_COUNT:
+                msg = f"Can not create more than {constants.MAX_SNAP_COUNT} snaps from this clone"
+                logger.error(msg)
+                return False, msg
+        except KeyError:
+            pass
 
     for sn in db_controller.get_snapshots():
         if sn.cluster_id == pool.cluster_id:
