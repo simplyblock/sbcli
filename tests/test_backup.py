@@ -387,17 +387,21 @@ class TestBackupSnapshot(unittest.TestCase):
     @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.backup_events")
+    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_success(self, mock_db, mock_events, mock_tasks, _mock_write):
+    def test_success(self, mock_db, _mock_local_source, mock_events, mock_tasks, _mock_write):
         snap = _snapshot()
         mock_db.get_snapshot_by_id.return_value = snap
         mock_db.get_storage_node_by_id.return_value = _node()
         mock_db.get_backups_by_lvol_id.return_value = []
         mock_db.get_backups.return_value = []
+        mock_db.get_backups_by_snapshot_id.return_value = []
+        mock_db.acquire_backup_chain_locks.return_value = (True, None)
         mock_tasks.add_backup_task.return_value = "task-1"
 
         from simplyblock_core.controllers.backup_controller import backup_snapshot
-        backup_id, error = backup_snapshot("snap-1")
+        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain", return_value=[snap]):
+            backup_id, error = backup_snapshot("snap-1")
 
         self.assertIsNotNone(backup_id)
         self.assertIsNone(error)
@@ -429,8 +433,9 @@ class TestBackupSnapshot(unittest.TestCase):
         self.assertIsNone(backup_id)
         self.assertIn("no associated lvol", error.lower())
 
+    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_node_not_online(self, mock_db):
+    def test_node_not_online(self, mock_db, _mock_local_source):
         snap = _snapshot()
         node = _node(status=StorageNode.STATUS_OFFLINE)
         mock_db.get_snapshot_by_id.return_value = snap
@@ -445,18 +450,21 @@ class TestBackupSnapshot(unittest.TestCase):
     @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.backup_events")
+    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_incremental_backup(self, mock_db, mock_events, mock_tasks, _mock_write):
+    def test_incremental_backup(self, mock_db, _mock_local_source, mock_events, mock_tasks, _mock_write):
         snap = _snapshot()
         prev = _backup(uuid="prev-backup", s3_id=3)
         mock_db.get_snapshot_by_id.return_value = snap
         mock_db.get_storage_node_by_id.return_value = _node()
         mock_db.get_backups_by_lvol_id.return_value = [prev]
         mock_db.get_backups.return_value = [prev]
+        mock_db.acquire_backup_chain_locks.return_value = (True, None)
         mock_tasks.add_backup_task.return_value = "task-1"
 
         from simplyblock_core.controllers.backup_controller import backup_snapshot
-        backup_id, error = backup_snapshot("snap-1")
+        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain", return_value=[snap]):
+            backup_id, error = backup_snapshot("snap-1")
 
         self.assertIsNotNone(backup_id)
         self.assertIsNone(error)
@@ -464,6 +472,54 @@ class TestBackupSnapshot(unittest.TestCase):
         created_backup = mock_events.backup_created.call_args[0][2]
         self.assertEqual(created_backup.prev_backup_id, "prev-backup")
         self.assertEqual(created_backup.s3_id, 4)
+
+    @patch.object(Backup, 'write_to_db')
+    @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
+    @patch("simplyblock_core.controllers.backup_controller.backup_events")
+    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
+    @patch("simplyblock_core.controllers.backup_controller.db_controller")
+    def test_chain_backup_acquires_and_releases_lock(self, mock_db, _mock_local_source, mock_events, mock_tasks, _mock_write):
+        snap1 = _snapshot(uuid="snap-1")
+        snap1.created_at = 1
+        snap2 = _snapshot(uuid="snap-2")
+        snap2.created_at = 2
+        snap2.lvol.uuid = "lvol-1"
+        mock_db.get_snapshot_by_id.return_value = snap2
+        mock_db.get_storage_node_by_id.return_value = _node()
+        mock_db.get_backups_by_lvol_id.return_value = []
+        mock_db.get_backups.return_value = []
+        mock_db.get_backups_by_snapshot_id.return_value = []
+        mock_db.acquire_backup_chain_locks.return_value = (True, None)
+        mock_tasks.add_backup_task.return_value = "task-1"
+
+        from simplyblock_core.controllers.backup_controller import backup_snapshot
+        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain", return_value=[snap1, snap2]):
+            backup_id, error = backup_snapshot("snap-2")
+
+        self.assertIsNotNone(backup_id)
+        self.assertIsNone(error)
+        mock_db.acquire_backup_chain_locks.assert_called_once_with(["snap-1", "snap-2"], "snap-2", "lvol-1")
+        mock_db.release_backup_chain_locks.assert_called_once_with(["snap-1", "snap-2"])
+        self.assertEqual(mock_tasks.add_backup_task.call_count, 2)
+        self.assertEqual(mock_events.backup_created.call_count, 2)
+
+    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
+    @patch("simplyblock_core.controllers.backup_controller.db_controller")
+    def test_chain_backup_lock_conflict(self, mock_db, _mock_local_source):
+        snap = _snapshot(uuid="snap-4")
+        snap.created_at = 4
+        existing_lock = MagicMock(requested_snapshot_id="snap-2", snapshot_id="snap-2")
+        mock_db.get_snapshot_by_id.return_value = snap
+        mock_db.get_storage_node_by_id.return_value = _node()
+        mock_db.acquire_backup_chain_locks.return_value = (False, existing_lock)
+
+        from simplyblock_core.controllers.backup_controller import backup_snapshot
+        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain", return_value=[snap]):
+            backup_id, error = backup_snapshot("snap-4")
+
+        self.assertIsNone(backup_id)
+        self.assertIn("already preparing this snapshot chain", error)
+        mock_db.release_backup_chain_locks.assert_not_called()
 
 
 # ===========================================================================
@@ -586,6 +642,18 @@ class TestListBackups(unittest.TestCase):
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["ID"], "backup-1")
         self.assertEqual(data[0]["Status"], Backup.STATUS_COMPLETED)
+
+    @patch("simplyblock_core.controllers.backup_controller.db_controller")
+    def test_list_sorted_newest_first_with_seconds(self, mock_db):
+        older = _backup(uuid="older", created_at=1710000000)
+        newer = _backup(uuid="newer", created_at=1710000005)
+        mock_db.get_backups.return_value = [older, newer]
+
+        from simplyblock_core.controllers.backup_controller import list_backups
+        data = list_backups()
+
+        self.assertEqual([row["ID"] for row in data], ["newer", "older"])
+        self.assertEqual(data[0]["Created"], time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(1710000005)))
 
 
 # ===========================================================================

@@ -50,6 +50,18 @@ class Backup(BaseModel):
         super().write_to_db(kv_store)
 
 
+class BackupChainLock(BaseModel):
+    """Short-lived lock used while enqueuing a snapshot backup chain."""
+
+    snapshot_id: str = ""
+    requested_snapshot_id: str = ""
+    lvol_id: str = ""
+    created_at: int = 0
+
+    def get_id(self):
+        return self.snapshot_id or self.uuid
+
+
 class BackupPolicy(BaseModel):
 
     STATUS_ACTIVE = 'active'
