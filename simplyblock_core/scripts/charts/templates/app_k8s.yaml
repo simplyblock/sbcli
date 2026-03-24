@@ -1678,9 +1678,9 @@ spec:
         - name: VAULT_ADDR
           value: "http://127:0:0:1:8200"
         volumeMounts:
-        - name: kms_config
+        - name: kms-config
           mountPath: /vault/config/
-        - name: kms_data
+        - name: kms-data
           mountPath: /vault/data
         resources:
           requests:
@@ -1690,10 +1690,10 @@ spec:
             cpu: "600m"
             memory: "1Gi"
       volumes:
-      - name: kms_config
+      - name: kms-config
         configMap:
           name: simplyblock-kms-config
-      - name: kms_data
+      - name: kms-data
         hostPath:
           path: /var/simplyblock/kms/data
 {{- end }}
