@@ -109,6 +109,12 @@ on:
         default: 'spdk="" docker=""'
         required: false
 
+      USE_EXISTING_CLUSTER:
+        description: "Use existing K8s cluster (skip k3s bootstrap). Kubeconfig is read from K8S_KUBECONFIG secret."
+        type: boolean
+        required: false
+        default: false
+
 concurrency:
   group: simplyblock-lab-k8s-stress-${{ inputs.K3S_MNODES }}
   cancel-in-progress: false
@@ -297,6 +303,7 @@ jobs:
           done
 
       - name: Pre-clean — uninstall k3s / k3s-agent, remove containers and sbcli
+        if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -356,6 +363,7 @@ jobs:
           done
 
       - name: Pre-clean — remove /etc/simplyblock on all nodes
+        if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -371,6 +379,7 @@ jobs:
           done
 
       - name: Reboot storage nodes + wait online + disk reset
+        if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -419,6 +428,7 @@ jobs:
       # K3S BOOTSTRAP
       # ============================================================
       - name: Clone simplyBlockDeploy (bootstrap repo)
+        if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -427,6 +437,7 @@ jobs:
           test -f simplyBlockDeploy/bare-metal/bootstrap-k3s.sh
 
       - name: Bootstrap K3s cluster (--k8s-snode)
+        if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -457,6 +468,7 @@ jobs:
       # COPY KUBECONFIG FROM K3S MASTER TO RUNNER
       # ============================================================
       - name: Copy kubeconfig from K3s master to runner
+        if: ${{ inputs.USE_EXISTING_CLUSTER != true }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -471,9 +483,71 @@ jobs:
           echo "KUBECONFIG=${HOME}/.kube/config_k3s" >> "$GITHUB_ENV"
           kubectl get nodes
 
+      - name: Write kubeconfig from secret (existing cluster)
+        if: ${{ inputs.USE_EXISTING_CLUSTER == true }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/.kube
+          echo "${{ secrets.K8S_KUBECONFIG }}" > ~/.kube/config_k3s
+          chmod 600 ~/.kube/config_k3s
+          echo "KUBECONFIG=${HOME}/.kube/config_k3s" >> "$GITHUB_ENV"
+          kubectl get nodes
+
       # ============================================================
       # HELM DEPLOY
       # ============================================================
+      - name: Pre-Helm cleanup (uninstall + delete CRDs/resources)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          NS="${K8S_NAMESPACE}"
+
+          # Uninstall existing Helm release (ignore error if not installed)
+          helm uninstall sbcli -n "${NS}" 2>/dev/null || true
+
+          # Force-delete all pods, PVCs, PVs
+          kubectl -n "${NS}" delete pod --all --force --grace-period=0 2>/dev/null || true
+          kubectl -n "${NS}" delete pvc --all --force --grace-period=0 2>/dev/null || true
+          kubectl delete pv --all --force --grace-period=0 2>/dev/null || true
+
+          # Remove finalizers then delete known CRD instances
+          RESOURCES=(
+            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool"
+            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool2"
+            "simplyblocklvol.simplyblock.simplyblock.io simplyblock-lvol"
+            "simplyblocktask.simplyblock.simplyblock.io simplyblock-task"
+            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-devices"
+            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-device-action"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node2"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node-action"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster2"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster-activate"
+            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication"
+            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication-failback"
+          )
+          for item in "${RESOURCES[@]}"; do
+            KIND=$(echo "$item" | awk '{print $1}')
+            NAME=$(echo "$item" | awk '{print $2}')
+            kubectl -n "${NS}" patch "${KIND}" "${NAME}" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl -n "${NS}" delete "${KIND}" "${NAME}" --ignore-not-found 2>/dev/null || true
+          done
+          echo "Pre-Helm cleanup done."
+
+      - name: Build worker node names for Helm
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Generate worker1,worker2,...,workerN from the number of STORAGE_PRIVATE_IPS
+          count=$(echo "${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | grep -c '\S')
+          worker_csv=$(seq 1 "${count}" | sed 's/^/worker/' | tr '\n' ',' | sed 's/,$//')
+          echo "Worker node names: ${worker_csv}"
+          [[ -n "${worker_csv}" ]] || (echo "ERROR: STORAGE_PRIVATE_IPS is empty" && exit 1)
+          echo "HELM_WORKER_NODES={${worker_csv}}" >> "$GITHUB_ENV"
+
       - name: Clone sbcli charts branch
         shell: bash
         run: |
@@ -493,6 +567,9 @@ jobs:
           if [[ -n "${SIMPLY_BLOCK_DOCKER_IMAGE-}" ]]; then
             extra_set+=( --set "image.repository=${SIMPLY_BLOCK_DOCKER_IMAGE%%:*}" )
             extra_set+=( --set "image.tag=${SIMPLY_BLOCK_DOCKER_IMAGE##*:}" )
+          fi
+          if [[ -n "${HELM_WORKER_NODES:-}" ]]; then
+            extra_set+=( --set "storageNodes.workerNodes=${HELM_WORKER_NODES}" )
           fi
           if [[ -n "${EXTRA_HELM_ARGS:-}" ]]; then
             # Allow caller to pass raw --set flags as space-separated string
@@ -524,6 +601,26 @@ jobs:
             [[ "$i" -lt 60 ]] || (echo "ERROR: admin pod did not start" && exit 1)
           done
           kubectl get pods -n "${K8S_NAMESPACE}"
+
+      - name: Wait for cluster to be active
+        shell: bash
+        run: |
+          set -euxo pipefail
+          admin_pod="$(kubectl get pods -n "${K8S_NAMESPACE}" --no-headers \
+            -o custom-columns=:metadata.name | grep simplyblock-admin-control | head -1)"
+          echo "Admin pod: ${admin_pod}"
+          for i in {1..120}; do
+            output="$(kubectl exec -n "${K8S_NAMESPACE}" "${admin_pod}" -- \
+              bash -c "${SBCLI_CMD} cluster list" 2>/dev/null || true)"
+            echo "cluster list output: ${output}"
+            if echo "${output}" | grep -qi "active"; then
+              echo "Cluster is active."
+              break
+            fi
+            echo "Attempt $i: cluster not active yet. Waiting 10s..."
+            sleep 10
+            [[ "$i" -lt 120 ]] || (echo "ERROR: cluster did not become active" && exit 1)
+          done
 
       # ============================================================
       # SET API_BASE_URL
