@@ -294,6 +294,9 @@ def delete(snapshot_uuid, force_delete=False):
         snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
     except KeyError:
         logger.exception(f"Storage node not found {snap.lvol.node_id}")
+        if force_delete:
+            snap.remove(db_controller.kv_store)
+            return True
         return False
 
     clones = []
