@@ -2447,7 +2447,9 @@ class SshUtils:
                 all_ok = False
                 continue
 
-            if "lpgi:" not in map_content:
+            if not map_content.strip():
+                self.logger.warning(f"[PLACEMENT_DUMP] Map file is empty (skipping): {map_file_path}")
+            elif "lpgi:" not in map_content:
                 self.logger.error(f"[PLACEMENT_DUMP] Map file has no lpgi data: {map_file_path}")
                 all_ok = False
             else:
