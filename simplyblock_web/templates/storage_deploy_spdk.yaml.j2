@@ -36,9 +36,6 @@ spec:
     - name: host-rootfs
       hostPath:
         path: /
-    - name: foundationdb
-      hostPath:
-        path: /var/foundationdb
     - name: etc-simplyblock
       hostPath:
         path: /var/simplyblock
@@ -64,14 +61,6 @@ spec:
       configMap:
         name: simplyblock-fluent-bit-config
     {% endif %}
-
-  initContainers:
-    - name: copy-script
-      image: public.ecr.aws/simply-block/busybox
-      command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
-      volumeMounts:
-        - name: foundationdb
-          mountPath: /etc/foundationdb
 
   containers:
     - name: spdk-container
