@@ -1661,14 +1661,13 @@ spec:
       labels:
         app: simplyblock-kms
     spec:
-      serviceAccountName: simplyblock-kms
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
       - name: simplyblock-kms
         image: "hashicorp/vault:1.13.3"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-        command: ["/bin/bash", "-c", "server"]
+        command: ["/bin/sh", "/usr/local/bin/docker-entrypoint.sh", "server"]
         securityContext:
           runAsUser: 0
           runAsGroup: 0
@@ -1696,4 +1695,5 @@ spec:
       - name: kms-data
         hostPath:
           path: /var/simplyblock/kms/data
+          type: DirectoryOrCreate
 {{- end }}
