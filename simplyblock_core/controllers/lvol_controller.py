@@ -907,7 +907,7 @@ def delete_lvol(id_or_name, force_delete=False):
     if lvol.status == LVol.STATUS_IN_DELETION:
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
-            return False
+            return True
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
