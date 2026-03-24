@@ -243,12 +243,15 @@ def add(lvol_id, snapshot_name):
     if lvol.cloned_from_snap:
         lvol_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
         if lvol_snap.source_replicated_snap_uuid:
-            org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
-            if org_snap and org_snap.status == SnapShot.STATUS_ONLINE:
-                task = tasks_controller.add_snapshot_replication_task(
-                    snap.cluster_id, org_snap.lvol.node_id, snap.get_id(), replicate_to_source=True)
-                if task:
-                    logger.info("Created snapshot replication task on original node")
+            try:
+                org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
+                if org_snap and org_snap.status == SnapShot.STATUS_ONLINE:
+                    task = tasks_controller.add_snapshot_replication_task(
+                        snap.cluster_id, org_snap.lvol.node_id, snap.get_id(), replicate_to_source=True)
+                    if task:
+                        logger.info("Created snapshot replication task on original node")
+            except KeyError:
+                pass
     return snap.uuid, False
 
 
