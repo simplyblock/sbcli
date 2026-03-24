@@ -505,8 +505,8 @@ class TestDHCHAPE2E(unittest.TestCase):
         self.assertIn(f"--hostnqn={host_nqn}", cmd)
         self.assertTrue(result[0].get("tls"))
 
-    def test_connect_lvol_no_secrets_without_host_nqn(self):
-        """connect_lvol without host_nqn omits secrets."""
+    def test_connect_lvol_without_host_nqn_is_rejected_when_acl_exists(self):
+        """connect_lvol requires host_nqn when allowed_hosts are configured."""
         from unittest.mock import MagicMock, patch
         from simplyblock_core.controllers import lvol_controller as lvol_ctl
         from simplyblock_core.utils import generate_dhchap_key
@@ -551,9 +551,7 @@ class TestDHCHAPE2E(unittest.TestCase):
                     return_value=mock_db):
             result = lvol_ctl.connect_lvol("lvol-1")
 
-        cmd = result[0]["connect"]
-        self.assertNotIn("--dhchap-secret", cmd)
-        self.assertNotIn("--hostnqn", cmd)
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":

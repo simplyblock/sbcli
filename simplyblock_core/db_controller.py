@@ -387,8 +387,8 @@ class DBController(metaclass=Singleton):
         if not self.kv_store or not snapshot_ids:
             return True, None
         ordered_snapshot_ids = sorted(set(snapshot_ids))
-        transactional = fdb.transactional(self._acquire_backup_chain_locks_tx)
-        return transactional(self.kv_store, ordered_snapshot_ids, requested_snapshot_id, lvol_id)
+        transactional = fdb.transactional(DBController._acquire_backup_chain_locks_tx)
+        return transactional(self, self.kv_store, ordered_snapshot_ids, requested_snapshot_id, lvol_id)
 
     def _release_backup_chain_locks_tx(self, tr, snapshot_ids):
         for snapshot_id in snapshot_ids:
@@ -401,8 +401,8 @@ class DBController(metaclass=Singleton):
         if not self.kv_store or not snapshot_ids:
             return
         ordered_snapshot_ids = sorted(set(snapshot_ids))
-        transactional = fdb.transactional(self._release_backup_chain_locks_tx)
-        transactional(self.kv_store, ordered_snapshot_ids)
+        transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
+        transactional(self, self.kv_store, ordered_snapshot_ids)
 
     # ---- S3 Backup ----
 
