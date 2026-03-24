@@ -87,8 +87,8 @@ opensearch:
       memory: "3Gi"
 
   extraEnvs:
-    - name: OPENSEARCH_JAVA_OPTS
-      value: "-Xms1g -Xmx1g"
+#    - name: OPENSEARCH_JAVA_OPTS
+#      value: "-Xms1g -Xmx1g"
     - name: bootstrap.memory_lock
       value: "true"
     - name: action.auto_create_index
