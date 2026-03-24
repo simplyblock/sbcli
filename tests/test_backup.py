@@ -22,6 +22,7 @@ import unittest
 from unittest.mock import MagicMock, patch, call
 import time
 
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -523,7 +524,41 @@ class TestBackupSnapshot(unittest.TestCase):
 
 
 # ===========================================================================
-# 8. backup_controller.restore_backup
+# 8. db_controller backup chain locking
+# ===========================================================================
+
+class TestDBControllerBackupChainLocks(unittest.TestCase):
+
+    @patch("simplyblock_core.db_controller.fdb.transactional")
+    def test_acquire_backup_chain_locks_uses_bound_method_arguments(self, mock_transactional):
+        db = object.__new__(DBController)
+        db.kv_store = MagicMock()
+
+        wrapped = MagicMock(return_value=("ok", None))
+        mock_transactional.return_value = wrapped
+
+        result = db.acquire_backup_chain_locks(["snap-2", "snap-1"], "snap-2", "lvol-1")
+
+        self.assertEqual(result, ("ok", None))
+        mock_transactional.assert_called_once_with(db._acquire_backup_chain_locks_tx)
+        wrapped.assert_called_once_with(["snap-1", "snap-2"], "snap-2", "lvol-1")
+
+    @patch("simplyblock_core.db_controller.fdb.transactional")
+    def test_release_backup_chain_locks_uses_bound_method_arguments(self, mock_transactional):
+        db = object.__new__(DBController)
+        db.kv_store = MagicMock()
+
+        wrapped = MagicMock()
+        mock_transactional.return_value = wrapped
+
+        db.release_backup_chain_locks(["snap-2", "snap-1"])
+
+        mock_transactional.assert_called_once_with(db._release_backup_chain_locks_tx)
+        wrapped.assert_called_once_with(["snap-1", "snap-2"])
+
+
+# ===========================================================================
+# 9. backup_controller.restore_backup
 # ===========================================================================
 
 class TestRestoreBackup(unittest.TestCase):
@@ -583,7 +618,7 @@ class TestRestoreBackup(unittest.TestCase):
 
 
 # ===========================================================================
-# 9. backup_controller.delete_backups
+# 10. backup_controller.delete_backups
 # ===========================================================================
 
 class TestDeleteBackups(unittest.TestCase):
