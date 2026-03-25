@@ -232,6 +232,7 @@ simplyblock:
     partitions: 0
     corePercentage: 65
     spdkDebug: false
+    spdkImage:
     coreIsolation: false
     workerNodes:
       - israel-storage-node-1
