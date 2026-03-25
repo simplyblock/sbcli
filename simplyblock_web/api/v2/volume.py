@@ -277,14 +277,12 @@ def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume
 
 
 class ReplicateLVolParams(BaseModel):
-    cluster_id: Optional[str] = None
-    pool_id: Optional[str] = None
     lvol_id: Optional[str] = None
 
 
-@instance_api.post('/replicate_lvol_on_source_cluster', name='replicate_lvol_on_source_cluster')
-def replicate_lvol_on_source_cluster(body: ReplicateLVolParams):
-    return lvol_controller.replicate_lvol_on_source_cluster(body.lvol_id, body.cluster_id, body.pool_id)
+@instance_api.post('/replicate_lvol_on_source_cluster', name='clusters:storage-pools:replicate_lvol_on_source_cluster')
+def replicate_lvol_on_source_cluster(cluster: Cluster, pool: StoragePool, body: ReplicateLVolParams):
+    return lvol_controller.replicate_lvol_on_source_cluster(body.lvol_id, cluster.get_id(), pool.get_id())
 
 
 @instance_api.get('/list_replication_tasks', name='clusters:storage-pools:volumes:list_replication_tasks')
