@@ -29,6 +29,7 @@ class Pool(BaseModel):
     secret: str = ""  # unused
     users: List[str] = []
     qos_host: str = ""
+    sec_options: dict = {}
 
 
     def has_qos(self):

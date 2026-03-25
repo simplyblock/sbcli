@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import (
     generate_psk_key,
@@ -45,8 +46,16 @@ def _cluster(tls=False, tls_config=None, nqn="nqn.2023-02.io.simplyblock:test"):
     return c
 
 
+def _pool(uuid="pool-1", sec_options=None):
+    p = Pool()
+    p.uuid = uuid
+    p.status = Pool.STATUS_ACTIVE
+    p.sec_options = sec_options or {}
+    return p
+
+
 def _lvol(uuid="lvol-1", node_id="node-1", nqn="nqn:test:lvol-1",
-          allowed_hosts=None, nodes=None):
+          allowed_hosts=None, nodes=None, pool_uuid="pool-1"):
     l = LVol()
     l.uuid = uuid
     l.node_id = node_id
@@ -58,6 +67,7 @@ def _lvol(uuid="lvol-1", node_id="node-1", nqn="nqn:test:lvol-1",
     l.ns_id = 1
     l.ha_type = "single"
     l.fabric = "tcp"
+    l.pool_uuid = pool_uuid
     return l
 
 
@@ -370,12 +380,16 @@ class TestBuildHostEntries(unittest.TestCase):
 import simplyblock_core.controllers.lvol_controller as lvol_ctl
 
 
-def _mock_db_for_host_ops(lvol, node, cluster):
+def _mock_db_for_host_ops(lvol, node, cluster, pool=None):
     """Build a mock DBController for add/remove host tests."""
     mock_db = MagicMock()
     mock_db.get_lvol_by_id.return_value = lvol
     mock_db.get_storage_node_by_id.return_value = node
     mock_db.get_cluster_by_id.return_value = cluster
+    if pool is not None:
+        mock_db.get_pool_by_id.return_value = pool
+    else:
+        mock_db.get_pool_by_id.side_effect = KeyError("pool not found")
     mock_db.kv_store = MagicMock()
     return mock_db
 
@@ -389,9 +403,10 @@ class TestAddHostToLvol(unittest.TestCase):
         cl = _cluster(tls=True)
         node = _node()
         node.cluster_id = cl.uuid
+        pool = _pool(sec_options={"psk": True})
         lvol = _lvol(allowed_hosts=[], nodes=[node.uuid])
 
-        mock_db = _mock_db_for_host_ops(lvol, node, cl)
+        mock_db = _mock_db_for_host_ops(lvol, node, cl, pool=pool)
         MockDBCtrl.return_value = mock_db
 
         mock_rpc_inst = MagicMock()
@@ -400,8 +415,7 @@ class TestAddHostToLvol(unittest.TestCase):
         mock_register.return_value = {"psk": "psk_key_name"}
 
         with patch.object(lvol, "write_to_db") as mock_write:
-            result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:new-host",
-                                                      sec_options={"psk": True})
+            result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:new-host")
             self.assertIsNone(err)
             self.assertEqual(result["nqn"], "nqn:new-host")
             self.assertIn("psk", result)
@@ -457,9 +471,10 @@ class TestAddHostToLvol(unittest.TestCase):
         cl = _cluster(tls=True)
         node = _node()
         node.cluster_id = cl.uuid
+        pool = _pool(sec_options={"dhchap_key": True})
         lvol = _lvol(nodes=[node.uuid])
 
-        mock_db = _mock_db_for_host_ops(lvol, node, cl)
+        mock_db = _mock_db_for_host_ops(lvol, node, cl, pool=pool)
         MockDBCtrl.return_value = mock_db
 
         mock_rpc_inst = MagicMock()
@@ -467,8 +482,7 @@ class TestAddHostToLvol(unittest.TestCase):
         MockRPC.return_value = mock_rpc_inst
         mock_register.return_value = {"dhchap_key": "kn"}
 
-        result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:host",
-                                                  sec_options={"dhchap_key": True})
+        result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:host")
         self.assertFalse(result)
         self.assertIn("Failed to add host", err)
 
@@ -479,9 +493,10 @@ class TestAddHostToLvol(unittest.TestCase):
         cl = _cluster(tls=True)
         node = _node()
         node.cluster_id = cl.uuid
+        pool = _pool(sec_options={"dhchap_key": True, "dhchap_ctrlr_key": True})
         lvol = _lvol(nodes=[node.uuid])
 
-        mock_db = _mock_db_for_host_ops(lvol, node, cl)
+        mock_db = _mock_db_for_host_ops(lvol, node, cl, pool=pool)
         MockDBCtrl.return_value = mock_db
 
         mock_rpc_inst = MagicMock()
@@ -492,9 +507,7 @@ class TestAddHostToLvol(unittest.TestCase):
             "dhchap_ctrlr_key": "kn_ctrlr",
         }
 
-        result, err = lvol_ctl.add_host_to_lvol(
-            "lvol-1", "nqn:host",
-            sec_options={"dhchap_key": True, "dhchap_ctrlr_key": True})
+        result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:host")
         self.assertIsNone(err)
         self.assertIn("dhchap_key", result)
         self.assertIn("dhchap_ctrlr_key", result)
