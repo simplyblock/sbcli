@@ -1021,6 +1021,10 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error(f"Cannot delete lvol {lvol.uuid}: active migration {active_mig.uuid}")
         return False
 
+    if lvol.status == LVol.STATUS_RESTORING and not force_delete:
+        logger.error(f"Cannot delete lvol {lvol.uuid}: backup restore in progress")
+        return False
+
     if lvol.status == LVol.STATUS_IN_DELETION:
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
