@@ -80,17 +80,21 @@ def _set_lvol_ana_on_node(lvol, node, ana_state):
 
 
 def _failover_primary_ana(primary_node):
-    """Primary failed: promote first_sec→optimized, second_sec→non_optimized."""
-    db_controller = DBController()
-    lvol_list = [lv for lv in db_controller.get_lvols_by_node_id(primary_node.get_id())
+    """Primary failed: promote first_sec→optimized, second_sec→non_optimized.
+
+    Iterates volume-by-volume: for each lvol, set first_sec then second_sec
+    before moving to the next lvol.
+    """
+    db_ctrl = DBController()
+    lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
                  if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
 
     first_sec = None
     second_sec = None
     if primary_node.secondary_node_id:
-        first_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+        first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
     if primary_node.secondary_node_id_2:
-        second_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id_2)
+        second_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id_2)
 
     for lvol in lvol_list:
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
@@ -99,46 +103,132 @@ def _failover_primary_ana(primary_node):
             _set_lvol_ana_on_node(lvol, second_sec, "non_optimized")
 
 
-def _failback_primary_ana(primary_node):
-    """Primary restarting: second_sec→inaccessible, then first_sec→non_optimized."""
-    db_controller = DBController()
-    lvol_list = [lv for lv in db_controller.get_lvols_by_node_id(primary_node.get_id())
-                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
-
-    first_sec = None
-    second_sec = None
-    if primary_node.secondary_node_id:
-        first_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
-    if primary_node.secondary_node_id_2:
-        second_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id_2)
-
-    # Order matters: demote second_sec FIRST, then first_sec
-    for lvol in lvol_list:
-        if second_sec and second_sec.status == StorageNode.STATUS_ONLINE:
-            _set_lvol_ana_on_node(lvol, second_sec, "inaccessible")
-    for lvol in lvol_list:
-        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
-            _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
-
-
 def _failover_first_sec_ana(primary_node, second_sec_node):
     """First sec failed: promote second_sec from inaccessible→non_optimized."""
-    db_controller = DBController()
-    lvol_list = [lv for lv in db_controller.get_lvols_by_node_id(primary_node.get_id())
+    db_ctrl = DBController()
+    lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
                  if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
 
     for lvol in lvol_list:
         _set_lvol_ana_on_node(lvol, second_sec_node, "non_optimized")
 
 
+def _failback_primary_ana(primary_node):
+    """Primary restarting: for each lvol, set second_sec→inaccessible then first_sec→non_optimized.
+
+    Order matters per-lvol: demote second_sec FIRST, then first_sec, to ensure
+    at no point two subsystems are in the same accessible state.
+    """
+    db_ctrl = DBController()
+    lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
+                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
+
+    first_sec = None
+    second_sec = None
+    if primary_node.secondary_node_id:
+        first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
+    if primary_node.secondary_node_id_2:
+        second_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id_2)
+
+    for lvol in lvol_list:
+        if second_sec and second_sec.status == StorageNode.STATUS_ONLINE:
+            _set_lvol_ana_on_node(lvol, second_sec, "inaccessible")
+        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+            _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
+
+
 def _failback_first_sec_ana(primary_node, second_sec_node):
     """First sec restarting: demote second_sec from non_optimized→inaccessible."""
-    db_controller = DBController()
-    lvol_list = [lv for lv in db_controller.get_lvols_by_node_id(primary_node.get_id())
+    db_ctrl = DBController()
+    lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
                  if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
 
     for lvol in lvol_list:
         _set_lvol_ana_on_node(lvol, second_sec_node, "inaccessible")
+
+
+def trigger_ana_failover_for_node(offline_node):
+    """Trigger ANA failover for all roles an offline node plays.
+
+    A node in FT=2 plays multiple roles:
+    1. Primary for its own lvstore — promote its secondaries
+    2. First-secondary for another primary's lvstore — promote that primary's second-secondary
+    3. Second-secondary for another primary's lvstore — no action needed (first-sec is still up)
+    """
+    db_ctrl = DBController()
+    node_id = offline_node.get_id()
+
+    # Role 1: This node is a primary — promote its secondaries
+    if offline_node.secondary_node_id:
+        logger.info("ANA failover: node %s is primary, promoting secondaries", node_id)
+        try:
+            _failover_primary_ana(offline_node)
+        except Exception as e:
+            logger.error("ANA failover for primary role of %s failed: %s", node_id, e)
+
+    # Role 2: This node is a secondary for other primaries
+    primary_nodes = db_ctrl.get_primary_storage_nodes_by_secondary_node_id(node_id)
+    for primary_node in primary_nodes:
+        if primary_node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            continue
+        if primary_node.secondary_node_id == node_id and primary_node.secondary_node_id_2:
+            # This offline node is the first-secondary — promote second-secondary
+            second_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id_2)
+            if second_sec and second_sec.status == StorageNode.STATUS_ONLINE:
+                logger.info("ANA failover: node %s is first-sec of %s, promoting second-sec %s",
+                            node_id, primary_node.get_id(), second_sec.get_id())
+                try:
+                    _failover_first_sec_ana(primary_node, second_sec)
+                except Exception as e:
+                    logger.error("ANA failover for first-sec role of %s (primary %s) failed: %s",
+                                 node_id, primary_node.get_id(), e)
+        # If this node is the second-secondary, no ANA action needed
+
+
+def trigger_ana_failback_for_node(restarting_node):
+    """Trigger ANA failback when a node comes back online.
+
+    Must be called BEFORE port unblock/examine so that subsystem states
+    are correct before the node starts serving IO.
+
+    Rules:
+    - Primary restarts, both secondaries online: for each lvol set
+      second_sec→inaccessible then first_sec→non_optimized
+    - First-sec restarts, primary and second-sec online: set
+      second_sec→inaccessible
+    """
+    db_ctrl = DBController()
+    node_id = restarting_node.get_id()
+
+    # Role 1: This node is a primary — demote secondaries back to normal
+    if restarting_node.secondary_node_id:
+        first_sec = db_ctrl.get_storage_node_by_id(restarting_node.secondary_node_id)
+        second_sec = None
+        if restarting_node.secondary_node_id_2:
+            second_sec = db_ctrl.get_storage_node_by_id(restarting_node.secondary_node_id_2)
+        first_online = first_sec and first_sec.status == StorageNode.STATUS_ONLINE
+        second_online = second_sec and second_sec.status == StorageNode.STATUS_ONLINE
+        if first_online and second_online:
+            logger.info("ANA failback: primary %s restarting, demoting secondaries", node_id)
+            try:
+                _failback_primary_ana(restarting_node)
+            except Exception as e:
+                logger.error("ANA failback for primary role of %s failed: %s", node_id, e)
+
+    # Role 2: This node is a first-secondary for other primaries
+    primary_nodes = db_ctrl.get_primary_storage_nodes_by_secondary_node_id(node_id)
+    for primary_node in primary_nodes:
+        if primary_node.secondary_node_id == node_id and primary_node.secondary_node_id_2:
+            if primary_node.status == StorageNode.STATUS_ONLINE:
+                second_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id_2)
+                if second_sec and second_sec.status == StorageNode.STATUS_ONLINE:
+                    logger.info("ANA failback: first-sec %s restarting for primary %s, demoting second-sec %s",
+                                node_id, primary_node.get_id(), second_sec.get_id())
+                    try:
+                        _failback_first_sec_ana(primary_node, second_sec)
+                    except Exception as e:
+                        logger.error("ANA failback for first-sec role of %s (primary %s) failed: %s",
+                                     node_id, primary_node.get_id(), e)
 
 
 def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool):
@@ -2208,6 +2298,12 @@ def restart_storage_node(
         if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
             device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
+        # ANA failback: demote secondaries BEFORE port unblock/online
+        try:
+            trigger_ana_failback_for_node(snode)
+        except Exception as ana_e:
+            logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
+
         logger.info("Cluster is not ready yet")
         logger.info("Setting node status to Online")
         set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
@@ -2279,6 +2375,12 @@ def restart_storage_node(
 
             if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
                 device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
+
+            # ANA failback: demote secondaries BEFORE port unblock/online
+            try:
+                trigger_ana_failback_for_node(snode)
+            except Exception as ana_e:
+                logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
 
             logger.info("Setting node status to Online")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
@@ -2546,6 +2648,13 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+
+    # ANA failover: update subsystem states on surviving nodes
+    snode = db_controller.get_storage_node_by_id(node_id)
+    try:
+        trigger_ana_failover_for_node(snode)
+    except Exception as ana_e:
+        logger.error("ANA failover during shutdown of %s failed: %s", node_id, ana_e)
 
     tasks = db_controller.get_job_tasks(snode.cluster_id)
     for task in tasks:
