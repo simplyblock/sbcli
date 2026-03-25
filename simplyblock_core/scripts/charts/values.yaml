@@ -21,8 +21,8 @@ grafana:
 
 image:
   simplyblock: 
-    repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "R25.10-Hotfix"
+    repository: "simplyblock/simplyblock"
+    tag: "new-main-kms"
     pullPolicy: "Always"
 
 tolerations:
