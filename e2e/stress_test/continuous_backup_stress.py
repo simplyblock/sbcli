@@ -310,7 +310,8 @@ class BackupStressParallelSnapshots(BackupStressBase):
             rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
             r_device, r_mount = self._connect_and_mount(
                 restored_name, rest_id,
-                mount=f"{self.mount_path}/par_rest_{_rand_suffix()}")
+                mount=f"{self.mount_path}/par_rest_{_rand_suffix()}",
+                format_disk=False)
             r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
             orig_checksums = lvol_map[target_name][3]
             self.ssh_obj.verify_checksums(
@@ -439,7 +440,8 @@ class BackupStressTcpFailover(BackupStressBase):
                 rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
                 r_device, r_mount = self._connect_and_mount(
                     restored_name, rest_id,
-                    mount=f"{self.mount_path}/tr_{_rand_suffix()}")
+                    mount=f"{self.mount_path}/tr_{_rand_suffix()}",
+                    format_disk=False)
                 self._run_fio(r_mount, runtime=30)
                 self.logger.info(
                     f"TC-BCK-STR-013: restore after TCP failover OK for {name}")
@@ -564,7 +566,8 @@ class BackupStressCryptoMix(BackupStressBase):
                 rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
                 r_device, r_mount = self._connect_and_mount(
                     restored_name, rest_id,
-                    mount=f"{self.mount_path}/mr_{_rand_suffix()}")
+                    mount=f"{self.mount_path}/mr_{_rand_suffix()}",
+                    format_disk=False)
                 r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
                 self.ssh_obj.verify_checksums(
                     self.fio_node, r_files, lvol_map[name]["checksums"],
@@ -753,7 +756,8 @@ class BackupStressRestoreConcurrent(BackupStressBase):
                 rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
                 r_device, r_mount = self._connect_and_mount(
                     restored_name, rest_id,
-                    mount=f"{self.mount_path}/cr_{_rand_suffix()}")
+                    mount=f"{self.mount_path}/cr_{_rand_suffix()}",
+                    format_disk=False)
                 r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
                 self.ssh_obj.verify_checksums(
                     self.fio_node, r_files, orig_checksums,
@@ -847,7 +851,8 @@ class TestBackupInterruptedBackup(BackupStressBase):
         rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
         r_device, r_mount = self._connect_and_mount(
             restored_name, rest_id,
-            mount=f"{self.mount_path}/intr_{label}_{_rand_suffix()}")
+            mount=f"{self.mount_path}/intr_{label}_{_rand_suffix()}",
+            format_disk=False)
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, r_files, orig_checksums,
@@ -921,7 +926,8 @@ class TestBackupInterruptedBackup(BackupStressBase):
         rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
         r_device, r_mount = self._connect_and_mount(
             restored_name, rest_id,
-            mount=f"{self.mount_path}/intr_rest_{_rand_suffix()}")
+            mount=f"{self.mount_path}/intr_rest_{_rand_suffix()}",
+            format_disk=False)
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, r_files, orig_checksums,
@@ -1099,7 +1105,8 @@ class TestBackupInterruptedRestore(BackupStressBase):
         retry_id = self.sbcli_utils.get_lvol_id(lvol_name=retry_name)
         r_device, r_mount = self._connect_and_mount(
             retry_name, retry_id,
-            mount=f"{self.mount_path}/intr_rr_{label}_{_rand_suffix()}")
+            mount=f"{self.mount_path}/intr_rr_{label}_{_rand_suffix()}",
+            format_disk=False)
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, r_files, orig_checksums,
@@ -1186,7 +1193,8 @@ class TestBackupInterruptedRestore(BackupStressBase):
         retry_id = self.sbcli_utils.get_lvol_id(lvol_name=retry_name)
         r_device, r_mount = self._connect_and_mount(
             retry_name, retry_id,
-            mount=f"{self.mount_path}/intr_rr_{_rand_suffix()}")
+            mount=f"{self.mount_path}/intr_rr_{_rand_suffix()}",
+            format_disk=False)
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, r_files, orig_checksums,
@@ -1241,7 +1249,8 @@ class TestBackupInterruptedRestore(BackupStressBase):
                 c_rest_id = self.sbcli_utils.get_lvol_id(lvol_name=c_rst_retry)
                 c_r_device, c_r_mount = self._connect_and_mount(
                     c_rst_retry, c_rest_id,
-                    mount=f"{self.mount_path}/icr2_{_rand_suffix()}")
+                    mount=f"{self.mount_path}/icr2_{_rand_suffix()}",
+                    format_disk=False)
                 c_r_files = self.ssh_obj.find_files(self.fio_node, c_r_mount)
                 self.ssh_obj.verify_checksums(
                     self.fio_node, c_r_files, c_checksums,
@@ -1315,7 +1324,8 @@ class BackupStressMarathon(BackupStressBase):
             rst_id = self.sbcli_utils.get_lvol_id(lvol_name=rst_name)
             _, rst_mount = self._connect_and_mount(
                 rst_name, rst_id,
-                mount=f"{self.mount_path}/mr_{round_num}_{_rand_suffix()}")
+                mount=f"{self.mount_path}/mr_{round_num}_{_rand_suffix()}",
+                format_disk=False)
             rst_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
             self.ssh_obj.verify_checksums(
                 self.fio_node, rst_files, info["checksums"],
@@ -1369,7 +1379,7 @@ class BackupStressMarathon(BackupStressBase):
                 return
             # Re-mount and re-verify (mount may already be tracked; use a fresh path)
             mount_path = f"{self.mount_path}/mv_{round_num}_{_rand_suffix()}"
-            _, rst_mount = self._connect_and_mount(rst_name, rst_id, mount=mount_path)
+            _, rst_mount = self._connect_and_mount(rst_name, rst_id, mount=mount_path, format_disk=False)
             files = self.ssh_obj.find_files(self.fio_node, rst_mount)
             self.ssh_obj.verify_checksums(
                 self.fio_node, files, expected,
@@ -1454,7 +1464,7 @@ class BackupStressMarathon(BackupStressBase):
                 if not rst_id:
                     continue
                 mount_path = f"{self.mount_path}/mf_{_rand_suffix()}"
-                _, rst_mount = self._connect_and_mount(rst_name, rst_id, mount=mount_path)
+                _, rst_mount = self._connect_and_mount(rst_name, rst_id, mount=mount_path, format_disk=False)
                 files = self.ssh_obj.find_files(self.fio_node, rst_mount)
                 self.ssh_obj.verify_checksums(self.fio_node, files, expected,
                     message=f"TC-BCK-STR-063: final checksum mismatch for {rst_name}")

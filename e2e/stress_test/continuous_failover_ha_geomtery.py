@@ -67,6 +67,8 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
+        # Maps node_uuid -> (node_ip, local_tmp_log_dir) for ongoing network outages
+        self._local_outage_log_dirs = {}
 
     def _initialize_outage_log(self):
         """Create or initialize the outage log file."""
@@ -409,7 +411,22 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
         elif outage_type == "interface_full_network_interrupt":
             self.logger.info("Handling full interface based network interruption...")
             active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-            
+
+            # Before cutting the network: start local-tmp logging alongside NFS logging
+            if not self.k8s_test and node_ip in self.container_nodes:
+                ts = int(datetime.now().timestamp())
+                local_log_dir = f"/tmp/outage_logs/{self.current_outage_node}_{ts}"
+                self.ssh_obj.start_local_docker_logging(
+                    node_ip,
+                    self.container_nodes[node_ip],
+                    local_log_dir,
+                    self.test_name,
+                )
+                self._local_outage_log_dirs[self.current_outage_node] = (node_ip, local_log_dir)
+                self.logger.info(
+                    f"[NW-OUTAGE] Local logging started alongside NFS on {node_ip} → {local_log_dir}"
+                )
+
             self.disconnect_thread = threading.Thread(
                 target=self.ssh_obj.disconnect_all_active_interfaces,
                 args=(node_ip, active_interfaces, 600),
@@ -551,6 +568,13 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
 
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
         self.outage_end_time = int(datetime.now().timestamp())
+
+        # Flush local outage logs to NFS if we started local logging before a network outage
+        if self.current_outage_node in self._local_outage_log_dirs:
+            _nip, _local_dir = self._local_outage_log_dirs.pop(self.current_outage_node)
+            nfs_target = os.path.join(self.docker_logs_path, _nip, "local_logs")
+            self.ssh_obj.flush_local_logs_to_nfs(_nip, _local_dir, nfs_target)
+            self.logger.info(f"[NW-OUTAGE] Flushed local outage logs to NFS: {nfs_target}")
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:

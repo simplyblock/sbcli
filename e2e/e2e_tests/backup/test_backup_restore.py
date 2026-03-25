@@ -306,8 +306,13 @@ class BackupTestBase(TestClusterBase):
         return name, lvol_id
 
     def _connect_and_mount(self, lvol_name: str, lvol_id: str,
-                            mount: str = None) -> tuple[str, str]:
-        """Connect lvol via NVMe and mount; return (device, mount_point)."""
+                            mount: str = None,
+                            format_disk: bool = True) -> tuple[str, str]:
+        """Connect lvol via NVMe and mount; return (device, mount_point).
+
+        Set format_disk=False for restored lvols — they already carry a
+        filesystem and formatting would destroy the backed-up data.
+        """
         mount = mount or f"{self.mount_path}/{lvol_name}"
         initial = self.ssh_obj.get_devices(node=self.fio_node)
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
@@ -318,7 +323,8 @@ class BackupTestBase(TestClusterBase):
         new_devs = [d for d in final if d not in initial]
         assert new_devs, f"No new block device after connecting {lvol_name}"
         device = f"/dev/{new_devs[0]}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=device, fs_type="ext4")
+        if format_disk:
+            self.ssh_obj.format_disk(node=self.fio_node, device=device, fs_type="ext4")
         self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
         self.ssh_obj.mount_path(node=self.fio_node, device=device, mount_path=mount)
         self.mounted.append((self.fio_node, mount))
@@ -625,7 +631,8 @@ class TestBackupBasicPositive(BackupTestBase):
         rest10_id = self.sbcli_utils.get_lvol_id(lvol_name=rest10_name)
         r10_device, r10_mount = self._connect_and_mount(
             rest10_name, rest10_id,
-            mount=f"{self.mount_path}/rest10_{_rand_suffix()}")
+            mount=f"{self.mount_path}/rest10_{_rand_suffix()}",
+            format_disk=False)
         r10_files = self.ssh_obj.find_files(self.fio_node, r10_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, r10_files, original_checksums)
@@ -705,7 +712,8 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         restored_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
         r_device, r_mount = self._connect_and_mount(
             restored_name, restored_id,
-            mount=f"{self.mount_path}/restored_{_rand_suffix()}")
+            mount=f"{self.mount_path}/restored_{_rand_suffix()}",
+            format_disk=False)
 
         # --- TC-BCK-014: Checksum validation ---
         self.logger.info("TC-BCK-014: verifying checksums on restored lvol")
@@ -751,7 +759,8 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         self._wait_for_restore(dr_name)
         dr_id = self.sbcli_utils.get_lvol_id(lvol_name=dr_name)
         dr_device, dr_mount = self._connect_and_mount(
-            dr_name, dr_id, mount=f"{self.mount_path}/dr_{_rand_suffix()}")
+            dr_name, dr_id, mount=f"{self.mount_path}/dr_{_rand_suffix()}",
+            format_disk=False)
         dr_files = self.ssh_obj.find_files(self.fio_node, dr_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, dr_files, original_checksums)
@@ -766,7 +775,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             self._restore_backup(backup_id, pool2_name, pool_name=self.pool_name2)
             self._wait_for_restore(pool2_name)
             pool2_id = self.sbcli_utils.get_lvol_id(lvol_name=pool2_name)
-            self._connect_and_mount(pool2_name, pool2_id, mount=p2_mount)
+            self._connect_and_mount(pool2_name, pool2_id, mount=p2_mount, format_disk=False)
             p2_files = self.ssh_obj.find_files(self.fio_node, p2_mount)
             self.ssh_obj.verify_checksums(
                 self.fio_node, p2_files, original_checksums)
@@ -830,7 +839,8 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         tc18_restored_id = self.sbcli_utils.get_lvol_id(lvol_name=tc18_restored_name)
         _, tc18_r_mount = self._connect_and_mount(
             tc18_restored_name, tc18_restored_id,
-            mount=f"{self.mount_path}/tc18_{_rand_suffix()}")
+            mount=f"{self.mount_path}/tc18_{_rand_suffix()}",
+            format_disk=False)
         tc18_r_files = self.ssh_obj.find_files(self.fio_node, tc18_r_mount)
         self.ssh_obj.verify_checksums(self.fio_node, tc18_r_files, tc18_checksums)
         self.logger.info("TC-BCK-018: checksums match after restore from in-progress backup ✓")
@@ -1170,7 +1180,8 @@ class TestBackupCryptoLvol(BackupTestBase):
         rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
         r_device, r_mount = self._connect_and_mount(
             restored_name, rest_id,
-            mount=f"{self.mount_path}/cr_{_rand_suffix()}")
+            mount=f"{self.mount_path}/cr_{_rand_suffix()}",
+            format_disk=False)
 
         # --- TC-BCK-054: checksum validation on restored crypto lvol ---
         self.logger.info("TC-BCK-054: checksum validation on restored crypto lvol")
@@ -1251,7 +1262,8 @@ class TestBackupCustomGeometry(BackupTestBase):
             rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
             r_device, r_mount = self._connect_and_mount(
                 restored_name, rest_id,
-                mount=f"{self.mount_path}/geom_{ndcs}_{npcs}_{_rand_suffix()}")
+                mount=f"{self.mount_path}/geom_{ndcs}_{npcs}_{_rand_suffix()}",
+                format_disk=False)
             r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
             self.ssh_obj.verify_checksums(
                 self.fio_node, r_files, orig_checksums)
@@ -1346,7 +1358,8 @@ class TestBackupDeleteAndRestore(BackupTestBase):
         fresh_rst_id = self.sbcli_utils.get_lvol_id(lvol_name=fresh_restored)
         _, fr_mount = self._connect_and_mount(
             fresh_restored, fresh_rst_id,
-            mount=f"{self.mount_path}/del_fr_{_rand_suffix()}")
+            mount=f"{self.mount_path}/del_fr_{_rand_suffix()}",
+            format_disk=False)
         fr_files = self.ssh_obj.find_files(self.fio_node, fr_mount)
         self.ssh_obj.verify_checksums(self.fio_node, fr_files, original_checksums)
         self.logger.info("TC-BCK-080: fresh post-delete backup → restore → checksums match ✓")
@@ -1389,7 +1402,8 @@ class TestBackupDeleteAndRestore(BackupTestBase):
             rst_id = self.sbcli_utils.get_lvol_id(lvol_name=rst_name)
             _, rst_mount = self._connect_and_mount(
                 rst_name, rst_id,
-                mount=f"{self.mount_path}/ret_{_rand_suffix()}")
+                mount=f"{self.mount_path}/ret_{_rand_suffix()}",
+                format_disk=False)
             rst_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
             self.ssh_obj.verify_checksums(self.fio_node, rst_files, original_checksums)
             self.logger.info(f"TC-BCK-081: retained backup {bk_id} → restore → checksums match ✓")

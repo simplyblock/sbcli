@@ -90,6 +90,7 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupNegative,
     TestBackupCryptoLvol,
     TestBackupCustomGeometry,
+    TestBackupDeleteAndRestore,
     TestBackupCrossClusterRestore,  # NOT in get_backup_tests(); run explicitly only
 )
 
@@ -102,6 +103,7 @@ from stress_test.continuous_backup_stress import (
     BackupStressRestoreConcurrent,
     TestBackupInterruptedBackup,
     TestBackupInterruptedRestore,
+    BackupStressMarathon,
 )
 
 
@@ -156,6 +158,7 @@ ALL_TESTS = [
     TestBackupNegative,
     TestBackupCryptoLvol,
     TestBackupCustomGeometry,
+    TestBackupDeleteAndRestore,
     TestBackupInterruptedBackup,
     TestBackupInterruptedRestore,
     # Backup stress tests
@@ -165,6 +168,7 @@ ALL_TESTS = [
     BackupStressCryptoMix,
     BackupStressPolicyRetention,
     BackupStressRestoreConcurrent,
+    BackupStressMarathon,
     # Cross-cluster restore — explicit-only (requires CLUSTER2_* env vars)
     TestBackupCrossClusterRestore,
 ]
@@ -277,7 +281,8 @@ def get_backup_tests():
         TestBackupPolicy,
         TestBackupNegative,
         TestBackupCryptoLvol,
-        TestBackupCustomGeometry,
+        # TestBackupCustomGeometry, # Will re-enable when we have a way to reliably test it in CI (currently requires manual setup of custom geometry pool)
+        TestBackupDeleteAndRestore,
         # Interrupted-operation tests
         TestBackupInterruptedBackup,
         TestBackupInterruptedRestore,
@@ -292,6 +297,7 @@ def get_backup_stress_tests():
         BackupStressCryptoMix,
         BackupStressPolicyRetention,
         BackupStressRestoreConcurrent,
+        BackupStressMarathon,
     ]
 
 
