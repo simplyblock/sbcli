@@ -189,7 +189,8 @@ def update_cluster_status(cluster_id):
 
 
 def set_node_online(node):
-    if node.status != StorageNode.STATUS_ONLINE:
+    node = db.get_storage_node_by_id(node.get_id())
+    if node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
 
         # set node online
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
