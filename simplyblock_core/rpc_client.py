@@ -1139,18 +1139,18 @@ class RPCClient:
         }
         return self._request("nvmf_set_max_subsystems", params)
 
-    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, primary=False, secondary=False):
+    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, role="primary"):
         """Set lvstore options
 
         `lvs` must be either an ID or the lvstore name.
+        `role` must be one of: 'primary', 'secondary', 'tertiary'.
         """
 
         return self._request('bdev_lvol_set_lvs_opts', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
             "subsystem_port": subsystem_port,
-            "primary": primary,
-            "secondary": secondary,
+            "role": role,
         })
 
     def bdev_lvol_get_lvol_delete_status(self, name):

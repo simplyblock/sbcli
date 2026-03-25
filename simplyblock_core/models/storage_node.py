@@ -269,7 +269,7 @@ class StorageNode(BaseNodeObject):
 
         return self.hublvol
 
-    def connect_to_hublvol(self, primary_node):
+    def connect_to_hublvol(self, primary_node, role="secondary"):
         """Connect to a primary node's hublvol
         """
         logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}')
@@ -304,7 +304,7 @@ class StorageNode(BaseNodeObject):
                 primary_node.lvstore,
                 groupid=primary_node.jm_vuid,
                 subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
-                secondary=True,
+                role=role,
         ):
             pass
             # raise RPCException('Failed to set secondary lvstore options')

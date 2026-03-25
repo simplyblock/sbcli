@@ -3409,8 +3409,9 @@ def recreate_lvstore_on_sec(secondary_node):
             logger.warning("Failed to examine bdevs on secondary node")
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+            role = "tertiary" if is_second_sec else "secondary"
             try:
-                secondary_node.connect_to_hublvol(primary_node)
+                secondary_node.connect_to_hublvol(primary_node, role=role)
 
             except Exception as e:
                 logger.error("Error connecting to hublvol: %s", e)
@@ -3622,7 +3623,7 @@ def recreate_lvstore(snode, force=False):
         snode.lvstore,
         groupid=snode.jm_vuid,
         subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
-        primary=True
+        role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
@@ -3641,8 +3642,9 @@ def recreate_lvstore(snode, force=False):
 
     for sec_node in sec_nodes:
         if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            role = "tertiary" if sec_node.get_id() == snode.secondary_node_id_2 else "secondary"
             try:
-                sec_node.connect_to_hublvol(snode)
+                sec_node.connect_to_hublvol(snode, role=role)
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
@@ -3966,7 +3968,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.lvstore,
         groupid=snode.jm_vuid,
         subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
-        primary=True
+        role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
@@ -4015,10 +4017,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
         for sec_node_id in secondary_ids:
             sec_node = db_controller.get_storage_node_by_id(sec_node_id)
+            role = "tertiary" if sec_node_id == snode.secondary_node_id_2 else "secondary"
             if sec_node.status == StorageNode.STATUS_ONLINE:
                 try:
                     time.sleep(1)
-                    sec_node.connect_to_hublvol(snode)
+                    sec_node.connect_to_hublvol(snode, role=role)
                 except Exception as e:
                     logger.error("Error establishing hublvol: %s", e)
                     # return False

@@ -204,16 +204,15 @@ def _bdev_lvol_get_lvstores(s, p):
 def _bdev_lvol_set_lvs_opts(s, p):
     s.lvs_opts = p
     lvs_name = p.get('lvs', '')
-    is_secondary = p.get('secondary', False)
-    is_primary = p.get('primary', False)
+    role = p.get('role', 'primary')
     if lvs_name in s.lvstores:
-        if is_secondary:
+        if role in ('secondary', 'tertiary'):
             s.lvstores[lvs_name]['lvs_secondary'] = True
             s.lvstores[lvs_name]['lvs_primary'] = False
             s.lvstores[lvs_name]['lvs leadership'] = False
             s.lvstores[lvs_name]['lvs_redirect'] = True
             s.lvstores[lvs_name]['connect_state'] = True
-        if is_primary:
+        if role == 'primary':
             s.lvstores[lvs_name]['lvs_primary'] = True
     return True
 
