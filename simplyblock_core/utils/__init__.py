@@ -2851,7 +2851,7 @@ def configure_kms_on_k8s(cluster):
         resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
         logger.debug(resp)
 
-        init_file = json.loads(resp)
+        init_file = json.loads(resp.replace("\'", "\""))
         kms_unseal_key = init_file['unseal_keys_b64'][0]
         kms_root_token = init_file['root_token']
 
@@ -2874,7 +2874,7 @@ def configure_kms_on_k8s(cluster):
         resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
         logger.debug(resp)
 
-        with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
+        with open('/var/simplyblock/kms/data/init.json', 'w') as outfile:
             outfile.write(resp)
 
 
