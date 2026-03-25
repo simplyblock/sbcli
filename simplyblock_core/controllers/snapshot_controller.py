@@ -253,7 +253,6 @@ def list(node_id=None):
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
-    from simplyblock_core.controllers import migration_controller
     migrating_lvols = set()
     for m in db_controller.get_migrations():
         if m.is_active():

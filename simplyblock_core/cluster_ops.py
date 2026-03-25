@@ -1454,7 +1454,7 @@ def set(cl_id, attr, value) -> bool:
 
     if len(key_splits) > 1:
         key_info = cluster.get_attrs_map()[key]
-        if key_info["type"] == dict:
+        if key_info["type"] is dict:
             sub_key = key_splits[1]
             if sub_key in cluster[key]:
                 cluster[key][sub_key] = value

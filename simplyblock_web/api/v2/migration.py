@@ -1,11 +1,10 @@
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from simplyblock_core.controllers import migration_controller
-    from simplyblock_core.db_controller import DBController
+    pass
 
 from .cluster import Cluster
 from .dtos import MigrationDTO

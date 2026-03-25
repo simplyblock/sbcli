@@ -1,4 +1,7 @@
-import paramiko, os, json, time
+import paramiko
+import os
+import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 with open('cluster_metadata.json') as f:
@@ -31,8 +34,8 @@ def setup_sn(sn):
         else:
             # Show last few lines on success too
             lines = out.strip().split('\n')
-            for l in lines[-3:]:
-                print(f'  {l}')
+            for line in lines[-3:]:
+                print(f'  {line}')
 
     print(f'[{ip}] rebooting...')
     ssh.exec_command('sudo reboot')
@@ -61,7 +64,7 @@ for sn in meta['storage_nodes']:
             ssh.close()
             print(f'[{ip}] SSH ready')
             break
-        except:
+        except Exception:
             time.sleep(5)
 
 mgmt = paramiko.SSHClient()

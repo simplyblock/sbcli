@@ -1323,14 +1323,12 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
     data = []
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
-    from simplyblock_core.controllers import migration_controller
     migrating_lvols = set()
     for m in db_controller.get_migrations(cluster_id):
         if m.is_active():
             migrating_lvols.add(m.lvol_id)
 
     # Build policy lookup maps (single scan of attachments + policies)
-    from simplyblock_core.models.backup import BackupPolicyAttachment
     all_attachments = db_controller.get_backup_policy_attachments(cluster_id)
     all_policies = {p.uuid: p for p in db_controller.get_backup_policies(cluster_id)}
     lvol_policy_map = {}   # lvol_id -> policy

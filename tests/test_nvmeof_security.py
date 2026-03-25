@@ -16,9 +16,11 @@ Tests cover:
 """
 
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
+import simplyblock_core.controllers.lvol_controller as lvol_ctl
+import simplyblock_core.storage_node_ops as snode_ops
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
@@ -56,19 +58,19 @@ def _pool(uuid="pool-1", sec_options=None):
 
 def _lvol(uuid="lvol-1", node_id="node-1", nqn="nqn:test:lvol-1",
           allowed_hosts=None, nodes=None, pool_uuid="pool-1"):
-    l = LVol()
-    l.uuid = uuid
-    l.node_id = node_id
-    l.nqn = nqn
-    l.status = LVol.STATUS_ONLINE
-    l.allowed_hosts = allowed_hosts or []
-    l.nodes = nodes or [node_id]
-    l.subsys_port = 9090
-    l.ns_id = 1
-    l.ha_type = "single"
-    l.fabric = "tcp"
-    l.pool_uuid = pool_uuid
-    return l
+    lv = LVol()
+    lv.uuid = uuid
+    lv.node_id = node_id
+    lv.nqn = nqn
+    lv.status = LVol.STATUS_ONLINE
+    lv.allowed_hosts = allowed_hosts or []
+    lv.nodes = nodes or [node_id]
+    lv.subsys_port = 9090
+    lv.ns_id = 1
+    lv.ha_type = "single"
+    lv.fabric = "tcp"
+    lv.pool_uuid = pool_uuid
+    return lv
 
 
 def _node(uuid="node-1", status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1"):
@@ -274,18 +276,18 @@ class TestClusterModelTls(unittest.TestCase):
 class TestLVolModelAllowedHosts(unittest.TestCase):
 
     def test_default_empty(self):
-        l = LVol()
-        self.assertEqual(l.allowed_hosts, [])
+        lv = LVol()
+        self.assertEqual(lv.allowed_hosts, [])
 
     def test_stores_host_entries(self):
-        l = LVol()
-        l.allowed_hosts = [
+        lv = LVol()
+        lv.allowed_hosts = [
             {"nqn": "nqn:host1", "psk": "abc123"},
             {"nqn": "nqn:host2", "dhchap_key": "key1"},
         ]
-        self.assertEqual(len(l.allowed_hosts), 2)
-        self.assertEqual(l.allowed_hosts[0]["nqn"], "nqn:host1")
-        self.assertEqual(l.allowed_hosts[1]["dhchap_key"], "key1")
+        self.assertEqual(len(lv.allowed_hosts), 2)
+        self.assertEqual(lv.allowed_hosts[0]["nqn"], "nqn:host1")
+        self.assertEqual(lv.allowed_hosts[1]["dhchap_key"], "key1")
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +379,6 @@ class TestBuildHostEntries(unittest.TestCase):
 # add_host_to_lvol / remove_host_from_lvol
 # ---------------------------------------------------------------------------
 
-import simplyblock_core.controllers.lvol_controller as lvol_ctl
 
 
 def _mock_db_for_host_ops(lvol, node, cluster, pool=None):
@@ -829,8 +830,6 @@ class TestConstants(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Subsystem recreation on node restart (security preservation)
 # ---------------------------------------------------------------------------
-
-import simplyblock_core.storage_node_ops as snode_ops
 
 
 class TestReapplyAllowedHosts(unittest.TestCase):

@@ -1,10 +1,11 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import boto3
 import paramiko
 import time
 import re
-import socket
 import json
-import os
 
 # --- INPUT PARAMETERS ---
 AMI_ID = "ami-0dfc569a8686b9320"  # Rocky 9 us-east-1
@@ -72,7 +73,7 @@ def wait_for_ssh(ip, timeout=300):
             ssh.close()
             print(f"SUCCESS: {ip} is ready.")
             return True
-        except Exception as e:
+        except Exception:
             # We don't print the error every time to keep the console clean
             pass
         time.sleep(2)
@@ -140,15 +141,10 @@ def get_sn_uuids(mgmt_ip):
     return uuids
 
 
-from concurrent.futures import ThreadPoolExecutor
-
-
-
-
 def create_aws_clients(count, instance_type):
     session = boto3.Session()
     ec2_res = session.resource('ec2')
-    ec2_cli = session.client('ec2')
+    session.client('ec2')
 
     print(f"  Targeting Subnet: {SUBNET_ID}")
     # Launch the instances
@@ -168,7 +164,7 @@ def create_aws_clients(count, instance_type):
         }],
         TagSpecifications=[{
             'ResourceType': 'instance',
-            'Tags': [{'Key': 'Name', 'Value': f'SB-Client'}]
+            'Tags': [{'Key': 'Name', 'Value': 'SB-Client'}]
         }]
     )
     return instances
@@ -204,12 +200,6 @@ def deploy_storage_nodes(count=SN_COUNT, instance_type=SN_TYPE):
     return instances
 
 
-import time
-import socket
-import paramiko
-import os
-
-
 class PersistentSSH:
     def __init__(self, ip, retries=10, delay=5):
         self.ip = ip
@@ -238,10 +228,6 @@ class PersistentSSH:
         self.client.close()
 
 
-import argparse
-import sys
-import json
-import re
 
 
 def main():
