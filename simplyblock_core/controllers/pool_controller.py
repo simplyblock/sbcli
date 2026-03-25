@@ -23,7 +23,7 @@ def _generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id, qos_host=None):
+def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id, qos_host=None, sec_options=None):
     db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
@@ -84,6 +84,14 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
         return False
 
     pool.qos_host = qos_host
+
+    if sec_options:
+        ok, err = utils.validate_sec_options(sec_options)
+        if not ok:
+            logger.error(err)
+            return False
+        pool.sec_options = sec_options
+
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_add(pool)
@@ -248,6 +256,7 @@ def list_pools(is_json, cluster_id=None):
             "LVols": f"{len(lvs)}",
             "QOS": f"{pool.has_qos()}",
             "QOS Host": f"{pool.qos_host}",
+            "Security": ", ".join(sorted(pool.sec_options.keys())) if pool.sec_options else "none",
             "Status": pool.status,
         })
 

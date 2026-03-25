@@ -14,11 +14,10 @@ Tests cover:
 
 import json
 import random
-import time
 import unittest
 import uuid as _uuid_mod
 
-from tests.migration.mock_rpc_server import MockRpcServer, NodeState
+from tests.migration.mock_rpc_server import MockRpcServer
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +565,7 @@ class TestGetHostSecret(unittest.TestCase):
     """Test the get_host_secret controller function via mocking."""
 
     def test_get_secret_success(self):
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         from simplyblock_core.models.lvol_model import LVol
         from simplyblock_core.controllers import lvol_controller
 

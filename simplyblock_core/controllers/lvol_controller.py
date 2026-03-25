@@ -304,7 +304,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
-                allowed_hosts=None, sec_options=None):
+                allowed_hosts=None):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -575,8 +575,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.crypto_key2 = crypto_key2
 
     # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
+    # Security options are inherited from the pool
     if allowed_hosts and not namespace:
-        host_entries = _build_host_entries(allowed_hosts, sec_options)
+        host_entries = _build_host_entries(allowed_hosts, pool.sec_options or None)
         if isinstance(host_entries, tuple):
             return host_entries  # (False, error_message)
         lvol.allowed_hosts = host_entries
@@ -1018,10 +1019,6 @@ def delete_lvol(id_or_name, force_delete=False):
     active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
     if active_mig and not force_delete:
         logger.error(f"Cannot delete lvol {lvol.uuid}: active migration {active_mig.uuid}")
-        return False
-
-    if lvol.status == LVol.STATUS_RESTORING and not force_delete:
-        logger.error(f"Cannot delete lvol {lvol.uuid}: backup restore in progress")
         return False
 
     if lvol.status == LVol.STATUS_IN_DELETION:
@@ -2046,9 +2043,10 @@ def _build_host_entries(allowed_hosts, sec_options=None):
     return entries
 
 
-def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
+def add_host_to_lvol(lvol_id, host_nqn):
     """Add an allowed host to a volume's subsystem.
 
+    Security options are inherited from the volume's pool.
     Returns a dict with the host NQN and any auto-generated keys, or (False, error).
     """
     db_controller = DBController()
@@ -2062,6 +2060,15 @@ def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
     for h in lvol.allowed_hosts:
         if h["nqn"] == host_nqn:
             return False, f"Host {host_nqn} is already allowed"
+
+    # Get sec_options from the pool
+    sec_options = None
+    if lvol.pool_uuid:
+        try:
+            pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+            sec_options = pool.sec_options or None
+        except KeyError:
+            pass
 
     entry = {"nqn": host_nqn}
     if sec_options:

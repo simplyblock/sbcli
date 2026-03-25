@@ -623,13 +623,11 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=0, dest='ndcs')
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=0, dest='npcs')
         argument = subcommand.add_argument('--allowed-hosts', help='Path to JSON file with host NQNs allowed to access this volume\'s subsystem', type=str, dest='allowed_hosts')
-        argument = subcommand.add_argument('--sec-options', help='Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated)', type=str, dest='sec_options')
 
     def init_volume__add_host(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-host', 'Add an allowed host NQN to a volume\'s subsystem')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('host_nqn', help='Host NQN to allow access', type=str)
-        argument = subcommand.add_argument('--sec-options', help='Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated)', type=str, dest='sec_options')
 
     def init_volume__remove_host(self, subparser):
         subcommand = self.add_sub_command(subparser, 'remove-host', 'Remove an allowed host NQN from a volume\'s subsystem')
@@ -786,6 +784,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second', type=int, dest='max_r_mbytes')
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second', type=int, dest='max_w_mbytes')
         argument = subcommand.add_argument('--qos-host', help='Node UUID for QoS pool', type=str, dest='qos_host', required=False)
+        argument = subcommand.add_argument('--sec-options', help='Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated). Applied to all volumes in the pool.', type=str, dest='sec_options')
 
     def init_storage_pool__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'Sets a storage pool\'s attributes')

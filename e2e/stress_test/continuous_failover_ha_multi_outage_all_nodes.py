@@ -1,4 +1,4 @@
-from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest, generate_random_sequence
+from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
 import random
 
 

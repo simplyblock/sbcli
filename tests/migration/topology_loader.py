@@ -86,12 +86,10 @@ them to bytes using the same ``utils.parse_size()`` function the CLI uses.
 """
 
 import json
-import os
 import time
 import uuid as _uuid_mod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from simplyblock_core import constants
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
@@ -529,29 +527,29 @@ def _make_lvol(lvol_uuid: str, spec: dict, node: StorageNode,
     max_size_bytes = parse_size(str(spec.get('max_size', '1000T')))
     nqn = shared_nqn or f"nqn.2023-02.io.simplyblock:{lvol_uuid[:8]}"
 
-    l = LVol()
-    l.uuid = lvol_uuid
-    l.cluster_id = cluster_id
-    l.node_id = node.uuid
-    l.pool_uuid = pool_uuid
-    l.status = spec.get('status', LVol.STATUS_ONLINE)
-    l.lvol_name = spec.get('name', f"vol-{lvol_uuid[:8]}")
-    l.lvol_bdev = f"lvol_{spec.get('name', lvol_uuid[:8])}"
-    l.lvs_name = node.lvstore
-    l.size = size_bytes
-    l.max_size = max_size_bytes
-    l.ha_type = spec.get('ha_type', 'single')
-    l.fabric = spec.get('fabric', 'tcp')
-    l.nqn = nqn
-    l.ns_id = int(spec.get('ns_id', 1))
-    l.subsys_port = node.lvol_subsys_port
-    l.max_namespace_per_subsys = int(spec.get('max_namespace_per_subsys', 1))
-    l.cloned_from_snap = ''  # patched after snapshot loop
-    l.rw_ios_per_sec = int(spec.get('max_rw_iops', 0))
-    l.rw_mbytes_per_sec = int(spec.get('max_rw_mbytes', 0))
-    l.r_mbytes_per_sec = int(spec.get('max_r_mbytes', 0))
-    l.w_mbytes_per_sec = int(spec.get('max_w_mbytes', 0))
-    return l
+    lv = LVol()
+    lv.uuid = lvol_uuid
+    lv.cluster_id = cluster_id
+    lv.node_id = node.uuid
+    lv.pool_uuid = pool_uuid
+    lv.status = spec.get('status', LVol.STATUS_ONLINE)
+    lv.lvol_name = spec.get('name', f"vol-{lvol_uuid[:8]}")
+    lv.lvol_bdev = f"lvol_{spec.get('name', lvol_uuid[:8])}"
+    lv.lvs_name = node.lvstore
+    lv.size = size_bytes
+    lv.max_size = max_size_bytes
+    lv.ha_type = spec.get('ha_type', 'single')
+    lv.fabric = spec.get('fabric', 'tcp')
+    lv.nqn = nqn
+    lv.ns_id = int(spec.get('ns_id', 1))
+    lv.subsys_port = node.lvol_subsys_port
+    lv.max_namespace_per_subsys = int(spec.get('max_namespace_per_subsys', 1))
+    lv.cloned_from_snap = ''  # patched after snapshot loop
+    lv.rw_ios_per_sec = int(spec.get('max_rw_iops', 0))
+    lv.rw_mbytes_per_sec = int(spec.get('max_rw_mbytes', 0))
+    lv.r_mbytes_per_sec = int(spec.get('max_r_mbytes', 0))
+    lv.w_mbytes_per_sec = int(spec.get('max_w_mbytes', 0))
+    return lv
 
 
 def _make_snap(snap_uuid: str, spec: dict, lvol: LVol, node: StorageNode,

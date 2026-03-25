@@ -16,7 +16,6 @@ Requires: SNodeAPI running on localhost:5000 (started by conftest or manually).
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile

@@ -21,14 +21,14 @@ import threading
 import time
 import uuid as _uuid_mod
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, patch
+from typing import Dict, List
+from unittest.mock import patch
 
 import pytest
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import ClusterStatObject
 
@@ -956,11 +956,9 @@ class TestNodeRestart:
             # Get all secondaries
             all_nodes = db.get_storage_nodes_by_cluster_id(cl.uuid)
             secondaries = [n for n in all_nodes if n.is_secondary_node]
-            primaries = [n for n in all_nodes if not n.is_secondary_node]
+            [n for n in all_nodes if not n.is_secondary_node]
 
             # Track which subsystem_create calls happen (for min_cntlid verification)
-            subsystem_calls = []
-            original_subsystem_create = None
 
             # Pick a secondary that has lvstore_stack_secondary_1 set
             target_sec = None
@@ -999,7 +997,7 @@ class TestNodeRestart:
         Verify that recreate_lvstore_on_sec uses min_cntlid=2000 for secondary_2
         and min_cntlid=1000 for secondary_1.
         """
-        from simplyblock_core import cluster_ops, storage_node_ops
+        from simplyblock_core import cluster_ops
         from simplyblock_core.db_controller import DBController
 
         env = cluster_env
@@ -1316,7 +1314,7 @@ def _seed_secondary_for_health_check(env, primary, sec_node_id, db):
 
 def _find_server_for_node(env, node):
     """Find the mock server index for a given node by matching rpc_port."""
-    offset = _worker_port_offset()
+    _worker_port_offset()
     for i, srv in enumerate(env['servers']):
         if srv.port == node.rpc_port:
             return i

@@ -7,8 +7,7 @@ Every test patches the module-level ``db`` singleton so no FDB connection is nee
 
 import time
 import unittest
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
@@ -58,12 +57,12 @@ def _snap(uuid, lvol_uuid, node_id, ref_id="", created_at=None, status=SnapShot.
 
 
 def _lvol(uuid, node_id, status=LVol.STATUS_ONLINE, cloned_from_snap=""):
-    l = LVol()
-    l.uuid = uuid
-    l.node_id = node_id
-    l.status = status
-    l.cloned_from_snap = cloned_from_snap
-    return l
+    lv = LVol()
+    lv.uuid = uuid
+    lv.node_id = node_id
+    lv.status = status
+    lv.cloned_from_snap = cloned_from_snap
+    return lv
 
 
 def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
