@@ -20,9 +20,8 @@ Adds:
 
 K8s failover mapping:
   container_stop               → kubectl delete pod snode-spdk-pod-<x> (pod auto-restarts)
-  graceful_shutdown            → REST API (sbcli_utils) — unchanged
-  interface_full_network_interrupt  → SSH to SN host, iptables block — unchanged
-  interface_partial_network_interrupt → same as above
+  graceful_shutdown            → sbcli sn shutdown via kubectl exec
+  network outage               → not supported (no direct SSH to storage nodes)
 
 Usage (K8s):
   test = RandomK8sMultiOutageFailoverTest(k8s_run=True, ...)
@@ -70,6 +69,9 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
         self.logger = setup_logger(__name__)
         self.test_name = "n_plus_k_k8s_failover_ha"
         self.k8s_utils: K8sUtils | None = None
+        # Network outage not supported in K8s (no direct SSH to storage nodes).
+        self.outage_types = ["graceful_shutdown"]
+        self.outage_types2 = ["container_stop", "graceful_shutdown"]
 
     # ── Setup ────────────────────────────────────────────────────────────────
 
@@ -346,21 +348,13 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
 
             node_outage_dur = 0
             if outage_type == "container_stop":
-                # ── K8s: delete SPDK pod instead of docker stop ──────────────
+                # K8s: delete SPDK pod instead of docker stop
                 if self.k8s_test and self.k8s_utils:
                     self._k8s_stop_spdk_pod(node_ip, node)
                 else:
-                    # Fall back to bare-metal docker stop (k8s_test=False)
                     self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             elif outage_type == "graceful_shutdown":
                 self._graceful_shutdown_node(node)
-            elif outage_type == "interface_partial_network_interrupt":
-                # Network interface block goes directly to SN host via SSH
-                self._disconnect_partial_interface(node, node_ip)
-                node_outage_dur = 300
-            elif outage_type == "interface_full_network_interrupt":
-                # Same — SSH to SN host, iptables block
-                node_outage_dur = self._disconnect_full_interface(node, node_ip)
 
             outage_combinations.append((node, outage_type, node_outage_dur))
             self.current_outage_nodes.append(node)
@@ -397,7 +391,7 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             self.logger.info(
                 "K8s mode: pod logging via runner_k8s_log; "
                 "container_stop uses kubectl delete pod; "
-                "network outage uses SSH iptables on SN host."
+                "network outage disabled."
             )
 
         # Skip parent run() and call grandparent directly since we override
