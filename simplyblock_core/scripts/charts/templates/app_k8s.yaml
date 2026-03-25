@@ -1676,10 +1676,27 @@ spec:
         env:
         - name: VAULT_ADDR
           value: "http://simplyblock-kms:8200"
-        volumeMounts:
-        - name: kms-config
-          mountPath: /vault/config/
-          readOnly: false
+        - name : VAULT_LOCAL_CONFIG
+          value: |
+                {
+                  "storage": {
+                    "file": {
+                      "path": "/vault/data"
+                    }
+                  },
+                  "listener": [
+                    {
+                      "tcp": {
+                        "address": "0.0.0.0:8200",
+                        "tls_disable": true
+                      }
+                    }
+                  ],
+                  "default_lease_ttl": "168h",
+                  "max_lease_ttl": "720h",
+                  "ui": true
+                  "api_addr": "http://0.0.0.0:8200"
+                }
         resources:
           requests:
             cpu: "100m"
@@ -1687,8 +1704,5 @@ spec:
           limits:
             cpu: "600m"
             memory: "1Gi"
-      volumes:
-      - name: kms-config
-        configMap:
-          name: simplyblock-kms-config
+
 {{- end }}
