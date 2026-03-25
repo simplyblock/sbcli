@@ -316,7 +316,7 @@ class BackupStressParallelSnapshots(BackupStressBase):
             orig_checksums = lvol_map[target_name][3]
             self.ssh_obj.verify_checksums(
                 self.fio_node, r_files, orig_checksums,
-                message="TC-BCK-STR-004: parallel restore checksum mismatch")
+                message="TC-BCK-STR-004: parallel restore checksum mismatch", by_name=True)
             self.logger.info("TC-BCK-STR-004: parallel restore checksum ✓")
 
         # Phase 5: rapid multiple backups to test chain management
@@ -571,7 +571,7 @@ class BackupStressCryptoMix(BackupStressBase):
                 r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
                 self.ssh_obj.verify_checksums(
                     self.fio_node, r_files, lvol_map[name]["checksums"],
-                    message=f"TC-BCK-STR-032: checksum mismatch for {name}")
+                    message=f"TC-BCK-STR-032: checksum mismatch for {name}", by_name=True)
                 self.logger.info(f"TC-BCK-STR-032: {name} checksum ✓")
             except Exception as e:
                 self.logger.error(f"TC-BCK-STR-032: restore/checksum error {name}: {e}")
@@ -761,7 +761,7 @@ class BackupStressRestoreConcurrent(BackupStressBase):
                 r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
                 self.ssh_obj.verify_checksums(
                     self.fio_node, r_files, orig_checksums,
-                    message=f"TC-BCK-STR-052: checksum mismatch {restored_name}")
+                    message=f"TC-BCK-STR-052: checksum mismatch {restored_name}", by_name=True)
                 self._run_fio(r_mount, runtime=20)
                 self.logger.info(f"TC-BCK-STR-051: {restored_name} ✓")
             except Exception as e:
@@ -856,7 +856,7 @@ class TestBackupInterruptedBackup(BackupStressBase):
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, r_files, orig_checksums,
-            message=f"[{label}] checksum mismatch after interrupted backup recovery")
+            message=f"[{label}] checksum mismatch after interrupted backup recovery", by_name=True)
         self.logger.info(f"[{label}] checksums match after interrupted backup ✓")
         return restored_name, r_mount
 
@@ -931,7 +931,7 @@ class TestBackupInterruptedBackup(BackupStressBase):
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, r_files, orig_checksums,
-            message="TC-BCK-084: checksum mismatch after interrupted backup restore")
+            message="TC-BCK-084: checksum mismatch after interrupted backup restore", by_name=True)
         self.logger.info("TC-BCK-084: checksums match after interrupted backup ✓")
 
         # TC-BCK-085: FIO on the restored lvol
@@ -982,11 +982,12 @@ class TestBackupInterruptedBackup(BackupStressBase):
                 c_rest_id = self.sbcli_utils.get_lvol_id(lvol_name=c_rest_name)
                 c_r_device, c_r_mount = self._connect_and_mount(
                     c_rest_name, c_rest_id,
-                    mount=f"{self.mount_path}/icr_{_rand_suffix()}")
+                    mount=f"{self.mount_path}/icr_{_rand_suffix()}",
+                    format_disk=False)
                 c_r_files = self.ssh_obj.find_files(self.fio_node, c_r_mount)
                 self.ssh_obj.verify_checksums(
                     self.fio_node, c_r_files, c_checksums,
-                    message="TC-BCK-086: checksum mismatch on crypto interrupted backup")
+                    message="TC-BCK-086: checksum mismatch on crypto interrupted backup", by_name=True)
                 self.logger.info("TC-BCK-086: crypto interrupted backup restore ✓")
 
         self.logger.info("=== TestBackupInterruptedBackup PASSED ===")
@@ -1110,7 +1111,7 @@ class TestBackupInterruptedRestore(BackupStressBase):
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, r_files, orig_checksums,
-            message=f"[{label}] checksum mismatch on retry restore")
+            message=f"[{label}] checksum mismatch on retry restore", by_name=True)
         self.logger.info(f"[{label}] retry restore checksums match ✓")
         return retry_name, r_mount
 
@@ -1198,7 +1199,7 @@ class TestBackupInterruptedRestore(BackupStressBase):
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
             self.fio_node, r_files, orig_checksums,
-            message="TC-BCK-095: checksum mismatch on retried restore")
+            message="TC-BCK-095: checksum mismatch on retried restore", by_name=True)
         self.logger.info("TC-BCK-095: retry restore checksums match ✓")
 
         # TC-BCK-096: FIO on the retried restore
@@ -1254,7 +1255,7 @@ class TestBackupInterruptedRestore(BackupStressBase):
                 c_r_files = self.ssh_obj.find_files(self.fio_node, c_r_mount)
                 self.ssh_obj.verify_checksums(
                     self.fio_node, c_r_files, c_checksums,
-                    message="TC-BCK-097: checksum mismatch on interrupted crypto restore retry")
+                    message="TC-BCK-097: checksum mismatch on interrupted crypto restore retry", by_name=True)
                 self.logger.info("TC-BCK-097: crypto interrupted restore retry ✓")
 
         self.logger.info("=== TestBackupInterruptedRestore PASSED ===")
@@ -1329,7 +1330,7 @@ class BackupStressMarathon(BackupStressBase):
             rst_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
             self.ssh_obj.verify_checksums(
                 self.fio_node, rst_files, info["checksums"],
-                message=f"[round {round_num}] RESTORE {lvol_key} checksum mismatch")
+                message=f"[round {round_num}] RESTORE {lvol_key} checksum mismatch", by_name=True)
             state["restored"].append((rst_name, info["checksums"]))
             self.logger.info(f"[round {round_num}] RESTORE {lvol_key} ← {bk_id} ✓")
         except Exception as e:
@@ -1383,7 +1384,7 @@ class BackupStressMarathon(BackupStressBase):
             files = self.ssh_obj.find_files(self.fio_node, rst_mount)
             self.ssh_obj.verify_checksums(
                 self.fio_node, files, expected,
-                message=f"[round {round_num}] VERIFY {rst_name} checksum mismatch")
+                message=f"[round {round_num}] VERIFY {rst_name} checksum mismatch", by_name=True)
             self.logger.info(f"[round {round_num}] VERIFY {rst_name} ✓")
         except Exception as e:
             self.logger.error(f"[round {round_num}] VERIFY {rst_name} error: {e}")
@@ -1467,7 +1468,7 @@ class BackupStressMarathon(BackupStressBase):
                 _, rst_mount = self._connect_and_mount(rst_name, rst_id, mount=mount_path, format_disk=False)
                 files = self.ssh_obj.find_files(self.fio_node, rst_mount)
                 self.ssh_obj.verify_checksums(self.fio_node, files, expected,
-                    message=f"TC-BCK-STR-063: final checksum mismatch for {rst_name}")
+                    message=f"TC-BCK-STR-063: final checksum mismatch for {rst_name}", by_name=True)
                 self.logger.info(f"TC-BCK-STR-063: {rst_name} ✓")
             except Exception as e:
                 self.logger.error(f"TC-BCK-STR-063: {rst_name} failed: {e}")

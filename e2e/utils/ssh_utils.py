@@ -1436,7 +1436,22 @@ class SshUtils:
             checksums[file] = checksum
         return checksums
 
-    def verify_checksums(self, node, files, checksums, clone_base=False, message=None):
+    def verify_checksums(self, node, files, checksums, clone_base=False, message=None, by_name=False):
+        """Verify md5 checksums for a list of files.
+
+        by_name=True: compare by filename only, ignoring directory path.
+        Use this for backup-restore verification where the restored lvol is
+        mounted at a different path than the original.
+        """
+        if not files:
+            raise ValueError(
+                message or "No files found in mount — restore may have failed or filesystem was formatted")
+        if by_name:
+            name_checksums = {os.path.basename(k): v for k, v in checksums.items()}
+            if len(files) != len(name_checksums):
+                raise ValueError(
+                    message or
+                    f"File count mismatch: restored has {len(files)}, expected {len(name_checksums)}")
         for file in files:
             command = f"md5sum {file}"
             stdout, _ = self.exec_command(node, command)
@@ -1447,6 +1462,16 @@ class SshUtils:
                 base_file_complete = base_dir_name[0] + "_" + base_dir_name[1] + "/" + file_name
                 self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {checksums[base_file_complete]}")
                 if checksum != checksums[base_file_complete]:
+                    raise ValueError(message or f"Checksum mismatch for file {file}")
+                else:
+                    self.logger.info(f"Checksum match for file: {file}")
+            elif by_name:
+                fname = os.path.basename(file)
+                if fname not in name_checksums:
+                    raise ValueError(message or f"No matching checksum for filename {fname}")
+                expected = name_checksums[fname]
+                self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {expected}")
+                if checksum != expected:
                     raise ValueError(message or f"Checksum mismatch for file {file}")
                 else:
                     self.logger.info(f"Checksum match for file: {file}")

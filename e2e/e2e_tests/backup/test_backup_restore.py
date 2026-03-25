@@ -15,7 +15,7 @@ Snapshot backup:
 Backup CRUD:
   sbcli backup list [--cluster-id]
   sbcli backup delete <lvol_id>               # deletes ALL backups for that lvol
-  sbcli backup restore <backup_id> [--lvol-name NAME] [--pool POOL]
+  sbcli backup restore <backup_id> [--lvol NAME] [--pool POOL]
   sbcli backup import <metadata.json>
 
 Policy management:
@@ -189,12 +189,66 @@ class BackupTestBase(TestClusterBase):
         self.created_lvols.append(lvol_name)
         return lvol_name
 
-    def _wait_for_restore(self, lvol_name: str, timeout: int = _RESTORE_COMPLETE_TIMEOUT):
-        """Wait until restored lvol appears in lvol list."""
+    def _get_suspended_restore_task_ids(self) -> set:
+        """Return set of task IDs for currently suspended s3_backup_restore tasks."""
+        try:
+            out, _ = self._sbcli(f"cluster list-tasks {self.cluster_id} --limit 0")
+            ids = set()
+            for line in (out or "").splitlines():
+                if "|" not in line or "s3_backup_restore" not in line:
+                    continue
+                parts = [p.strip() for p in line.split("|") if p.strip()]
+                # columns: task_id(0), target_id(1), function(2), retry(3), status(4), result(5), updated_at(6)
+                if len(parts) >= 5 and parts[2] == "s3_backup_restore" and parts[4] == "suspended":
+                    ids.add(parts[0])
+            return ids
+        except Exception as e:
+            self.logger.warning(f"Could not fetch cluster tasks for restore check: {e}")
+            return set()
+
+    def _assert_no_new_restore_failures(self, suspended_before: set, lvol_name: str) -> None:
+        """Raise if new suspended s3_backup_restore tasks appeared since suspended_before was captured."""
+        try:
+            out, _ = self._sbcli(f"cluster list-tasks {self.cluster_id} --limit 0")
+            new_failures = []
+            for line in (out or "").splitlines():
+                if "|" not in line or "s3_backup_restore" not in line:
+                    continue
+                parts = [p.strip() for p in line.split("|") if p.strip()]
+                if len(parts) >= 5 and parts[2] == "s3_backup_restore" and parts[4] == "suspended":
+                    task_id = parts[0]
+                    if task_id not in suspended_before:
+                        result = parts[5] if len(parts) > 5 else ""
+                        new_failures.append(f"task={task_id} result={result!r}")
+            if new_failures:
+                raise RuntimeError(
+                    f"Restore of {lvol_name} failed: {len(new_failures)} new suspended "
+                    f"s3_backup_restore task(s) detected: " + "; ".join(new_failures)
+                )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            self.logger.warning(f"Could not verify restore task status: {e}")
+
+    def _wait_for_restore(self, lvol_name: str, timeout: int = _RESTORE_COMPLETE_TIMEOUT,
+                          expect_failure: bool = False):
+        """Wait until restored lvol appears in lvol list.
+
+        Set expect_failure=True to skip cluster-task failure detection (used in
+        interrupted-restore tests where a suspended task is tolerated).
+        Raises RuntimeError if a new suspended s3_backup_restore task is detected
+        (indicating the restore failed on the data plane).
+        """
+        suspended_before: set = set()
+        if not expect_failure:
+            suspended_before = self._get_suspended_restore_task_ids()
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             out, _ = self._sbcli("lvol list")
             if lvol_name in out:
+                if not expect_failure:
+                    self._assert_no_new_restore_failures(suspended_before, lvol_name)
                 return
             sleep_n_sec(_POLL_INTERVAL)
         raise TimeoutError(f"Restored lvol {lvol_name} not visible after {timeout}s")
@@ -635,7 +689,7 @@ class TestBackupBasicPositive(BackupTestBase):
             format_disk=False)
         r10_files = self.ssh_obj.find_files(self.fio_node, r10_mount)
         self.ssh_obj.verify_checksums(
-            self.fio_node, r10_files, original_checksums)
+            self.fio_node, r10_files, original_checksums, by_name=True)
         self.logger.info("TC-BCK-010: delete-snapshot-then-restore checksums match ✓")
 
         self.logger.info("=== TestBackupBasicPositive PASSED ===")
@@ -720,7 +774,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         restored_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         restored_checksums = self.ssh_obj.generate_checksums(self.fio_node, restored_files)
         self.ssh_obj.verify_checksums(
-            self.fio_node, restored_files, original_checksums)
+            self.fio_node, restored_files, original_checksums, by_name=True)
         self.logger.info("TC-BCK-014: checksums match ✓")
 
         # --- TC-BCK-015: FIO on restored lvol ---
@@ -763,7 +817,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             format_disk=False)
         dr_files = self.ssh_obj.find_files(self.fio_node, dr_mount)
         self.ssh_obj.verify_checksums(
-            self.fio_node, dr_files, original_checksums)
+            self.fio_node, dr_files, original_checksums, by_name=True)
         self.logger.info("TC-BCK-016: disaster recovery checksums match ✓")
 
         # --- TC-BCK-017: Restore to a second pool; verify checksum ---
@@ -778,7 +832,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             self._connect_and_mount(pool2_name, pool2_id, mount=p2_mount, format_disk=False)
             p2_files = self.ssh_obj.find_files(self.fio_node, p2_mount)
             self.ssh_obj.verify_checksums(
-                self.fio_node, p2_files, original_checksums)
+                self.fio_node, p2_files, original_checksums, by_name=True)
             self.logger.info("TC-BCK-017: restore to second pool checksums match ✓")
         finally:
             try:
@@ -842,7 +896,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             mount=f"{self.mount_path}/tc18_{_rand_suffix()}",
             format_disk=False)
         tc18_r_files = self.ssh_obj.find_files(self.fio_node, tc18_r_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, tc18_r_files, tc18_checksums)
+        self.ssh_obj.verify_checksums(self.fio_node, tc18_r_files, tc18_checksums, by_name=True)
         self.logger.info("TC-BCK-018: checksums match after restore from in-progress backup ✓")
 
         self.logger.info("=== TestBackupRestoreDataIntegrity PASSED ===")
@@ -1009,7 +1063,7 @@ class TestBackupNegative(BackupTestBase):
         self.logger.info("TC-BCK-030: restore invalid backup_id")
         out, err = self._sbcli(
             "backup restore 00000000-0000-0000-0000-000000000000 "
-            "--lvol-name invalid_restore --pool bck_test_pool")
+            "--lvol invalid_restore --pool bck_test_pool")
         assert err or "error" in out.lower(), \
             "TC-BCK-030: expected error for invalid backup_id"
         self.logger.info("TC-BCK-030: got expected error ✓")
@@ -1102,7 +1156,7 @@ class TestBackupNegative(BackupTestBase):
         bk39_id = self._wait_for_backup_by_snap(snap39, "TC-BCK-039")
         self.logger.info(f"TC-BCK-039: backup {bk39_id} completed, testing restore conflict")
         out, err = self._sbcli(
-            f"backup restore {bk39_id} --lvol-name {lvol_name} "
+            f"backup restore {bk39_id} --lvol {lvol_name} "
             f"--pool {self.pool_name}")
         assert err or "error" in out.lower(), \
             "TC-BCK-039: expected conflict error restoring to existing lvol name"
@@ -1187,7 +1241,7 @@ class TestBackupCryptoLvol(BackupTestBase):
         self.logger.info("TC-BCK-054: checksum validation on restored crypto lvol")
         r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
         self.ssh_obj.verify_checksums(
-            self.fio_node, r_files, orig_checksums)
+            self.fio_node, r_files, orig_checksums, by_name=True)
         self.logger.info("TC-BCK-054: checksums match ✓")
 
         # --- TC-BCK-055: FIO on restored crypto lvol ---
@@ -1266,7 +1320,7 @@ class TestBackupCustomGeometry(BackupTestBase):
                 format_disk=False)
             r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
             self.ssh_obj.verify_checksums(
-                self.fio_node, r_files, orig_checksums)
+                self.fio_node, r_files, orig_checksums, by_name=True)
             self.logger.info(f"TC-BCK-060: ndcs={ndcs} npcs={npcs} ✓")
 
         self.logger.info("=== TestBackupCustomGeometry PASSED ===")
@@ -1361,7 +1415,7 @@ class TestBackupDeleteAndRestore(BackupTestBase):
             mount=f"{self.mount_path}/del_fr_{_rand_suffix()}",
             format_disk=False)
         fr_files = self.ssh_obj.find_files(self.fio_node, fr_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, fr_files, original_checksums)
+        self.ssh_obj.verify_checksums(self.fio_node, fr_files, original_checksums, by_name=True)
         self.logger.info("TC-BCK-080: fresh post-delete backup → restore → checksums match ✓")
 
         # ── TC-BCK-081: Retention merge — restore from retained backups ─────
@@ -1405,7 +1459,7 @@ class TestBackupDeleteAndRestore(BackupTestBase):
                 mount=f"{self.mount_path}/ret_{_rand_suffix()}",
                 format_disk=False)
             rst_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
-            self.ssh_obj.verify_checksums(self.fio_node, rst_files, original_checksums)
+            self.ssh_obj.verify_checksums(self.fio_node, rst_files, original_checksums, by_name=True)
             self.logger.info(f"TC-BCK-081: retained backup {bk_id} → restore → checksums match ✓")
 
         self.logger.info("=== TestBackupDeleteAndRestore PASSED ===")
@@ -1607,7 +1661,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 f"TC-BCK-075: Cluster-2 — backup restore {backup_id} → {restored_name}")
             c2_pool = os.environ.get("CLUSTER2_POOL", self.pool_name)
             out3, err3 = self._sbcli_c2(
-                f"backup restore {backup_id} --lvol-name {restored_name} --pool {c2_pool}")
+                f"backup restore {backup_id} --lvol {restored_name} --pool {c2_pool}")
             assert not (err3 and "error" in err3.lower()), \
                 f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
             self.logger.info(f"TC-BCK-075: restore triggered: {out3.strip()}")
@@ -1655,7 +1709,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
             r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
             self.ssh_obj.verify_checksums(
-                self.fio_node, r_files, orig_checksums)
+                self.fio_node, r_files, orig_checksums, by_name=True)
             self.logger.info("TC-BCK-076: cross-cluster restore checksums match ✓")
 
         finally:
