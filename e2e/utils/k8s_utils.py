@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 import time
 from datetime import datetime, timezone
 from logger_config import setup_logger
@@ -47,6 +48,28 @@ class K8sUtils:
         self.namespace = namespace
         self._admin_pod: str | None = None
         self.logger = setup_logger(__name__)
+        # Use local subprocess when the runner IS the mgmt node (bastion == mgmt_node)
+        # or when K8S_LOCAL_KUBECTL=1 is set explicitly.
+        self.use_local_kubectl = (
+            os.environ.get("K8S_LOCAL_KUBECTL", "").lower() in ("1", "true", "yes")
+            or mgmt_node == getattr(ssh_obj, "bastion_server", None)
+        )
+        if self.use_local_kubectl:
+            self.logger.info("[K8sUtils] Local kubectl mode enabled (subprocess)")
+
+    # ── kubectl dispatch ─────────────────────────────────────────────────────
+
+    def _exec_kubectl(self, cmd: str, supress_logs: bool = False):
+        """
+        Execute *cmd* either locally via subprocess (when use_local_kubectl=True)
+        or via SSH to mgmt_node.  Returns (stdout, stderr) strings.
+        """
+        if self.use_local_kubectl:
+            if not supress_logs:
+                self.logger.info(f"[K8sUtils] local: {cmd}")
+            result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+            return result.stdout, result.stderr
+        return self.ssh_obj.exec_command(self.mgmt_node, cmd, supress_logs=supress_logs)
 
     # ── Admin pod discovery ──────────────────────────────────────────────────
 
@@ -60,8 +83,7 @@ class K8sUtils:
         if self._admin_pod and not refresh:
             return self._admin_pod
 
-        out, _ = self.ssh_obj.exec_command(
-            self.mgmt_node,
+        out, _ = self._exec_kubectl(
             (
                 f"kubectl get pods -n {self.namespace} --no-headers "
                 f"-o custom-columns=:metadata.name "
@@ -91,16 +113,13 @@ class K8sUtils:
             f"kubectl exec -n {self.namespace} {admin_pod} -- "
             f"bash -c {shlex.quote(command)}"
         )
-        return self.ssh_obj.exec_command(
-            self.mgmt_node, kubectl_cmd, supress_logs=supress_logs
-        )
+        return self._exec_kubectl(kubectl_cmd, supress_logs=supress_logs)
 
     # ── K8s node name resolution ─────────────────────────────────────────────
 
     def _get_k8s_node_name(self, node_ip: str) -> str:
         """Return the K8s node name (hostname) for a given storage-node IP."""
-        out, _ = self.ssh_obj.exec_command(
-            self.mgmt_node,
+        out, _ = self._exec_kubectl(
             (
                 "kubectl get nodes -o wide --no-headers "
                 f"| awk '{{print $1, $6}}' | grep '{node_ip}' | awk '{{print $1}}'"
@@ -124,8 +143,7 @@ class K8sUtils:
         Raises RuntimeError if the pod cannot be found.
         """
         k8s_node = self._get_k8s_node_name(node_ip)
-        out, _ = self.ssh_obj.exec_command(
-            self.mgmt_node,
+        out, _ = self._exec_kubectl(
             (
                 f"kubectl get pods -n {self.namespace} -o wide --no-headers "
                 f"| awk '{{print $1, $7}}' "
@@ -152,8 +170,7 @@ class K8sUtils:
         self.logger.info(
             f"[K8sUtils] Force-deleting SPDK pod {pod_name!r} on node {node_ip}"
         )
-        self.ssh_obj.exec_command(
-            self.mgmt_node,
+        self._exec_kubectl(
             (
                 f"kubectl delete pod {pod_name} -n {self.namespace} "
                 f"--grace-period=0 --force 2>&1 || true"
@@ -173,8 +190,7 @@ class K8sUtils:
         )
         deadline = time.time() + timeout
         while time.time() < deadline:
-            out, _ = self.ssh_obj.exec_command(
-                self.mgmt_node,
+            out, _ = self._exec_kubectl(
                 (
                     f"kubectl get pods -n {self.namespace} -o wide --no-headers "
                     f"| grep snode-spdk | grep '{k8s_node}' | awk '{{print $3}}' || true"
@@ -234,8 +250,7 @@ class K8sUtils:
         )
         deadline = time.time() + timeout
         while time.time() < deadline:
-            out, _ = self.ssh_obj.exec_command(
-                self.mgmt_node,
+            out, _ = self._exec_kubectl(
                 (
                     f"kubectl get pods -n {self.namespace} --no-headers "
                     f"-o custom-columns=:metadata.name,:status.phase "

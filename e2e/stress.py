@@ -254,11 +254,14 @@ def upload_logs():
 
 def check_for_dumps():
     """Validates whether core dumps present on machines
-    
+
     Returns:
         bool: If there are core dumps or not
     """
     logger.info("Checking for core dumps!!")
+    if not os.getenv("API_BASE_URL"):
+        logger.info("Skipping core dump check (K8s mode: no direct SSH to storage nodes)")
+        return False
     cluster_base = TestClusterBase()
     ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
     sbcli_utils = SbcliUtils(
