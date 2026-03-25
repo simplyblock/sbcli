@@ -289,7 +289,7 @@ class K8sSbcliUtils:
         The CLI binary name inside the admin pod (default: ``sbcli``).
     """
 
-    def __init__(self, k8s: K8sUtils, cluster_id: str, sbcli_cmd: str = "sbcli"):
+    def __init__(self, k8s: K8sUtils, cluster_id: str, sbcli_cmd: str = "sbctl"):
         self.k8s = k8s
         self.cluster_id = cluster_id
         self.sbcli_cmd = sbcli_cmd
