@@ -101,25 +101,26 @@ class TestClusterBase:
                     self.logger.info(f"Retry attemp exhausted. API failed with: {e}. Exiting")
                     raise e
                 self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
-        for node in self.mgmt_nodes:
-            self.logger.info(f"**Connecting to management nodes** - {node}")
-            self.ssh_obj.connect(
-                address=node,
-                bastion_server_address=self.bastion_server,
-            )
-            sleep_n_sec(2)
-            self.ssh_obj.set_aio_max_nr(node)
-        for node in self.storage_nodes:
-            self.logger.info(f"**Connecting to storage nodes** - {node}")
-            self.ssh_obj.connect(
-                address=node,
-                bastion_server_address=self.bastion_server,
-            )
-            sleep_n_sec(2)
-            self.ssh_obj.set_aio_max_nr(node)
+        if not self.k8s_test:
+            for node in self.mgmt_nodes:
+                self.logger.info(f"**Connecting to management nodes** - {node}")
+                self.ssh_obj.connect(
+                    address=node,
+                    bastion_server_address=self.bastion_server,
+                )
+                sleep_n_sec(2)
+                self.ssh_obj.set_aio_max_nr(node)
+            for node in self.storage_nodes:
+                self.logger.info(f"**Connecting to storage nodes** - {node}")
+                self.ssh_obj.connect(
+                    address=node,
+                    bastion_server_address=self.bastion_server,
+                )
+                sleep_n_sec(2)
+                self.ssh_obj.set_aio_max_nr(node)
         if not self.client_machines:
             self.client_machines = f"{self.mgmt_nodes[0]}"
-        
+
         self.client_machines = self.client_machines.strip().split(" ")
         for client in self.client_machines:
             self.logger.info(f"**Connecting to client machine** - {client}")
@@ -133,18 +134,21 @@ class TestClusterBase:
         nfs_path = "/srv/nfs_share"
         nfs_mount_point = "/mnt/nfs_share"
 
-        for node in self.storage_nodes + self.mgmt_nodes + self.client_machines:
+        if not self.k8s_test:
+            for node in self.storage_nodes + self.mgmt_nodes:
+                self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
+        for node in self.client_machines:
             self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
-        
         self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 
         # Construct the logs path with test name and timestamp
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        # fresh folder per run on NFS:
+        # fresh folder per run on NFS (mounted on client and runner):
         self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
         self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
+        os.makedirs(self.log_path, exist_ok=True)
         for node in self.fio_node:
             self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
         
@@ -174,8 +178,9 @@ class TestClusterBase:
         sleep_n_sec(2)
         self.sbcli_utils.delete_all_lvols()
         sleep_n_sec(2)
-        self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-        sleep_n_sec(2)
+        if not self.k8s_test:
+            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+            sleep_n_sec(2)
         self.sbcli_utils.delete_all_storage_pools()
         aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", None)
         aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", None)
@@ -187,105 +192,54 @@ class TestClusterBase:
             )
             self.ec2_resource = session.resource('ec2')
 
-        self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
-        self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
-        for node in self.storage_nodes:
-            node_log_dir = os.path.join(self.docker_logs_path, node)
-            # self.ssh_obj.delete_old_folders(
-            #     node=node,
-            #     folder_path=self.nfs_log_base,
-            #     days=10
-            # )
-            self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
-            containers = self.ssh_obj.get_running_containers(node_ip=node)
-            self.container_nodes[node] = containers
-            self.ssh_obj.check_tmux_installed(node_ip=node)
-            self.ssh_obj.exec_command(node=node,
-                                    command="sudo tmux kill-server")
-            
-            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=node_log_dir)
-
-            if not self.k8s_test:
-                self.ssh_obj.start_docker_logging(node_ip=node,
-                                                containers=containers,
-                                                log_dir=node_log_dir,
-                                                test_name=self.test_name
-                                                )
-
-            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
-            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                    log_dir=node_log_dir)
-            if not self.k8s_test:
-                self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
-        
+        os.makedirs(self.docker_logs_path, exist_ok=True)
         if self.k8s_test:
             self.runner_k8s_log.start_logging()
             self.runner_k8s_log.monitor_pod_logs()
-        # for node in self.storage_nodes:
-        #     self.ssh_obj.monitor_container_logs(
-        #         node_ip=node,
-        #         containers=self.container_nodes[node],
-        #         log_dir=self.docker_logs_path,
-        #         test_name=self.test_name
-        #     )
+        else:
+            self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
+            self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
+            for node in self.storage_nodes:
+                node_log_dir = os.path.join(self.docker_logs_path, node)
+                self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
+                containers = self.ssh_obj.get_running_containers(node_ip=node)
+                self.container_nodes[node] = containers
+                self.ssh_obj.check_tmux_installed(node_ip=node)
+                self.ssh_obj.exec_command(node=node, command="sudo tmux kill-server")
+                self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=node_log_dir)
+                self.ssh_obj.start_docker_logging(node_ip=node, containers=containers,
+                                                  log_dir=node_log_dir, test_name=self.test_name)
+                self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
+                self.ssh_obj.start_netstat_dmesg_logging(node_ip=node, log_dir=node_log_dir)
+                self.ssh_obj.reset_iptables_in_spdk(node_ip=node)
 
-        for node in self.mgmt_nodes:
-            # self.ssh_obj.delete_old_folders(
-            #     node=node,
-            #     folder_path=self.nfs_log_base,
-            #     days=10
-            # )
-            node_log_dir = os.path.join(self.docker_logs_path, node)
-            self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
-            containers = self.ssh_obj.get_running_containers(node_ip=node)
-            self.container_nodes[node] = containers
-            self.ssh_obj.check_tmux_installed(node_ip=node)
-            self.ssh_obj.exec_command(node=node,
-                                    command="sudo tmux kill-server")
-            
-            self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=node_log_dir)
+            for node in self.mgmt_nodes:
+                node_log_dir = os.path.join(self.docker_logs_path, node)
+                self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
+                containers = self.ssh_obj.get_running_containers(node_ip=node)
+                self.container_nodes[node] = containers
+                self.ssh_obj.check_tmux_installed(node_ip=node)
+                self.ssh_obj.exec_command(node=node, command="sudo tmux kill-server")
+                self.ssh_obj.start_resource_monitors(node_ip=node, log_dir=node_log_dir)
+                self.ssh_obj.start_docker_logging(node_ip=node, containers=containers,
+                                                  log_dir=node_log_dir, test_name=self.test_name)
+                self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
+                self.ssh_obj.start_netstat_dmesg_logging(node_ip=node, log_dir=node_log_dir)
 
-            self.ssh_obj.start_docker_logging(node_ip=node,
-                                              containers=containers,
-                                              log_dir=node_log_dir,
-                                              test_name=self.test_name
-                                              )
+            self.fetch_all_nodes_distrib_log()
 
-            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
-            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                     log_dir=node_log_dir)
-        # for node in self.mgmt_nodes:
-        #     self.ssh_obj.monitor_container_logs(
-        #         node_ip=node,
-        #         containers=self.container_nodes[node],
-        #         log_dir=self.docker_logs_path,
-        #         test_name=self.test_name
-        #     )
-        
         for node in self.fio_node:
-            # self.ssh_obj.delete_old_folders(
-            #     node=node,
-            #     folder_path=self.nfs_log_base,
-            #     days=10
-            # )
             node_log_dir = os.path.join(self.docker_logs_path, node)
-
             self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
-
             self.ssh_obj.check_tmux_installed(node_ip=node)
-
-            self.ssh_obj.exec_command(node=node,
-                                      command="sudo tmux kill-server")
-            self.ssh_obj.start_tcpdump_logging(node_ip=node,
-                                               log_dir=node_log_dir)
-            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node,
-                                                     log_dir=node_log_dir)
-        
-        self.fetch_all_nodes_distrib_log()
+            self.ssh_obj.exec_command(node=node, command="sudo tmux kill-server")
+            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
+            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node, log_dir=node_log_dir)
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
-        self.start_root_monitor()
+        if not self.k8s_test:
+            self.start_root_monitor()
 
         sleep_n_sec(120)
 
@@ -301,9 +255,10 @@ class TestClusterBase:
             'echo "net.ipv4.tcp_retries2=8" | sudo tee -a /etc/sysctl.conf',
             'sudo sysctl -p'
         ]
-        for node in self.storage_nodes:
-            for cmd in sysctl_commands:
-                self.ssh_obj.exec_command(node, cmd)
+        if not self.k8s_test:
+            for node in self.storage_nodes:
+                for cmd in sysctl_commands:
+                    self.ssh_obj.exec_command(node, cmd)
         for cmd in sysctl_commands:
             for node in self.fio_node:
                 self.ssh_obj.exec_command(node, cmd)
@@ -319,15 +274,16 @@ class TestClusterBase:
         for node in self.fio_node:
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
             self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.state*", recursive=True)
-        # self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
-        self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
-        for node in self.storage_nodes:
-            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/[0-9]*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*core*.zst", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
-            self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
+        if not self.k8s_test:
+            # self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity="/etc/simplyblock/*", recursive=True)
+            self.ssh_obj.delete_file_dir(self.mgmt_nodes[0], entity=f"{base_path}/*.txt*", recursive=True)
+            for node in self.storage_nodes:
+                self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/[0-9]*", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*core*.zst", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
 
     def stop_docker_logs_collect(self):
         for node in self.storage_nodes:
@@ -356,6 +312,9 @@ class TestClusterBase:
         self.runner_k8s_log.stop_logging()
 
     def fetch_all_nodes_distrib_log(self):
+        if self.k8s_test:
+            self.logger.info("Skipping distrib log fetch in K8s mode")
+            return
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         all_ok = True
         for result in storage_nodes['results']:
@@ -366,8 +325,58 @@ class TestClusterBase:
                     all_ok = False
         assert all_ok, "Placement dump validation failed on one or more storage nodes"
 
+    def _collect_management_details_k8s(self, suffix: str):
+        """Collect management details via kubectl exec (k8s mode)."""
+        base_path = os.path.join(self.docker_logs_path, "mgmt_details")
+        os.makedirs(base_path, exist_ok=True)
+        k8s = self.sbcli_utils.k8s
+
+        cmds = [
+            (f"cluster_list{suffix}.txt", f"{self.base_cmd} cluster list"),
+            (f"sn_list{suffix}.txt", f"{self.base_cmd} sn list"),
+            (f"sn_list{suffix}.json", f"{self.base_cmd} sn list --json"),
+            (f"lvol_list{suffix}.txt", f"{self.base_cmd} lvol list"),
+            (f"snapshot_list{suffix}.txt", f"{self.base_cmd} snapshot list"),
+            (f"pool_list{suffix}.txt", f"{self.base_cmd} pool list"),
+        ]
+        if self.cluster_id:
+            cmds += [
+                (f"cluster_status{suffix}.txt", f"{self.base_cmd} cluster status {self.cluster_id}"),
+                (f"cluster_list_tasks{suffix}.txt", f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0"),
+                (f"cluster_capacity{suffix}.txt", f"{self.base_cmd} cluster get-capacity {self.cluster_id}"),
+                (f"cluster_show{suffix}.txt", f"{self.base_cmd} cluster show {self.cluster_id}"),
+                (f"cluster_get_logs{suffix}.txt", f"{self.base_cmd} cluster get-logs {self.cluster_id} --limit 0"),
+            ]
+        for filename, cmd in cmds:
+            try:
+                out, _ = k8s.exec_sbcli(cmd)
+                with open(os.path.join(base_path, filename), "w") as fh:
+                    fh.write(out or "")
+            except Exception as e:
+                self.logger.warning(f"[k8s collect_mgmt] {cmd}: {e}")
+
+        try:
+            storage_nodes = self.sbcli_utils.get_storage_nodes()
+            for i, result in enumerate(storage_nodes["results"], 1):
+                for fname, cmd in [
+                    (f"node{i}_list_devices{suffix}.txt", f"{self.base_cmd} sn list-devices {result['uuid']}"),
+                    (f"node{i}_check{suffix}.txt", f"{self.base_cmd} sn check {result['uuid']}"),
+                    (f"node{i}_get{suffix}.txt", f"{self.base_cmd} sn get {result['uuid']}"),
+                ]:
+                    try:
+                        out, _ = k8s.exec_sbcli(cmd)
+                        with open(os.path.join(base_path, fname), "w") as fh:
+                            fh.write(out or "")
+                    except Exception as e:
+                        self.logger.warning(f"[k8s collect_mgmt] {cmd}: {e}")
+        except Exception as e:
+            self.logger.warning(f"[k8s collect_mgmt] storage node loop: {e}")
+
     def collect_management_details(self, post_teardown=False):
         suffix = "_pre_teardown" if not post_teardown else "_post_teardown"
+        if self.k8s_test:
+            self._collect_management_details_k8s(suffix)
+            return
 
         base_path = os.path.join(self.docker_logs_path, self.mgmt_nodes[0])
         cmd = f"{self.base_cmd} cluster list >& {base_path}/cluster_list{suffix}.txt"
@@ -721,12 +730,11 @@ class TestClusterBase:
         for node in fio_nodes:
             self.ssh_obj.exec_command(node=node,
                                       command="sudo tmux kill-server")
-        
             self.ssh_obj.kill_processes(node=node,
                                         process_name="fio")
-        
+
         self.stop_root_monitor()
-        
+
         retry_check = 100
         while retry_check:
             exit_while = True
@@ -743,7 +751,7 @@ class TestClusterBase:
                 retry_check -= 1
                 sleep_n_sec(10)
 
-        if retry_check <=0:
+        if retry_check <= 0:
             self.logger.info("FIO did not exit completely after kill and wait. "
                              "Some hanging mount points could be present. "
                              "Needs manual cleanup.")
@@ -770,10 +778,11 @@ class TestClusterBase:
                             sleep_n_sec(2)
                     self.disconnect_lvols()
                     sleep_n_sec(2)
-                    self.sbcli_utils.delete_all_lvols()
-                    sleep_n_sec(2)
-                self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+                self.sbcli_utils.delete_all_lvols()
                 sleep_n_sec(2)
+                if not self.k8s_test:
+                    self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+                    sleep_n_sec(2)
                 self.sbcli_utils.delete_all_storage_pools()
                 sleep_n_sec(2)
                 latest_util = self.get_latest_cluster_util()
@@ -785,23 +794,23 @@ class TestClusterBase:
             except Exception as _:
                 self.logger.info(traceback.format_exc())
 
-        for node in self.storage_nodes:
-            self.ssh_obj.exec_command(node=node,
-                                      command="sudo tmux kill-server")
-            result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node, 
-                                                                     log_dir=self.docker_logs_path, 
-                                                                     test_name=self.test_name)
+        if not self.k8s_test:
+            for node in self.storage_nodes:
+                self.ssh_obj.exec_command(node=node,
+                                          command="sudo tmux kill-server")
+                result = self.ssh_obj.check_remote_spdk_logs_for_keyword(node_ip=node,
+                                                                         log_dir=self.docker_logs_path,
+                                                                         test_name=self.test_name)
+                for file, lines in result.items():
+                    if lines:
+                        self.logger.info(f"\n{file}:")
+                        for line in lines:
+                            self.logger.info(f"  -> {line}")
 
-            for file, lines in result.items():
-                if lines:
-                    self.logger.info(f"\n{file}:")
-                    for line in lines:
-                        self.logger.info(f"  -> {line}")
-        
-        self.ssh_obj.copy_logs_and_configs_to_nfs(
+            self.ssh_obj.copy_logs_and_configs_to_nfs(
                 logs_path=self.docker_logs_path, storage_nodes=self.storage_nodes
             )
-        if close_ssh:
+        if close_ssh and not self.k8s_test:
             for node, ssh in self.ssh_obj.ssh_connections.items():
                 self.logger.info(f"Closing node ssh connection for {node}")
                 ssh.close()
@@ -887,6 +896,8 @@ class TestClusterBase:
         interval_minutes: int, default from env ROOT_MONITOR_INTERVAL_MIN or 60
         threshold: int %, default from env ROOT_DISK_THRESHOLD or 80
         """
+        if self.k8s_test:
+            return
         if hasattr(self, "_root_monitor_thread") and getattr(self, "_root_monitor_thread").is_alive():
             self.logger.info("Root monitor already running; skipping start.")
             return
