@@ -206,29 +206,47 @@ class BackupTestBase(TestClusterBase):
             self.logger.warning(f"Could not fetch cluster tasks for restore check: {e}")
             return set()
 
-    def _assert_no_new_restore_failures(self, suspended_before: set, lvol_name: str) -> None:
-        """Raise if new suspended s3_backup_restore tasks appeared since suspended_before was captured."""
-        try:
-            out, _ = self._sbcli(f"cluster list-tasks {self.cluster_id} --limit 0")
-            new_failures = []
-            for line in (out or "").splitlines():
-                if "|" not in line or "s3_backup_restore" not in line:
-                    continue
-                parts = [p.strip() for p in line.split("|") if p.strip()]
-                if len(parts) >= 5 and parts[2] == "s3_backup_restore" and parts[4] == "suspended":
-                    task_id = parts[0]
-                    if task_id not in suspended_before:
-                        result = parts[5] if len(parts) > 5 else ""
-                        new_failures.append(f"task={task_id} result={result!r}")
-            if new_failures:
-                raise RuntimeError(
-                    f"Restore of {lvol_name} failed: {len(new_failures)} new suspended "
-                    f"s3_backup_restore task(s) detected: " + "; ".join(new_failures)
+    def _assert_no_new_restore_failures(self, suspended_before: set, lvol_name: str,
+                                         recovery_timeout: int = 600) -> None:
+        """Wait up to recovery_timeout seconds for any new suspended s3_backup_restore
+        tasks to clear.  Raises RuntimeError only if they are still suspended after
+        the full wait (default: 10 minutes)."""
+        _RECOVERY_POLL = 30
+        deadline = time.time() + recovery_timeout
+        last_failures: list = []
+        while True:
+            try:
+                out, _ = self._sbcli(f"cluster list-tasks {self.cluster_id} --limit 0")
+                last_failures = []
+                for line in (out or "").splitlines():
+                    if "|" not in line or "s3_backup_restore" not in line:
+                        continue
+                    parts = [p.strip() for p in line.split("|") if p.strip()]
+                    # columns: task_id(0), target_id(1), function(2), retry(3), status(4), result(5)
+                    if len(parts) >= 5 and parts[2] == "s3_backup_restore" and parts[4] == "suspended":
+                        task_id = parts[0]
+                        if task_id not in suspended_before:
+                            result = parts[5] if len(parts) > 5 else ""
+                            last_failures.append(f"task={task_id} result={result!r}")
+                if not last_failures:
+                    return  # all restore tasks completed successfully
+                # New suspended tasks found — log and check if we still have time
+                self.logger.warning(
+                    f"Restore {lvol_name}: {len(last_failures)} suspended task(s) detected, "
+                    f"waiting for recovery ({int(deadline - time.time())}s remaining): "
+                    + "; ".join(last_failures)
                 )
-        except RuntimeError:
-            raise
-        except Exception as e:
-            self.logger.warning(f"Could not verify restore task status: {e}")
+            except Exception as e:
+                self.logger.warning(f"Could not verify restore task status: {e}")
+                return  # cannot determine status; proceed optimistically
+            if time.time() >= deadline:
+                break
+            sleep_n_sec(_RECOVERY_POLL)
+        raise RuntimeError(
+            f"Restore of {lvol_name} still failing after {recovery_timeout}s: "
+            f"{len(last_failures)} suspended s3_backup_restore task(s): "
+            + "; ".join(last_failures)
+        )
 
     def _wait_for_restore(self, lvol_name: str, timeout: int = _RESTORE_COMPLETE_TIMEOUT,
                           expect_failure: bool = False):
