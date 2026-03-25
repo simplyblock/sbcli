@@ -1697,6 +1697,10 @@ spec:
                   "ui": true,
                   "api_addr": "http://0.0.0.0:8200"
                 }
+        volumeMounts:
+        - name: kms-data
+          mountPath: /vault/data
+          readOnly: false
         resources:
           requests:
             cpu: "100m"
@@ -1704,5 +1708,9 @@ spec:
           limits:
             cpu: "600m"
             memory: "1Gi"
-
+      volumes:
+      - name: kms-data
+        hostPath:
+          path: /var/simplyblock/kms/data
+          type: DirectoryOrCreate
 {{- end }}
