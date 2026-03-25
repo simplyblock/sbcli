@@ -2851,32 +2851,31 @@ def configure_kms_on_k8s(cluster):
         resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
         logger.debug(resp)
 
+        init_file = json.loads(resp)
+        kms_unseal_key = init_file['unseal_keys_b64'][0]
+        kms_root_token = init_file['root_token']
+
+        exec_command = ['/bin/sh', '-c', f'vault operator unseal {kms_unseal_key}']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+        if resp:
+            cluster.kms_unseal_key = kms_unseal_key
+
+        exec_command = ['/bin/sh', '-c', f'vault login {kms_root_token}']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+        if resp:
+            cluster.kms_root_token = kms_root_token
+
+        exec_command = ['/bin/sh', '-c', f'vault secrets enable -path={cluster.uuid} -version=1 kv']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+        exec_command = ['/bin/sh', '-c', f'vault secrets enable transit']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+
         with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
             outfile.write(resp)
-
-        with open('/etc/simplyblock/kms/data/init.json', 'r') as f:
-            init_file = json.load(f)
-            kms_unseal_key = init_file['unseal_keys_b64'][0]
-            kms_root_token = init_file['root_token']
-
-            exec_command = ['/bin/sh', '-c', f'vault operator unseal {kms_unseal_key}']
-            resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
-            logger.debug(resp)
-            if resp:
-                cluster.kms_unseal_key = kms_unseal_key
-
-            exec_command = ['/bin/sh', '-c', f'vault login {kms_root_token}']
-            resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
-            logger.debug(resp)
-            if resp:
-                cluster.kms_root_token = kms_root_token
-
-            exec_command = ['/bin/sh', '-c', f'vault secrets enable -path={cluster.uuid} -version=1 kv']
-            resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
-            logger.debug(resp)
-            exec_command = ['/bin/sh', '-c', f'vault secrets enable transit']
-            resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
-            logger.debug(resp)
 
 
     except Exception as e:

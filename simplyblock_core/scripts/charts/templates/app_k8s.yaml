@@ -1680,9 +1680,6 @@ spec:
         - name: kms-config
           mountPath: /vault/config/
           readOnly: false
-        - name: kms-data
-          mountPath: /vault/data
-          readOnly: false
         resources:
           requests:
             cpu: "100m"
@@ -1694,8 +1691,4 @@ spec:
       - name: kms-config
         configMap:
           name: simplyblock-kms-config
-      - name: kms-data
-        hostPath:
-          path: /var/simplyblock/kms/data
-          type: DirectoryOrCreate
 {{- end }}
