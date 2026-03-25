@@ -365,7 +365,7 @@ class DBController(metaclass=Singleton):
             key = lock.get_db_id().encode()
             keys.append((key, lock))
             raw = tr.get(key).wait()
-            if raw is not None:
+            if raw.present():
                 existing_lock = BackupChainLock().from_dict(json.loads(raw))
                 break
 
