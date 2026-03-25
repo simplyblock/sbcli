@@ -3477,9 +3477,18 @@ class RunnerK8sLog:
             print(f"No running pods found for logging ({outage_type}).")
             return
 
+        _LOG_PREFIXES = (
+            "simplyblock-admin-control",
+            "simplyblock-csi-controller",
+            "simplyblock-csi-node",
+            "simplyblock-mgmt-api-job",
+            "simplyblock-storage-node-controller",
+            "simplyblock-storage-node-ds",
+            "snode-spdk-pod",
+        )
         for pod in pods:
             # Filter pods based on prefixes
-            if not (pod.startswith(("simplyblock-csi-controller", "simplyblock-csi-node", "simplyblock-mgmt-api-job", "simplyblock-storage-node-controller", "simplyblock-storage-node-ds", "snode-spdk-pod"))):
+            if not pod.startswith(_LOG_PREFIXES):
                 continue
 
             # Get all containers in the pod
@@ -3554,11 +3563,21 @@ class RunnerK8sLog:
         Starts new kubectl log sessions if containers change.
         """
 
+        _LOG_PREFIXES = (
+            "simplyblock-admin-control",
+            "simplyblock-csi-controller",
+            "simplyblock-csi-node",
+            "simplyblock-mgmt-api-job",
+            "simplyblock-storage-node-controller",
+            "simplyblock-storage-node-ds",
+            "snode-spdk-pod",
+        )
+
         def _monitor():
             while not self._monitor_stop_flag.is_set():
                 pods = self.get_running_pods()
                 for pod in pods:
-                    if not (pod.startswith("storage-node-ds") or pod.startswith("snode-spdk-deployment") or pod.startswith("storage-node-handler-")):
+                    if not pod.startswith(_LOG_PREFIXES):
                         continue
 
                     cmd = ["kubectl", "get", "pod", pod, "-n", self.namespace,

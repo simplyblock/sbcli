@@ -4,6 +4,7 @@ import time
 import boto3
 from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils, RunnerK8sLog
+from utils.k8s_utils import K8sUtils, K8sSbcliUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
@@ -40,11 +41,23 @@ class TestClusterBase:
 
         self.ssh_obj = SshUtils(bastion_server=self.bastion_server)
         self.logger = setup_logger(__name__)
-        self.sbcli_utils = SbcliUtils(
-            cluster_api_url=self.api_base_url,
-            cluster_id=self.cluster_id,
-            cluster_secret=self.cluster_secret
-        )
+        self.k8s_test = kwargs.get("k8s_run", False)
+        if self.k8s_test and not self.api_base_url:
+            # K8s mode: route all sbcli calls through kubectl exec into admin pod.
+            # K8sUtils needs the first management node IP from MNODES / K3S_MNODES.
+            _mnodes_raw = os.environ.get("MNODES", os.environ.get("K3S_MNODES", ""))
+            _mgmt_node = _mnodes_raw.split()[0] if _mnodes_raw.split() else ""
+            _k8s = K8sUtils(ssh_obj=self.ssh_obj, mgmt_node=_mgmt_node)
+            self.sbcli_utils = K8sSbcliUtils(
+                k8s=_k8s,
+                cluster_id=self.cluster_id or "",
+            )
+        else:
+            self.sbcli_utils = SbcliUtils(
+                cluster_api_url=self.api_base_url,
+                cluster_id=self.cluster_id,
+                cluster_secret=self.cluster_secret
+            )
         self.common_utils = CommonUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
@@ -53,7 +66,6 @@ class TestClusterBase:
         self.npcs = kwargs.get("npcs", 1)
         self.bs = kwargs.get("bs", 4096)
         self.chunk_bs = kwargs.get("chunk_bs", 4096)
-        self.k8s_test = kwargs.get("k8s_run", False)
         self.pool_name = "test_pool"
         self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = "/mnt/test_location"

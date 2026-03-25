@@ -452,62 +452,104 @@ class BackupTestBase(TestClusterBase):
                 result.append(row)
         return result
 
+    # ── teardown helpers ──────────────────────────────────────────────────────
+
+    def _wait_for_restore_tasks_to_finish(self, timeout: int = 300) -> None:
+        """Wait for all in-progress s3_backup_restore tasks to reach a terminal
+        state before deleting lvols.  Avoids the stuck-task loop caused by
+        deleting an lvol while its restore is still running."""
+        _POLL = 15
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                out, _ = self._sbcli(f"cluster list-tasks {self.cluster_id} --limit 0")
+                in_progress = []
+                for line in (out or "").splitlines():
+                    if "|" not in line or "s3_backup_restore" not in line:
+                        continue
+                    parts = [p.strip() for p in line.split("|") if p.strip()]
+                    # columns: task_id(0), target_id(1), function(2), retry(3), status(4)
+                    if len(parts) >= 5 and parts[2] == "s3_backup_restore":
+                        status = parts[4]
+                        if status not in ("done", "suspended", "failed", "error", "cancelled"):
+                            in_progress.append(f"{parts[0]}(status={status})")
+                if not in_progress:
+                    self.logger.info("Teardown: all restore tasks are in terminal state.")
+                    return
+                self.logger.info(
+                    f"Teardown: waiting for {len(in_progress)} in-progress restore "
+                    f"task(s) ({int(deadline - time.time())}s remaining): "
+                    + ", ".join(in_progress)
+                )
+            except Exception as e:
+                self.logger.warning(f"Teardown: could not check restore tasks: {e}")
+                return
+            sleep_n_sec(_POLL)
+        self.logger.warning(
+            f"Teardown: restore tasks did not reach terminal state within {timeout}s, "
+            "proceeding with deletion anyway.")
+
     # ── teardown ──────────────────────────────────────────────────────────────
 
-    def teardown(self):
+    def teardown(self, delete_lvols=True, close_ssh=True):
         self.logger.info("BackupTestBase teardown started.")
 
-        # Unmount
-        for node, mnt in list(self.mounted):
+        if delete_lvols:
+            # Wait for any in-progress restores to finish before deleting lvols
+            # to prevent the restore task from looping forever on a deleted device.
+            self._wait_for_restore_tasks_to_finish(timeout=300)
+
+            # Unmount
+            for node, mnt in list(self.mounted):
+                try:
+                    self.ssh_obj.unmount_path(node, mnt)
+                except Exception as e:
+                    self.logger.warning(f"Unmount error {mnt}: {e}")
+            self.mounted.clear()
+
+            # Disconnect NVMe
+            for lvol_id in list(self.connected):
+                try:
+                    details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+                    if details:
+                        nqn = details[0]["nqn"]
+                        self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+                except Exception as e:
+                    self.logger.warning(f"Disconnect error {lvol_id}: {e}")
+            self.connected.clear()
+
+            # Delete snapshots (force)
+            for snap_id in list(self.created_snapshots):
+                try:
+                    self._sbcli(f"snapshot delete {snap_id} --force")
+                except Exception as e:
+                    self.logger.warning(f"Snapshot delete error {snap_id}: {e}")
+            self.created_snapshots.clear()
+
+            # Delete backup policies
+            for pid in list(self.created_policies):
+                try:
+                    self._remove_policy(pid)
+                except Exception as e:
+                    self.logger.warning(f"Policy remove error {pid}: {e}")
+            self.created_policies.clear()
+
+            # Delete lvols
+            for name in list(self.created_lvols):
+                try:
+                    self.sbcli_utils.delete_lvol(lvol_name=name, skip_error=True)
+                except Exception as e:
+                    self.logger.warning(f"Lvol delete error {name}: {e}")
+            self.created_lvols.clear()
+
+            # Delete pool
             try:
-                self.ssh_obj.unmount_path(node, mnt)
-            except Exception as e:
-                self.logger.warning(f"Unmount error {mnt}: {e}")
-        self.mounted.clear()
+                self.sbcli_utils.delete_storage_pools(
+                    pool_name=self.pool_name, skip_error=True)
+            except Exception:
+                pass
 
-        # Disconnect NVMe
-        for lvol_id in list(self.connected):
-            try:
-                details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-                if details:
-                    nqn = details[0]["nqn"]
-                    self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
-            except Exception as e:
-                self.logger.warning(f"Disconnect error {lvol_id}: {e}")
-        self.connected.clear()
-
-        # Delete snapshots (force)
-        for snap_id in list(self.created_snapshots):
-            try:
-                self._sbcli(f"snapshot delete {snap_id} --force")
-            except Exception as e:
-                self.logger.warning(f"Snapshot delete error {snap_id}: {e}")
-        self.created_snapshots.clear()
-
-        # Delete backup policies
-        for pid in list(self.created_policies):
-            try:
-                self._remove_policy(pid)
-            except Exception as e:
-                self.logger.warning(f"Policy remove error {pid}: {e}")
-        self.created_policies.clear()
-
-        # Delete lvols
-        for name in list(self.created_lvols):
-            try:
-                self.sbcli_utils.delete_lvol(lvol_name=name, skip_error=True)
-            except Exception as e:
-                self.logger.warning(f"Lvol delete error {name}: {e}")
-        self.created_lvols.clear()
-
-        # Delete pool
-        try:
-            self.sbcli_utils.delete_storage_pools(
-                pool_name=self.pool_name, skip_error=True)
-        except Exception:
-            pass
-
-        super().teardown()
+        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -919,13 +961,14 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         self.logger.info("=== TestBackupRestoreDataIntegrity PASSED ===")
 
-    def teardown(self):
-        try:
-            self.sbcli_utils.delete_storage_pools(
-                pool_name=self.pool_name2, skip_error=True)
-        except Exception:
-            pass
-        super().teardown()
+    def teardown(self, delete_lvols=True, close_ssh=True):
+        if delete_lvols:
+            try:
+                self.sbcli_utils.delete_storage_pools(
+                    pool_name=self.pool_name2, skip_error=True)
+            except Exception:
+                pass
+        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1745,26 +1788,27 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
     # ── teardown ──────────────────────────────────────────────────────────────
 
-    def teardown(self):
-        # Safety: ensure Cluster-2's source is switched back to local
+    def teardown(self, delete_lvols=True, close_ssh=True):
+        # Safety: ensure Cluster-2's source is switched back to local (always)
         try:
             self._sbcli_c2("backup source-switch local")
         except Exception as e:
             self.logger.warning(f"source-switch-back in teardown warning: {e}")
 
-        # Best-effort cleanup of Cluster-2 resources
-        for name in list(self._c2_lvols):
+        if delete_lvols:
+            # Best-effort cleanup of Cluster-2 resources
+            for name in list(self._c2_lvols):
+                try:
+                    self._sbcli_c2(f"lvol delete {name}")
+                except Exception as e:
+                    self.logger.warning(f"Cluster-2 lvol delete error {name}: {e}")
+            self._c2_lvols.clear()
+
+            # Clean up metadata file from mgmt node
             try:
-                self._sbcli_c2(f"lvol delete {name}")
-            except Exception as e:
-                self.logger.warning(f"Cluster-2 lvol delete error {name}: {e}")
-        self._c2_lvols.clear()
+                self.ssh_obj.exec_command(
+                    self.mgmt_nodes[0], f"rm -f {self._meta_file}")
+            except Exception:
+                pass
 
-        # Clean up metadata file from mgmt node
-        try:
-            self.ssh_obj.exec_command(
-                self.mgmt_nodes[0], f"rm -f {self._meta_file}")
-        except Exception:
-            pass
-
-        super().teardown()
+        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)

@@ -16,9 +16,13 @@ storage-node host via the underlying SshUtils instance — same as bare-metal.
 
 from __future__ import annotations
 
+import json
+import os
 import shlex
 import time
+from datetime import datetime, timezone
 from logger_config import setup_logger
+from utils.common_utils import sleep_n_sec
 
 
 class K8sUtils:
@@ -247,3 +251,402 @@ class K8sUtils:
         raise TimeoutError(
             f"[K8sUtils] Pod with prefix {pod_name_prefix!r} not Running within {timeout}s"
         )
+
+
+# ── K8s-native sbcli_utils replacement ──────────────────────────────────────
+
+
+class K8sSbcliUtils:
+    """
+    Drop-in replacement for SbcliUtils in Kubernetes environments.
+
+    All CLI calls are routed through ``kubectl exec`` into the
+    simplyblock-admin-control pod via the provided K8sUtils instance.
+    No REST API calls are made.
+
+    Parameters
+    ----------
+    k8s : K8sUtils
+        Connected K8sUtils instance.
+    cluster_id : str
+        Cluster UUID (used by commands that accept a cluster id).
+    sbcli_cmd : str
+        The CLI binary name inside the admin pod (default: ``sbcli``).
+    """
+
+    def __init__(self, k8s: K8sUtils, cluster_id: str, sbcli_cmd: str = "sbcli"):
+        self.k8s = k8s
+        self.cluster_id = cluster_id
+        self.sbcli_cmd = sbcli_cmd
+        self.logger = setup_logger(__name__)
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _run(self, cmd: str) -> str:
+        """Execute *cmd* in the admin pod and return stripped stdout."""
+        out, _ = self.k8s.exec_sbcli(cmd)
+        return out.strip()
+
+    def _run_json(self, cmd: str):
+        """Execute *cmd* in the admin pod and parse stdout as JSON."""
+        raw = self._run(cmd)
+        return json.loads(raw)
+
+    # ── lvol methods ──────────────────────────────────────────────────────────
+
+    def list_lvols(self):
+        """Return ``{lvol_name: lvol_id}`` dict."""
+        items = self._run_json(f"{self.sbcli_cmd} lvol list --json")
+        return {item["Name"]: item["Id"] for item in items}
+
+    def get_lvol_id(self, lvol_name):
+        return self.list_lvols().get(lvol_name)
+
+    def lvol_exists(self, lvol_name):
+        return bool(self.get_lvol_id(lvol_name))
+
+    def get_lvol_details(self, lvol_id):
+        """Return ``[{uuid, lvol_name, node_id, nqn, status, ...}]``."""
+        raw = self._run(f"{self.sbcli_cmd} lvol get {lvol_id} --json")
+        data = json.loads(raw)
+        return data if isinstance(data, list) else [data]
+
+    def get_lvol_connect_str(self, lvol_name):
+        """Return list of ``sudo nvme connect ...`` strings for the lvol."""
+        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
+        if not lvol_id:
+            self.logger.info(f"Lvol {lvol_name} does not exist. Exiting")
+            return []
+        out = self._run(f"{self.sbcli_cmd} lvol connect {lvol_id}")
+        return [line for line in out.splitlines() if line.strip()]
+
+    def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
+                 distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
+                 max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
+                 crypto=False, key1=None, key2=None, fabric="tcp", cluster_id=None,
+                 max_namespace_per_subsys=None, namespace=None):
+        """Create an lvol via the CLI."""
+        if self.lvol_exists(lvol_name):
+            self.logger.info(f"LVOL {lvol_name} already exists. Skipping")
+            return
+
+        cmd = (
+            f"{self.sbcli_cmd} lvol add"
+            f" {shlex.quote(lvol_name)} {size} {shlex.quote(pool_name)}"
+        )
+        if host_id:
+            cmd += f" --host-id {shlex.quote(host_id)}"
+        if distr_ndcs and distr_npcs:
+            cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
+        if fabric:
+            cmd += f" --fabric {shlex.quote(fabric)}"
+        if crypto and key1 and key2:
+            cmd += f" --encrypt --crypto-key1 {shlex.quote(key1)} --crypto-key2 {shlex.quote(key2)}"
+
+        self.k8s.exec_sbcli(cmd)
+
+    def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
+        """Delete lvol by name, waiting until it disappears."""
+        lvol_id = self.get_lvol_id(lvol_name=lvol_name)
+        if not lvol_id:
+            if skip_error:
+                self.logger.info(f"Lvol {lvol_name} not found. Continuing without delete.")
+                return
+            raise Exception(f"No such Lvol {lvol_name} found!!")
+
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} lvol delete {lvol_id}")
+
+        attempt = 0
+        while attempt < max_attempt:
+            if lvol_name not in self.list_lvols():
+                self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
+                return
+            attempt += 1
+            self.logger.info(f"Lvol {lvol_name} deletion in progress... ({attempt})")
+            sleep_n_sec(5)
+
+        if skip_error:
+            return
+        raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
+
+    def delete_all_lvols(self):
+        lvols = self.list_lvols()
+        for name in list(lvols.keys()):
+            self.logger.info(f"Deleting lvol: {name}")
+            self.delete_lvol(lvol_name=name)
+
+    def resize_lvol(self, lvol_id, new_size):
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} lvol resize {lvol_id} {new_size}")
+
+    # ── storage node methods ──────────────────────────────────────────────────
+
+    def get_storage_nodes(self):
+        """Return ``{'results': [{uuid, mgmt_ip, status, is_secondary_node, ...}]}``."""
+        items = self._run_json(f"{self.sbcli_cmd} sn list --json")
+        results = []
+        for item in items:
+            uuid = item["UUID"]
+            detail_raw = self._run(f"{self.sbcli_cmd} sn get {uuid}")
+            detail = json.loads(detail_raw)
+            results.append(detail)
+        return {"results": results}
+
+    def get_storage_node_details(self, storage_node_id):
+        """Return ``[{uuid, mgmt_ip, status, ...}]``."""
+        raw = self._run(f"{self.sbcli_cmd} sn get {storage_node_id}")
+        data = json.loads(raw)
+        return data if isinstance(data, list) else [data]
+
+    def get_management_nodes(self):
+        """Return ``{'results': [{'mgmt_ip': ip, ...}]}`` from MNODES env var."""
+        mnodes_env = os.environ.get("MNODES", os.environ.get("K3S_MNODES", ""))
+        mgmt_ips = [ip.strip() for ip in mnodes_env.split() if ip.strip()]
+        return {"results": [{"mgmt_ip": ip, "uuid": ip} for ip in mgmt_ips]}
+
+    def get_all_nodes_ip(self):
+        """Return ``(mgmt_node_ips, storage_node_ips)`` as lists of strings."""
+        mgmt_data = self.get_management_nodes()
+        mgmt_ips = [n["mgmt_ip"] for n in mgmt_data["results"]]
+
+        sn_data = self.get_storage_nodes()
+        sn_ips = [n["mgmt_ip"] for n in sn_data["results"]]
+
+        return mgmt_ips, sn_ips
+
+    def shutdown_node(self, node_uuid, expected_error_code=None, force=False):
+        force_flag = " --force" if force else ""
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} sn shutdown {node_uuid}{force_flag}")
+
+    def suspend_node(self, node_uuid, expected_error_code=None):
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} sn suspend {node_uuid}")
+
+    def resume_node(self, node_uuid):
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} sn resume {node_uuid}")
+
+    def restart_node(self, node_uuid, expected_error_code=None, force=False):
+        force_flag = " --force" if force else ""
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} sn restart {node_uuid}{force_flag}")
+
+    def wait_for_storage_node_status(self, node_id, status, timeout=60):
+        actual_status = None
+        status_list = status if isinstance(status, list) else [status]
+        while timeout > 0:
+            node_details = self.get_storage_node_details(node_id)
+            actual_status = node_details[0]["status"]
+            if actual_status in status_list:
+                return node_details[0]
+            self.logger.info(f"Expected Status: {status_list} / Actual Status: {actual_status}")
+            sleep_n_sec(1)
+            timeout -= 1
+        raise TimeoutError(
+            f"Timed out waiting for node status, {node_id}, "
+            f"Expected: {status_list}, Actual: {actual_status}"
+        )
+
+    def is_secondary_node(self, node_id):
+        try:
+            details = self.get_storage_node_details(node_id)
+            return bool(details[0].get("is_secondary_node", False))
+        except Exception:
+            return False
+
+    def get_node_without_lvols(self):
+        """Return a single primary node UUID that has no lvols, or empty string."""
+        nodes_with_lvols = self._nodes_with_lvols()
+        for result in self.get_storage_nodes()["results"]:
+            if not result.get("is_secondary_node") and result["uuid"] not in nodes_with_lvols:
+                return result["uuid"]
+        return ""
+
+    def get_all_node_without_lvols(self):
+        """Return all primary node UUIDs that have no lvols."""
+        nodes_with_lvols = self._nodes_with_lvols()
+        return [
+            r["uuid"]
+            for r in self.get_storage_nodes()["results"]
+            if not r.get("is_secondary_node") and r["uuid"] not in nodes_with_lvols
+        ]
+
+    def _nodes_with_lvols(self):
+        """Return set of node UUIDs that have at least one lvol."""
+        nodes = set()
+        for lvol_id in self.list_lvols().values():
+            try:
+                details = self.get_lvol_details(lvol_id)
+                nodes.add(details[0].get("node_id"))
+            except Exception:
+                pass
+        return nodes
+
+    # ── pool methods ──────────────────────────────────────────────────────────
+
+    def list_storage_pools(self):
+        """Return ``{pool_name: pool_id}`` dict."""
+        items = self._run_json(f"{self.sbcli_cmd} pool list --json")
+        return {item["Name"]: item["UUID"] for item in items}
+
+    def get_storage_pool_id(self, pool_name):
+        return self.list_storage_pools().get(pool_name)
+
+    def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
+                         max_r_mbytes=0, max_w_mbytes=0):
+        if pool_name in self.list_storage_pools():
+            self.logger.info(f"Pool {pool_name} already exists. Skipping")
+            return
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} pool add {shlex.quote(pool_name)}")
+
+    def delete_storage_pool(self, pool_name):
+        pool_id = self.get_storage_pool_id(pool_name)
+        if not pool_id:
+            self.logger.info("Pool does not exist. Skipping")
+            return
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} pool delete {pool_id}")
+
+    def delete_all_storage_pools(self):
+        for name in list(self.list_storage_pools().keys()):
+            self.logger.info(f"Deleting pool: {name}")
+            self.delete_storage_pool(pool_name=name)
+
+    # ── cluster methods ──────────────────────────────────────────────────────
+
+    def get_cluster_details(self, cluster_id=None):
+        """Return cluster dict (includes ``status``, ``max_fault_tolerance``, etc.)."""
+        cid = cluster_id or self.cluster_id
+        raw = self._run(f"{self.sbcli_cmd} cluster get {cid}")
+        return json.loads(raw)
+
+    def get_cluster_tasks(self, cluster_id=None):
+        """
+        Return list of task dicts parsed from the ``cluster list-tasks`` table.
+
+        Each dict contains: id, function_name, node_id, status,
+        updated_at (ISO string), date (Unix timestamp int).
+
+        Table columns: Task ID | Target ID | Function | Retry | Status | Result | Updated At
+        Updated At format: "HH:MM:SS, DD/MM/YYYY"
+        """
+        cid = cluster_id or self.cluster_id
+        out = self._run(f"{self.sbcli_cmd} cluster list-tasks {cid} --limit 0")
+        tasks = []
+        for line in out.splitlines():
+            line = line.strip()
+            # Skip border rows and header
+            if not line or line.startswith("+") or "Task ID" in line:
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            # Expect: ['', task_id, target_id, function, retry, status, result, updated_at, '']
+            if len(parts) < 8:
+                continue
+            task_id = parts[1]
+            target_id = parts[2]
+            function_name = parts[3]
+            status = parts[5]
+            updated_at_raw = parts[7]
+
+            # Skip rows that don't look like UUIDs
+            if not task_id or len(task_id) != 36 or task_id.count("-") != 4:
+                continue
+
+            # Extract node_id from "NodeID:<uuid>" or leave None
+            node_id = None
+            if target_id.startswith("NodeID:"):
+                node_id = target_id[len("NodeID:"):]
+
+            # Parse "HH:MM:SS, DD/MM/YYYY" → ISO string + Unix timestamp
+            date_ts = 0
+            iso_str = updated_at_raw
+            try:
+                dt = datetime.strptime(updated_at_raw, "%H:%M:%S, %d/%m/%Y")
+                dt = dt.replace(tzinfo=timezone.utc)
+                iso_str = dt.isoformat()
+                date_ts = int(dt.timestamp())
+            except Exception:
+                pass
+
+            tasks.append({
+                "id": task_id,
+                "function_name": function_name,
+                "node_id": node_id,
+                "status": status,
+                "updated_at": iso_str,
+                "date": date_ts,
+            })
+        return tasks
+
+    def get_cluster_capacity(self):
+        """Return list of capacity records (each has ``date``, ``size_used``, etc.)."""
+        raw = self._run(f"{self.sbcli_cmd} cluster get-capacity {self.cluster_id} --json")
+        return json.loads(raw)
+
+    def wait_for_cluster_status(self, cluster_id=None, status="active", timeout=60):
+        actual_status = None
+        status_list = status if isinstance(status, list) else [status]
+        while timeout > 0:
+            cluster_details = self.get_cluster_details(cluster_id=cluster_id)
+            actual_status = cluster_details.get("status")
+            if actual_status in status_list:
+                return cluster_details
+            self.logger.info(f"Expected Status: {status_list} / Actual Status: {actual_status}")
+            sleep_n_sec(1)
+            timeout -= 1
+        raise TimeoutError(
+            f"Timed out waiting for cluster status, {cluster_id or self.cluster_id}, "
+            f"Expected: {status_list}, Actual: {actual_status}"
+        )
+
+    def all_expected_status(self, value_dict, expected_status):
+        value_match = []
+        for key, value in value_dict.items():
+            self.logger.info(f"Entity: {key}, Expected: {expected_status}, Actual: {value}")
+            value_match.append(value in expected_status)
+        self.logger.info(f"Value: {value_match}")
+        return all(value_match)
+
+    # ── snapshot methods ──────────────────────────────────────────────────────
+
+    def add_snapshot(self, lvol_id: str, snapshot_name: str, retry: int = 10):
+        self.k8s.exec_sbcli(
+            f"{self.sbcli_cmd} snapshot add {lvol_id} {shlex.quote(snapshot_name)}"
+        )
+
+    def list_snapshots(self):
+        """Parse snapshot list table output → ``{snap_name: snap_uuid}``."""
+        out = self._run(f"{self.sbcli_cmd} snapshot list")
+        result = {}
+        for line in out.splitlines():
+            parts = [p.strip() for p in line.split("|")]
+            # Table columns: | UUID | BDdev UUID | BlobID | Name | ...
+            if len(parts) > 4:
+                uuid_candidate = parts[1]
+                name_candidate = parts[4]
+                # UUID is a 36-char hyphenated string
+                if (
+                    len(uuid_candidate) == 36
+                    and uuid_candidate.count("-") == 4
+                    and name_candidate
+                ):
+                    result[name_candidate] = uuid_candidate
+        return result
+
+    def get_snapshot_id(self, snap_name: str):
+        return self.list_snapshots().get(snap_name)
+
+    def delete_snapshot(self, snap_name: str = None, snap_id: str = None,
+                        max_attempt: int = 60, skip_error: bool = False):
+        if not snap_id:
+            if not snap_name:
+                raise ValueError("delete_snapshot requires snap_name or snap_id")
+            snap_id = self.get_snapshot_id(snap_name)
+        if not snap_id:
+            if skip_error:
+                self.logger.info(f"Snapshot not found (skip_error=True). snap_name={snap_name}")
+                return
+            raise Exception(f"Snapshot not found. snap_name={snap_name}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} snapshot delete {snap_id}")
+
+    def delete_all_snapshots(self):
+        for snap_name in list(self.list_snapshots().keys()):
+            try:
+                self.delete_snapshot(snap_name=snap_name, skip_error=True)
+            except Exception as e:
+                self.logger.info(f"Snapshot delete failed (continuing): {snap_name}, err={e}")

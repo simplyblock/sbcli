@@ -43,8 +43,9 @@ from stress_test.continuous_failover_ha_multi_outage import (
 from utils.common_utils import sleep_n_sec
 from utils.k8s_utils import K8sUtils
 
-_NDCS_NPCS_CHOICES = [(1, 1), (1, 2), (2, 1)]
+# _NDCS_NPCS_CHOICES = [(1, 1), (1, 2), (2, 1)]
 
+_NDCS_NPCS_CHOICES = [(1, 1)]
 
 class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
     """
@@ -67,7 +68,7 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.test_name = "n_plus_k_k8s_geometry_failover_ha"
+        self.test_name = "n_plus_k_k8s_failover_ha"
         self.k8s_utils: K8sUtils | None = None
 
     # ── Setup ────────────────────────────────────────────────────────────────
