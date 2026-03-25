@@ -65,22 +65,25 @@ def main():
     
     test_run_api = TestRunsAPI(PROFILE_KEY)
     try:
-        cluster_base = TestClusterBase()
+        cluster_base = TestClusterBase(k8s_run=args.run_k8s)
         ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
-        sbcli_utils = SbcliUtils(
-            cluster_api_url=cluster_base.api_base_url,
-            cluster_id=cluster_base.cluster_id,
-            cluster_secret=cluster_base.cluster_secret
-        )
 
-        mgmt_nodes, storage_node = sbcli_utils.get_all_nodes_ip()
+        mgmt_nodes, storage_node = cluster_base.sbcli_utils.get_all_nodes_ip()
         mgmt_ip_for_env = mgmt_nodes[0]
         environment_id = resolve_environment_id_from_ip(mgmt_ip_for_env)
         if not environment_id:
             raise RuntimeError(f"Could not resolve environment for mgmt IP {mgmt_ip_for_env}")
-        ssh_obj.connect(address=storage_node[0], bastion_server_address=cluster_base.bastion_server)
 
-        fe_branch, fe_commit, be_branch, be_commit = detect_fe_be_tags(ssh_obj, storage_node[0])
+        fe_branch, fe_commit, be_branch, be_commit = None, None, None, None
+        try:
+            ssh_obj.connect(address=storage_node[0], bastion_server_address=cluster_base.bastion_server)
+            fe_branch, fe_commit, be_branch, be_commit = detect_fe_be_tags(ssh_obj, storage_node[0])
+            # Close the temp SSH connection used for tag detection
+            for node, ssh in ssh_obj.ssh_connections.items():
+                logger.info(f"Closing temp ssh connection for FE/BE detection: {node}")
+                ssh.close()
+        except Exception as tag_err:
+            logger.warning(f"Could not detect FE/BE tags (will use 'unknown'): {tag_err}")
 
         test_run_id = test_run_api.create_run(
             jira_ticket=JIRA_TICKET,
@@ -91,11 +94,6 @@ def main():
             environment_id=environment_id
         )
         logger.info(f"Test Run started: {test_run_id}")
-
-        # Close the temp SSH connection used for tag detection
-        for node, ssh in ssh_obj.ssh_connections.items():
-            logger.info(f"Closing temp ssh connection for FE/BE detection: {node}")
-            ssh.close()
 
     except Exception as e:
         logger.error("Failed to create Test Run; proceeding without external tracking.")
