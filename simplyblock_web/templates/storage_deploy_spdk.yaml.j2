@@ -35,9 +35,6 @@ spec:
     - name: host-rootfs
       hostPath:
         path: /
-    - name: foundationdb
-      hostPath:
-        path: /var/foundationdb
     - name: etc-simplyblock
       hostPath:
         path: /var/simplyblock
@@ -58,21 +55,6 @@ spec:
     - name: dockercontainerlogdirectory
       hostPath:
         path: /var/log/pods
-
-  initContainers:
-    - name: copy-script
-      image: simplyblock/busybox
-      command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
-      volumeMounts:
-        - name: foundationdb
-          mountPath: /etc/foundationdb
-      resources:
-        requests:
-          cpu: "100m"
-          memory: "64Mi"
-        limits:
-          cpu: "100m"
-          memory: "64Mi"
 
   containers:
     - name: spdk-container
