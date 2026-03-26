@@ -1014,8 +1014,12 @@ def delete_lvol(id_or_name, force_delete=False):
     lvol.write_to_db()
     lvol_events.lvol_status_change(lvol, lvol.status, old_status)
 
+    if lvol.cloned_from_snap and lvol.delete_snap_on_lvol_delete:
+        logger.info(f"Deleting snap: {lvol.cloned_from_snap}")
+        snapshot_controller.delete(lvol.cloned_from_snap)
+
     # if lvol is clone and snapshot is deleted, then delete snapshot
-    if lvol.cloned_from_snap:
+    elif lvol.cloned_from_snap:
         try:
             snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
             if snap.snap_ref_id:
