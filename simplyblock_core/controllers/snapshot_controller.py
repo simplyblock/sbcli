@@ -529,6 +529,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.fabric = snap.fabric
     lvol.allowed_hosts = snap.lvol.allowed_hosts
     lvol.delete_snap_on_lvol_delete = bool(delete_snap_on_lvol_delete)
+    lvol.ndcs = snap.lvol.ndcs
+    lvol.npcs = snap.lvol.npcs
 
     if pvc_name:
         lvol.pvc_name = pvc_name
