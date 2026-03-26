@@ -689,6 +689,42 @@ class TestClusterBase:
             )
 
     
+    def _fetch_spdk_mem_stats_for_node_k8s(self, storage_node_ip, storage_node_id):
+        """Collect memory stats from SPDK pod via kubectl exec (k8s mode)."""
+        try:
+            k8s = self.sbcli_utils.k8s
+            timestamp = time.strftime("%d-%m-%y-%H-%M-%S")
+            final_dir = f"{self.docker_logs_path}/{storage_node_ip}/spdk_mem_stats"
+            os.makedirs(final_dir, exist_ok=True)
+
+            pod_name = k8s.get_spdk_pod_name(storage_node_ip)
+
+            meminfo_out, _ = k8s._exec_kubectl(
+                f"kubectl exec {pod_name} -c spdk-container -n {k8s.namespace} -- "
+                f"cat /proc/meminfo",
+                supress_logs=True,
+            )
+            meminfo_file = f"{final_dir}/meminfo_{timestamp}.txt"
+            with open(meminfo_file, "w") as f:
+                f.write(meminfo_out)
+
+            free_out, _ = k8s._exec_kubectl(
+                f"kubectl exec {pod_name} -c spdk-container -n {k8s.namespace} -- "
+                f"free -m",
+                supress_logs=True,
+            )
+            free_file = f"{final_dir}/free_{timestamp}.txt"
+            with open(free_file, "w") as f:
+                f.write(free_out)
+
+            self.logger.info(
+                f"[SPDK-MEM-K8s] Saved mem stats for {storage_node_ip} (pod={pod_name})"
+            )
+        except Exception as e:
+            self.logger.info(
+                f"[SPDK-MEM-K8s] FAILURE node={storage_node_ip} error={e}"
+            )
+
     def _spdk_mem_stats_worker(self, interval_sec=60):
         """
         Background thread that collects SPDK mem stats every minute
@@ -706,10 +742,16 @@ class TestClusterBase:
                         # Node may be offline during outage
                         continue
 
-                    self._fetch_spdk_mem_stats_for_node(
-                        storage_node_ip=node_ip,
-                        storage_node_id=node_id
-                    )
+                    if self.k8s_test:
+                        self._fetch_spdk_mem_stats_for_node_k8s(
+                            storage_node_ip=node_ip,
+                            storage_node_id=node_id
+                        )
+                    else:
+                        self._fetch_spdk_mem_stats_for_node(
+                            storage_node_ip=node_ip,
+                            storage_node_id=node_id
+                        )
 
             except Exception as e:
                 self.logger.info(

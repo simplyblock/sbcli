@@ -48,12 +48,13 @@ class K8sUtils:
         self.namespace = namespace
         self._admin_pod: str | None = None
         self.logger = setup_logger(__name__)
-        # Use local subprocess when the runner IS the mgmt node (bastion == mgmt_node)
-        # or when K8S_LOCAL_KUBECTL=1 is set explicitly.
-        self.use_local_kubectl = (
-            os.environ.get("K8S_LOCAL_KUBECTL", "").lower() in ("1", "true", "yes")
-            or mgmt_node == getattr(ssh_obj, "bastion_server", None)
-        )
+        # Use local subprocess when K8S_LOCAL_KUBECTL=1 is set explicitly,
+        # or when the runner is on the mgmt node (bastion == mgmt_node) AND
+        # this is a k8s deployment (ssh_obj has no real bastion to proxy through).
+        _bastion = getattr(ssh_obj, "bastion_server", None)
+        _local_env = os.environ.get("K8S_LOCAL_KUBECTL", "").lower() in ("1", "true", "yes")
+        _same_as_bastion = bool(_bastion) and mgmt_node == _bastion
+        self.use_local_kubectl = _local_env or _same_as_bastion
         if self.use_local_kubectl:
             self.logger.info("[K8sUtils] Local kubectl mode enabled (subprocess)")
 
@@ -108,6 +109,8 @@ class K8sUtils:
 
         Returns the same (stdout, stderr) tuple as SshUtils.exec_command.
         """
+        if not supress_logs:
+            self.logger.info(f"[sbcli] {command}")
         admin_pod = self.get_admin_pod()
         kubectl_cmd = (
             f"kubectl exec -n {self.namespace} {admin_pod} -- "

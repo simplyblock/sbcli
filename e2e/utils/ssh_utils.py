@@ -3481,9 +3481,15 @@ class RunnerK8sLog:
             "simplyblock-admin-control",
             "simplyblock-csi-controller",
             "simplyblock-csi-node",
+            "simplyblock-fdb-",
+            "simplyblock-manager",
             "simplyblock-mgmt-api-job",
+            "simplyblock-monitoring",
+            "simplyblock-prometheus",
             "simplyblock-storage-node-controller",
             "simplyblock-storage-node-ds",
+            "simplyblock-tasks",
+            "simplyblock-webappapi",
             "snode-spdk-pod",
         )
         for pod in pods:
@@ -3557,7 +3563,7 @@ class RunnerK8sLog:
         except subprocess.CalledProcessError:
             return None
 
-    def monitor_pod_logs(self, poll_interval=10):
+    def monitor_pod_logs(self, poll_interval=60):
         """
         Continuously monitor running pods and their containers for restarts.
         Starts new kubectl log sessions if containers change.
@@ -3567,9 +3573,15 @@ class RunnerK8sLog:
             "simplyblock-admin-control",
             "simplyblock-csi-controller",
             "simplyblock-csi-node",
+            "simplyblock-fdb-",
+            "simplyblock-manager",
             "simplyblock-mgmt-api-job",
+            "simplyblock-monitoring",
+            "simplyblock-prometheus",
             "simplyblock-storage-node-controller",
             "simplyblock-storage-node-ds",
+            "simplyblock-tasks",
+            "simplyblock-webappapi",
             "snode-spdk-pod",
         )
 
