@@ -15,7 +15,7 @@ observability:
 
 image:
   simplyblock: 
-    repository: "public.ecr.aws/simply-block/simplyblock"
+    repository: "simplyblock/simplyblock"
     tag: "main-sfam-2359"
     pullPolicy: "Always"
 
@@ -225,7 +225,7 @@ simplyblock:
     
   storageNodes:
     name: simplyblock-node
-    clusterImage: public.ecr.aws/simply-block/simplyblock:main-sfam-2359
+    clusterImage: simplyblock/simplyblock:main-sfam-2359
     mgmtIfc: eth0
     maxLVol: 10
     maxSize: 0
