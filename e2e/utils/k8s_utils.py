@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -69,6 +70,11 @@ class K8sUtils:
             if not supress_logs:
                 self.logger.info(f"[K8sUtils] local: {cmd}")
             result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+            if not supress_logs:
+                if result.stdout.strip():
+                    self.logger.info(f"[K8sUtils] stdout: {result.stdout.strip()}")
+                if result.stderr.strip():
+                    self.logger.info(f"[K8sUtils] stderr: {result.stderr.strip()}")
             return result.stdout, result.stderr
         return self.ssh_obj.exec_command(self.mgmt_node, cmd, supress_logs=supress_logs)
 
@@ -180,6 +186,131 @@ class K8sUtils:
             ),
         )
         return pod_name
+
+    def _find_spdk_sock(self, pod_name: str) -> str:
+        """Return the spdk.sock path inside spdk-container (searches /mnt/ramdisk)."""
+        out, _ = self._exec_kubectl(
+            f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
+            f"bash -c 'find /mnt/ramdisk -name spdk.sock -maxdepth 3 2>/dev/null | head -1'",
+            supress_logs=True,
+        )
+        sock = out.strip()
+        if not sock:
+            raise RuntimeError(f"[K8sUtils] spdk.sock not found in {pod_name}")
+        return sock
+
+    def dump_lvstore_k8s(self, sbcli_cmd: str, storage_node_id: str,
+                          storage_node_ip: str, logs_path: str) -> None:
+        """
+        K8s equivalent of ssh_utils.dump_lvstore:
+          1. Run sbcli sn dump-lvstore via admin pod.
+          2. Parse dump file path from output.
+          3. kubectl cp the file from spdk-container → logs_path/<pod_name>/lvstore_dumps/.
+        """
+        try:
+            out, err = self.exec_sbcli(
+                f"{sbcli_cmd} --dev -d sn dump-lvstore {storage_node_id}"
+            )
+            combined = (out or "") + (err or "")
+
+            dump_file = None
+            for line in combined.splitlines():
+                if "LVS dump file will be here" in line and ":" in line:
+                    dump_file = line.split(":", 1)[1].strip()
+                    break
+
+            if not dump_file:
+                self.logger.warning(
+                    f"[dump_lvstore_k8s] No dump file path in output for {storage_node_id}"
+                )
+                return
+
+            pod_name = self.get_spdk_pod_name(storage_node_ip)
+            dest_dir = os.path.join(logs_path, pod_name, "lvstore_dumps")
+            os.makedirs(dest_dir, exist_ok=True)
+            dest_path = os.path.join(dest_dir, os.path.basename(dump_file))
+
+            self._exec_kubectl(
+                f"kubectl cp -n {self.namespace} {pod_name}:{dump_file} "
+                f"-c spdk-container {dest_path}"
+            )
+            self.logger.info(f"[dump_lvstore_k8s] {dump_file} → {dest_path}")
+        except Exception as e:
+            self.logger.warning(f"[dump_lvstore_k8s] FAILED node={storage_node_id}: {e}")
+
+    def fetch_distrib_logs_k8s(self, storage_node_id: str,
+                                storage_node_ip: str, logs_path: str) -> bool:
+        """
+        K8s equivalent of ssh_utils.fetch_distrib_logs:
+          1. Find spdk.sock inside spdk-container.
+          2. Get bdevs via RPC, collect distrib_* names.
+          3. For each distrib: run distr_debug_placement_map_dump RPC.
+          4. kubectl cp any new files from /tmp inside container → logs_path/<pod_name>/distrib_logs/.
+        Returns True (non-fatal failures are logged and skipped).
+        """
+        try:
+            pod_name = self.get_spdk_pod_name(storage_node_ip)
+            sock = self._find_spdk_sock(pod_name)
+            dest_dir = os.path.join(logs_path, pod_name, "distrib_logs")
+            os.makedirs(dest_dir, exist_ok=True)
+
+            rpc_base = (
+                f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
+                f"python spdk/scripts/rpc.py -s {sock}"
+            )
+
+            # 1. Get bdevs
+            bdev_out, _ = self._exec_kubectl(f"{rpc_base} bdev_get_bdevs", supress_logs=True)
+            try:
+                bdevs = json.loads(bdev_out)
+                distribs = sorted({
+                    b.get("name", "")
+                    for b in bdevs
+                    if isinstance(b, dict) and str(b.get("name", "")).startswith("distrib_")
+                })
+            except Exception as e:
+                self.logger.warning(f"[fetch_distrib_logs_k8s] bdev parse failed: {e}")
+                return True
+
+            if not distribs:
+                self.logger.warning(f"[fetch_distrib_logs_k8s] No distrib_* bdevs on {storage_node_ip}")
+                return True
+
+            self.logger.info(f"[fetch_distrib_logs_k8s] distribs={distribs} pod={pod_name}")
+
+            # 2. Dump each distrib and kubectl cp result
+            for distrib in distribs:
+                try:
+                    dump_out, _ = self._exec_kubectl(
+                        f"{rpc_base} distr_debug_placement_map_dump "
+                        f"--name {shlex.quote(distrib)}",
+                        supress_logs=True,
+                    )
+                    self.logger.info(f"[fetch_distrib_logs_k8s] {distrib}: {dump_out.strip()}")
+
+                    # Collect any /tmp files matching this distrib name
+                    ls_out, _ = self._exec_kubectl(
+                        f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
+                        f"bash -c 'ls /tmp/ 2>/dev/null | grep -F {shlex.quote(distrib)} || true'",
+                        supress_logs=True,
+                    )
+                    for fname in ls_out.splitlines():
+                        fname = fname.strip()
+                        if not fname:
+                            continue
+                        dest = os.path.join(dest_dir, fname)
+                        self._exec_kubectl(
+                            f"kubectl cp -n {self.namespace} {pod_name}:/tmp/{fname} "
+                            f"-c spdk-container {dest}"
+                        )
+                        self.logger.info(f"[fetch_distrib_logs_k8s] copied /tmp/{fname} → {dest}")
+                except Exception as e:
+                    self.logger.warning(f"[fetch_distrib_logs_k8s] distrib={distrib} error: {e}")
+
+            return True
+        except Exception as e:
+            self.logger.warning(f"[fetch_distrib_logs_k8s] FAILED node={storage_node_ip}: {e}")
+            return True
 
     def wait_spdk_pod_running(self, node_ip: str, timeout: int = 600) -> None:
         """
@@ -330,13 +461,25 @@ class K8sSbcliUtils:
         return data if isinstance(data, list) else [data]
 
     def get_lvol_connect_str(self, lvol_name):
-        """Return list of ``sudo nvme connect ...`` strings for the lvol."""
+        """Return list of ``sudo nvme connect ...`` strings for the lvol.
+
+        Injects ``--ctrl-loss-tmo -1`` so NVMe controllers never time out
+        during a storage-node outage (matches bare-metal stress-test behaviour).
+        """
         lvol_id = self.get_lvol_id(lvol_name=lvol_name)
         if not lvol_id:
             self.logger.info(f"Lvol {lvol_name} does not exist. Exiting")
             return []
         out = self._run(f"{self.sbcli_cmd} lvol connect {lvol_id}")
-        return [line for line in out.splitlines() if line.strip()]
+        lines = [line for line in out.splitlines() if line.strip()]
+        result = []
+        for line in lines:
+            # Replace existing --ctrl-loss-tmo <value> or --ctrl-loss-tmo=<value> with -1
+            line = re.sub(r"--ctrl-loss-tmo[=\s]\S+", "--ctrl-loss-tmo -1", line)
+            if "--ctrl-loss-tmo" not in line:
+                line = line.rstrip() + " --ctrl-loss-tmo -1"
+            result.append(line)
+        return result
 
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
@@ -594,6 +737,64 @@ class K8sSbcliUtils:
                 "date": date_ts,
             })
         return tasks
+
+    def get_io_stats(self, cluster_id=None, time_duration=None):
+        """
+        Fetch last 10 minutes of I/O stats and return a single averaged dict so
+        that ``validate_io_stats`` can assert read_io + write_io > 0 over the window.
+
+        Keys: date, read_bytes, write_bytes, read_io, write_io.
+        """
+        _UNITS = {"b": 1, "kib": 1024, "mib": 1024**2, "gib": 1024**3, "tib": 1024**4}
+
+        def _parse_bytes(val):
+            """Convert human-readable size string (e.g. '108.8 MiB') to bytes."""
+            try:
+                parts = val.split()
+                num = float(parts[0])
+                unit = parts[1].lower() if len(parts) > 1 else "b"
+                return num * _UNITS.get(unit, 1)
+            except Exception:
+                return 0.0
+
+        def _parse_int(val):
+            try:
+                return int(val)
+            except Exception:
+                return 0
+
+        cid = cluster_id or self.cluster_id
+        out = self._run(f"{self.sbcli_cmd} cluster get-io-stats {cid} --history 10m")
+        rows = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith("+") or "Date" in line:
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            # ['', date, read_speed, read_iops, read_lat, write_speed, write_iops, write_lat, '']
+            if len(parts) < 8:
+                continue
+            rows.append({
+                "date": parts[1],
+                "read_bytes": _parse_bytes(parts[2]),
+                "write_bytes": _parse_bytes(parts[5]),
+                "read_io": _parse_int(parts[3]),
+                "write_io": _parse_int(parts[6]),
+            })
+
+        if not rows:
+            return []
+
+        n = len(rows)
+        avg = {
+            "date": f"avg({rows[0]['date']} … {rows[-1]['date']})",
+            "read_bytes": sum(r["read_bytes"] for r in rows) / n,
+            "write_bytes": sum(r["write_bytes"] for r in rows) / n,
+            "read_io": sum(r["read_io"] for r in rows) / n,
+            "write_io": sum(r["write_io"] for r in rows) / n,
+        }
+        self.logger.info(f"[io_stats] {n} samples averaged: {avg}")
+        return [avg]
 
     def get_cluster_capacity(self):
         """Return list of capacity records (each has ``date``, ``size_used``, etc.)."""

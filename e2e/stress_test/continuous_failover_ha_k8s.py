@@ -329,17 +329,29 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
 
-            self.ssh_obj.dump_lvstore(
-                node_ip=self.mgmt_nodes[0], storage_node_id=node
-            )
-
-            status = self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=node_ip,
-                storage_node_id=node,
-                logs_path=self.docker_logs_path,
-            )
-            if not status:
-                raise RuntimeError("Placement Dump Status incorrect!!!")
+            if self.k8s_test:
+                self.k8s_utils.dump_lvstore_k8s(
+                    sbcli_cmd=self.sbcli_utils.sbcli_cmd,
+                    storage_node_id=node,
+                    storage_node_ip=node_ip,
+                    logs_path=self.docker_logs_path,
+                )
+                self.k8s_utils.fetch_distrib_logs_k8s(
+                    storage_node_id=node,
+                    storage_node_ip=node_ip,
+                    logs_path=self.docker_logs_path,
+                )
+            else:
+                self.ssh_obj.dump_lvstore(
+                    node_ip=self.mgmt_nodes[0], storage_node_id=node
+                )
+                status = self.ssh_obj.fetch_distrib_logs(
+                    storage_node_ip=node_ip,
+                    storage_node_id=node,
+                    logs_path=self.docker_logs_path,
+                )
+                if not status:
+                    raise RuntimeError("Placement Dump Status incorrect!!!")
 
             self.logger.info(
                 f"Performing {outage_type} on primary node {node} (K8s mode)."
