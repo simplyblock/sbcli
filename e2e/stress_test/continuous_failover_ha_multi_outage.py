@@ -306,35 +306,44 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             to_delete = []
             for clone_name, clone_details in self.clone_mount_details.items():
                 if clone_details["snapshot"] in snapshots:
-                    self.common_utils.validate_fio_test(clone_details["Client"],
-                                                        log_file=clone_details["Log"])
-                    self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=False)
-                    fio_pids = self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=True)
-                    sleep_n_sec(10)
-                    for pid in fio_pids:
-                        self.ssh_obj.kill_processes(clone_details["Client"], pid=pid)
-                    attempt = 1
-                    while len(fio_pids) > 2:
+                    if self.k8s_test and clone_details.get("pending_connect"):
+                        # Clone was never connected/mounted — skip FIO/unmount/disconnect
+                        self.logger.info(f"[pending_connect] Deleting deferred clone '{clone_name}' (no FIO/mount to clean up).")
+                        self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        self.record_pending_lvol_delete(clone_name, clone_details['ID'])
+                        if clone_name in self.lvols_without_sec_connect:
+                            self.lvols_without_sec_connect.remove(clone_name)
+                        to_delete.append(clone_name)
+                    else:
+                        self.common_utils.validate_fio_test(clone_details["Client"],
+                                                            log_file=clone_details["Log"])
                         self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=False)
                         fio_pids = self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=True)
-                        if attempt >= 20:
-                            raise Exception("FIO not killed on clone")
-                        attempt += 1
-                        sleep_n_sec(60)
-                    
-                    sleep_n_sec(10)
-                    self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
-                    self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
-                    self.disconnect_lvol(clone_details['ID'])
-                    self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
-                    self.record_pending_lvol_delete(clone_name, clone_details['ID'])
-                    sleep_n_sec(30)
-                    if clone_name in self.lvols_without_sec_connect:
-                        self.lvols_without_sec_connect.remove(clone_name)
-                    to_delete.append(clone_name)
-                    self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
-                    self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
-                    self.ssh_obj.delete_files(clone_details["Client"], [f"/mnt/{clone_name}/*"])
+                        sleep_n_sec(10)
+                        for pid in fio_pids:
+                            self.ssh_obj.kill_processes(clone_details["Client"], pid=pid)
+                        attempt = 1
+                        while len(fio_pids) > 2:
+                            self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=False)
+                            fio_pids = self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=True)
+                            if attempt >= 20:
+                                raise Exception("FIO not killed on clone")
+                            attempt += 1
+                            sleep_n_sec(60)
+
+                        sleep_n_sec(10)
+                        self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
+                        self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
+                        self.disconnect_lvol(clone_details['ID'])
+                        self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        self.record_pending_lvol_delete(clone_name, clone_details['ID'])
+                        sleep_n_sec(30)
+                        if clone_name in self.lvols_without_sec_connect:
+                            self.lvols_without_sec_connect.remove(clone_name)
+                        to_delete.append(clone_name)
+                        self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
+                        self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
+                        self.ssh_obj.delete_files(clone_details["Client"], [f"/mnt/{clone_name}/*"])
                     # self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}*.log"])
             for del_key in to_delete:
                 del self.clone_mount_details[del_key]
@@ -476,10 +485,19 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                    "Log": f"{self.log_path}/{clone_name}.log",
                    "snapshot": snapshot_name,
                    "Client": client,
-                   "iolog_base_path": f"{self.log_path}/{clone_name}_fio_iolog"
+                   "iolog_base_path": f"{self.log_path}/{clone_name}_fio_iolog",
+                   "pending_connect": False,
             }
 
             self.logger.info(f"Created clone {clone_name}.")
+
+            # K8s: skip connect/mount/FIO if the lvol's primary node is currently in outage
+            if self.k8s_test and lvol_node_id in self.current_outage_nodes:
+                self.clone_mount_details[clone_name]["pending_connect"] = True
+                self.logger.info(
+                    f"[pending_connect] Clone '{clone_name}' deferred — node {lvol_node_id} is in outage."
+                )
+                continue
 
             sleep_n_sec(3)
 
@@ -585,6 +603,77 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                                              new_size=f"{self.int_lvol_size}G")
 
 
+    def _connect_pending_clones(self):
+        """K8s only: connect, mount, and run FIO for clones deferred during outage (runtime=300s)."""
+        pending = [(name, details) for name, details in self.clone_mount_details.items()
+                   if details.get("pending_connect")]
+        if not pending:
+            return
+        self.logger.info(f"[pending_connect] Processing {len(pending)} deferred clone(s).")
+        for clone_name, clone_details in pending:
+            self.logger.info(f"[pending_connect] Connecting clone '{clone_name}'.")
+            client = clone_details["Client"]
+            fs_type = clone_details["FS"]
+
+            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+            clone_details["Command"] = connect_ls
+
+            initial_devices = self.ssh_obj.get_devices(node=client)
+            for connect_str in connect_ls:
+                _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
+                if error:
+                    self.record_failed_nvme_connect(clone_name, connect_str, client=client)
+
+            sleep_n_sec(3)
+            final_devices = self.ssh_obj.get_devices(node=client)
+            lvol_device = None
+            for device in final_devices:
+                if device not in initial_devices:
+                    lvol_device = f"/dev/{device.strip()}"
+                    break
+            if not lvol_device:
+                self.logger.warning(f"[pending_connect] Clone '{clone_name}' did not connect after outage; skipping.")
+                continue
+
+            clone_details["Device"] = lvol_device
+
+            if fs_type == "xfs":
+                self.ssh_obj.clone_mount_gen_uuid(client, lvol_device)
+            mount_point = f"{self.mount_path}/{clone_name}"
+            self.ssh_obj.mount_path(node=client, device=lvol_device, mount_path=mount_point)
+            clone_details["Mount"] = mount_point
+
+            sleep_n_sec(10)
+
+            self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
+            self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
+            self.ssh_obj.delete_files(client, [f"{self.log_path}/{clone_name}_fio_iolog*"])
+
+            sleep_n_sec(5)
+
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(client, None, clone_details["Mount"], clone_details["Log"]),
+                kwargs={
+                    "size": self.fio_size,
+                    "name": f"{clone_name}_fio",
+                    "rw": "randrw",
+                    "bs": f"{2 ** random.randint(2, 7)}K",
+                    "nrfiles": 16,
+                    "iodepth": 1,
+                    "numjobs": 5,
+                    "time_based": True,
+                    "runtime": 300,
+                    "log_avg_msec": 1000,
+                    "iolog_file": clone_details["iolog_base_path"],
+                },
+            )
+            fio_thread.start()
+            self.fio_threads.append(fio_thread)
+
+            clone_details["pending_connect"] = False
+            self.logger.info(f"[pending_connect] Clone '{clone_name}' connected and FIO started (runtime=300s).")
+
     def run(self):
         """Main N+K failover test loop. Performs lvol creation, fio, clone/snapshot, and multiple outages."""
         self.logger.info("Starting N+K failover test.")
@@ -662,6 +751,8 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             sleep_n_sec(300)
 
             self.retry_failed_nvme_connects()
+            if self.k8s_test:
+                self._connect_pending_clones()
             self.validate_pending_deletions()
 
             self.check_core_dump()
@@ -680,6 +771,10 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.common_utils.manage_fio_threads(self.fio_node, self.fio_threads, timeout=5000)
 
             for clone, clone_details in self.clone_mount_details.items():
+                if self.k8s_test and clone_details.get("pending_connect"):
+                    # Connect failed after outage — no FIO was started; skip validation
+                    self.logger.warning(f"[pending_connect] Skipping FIO validation for unconnected clone '{clone}'.")
+                    continue
                 self.common_utils.validate_fio_test(clone_details["Client"], clone_details["Log"])
                 self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone}_fio*"])
                 self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone}_fio_iolog*"])

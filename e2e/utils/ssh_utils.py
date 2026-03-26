@@ -2445,12 +2445,27 @@ class SshUtils:
         then checks the corresponding map txt file in base_path has lpgi data.
         Returns True if all distribs have valid data, False otherwise.
         """
+        import time as _time
+
+        def _read_with_retry(path, retries=10, delay=3):
+            """Read a file with retries to handle NFS propagation delays."""
+            for attempt in range(retries):
+                try:
+                    with open(path, "r") as f:
+                        return f.read()
+                except FileNotFoundError:
+                    if attempt < retries - 1:
+                        self.logger.warning(
+                            f"[PLACEMENT_DUMP] File not yet visible (attempt {attempt+1}/{retries}): {path}"
+                        )
+                        _time.sleep(delay)
+            raise FileNotFoundError(f"File not found after {retries} retries: {path}")
+
         all_ok = True
         for distrib in distribs:
             rpc_log_path = os.path.join(base_path, f"rpc_{distrib}.log")
             try:
-                with open(rpc_log_path, "r") as f:
-                    rpc_content = f.read()
+                rpc_content = _read_with_retry(rpc_log_path)
             except Exception as e:
                 self.logger.error(f"[PLACEMENT_DUMP] Cannot read rpc log {rpc_log_path}: {e}")
                 all_ok = False
@@ -2465,8 +2480,7 @@ class SshUtils:
             response_filename = os.path.basename(match.group(1))
             map_file_path = os.path.join(base_path, response_filename)
             try:
-                with open(map_file_path, "r") as f:
-                    map_content = f.read()
+                map_content = _read_with_retry(map_file_path)
             except Exception as e:
                 self.logger.error(f"[PLACEMENT_DUMP] Cannot read map file {map_file_path}: {e}")
                 all_ok = False
@@ -2801,7 +2815,30 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         self.exec_command(node_ip, f"sudo tmux new-session -d -s netstat_log 'bash -c \"while true; do netstat -s | grep \\\"segments dropped\\\" >> {netstat_log}; sleep 5; done\"'")
         self.exec_command(node_ip, f"sudo tmux new-session -d -s dmesg_log 'bash -c \"while true; do sudo dmesg | grep -i \\\"tcp\\\" >> {dmesg_log}; sleep 5; done\"'")
         self.exec_command(node_ip, f"sudo tmux new-session -d -s journalctl_log 'bash -c \"while true; do sudo journalctl -k --no-tail | grep -i \\\"tcp\\\" >> {journalctl_log}; sleep 5; done\"'")
-                
+
+    def start_full_journal_dmesg_logging(self, node_ip, log_dir):
+        """
+        Start full (unfiltered) continuous journalctl and dmesg logging for a node.
+
+        - journalctl_full_{node_ip}.log : live-followed full journal (all units, appended)
+        - dmesg_full_{node_ip}.log      : full dmesg snapshot refreshed every 30 s
+        """
+        journalctl_full_log = f"{log_dir}/journalctl_full_{node_ip}.log"
+        dmesg_full_log = f"{log_dir}/dmesg_full_{node_ip}.log"
+
+        # Follow the full journal and append continuously
+        self.exec_command(
+            node_ip,
+            f"sudo tmux new-session -d -s journalctl_full_log "
+            f"'bash -c \"sudo journalctl -f -o short-precise >> {journalctl_full_log} 2>&1\"'"
+        )
+        # Refresh full dmesg snapshot every 30 s (overwrite avoids duplication)
+        self.exec_command(
+            node_ip,
+            f"sudo tmux new-session -d -s dmesg_full_log "
+            f"'bash -c \"while true; do sudo dmesg -T > {dmesg_full_log}; sleep 30; done\"'"
+        )
+
     def reset_iptables_in_spdk(self, node_ip):
         """
         Resets iptables rules inside the SPDK container on a given node.
@@ -3505,9 +3542,13 @@ class RunnerK8sLog:
                 self.logger.info(f"Error fetching containers for pod {pod}: {e}")
                 continue
 
+            # Per-pod subdirectory
+            pod_log_dir = os.path.join(self.log_dir, pod)
+            os.makedirs(pod_log_dir, exist_ok=True)
+
             for container in containers:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                log_file = f"{self.log_dir}/{pod}_{container}_{self.test_name}_{timestamp}_{outage_type}.log"
+                log_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_{outage_type}.log"
                 session_name = f"{pod}_{container}_logs_{self.generate_random_string()}"
                 container_id = self._get_container_id(pod, container)
                 key = f"{pod}:{container}"

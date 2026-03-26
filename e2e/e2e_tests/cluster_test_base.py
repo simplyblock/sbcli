@@ -235,6 +235,7 @@ class TestClusterBase:
             self.ssh_obj.exec_command(node=node, command="sudo tmux kill-server")
             self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
             self.ssh_obj.start_netstat_dmesg_logging(node_ip=node, log_dir=node_log_dir)
+            self.ssh_obj.start_full_journal_dmesg_logging(node_ip=node, log_dir=node_log_dir)
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
@@ -371,6 +372,23 @@ class TestClusterBase:
                         self.logger.warning(f"[k8s collect_mgmt] {cmd}: {e}")
         except Exception as e:
             self.logger.warning(f"[k8s collect_mgmt] storage node loop: {e}")
+
+        # Collect journalctl + dmesg final snapshot from client/fio nodes (accessible via SSH)
+        for node in self.client_machines:
+            try:
+                node_log_dir = os.path.join(self.docker_logs_path, node)
+                os.makedirs(node_log_dir, exist_ok=True)
+                self.ssh_obj.exec_command(
+                    node,
+                    f"journalctl -k --no-tail >& {node_log_dir}/jounalctl_{node}{suffix}.txt"
+                )
+                self.ssh_obj.exec_command(
+                    node,
+                    f"dmesg -T >& {node_log_dir}/dmesg_{node}{suffix}.txt"
+                )
+                self.logger.info(f"[k8s collect_mgmt] journalctl+dmesg collected for client {node}")
+            except Exception as e:
+                self.logger.warning(f"[k8s collect_mgmt] journalctl/dmesg for {node}: {e}")
 
     def collect_management_details(self, post_teardown=False):
         suffix = "_pre_teardown" if not post_teardown else "_post_teardown"

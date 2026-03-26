@@ -120,12 +120,14 @@ def main():
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
+        log_path = getattr(test_obj, "docker_logs_path", "")
         try:
-            if not args.run_k8s:
+            if args.run_k8s:
+                test_obj.stop_k8s_log_collect()
+            else:
                 test_obj.stop_docker_logs_collect()
             test_obj.fetch_all_nodes_distrib_log()
-            if i == (len(test_class_run) - 1):
-                test_obj.collect_management_details()
+            test_obj.collect_management_details()
             all_nodes = test_obj._get_all_nodes()
             if not args.run_k8s:
                 test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
@@ -135,6 +137,8 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            if log_path:
+                logger.info(f"Test logs saved at: {log_path}")
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
