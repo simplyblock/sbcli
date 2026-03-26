@@ -176,11 +176,11 @@ class TestClusterBase:
             sleep_n_sec(2)
         self.disconnect_lvols()
         sleep_n_sec(2)
+        self.sbcli_utils.delete_all_snapshots() if self.k8s_test else \
+            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
+        sleep_n_sec(2)
         self.sbcli_utils.delete_all_lvols()
         sleep_n_sec(2)
-        if not self.k8s_test:
-            self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
-            sleep_n_sec(2)
         self.sbcli_utils.delete_all_storage_pools()
         aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", None)
         aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", None)
