@@ -1279,6 +1279,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 snode_api.format_device_with_4k(ssd)
                 snode_api.bind_device_to_spdk(ssd)
             snode_api.bind_device_to_spdk(ssd)
+
+        spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
         try:
             results, err = snode_api.spdk_process_start(
                 l_cores, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
@@ -1286,7 +1288,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=node_socket, firewall_port=firewall_port, cluster_id=cluster_id)
+                socket=node_socket, firewall_port=firewall_port, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image)
             time.sleep(5)
 
         except Exception as e:
@@ -1404,6 +1406,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.minimum_sys_memory = minimum_sys_memory
         snode.active_tcp = active_tcp
         snode.active_rdma = active_rdma
+        snode.spdk_proxy_image = spdk_proxy_image
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -1998,6 +2001,9 @@ def restart_storage_node(
         if n.api_endpoint == snode.api_endpoint and n.socket == snode.socket and n.uuid != snode.uuid:
             total_mem += (n.spdk_mem + 500000000)
 
+    if not snode.spdk_proxy_image:
+        snode.spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
+
     results = None
     try:
         if new_ssd_pcie and type(new_ssd_pcie) is list:
@@ -2015,7 +2021,8 @@ def restart_storage_node(
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-            socket=snode.socket, firewall_port=snode.firewall_port, cluster_id=snode.cluster_id)
+            socket=snode.socket, firewall_port=snode.firewall_port, cluster_id=snode.cluster_id,
+            spdk_proxy_image=snode.spdk_proxy_image)
 
     except Exception as e:
         logger.error(e)

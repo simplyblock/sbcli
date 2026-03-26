@@ -140,6 +140,7 @@ class SPDKParams(BaseModel):
     multi_threading_enabled: Optional[bool] = Field(False)
     timeout: Optional[int] = Field(5 * 60)
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
@@ -197,7 +198,7 @@ def spdk_process_start(body: SPDKParams):
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
     node_docker.containers.run(
-        constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+        body.spdk_proxy_image,
         "python simplyblock_core/services/spdk_http_proxy_server.py ",
         name=f"spdk_proxy_{body.rpc_port}",
         detach=True,
