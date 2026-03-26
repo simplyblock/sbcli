@@ -169,16 +169,21 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
 
-            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                      storage_node_id=node)
-
-            status = self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=node_ip,
-                storage_node_id=node,
-                logs_path=self.docker_logs_path
-            )
-            if not status:
-                raise RuntimeError("Placement Dump Status incorrect!!!")
+            if self.k8s_test:
+                k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
+                if k8s_obj:
+                    k8s_obj.dump_lvstore_k8s(storage_node_id=node, logs_path=self.docker_logs_path)
+                    k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
+            else:
+                self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
+                                          storage_node_id=node)
+                status = self.ssh_obj.fetch_distrib_logs(
+                    storage_node_ip=node_ip,
+                    storage_node_id=node,
+                    logs_path=self.docker_logs_path
+                )
+                if not status:
+                    raise RuntimeError("Placement Dump Status incorrect!!!")
 
             self.logger.info(f"Performing {outage_type} on primary node {node}.")
             self.log_outage_event(node, outage_type, "Outage started")
@@ -234,9 +239,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 try:
                     if attempt == max_retries - 1:
                         self.logger.info("[CHECK] Shutting down Node via CLI as via API Fails.")
-                        self.ssh_obj.shutdown_node(node=self.mgmt_nodes[0],
-                                                   node_id=node,
-                                                   force=True)
+                        if self.k8s_test:
+                            self.sbcli_utils.shutdown_node(node_uuid=node, force=True)
+                        else:
+                            self.ssh_obj.shutdown_node(node=self.mgmt_nodes[0],
+                                                       node_id=node,
+                                                       force=True)
                     else:
                         self.sbcli_utils.shutdown_node(node_uuid=node, force=True,
                                                        expected_error_code=[503])
@@ -331,10 +339,14 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             for del_key in to_delete:
                 del self.clone_mount_details[del_key]
             for snapshot in snapshots:
-                snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot)
-                # snapshot_node = self.snap_vs_node[snapshot]
-                # if snapshot_node not in skip_nodes:
-                self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id, skip_error=True)
+                if self.k8s_test:
+                    snapshot_id = self.sbcli_utils.get_snapshot_id(snapshot)
+                    self.sbcli_utils.delete_snapshot(snap_id=snapshot_id, skip_error=True)
+                else:
+                    snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot)
+                    # snapshot_node = self.snap_vs_node[snapshot]
+                    # if snapshot_node not in skip_nodes:
+                    self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snapshot_id, skip_error=True)
                 self.record_pending_snapshot_delete(snapshot, snapshot_id)
                 self.snapshot_names.remove(snapshot)
 
@@ -398,18 +410,25 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             if snapshot_name in self.snapshot_names:
                 snapshot_name = f"{snapshot_name}_{temp_name}"
             try:
-                output, error = self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
-                if "(False," in output:
-                    raise Exception(output)
-                if "(False," in error:
-                    raise Exception(error)
+                if self.k8s_test:
+                    self.sbcli_utils.add_snapshot(self.lvol_mount_details[lvol]["ID"], snapshot_name)
+                    output, error = "", ""
+                else:
+                    output, error = self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
+                    if "(False," in output:
+                        raise Exception(output)
+                    if "(False," in error:
+                        raise Exception(error)
             except Exception as e:
                 self.logger.warning(f"Snap creation fails with {str(e)}. Retrying with different name.")
                 try:
                     snapshot_name = f"snap_{lvol}"
                     temp_name = generate_random_sequence(5)
                     snapshot_name = f"{snapshot_name}_{temp_name}"
-                    self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
+                    if self.k8s_test:
+                        self.sbcli_utils.add_snapshot(self.lvol_mount_details[lvol]["ID"], snapshot_name)
+                    else:
+                        self.ssh_obj.add_snapshot(self.mgmt_nodes[0], self.lvol_mount_details[lvol]["ID"], snapshot_name)
                 except Exception as exp:
                     self.logger.warning(f"Retry Snap creation fails with {str(exp)}.")
                     continue
@@ -423,16 +442,25 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             if clone_name in list(self.clone_mount_details):
                 clone_name = f"{clone_name}_{temp_name}"
             sleep_n_sec(30)
-            snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
+            if self.k8s_test:
+                snapshot_id = self.sbcli_utils.get_snapshot_id(snapshot_name)
+            else:
+                snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
             try:
-                self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
+                if self.k8s_test:
+                    self.sbcli_utils.add_clone(snapshot_id, clone_name)
+                else:
+                    self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
             except Exception as e:
                 self.logger.warning(f"Clone creation fails with {str(e)}. Retrying with different name.")
                 try:
                     clone_name = f"clone_{generate_random_sequence(15)}"
                     temp_name = generate_random_sequence(5)
                     clone_name = f"{clone_name}_{temp_name}"
-                    self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
+                    if self.k8s_test:
+                        self.sbcli_utils.add_clone(snapshot_id, clone_name)
+                    else:
+                        self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
                 except Exception as exp:
                     self.logger.warning(f"Retry Clone creation fails with {str(exp)}.")
                     continue
@@ -455,8 +483,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
             sleep_n_sec(3)
 
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
-                                      command=f"{self.base_cmd} lvol list")
+            if not self.k8s_test:
+                self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
+                                          command=f"{self.base_cmd} lvol list")
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
             self.clone_mount_details[clone_name]["Command"] = connect_ls
@@ -609,15 +638,21 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             for node in self.sn_nodes_with_sec:
                 cur_node_details = self.sbcli_utils.get_storage_node_details(node)
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                          storage_node_id=node)
-                status = self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=cur_node_ip,
-                    storage_node_id=node,
-                    logs_path=self.docker_logs_path
-                )
-                if not status:
-                    raise RuntimeError("Placement Dump Status incorrect!!!")
+                if self.k8s_test:
+                    k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
+                    if k8s_obj:
+                        k8s_obj.dump_lvstore_k8s(storage_node_id=node, logs_path=self.docker_logs_path)
+                        k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=cur_node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
+                else:
+                    self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
+                                              storage_node_id=node)
+                    status = self.ssh_obj.fetch_distrib_logs(
+                        storage_node_ip=cur_node_ip,
+                        storage_node_id=node,
+                        logs_path=self.docker_logs_path
+                    )
+                    if not status:
+                        raise RuntimeError("Placement Dump Status incorrect!!!")
 
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
@@ -659,14 +694,20 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             for node in self.sn_nodes_with_sec:
                 cur_node_details = self.sbcli_utils.get_storage_node_details(node)
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                          storage_node_id=node)
-                status = self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=cur_node_ip,
-                    storage_node_id=node,
-                    logs_path=self.docker_logs_path
-                )
-                if not status:
-                    raise RuntimeError("Placement Dump Status incorrect!!!")
+                if self.k8s_test:
+                    k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
+                    if k8s_obj:
+                        k8s_obj.dump_lvstore_k8s(storage_node_id=node, logs_path=self.docker_logs_path)
+                        k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=cur_node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
+                else:
+                    self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
+                                              storage_node_id=node)
+                    status = self.ssh_obj.fetch_distrib_logs(
+                        storage_node_ip=cur_node_ip,
+                        storage_node_id=node,
+                        logs_path=self.docker_logs_path
+                    )
+                    if not status:
+                        raise RuntimeError("Placement Dump Status incorrect!!!")
             iteration += 1
 

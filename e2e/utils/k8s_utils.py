@@ -873,3 +873,10 @@ class K8sSbcliUtils:
                 self.delete_snapshot(snap_name=snap_name, skip_error=True)
             except Exception as e:
                 self.logger.info(f"Snapshot delete failed (continuing): {snap_name}, err={e}")
+
+    def add_clone(self, snapshot_id: str, clone_name: str):
+        """Create a clone lvol from snapshot_id."""
+        out, err = self.k8s.exec_sbcli(
+            f"{self.sbcli_cmd} snapshot clone {snapshot_id} {shlex.quote(clone_name)}"
+        )
+        return out, err
