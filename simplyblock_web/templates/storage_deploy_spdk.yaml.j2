@@ -68,17 +68,17 @@ spec:
           mountPath: /etc/foundationdb
       resources:
         requests:
-          cpu: 2
-          memory: "64Mi"
           {% if CPU_TOPOLOGY_ENABLED %}
+          cpu: {{ 2 if HT_ENABLED else 1 }}
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
+          memory: "64Mi"
         limits:
-          cpu: 2
-          memory: "64Mi"
           {% if CPU_TOPOLOGY_ENABLED %}
+          cpu: {{ 2 if HT_ENABLED else 1 }}
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
+          memory: "64Mi"
 
   containers:
     - name: spdk-container
@@ -170,21 +170,19 @@ spec:
           value: "True"
         - name: TIMEOUT
           value: "300"
-      {% if CPU_TOPOLOGY_ENABLED %}
       resources:
         limits:
-          cpu: 2
-          memory: "128Mi"
           {% if CPU_TOPOLOGY_ENABLED %}
+          cpu: {{ 2 if HT_ENABLED else 1 }}
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
+          memory: "128Mi"
         requests:
-          cpu: 2
-          memory: "128Mi"
           {% if CPU_TOPOLOGY_ENABLED %}
+          cpu: {{ 2 if HT_ENABLED else 1 }}
           numa-align/numa-{{ NSOCKET }}: 1
           {% endif %}
-      {% endif %}
+          memory: "128Mi"
 
 {% if MODE == "docker" %}
 ---
