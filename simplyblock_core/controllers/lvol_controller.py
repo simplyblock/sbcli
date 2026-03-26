@@ -921,7 +921,8 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error(f"lvol node id not found: {lvol.node_id}")
         if not force_delete:
             return False
-        lvol.remove(db_controller.kv_store)
+        lvol.status = LVol.STATUS_DELETED
+        lvol.write_to_db(db_controller.kv_store)
 
         # if lvol is clone and snapshot is deleted, then delete snapshot
         if lvol.cloned_from_snap:
@@ -1327,7 +1328,7 @@ def get_replication_info(lvol_id_or_name):
 
 def get_lvol(lvol_id_or_name, is_json):
     db_controller = DBController()
-    lvol = None
+    lvol = db_controller.get_lvol_by_id(lvol_id_or_name)
     for lv in db_controller.get_lvols():  # pass
         if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
             lvol = lv
