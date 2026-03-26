@@ -42,7 +42,7 @@ def _rollback_lvol_creation(lvol, node_ids):
             logger.error(f"Failed to rollback lvol {lvol.get_id()} from node {node_id}: {e}")
 
 
-def add(lvol_id, snapshot_name, backup=False):
+def add(lvol_id, snapshot_name, backup=False, lock=True):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
@@ -141,7 +141,8 @@ def add(lvol_id, snapshot_name, backup=False):
         secondary_nodes = []
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        had_lock = _acquire_lvol_mutation_lock(host_node)
+        if lock:
+            had_lock = _acquire_lvol_mutation_lock(host_node)
 
         try:
             # Build nodes list with all secondaries
@@ -236,7 +237,8 @@ def add(lvol_id, snapshot_name, backup=False):
                     return False, msg
                 registered_secs.append(sec)
         finally:
-            _release_lvol_mutation_lock(host_node, had_lock)
+            if lock:
+                _release_lvol_mutation_lock(host_node, had_lock)
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
