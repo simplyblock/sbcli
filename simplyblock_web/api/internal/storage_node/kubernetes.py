@@ -370,6 +370,7 @@ def spdk_process_start(body: SPDKParams):
             'NSOCKET': body.socket,
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
+            'HT_ENABLED': core_utils.is_hyperthreading_enabled_via_siblings(),
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus
         }
 

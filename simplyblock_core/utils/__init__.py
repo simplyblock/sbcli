@@ -1371,6 +1371,7 @@ def build_unisolated_stride(
         num_unisolated: int,
         client_qpair_count: int,
         pool_stride: int = 2,
+        nodes_per_socket: int = 1,
 ) -> List[int]:
     """
     Build a list of 'unisolated' CPUs by picking from per-qpair pools.
@@ -1385,6 +1386,10 @@ def build_unisolated_stride(
     If hyper_thread=True, append sibling right after each selected core,
     where sibling is defined by *index pairing* across halves of the sorted list:
       sibling(cores[i]) = cores[i + half] if i < half else cores[i - half]
+
+    When hyper_thread=True and nodes_per_socket >= 2, the remaining SPDK cores
+    (all_cores - unisolated) are trimmed to a multiple of 4 so that when split
+    across two nodes each node gets an even (paired) count.
     """
     hyper_thread = is_hyperthreading_enabled_via_siblings()
 
@@ -1408,9 +1413,27 @@ def build_unisolated_stride(
             raise ValueError(f"hyper_thread=True but total logical CPUs ({total}) is not even")
         half = total // 2
 
-    # If you REQUIRE strict pairing (cpu+sibling always together), uncomment:
-    # if hyper_thread and (num_unisolated % 2 != 0):
-    #     raise ValueError("num_unisolated must be even when hyper_thread=True")
+        # Cores are always selected in complete HT pairs (cpu + sibling), so
+        # num_unisolated must be even — round down if needed.
+        if num_unisolated % 2 != 0:
+            num_unisolated -= 1
+
+        if nodes_per_socket >= 2:
+            # When splitting across 2 nodes each SPDK core must pair with its HT
+            # sibling, so the SPDK pool (total - num_unisolated) must be a multiple
+            # of 4.  Both values are already even, so the only possible misalignment
+            # is a remainder of 2 — corrected by adjusting num_unisolated by one
+            # HT pair (2 cores).
+            spdk_count = total - num_unisolated
+            if spdk_count % 4 != 0:
+                # spdk_count % 4 == 2: give one extra HT pair to SPDK
+                if num_unisolated >= 2:
+                    num_unisolated -= 2
+                else:
+                    # No room to shrink unisolated; take one pair from SPDK instead
+                    num_unisolated += 2
+
+        num_unisolated = max(0, min(num_unisolated, total))
 
     core_to_idx = {c: i for i, c in enumerate(cores)}
 
@@ -1480,7 +1503,7 @@ def build_unisolated_stride(
 
         break
 
-    return out[:num_unisolated]
+    return out[:num_unisolated], num_unisolated
 
 def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage=0):
     node_distribution: dict = {}
@@ -1490,7 +1513,9 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, co
             continue
         all_cores = sorted(cores_by_numa[numa_node])
         num_unisolated = calculate_unisolated_cores(all_cores, cores_percentage)
-        unisolated = build_unisolated_stride(all_cores, num_unisolated, constants.CLIENT_QPAIR_COUNT)
+        unisolated, num_unisolated = build_unisolated_stride(
+            all_cores, num_unisolated, constants.CLIENT_QPAIR_COUNT, nodes_per_socket=nodes_per_socket
+        )
 
         available_cores = [c for c in all_cores if c not in unisolated]
         q1 = len(available_cores) // 4
