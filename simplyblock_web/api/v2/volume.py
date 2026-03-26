@@ -297,3 +297,7 @@ def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 @instance_api.get('/resume', name='clusters:storage-pools:volumes:resume')
 def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.resume_lvol(volume.get_id())
+
+@instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
+def clone(cluster: Cluster, pool: StoragePool, volume: Volume, clone_name: str) -> bool:
+    return lvol_controller.clone_lvol(volume.get_id(), clone_name)

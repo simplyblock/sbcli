@@ -2286,3 +2286,28 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
 
     return new_lvol.lvol_uuid
 
+
+
+def clone_lvol(lvol_id, clone_name):
+    # create snapshot and clone it
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    try:
+        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
+        if err:
+            logger.error(err)
+            return False
+        new_lvol_uuid, err = snapshot_controller.clone(snapshot_uuid, clone_name)
+        if err:
+            logger.error(err)
+            return False
+        new_lvol = db_controller.get_lvol_by_id(new_lvol_uuid)
+        return new_lvol_uuid
+    except Exception as e:
+        logger.error(e)
+        return False
