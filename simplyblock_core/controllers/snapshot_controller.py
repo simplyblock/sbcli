@@ -517,6 +517,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.subsys_port = snap.lvol.subsys_port
     lvol.fabric = snap.fabric
     lvol.delete_snap_on_lvol_delete = bool(delete_snap_on_lvol_delete)
+    lvol.ndcs = snap.lvol.ndcs
+    lvol.npcs = snap.lvol.npcs
 
     if pvc_name:
         lvol.pvc_name = pvc_name
