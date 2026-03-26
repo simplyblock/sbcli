@@ -394,6 +394,15 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 "network outage disabled."
             )
 
+        # Ensure a clean pool exists before the test loop starts.
+        # setup() deletes all pools, but stale API state can cause
+        # add_storage_pool() in the parent run() to falsely skip creation.
+        # Explicitly delete + recreate here to guarantee the pool is present.
+        self.logger.info(f"Ensuring clean pool '{self.pool_name}' before run.")
+        self.sbcli_utils.delete_all_storage_pools()
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.logger.info(f"Pool '{self.pool_name}' ready.")
+
         # Skip parent run() and call grandparent directly since we override
         # perform_n_plus_k_outages; the rest of the loop is inherited.
         super().run()

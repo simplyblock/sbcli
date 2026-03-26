@@ -508,9 +508,12 @@ class K8sSbcliUtils:
 
     def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
                          max_r_mbytes=0, max_w_mbytes=0):
-        if pool_name in self.list_storage_pools():
+        existing = self.list_storage_pools()
+        self.logger.info(f"[pool] existing pools: {list(existing.keys())}")
+        if pool_name in existing:
             self.logger.info(f"Pool {pool_name} already exists. Skipping")
             return
+        self.logger.info(f"[pool] Creating pool '{pool_name}'")
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} pool add {shlex.quote(pool_name)}")
 
     def delete_storage_pool(self, pool_name):
