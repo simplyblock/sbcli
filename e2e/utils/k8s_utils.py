@@ -831,17 +831,21 @@ class K8sSbcliUtils:
         self.k8s.exec_sbcli(
             f"{self.sbcli_cmd} snapshot add {lvol_id} {shlex.quote(snapshot_name)}"
         )
+        self.wait_for_snapshot(snapshot_name, present=True, timeout=60)
 
     def list_snapshots(self):
-        """Parse snapshot list table output → ``{snap_name: snap_uuid}``."""
+        """Parse snapshot list table output → ``{snap_name: snap_uuid}``.
+
+        Table columns: | UUID | Name | Size | ProvSize | BDev | LVol ID | Created At | Health | Status |
+        """
         out = self._run(f"{self.sbcli_cmd} snapshot list")
         result = {}
         for line in out.splitlines():
             parts = [p.strip() for p in line.split("|")]
-            # Table columns: | UUID | BDdev UUID | BlobID | Name | ...
-            if len(parts) > 4:
+            # parts[0]='' parts[1]=UUID parts[2]=Name ...
+            if len(parts) > 2:
                 uuid_candidate = parts[1]
-                name_candidate = parts[4]
+                name_candidate = parts[2]
                 # UUID is a 36-char hyphenated string
                 if (
                     len(uuid_candidate) == 36
@@ -853,6 +857,19 @@ class K8sSbcliUtils:
 
     def get_snapshot_id(self, snap_name: str):
         return self.list_snapshots().get(snap_name)
+
+    def wait_for_snapshot(self, snap_name: str, present: bool = True, timeout: int = 60):
+        """Poll until snap_name appears (present=True) or disappears (present=False)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            exists = snap_name in self.list_snapshots()
+            if exists == present:
+                return
+            state = "appear" if present else "disappear"
+            self.logger.info(f"[wait_for_snapshot] Waiting for '{snap_name}' to {state}...")
+            time.sleep(3)
+        state = "appear" if present else "disappear"
+        raise TimeoutError(f"[wait_for_snapshot] '{snap_name}' did not {state} within {timeout}s")
 
     def delete_snapshot(self, snap_name: str = None, snap_id: str = None,
                         max_attempt: int = 60, skip_error: bool = False):
@@ -866,6 +883,18 @@ class K8sSbcliUtils:
                 return
             raise Exception(f"Snapshot not found. snap_name={snap_name}")
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} snapshot delete {snap_id}")
+        # Wait for it to disappear from the list
+        resolve_name = snap_name or next(
+            (k for k, v in self.list_snapshots().items() if v == snap_id), None
+        )
+        if resolve_name:
+            try:
+                self.wait_for_snapshot(resolve_name, present=False, timeout=60)
+            except TimeoutError as e:
+                if skip_error:
+                    self.logger.warning(str(e))
+                else:
+                    raise
 
     def delete_all_snapshots(self):
         for snap_name in list(self.list_snapshots().keys()):
@@ -875,8 +904,16 @@ class K8sSbcliUtils:
                 self.logger.info(f"Snapshot delete failed (continuing): {snap_name}, err={e}")
 
     def add_clone(self, snapshot_id: str, clone_name: str):
-        """Create a clone lvol from snapshot_id."""
+        """Create a clone lvol from snapshot_id and wait for it to appear in lvol list."""
         out, err = self.k8s.exec_sbcli(
             f"{self.sbcli_cmd} snapshot clone {snapshot_id} {shlex.quote(clone_name)}"
         )
-        return out, err
+        # Poll until the clone appears in lvol list
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if self.get_lvol_id(clone_name):
+                self.logger.info(f"[add_clone] '{clone_name}' is now listed.")
+                return out, err
+            self.logger.info(f"[add_clone] Waiting for '{clone_name}' to appear in lvol list...")
+            time.sleep(3)
+        raise TimeoutError(f"[add_clone] '{clone_name}' did not appear in lvol list within 60s")
