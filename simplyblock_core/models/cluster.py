@@ -81,6 +81,7 @@ class Cluster(BaseModel):
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
+    container_image_prefix: str = ""
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

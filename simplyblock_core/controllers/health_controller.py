@@ -449,7 +449,7 @@ def _check_node_lvstore(
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
                                         dev_node = db_controller.get_storage_node_by_id(dev.node_id)
                                         if dev.status == NVMeDevice.STATUS_ONLINE and dev_node.status in [
-                                            StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                                            StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
                                             try:
                                                 remote_bdev = storage_node_ops.connect_device(
                                                     f"remote_{dev.alceml_bdev}", dev, node,
