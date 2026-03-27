@@ -1235,12 +1235,6 @@ class RPCClient:
         }
         return self._request("bdev_distrib_check_inflight_io", params)
 
-    def bdev_lvol_create_poller_group(self, cpu_mask):
-        params = {
-            "cpu_mask": cpu_mask,
-        }
-        return self._request("bdev_lvol_create_poller_group", params)
-
     def bdev_lvol_transfer(self, lvol_name, offset, cluster_batch, gateway, operation):
         # --operation {migrate,replicate}
         params = {
