@@ -182,7 +182,7 @@ class CLIWrapperBase:
                 partition_size=args.partition_size,
                 ha_jm_count=ha_jm_count,
                 format_4k=format_4k,
-                spdk_proxy_image=args.spdk_proxy_image,
+                spdk_proxy_image=getattr(args, 'spdk_proxy_image', None),
             )
         except Exception as e:
             print(e)
@@ -222,7 +222,7 @@ class CLIWrapperBase:
                 node_id, max_lvol, max_snap, max_prov,
                 spdk_image, spdk_debug,
                 small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
-                new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate, spdk_proxy_image=args.spdk_proxy_image)
+                new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate, spdk_proxy_image=getattr(args, 'spdk_proxy_image', None))
         except Exception as e:
             print(e)
             return False
