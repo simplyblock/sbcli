@@ -244,7 +244,7 @@ simplyblock:
     
   storageNodes:
     name: simplyblock-node
-    clusterImage: simplyblock/simplyblock:main-snap-repl
+    clusterImage: simplyblock/simplyblock:main-snapshot-replication
     mgmtIfc: eth0
     maxLVol: 10
     maxSize: 0
