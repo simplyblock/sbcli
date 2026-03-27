@@ -121,6 +121,7 @@ class DBController(metaclass=Singleton):
 
     def get_lvols(self, cluster_id=None) -> List[LVol]:
         lvols = self.get_all_lvols()
+        lvols = [lvol for lvol in lvols if lvol.status != LVol.STATUS_DELETED]
         if not cluster_id:
             return lvols
 
@@ -161,9 +162,11 @@ class DBController(metaclass=Singleton):
                 hostnames.append(lv.hostname)
         return hostnames
 
-    def get_snapshots(self) -> List[SnapShot]:
-        ret = SnapShot().read_from_db(self.kv_store)
-        return ret
+    def get_snapshots(self, cluster_id=None) -> List[SnapShot]:
+        snaps = SnapShot().read_from_db(self.kv_store)
+        if cluster_id:
+            snaps = [n for n in snaps if n.cluster_id == cluster_id]
+        return sorted(snaps, key=lambda x: x.created_at)
 
     def get_snapshot_by_id(self, id) -> SnapShot:
         ret = SnapShot().read_from_db(self.kv_store, id)
@@ -260,7 +263,9 @@ class DBController(metaclass=Singleton):
         return EventObj().read_from_db(self.kv_store, id=event_id, limit=limit, reverse=reverse)
 
     def get_job_tasks(self, cluster_id, reverse=True, limit=0) -> List[JobSchedule]:
-        return JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
+        ret = JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
+        return sorted(ret, key=lambda x: x.date)
+
 
     def get_active_migration_tasks(self, cluster_id: str) -> List[JobSchedule]:
         """Return all non-done FN_LVOL_MIG tasks for the given cluster (single FDB scan)."""
@@ -282,7 +287,7 @@ class DBController(metaclass=Singleton):
         for snap in snaps:
             if snap.lvol.node_id == node_id:
                 ret.append(snap)
-        return ret
+        return sorted(ret, key=lambda x: x.create_dt)
 
     def get_snapshots_by_lvol_id(self, lvol_id) -> List[SnapShot]:
         return [s for s in self.get_snapshots() if s.lvol and s.lvol.get_id() == lvol_id]

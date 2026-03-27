@@ -1,41 +1,26 @@
-graylog:
-  rootPasswordSha2: "b87c15a8ae4736d771ca60a7cc2014baaeab19b11c31f5fedef9421958a403c9"
-  passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
 
-monitoring:
-  enabled: true
+observability:
+  enabled: false
   secret: "sWbpOgba1bKnCfcPkVQi"
-
-log:
   deletionInterval: "3d"
-  retentionPeriod: "7d"
   level: "DEBUG"
-  maxNumberIndex: "3"
-
-grafana:
-  endpoint: ""
-  contactPoint: "https://hooks.slack.com/services/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"
+  graylog:
+    rootPasswordSha2: "b87c15a8ae4736d771ca60a7cc2014baaeab19b11c31f5fedef9421958a403c9"
+    passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
+    maxNumberIndex: "3"
+    retentionPeriod: "7d"
+  grafana:
+    endpoint: ""
+    contactPoint: "https://hooks.slack.com/services/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"
 
 image:
   simplyblock: 
-    repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "R25.10-Hotfix"
+    repository: "simplyblock/simplyblock"
+    tag: "main-sfam-2359"
     pullPolicy: "Always"
 
-tolerations:
-  create: false
-  list:
-  - operator: Exists
-    effect:
-    key: 
-    value:
-nodeSelector:
-  create: false
-  key: 
-  value:
-  
 ports:
-  lvolNvmfPortStart:
+  lvolNvmfPortStart: 9100
 
 storageclass:  
   allowedTopologyZones: []
@@ -73,7 +58,7 @@ opensearch:
   persistence:
     enabled: true
     storageClass: local-hostpath
-    size: 10Gi
+    size: 20Gi
 
   resources:
     requests:
@@ -99,9 +84,6 @@ opensearch:
     enabled: false
 
 prometheus:
-  simplyblock:
-    prometheusURL: simplyblock-prometheus
-    prometheusPORT: 9090    
   server:
     fullnameOverride: simplyblock-prometheus
     enabled: true
@@ -195,7 +177,7 @@ prometheus:
     enabled: false
 
 ingress:
-  enabled: true
+  enabled: false
   ingressClassName: nginx
   useDNS: false
   host: ""
@@ -219,3 +201,46 @@ ingress:
                     - ingress
             topologyKey: "kubernetes.io/hostname"
     nodeSelector: {}
+
+
+simplyblock:
+  cluster:
+    clusterName: simplyblock-cluster
+    mgmtIfc: eth0
+    fabric: tcp
+    isSingleNode: false
+    enableNodeAffinity: false
+    strictNodeAntiAffinity: false
+    capWarn: 80
+    capCrit: 90
+    provCapWarn: 120
+    provCapCrit: 150
+
+  pool:
+    name: simplyblock-pool
+    capacityLimit: 100Gi
+
+  lvol:
+    name: simplyblock-lvol
+    
+  storageNodes:
+    name: simplyblock-node
+    clusterImage: simplyblock/simplyblock:main-sfam-2359
+    mgmtIfc: eth0
+    maxLVol: 10
+    maxSize: 0
+    partitions: 0
+    corePercentage: 65
+    spdkDebug: false
+    spdkImage:
+    coreIsolation: false
+    workerNodes:
+      - israel-storage-node-1
+      - israel-storage-node-2
+      - israel-storage-node-3
+
+  devices:
+    name: simplyblock-devices
+
+  tasks:
+    name: simplyblock-task

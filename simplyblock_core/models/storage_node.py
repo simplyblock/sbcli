@@ -107,6 +107,7 @@ class StorageNode(BaseNodeObject):
     active_rdma: bool = False
     socket: int = 0
     firewall_port: int = 5001
+    lvol_poller_mask: str = ""
     spdk_proxy_image: str = ""
 
     def get_lvol_subsys_port(self, lvs_name=None):

@@ -70,6 +70,9 @@ class Cluster(BaseModel):
     is_re_balancing: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
+    snapshot_replication_target_cluster: str = ""
+    snapshot_replication_target_pool: str = ""
+    snapshot_replication_timeout: int = 60*10
     client_data_nic: str = ""
     max_fault_tolerance: int = 1
     backup_config: dict = {}
