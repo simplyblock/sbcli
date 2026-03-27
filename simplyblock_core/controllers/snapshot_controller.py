@@ -415,7 +415,7 @@ def delete(snapshot_uuid, force_delete=False):
     return True
 
 
-def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False):
+def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False, lock=True):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
@@ -588,7 +588,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         if second_secondary_id:
             secondary_ids.append(second_secondary_id)
         lvol.nodes = [host_node.get_id()] + secondary_ids
-        had_lock = _acquire_lvol_mutation_lock(host_node)
+        if lock:
+            had_lock = _acquire_lvol_mutation_lock(host_node)
 
         try:
             primary_node = None
@@ -663,7 +664,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     return False, error
                 created_nodes.append(sec.get_id())
         finally:
-            _release_lvol_mutation_lock(host_node, had_lock)
+            if lock:
+                _release_lvol_mutation_lock(host_node, had_lock)
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)

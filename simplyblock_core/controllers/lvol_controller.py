@@ -1809,7 +1809,7 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
         if not had_lock:
             had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
         new_lvol_uuid, err = snapshot_controller.clone(
-            snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True)
+            snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False)
         if err:
             logger.error(err)
             if snapshot_uuid:
