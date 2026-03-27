@@ -387,6 +387,26 @@ class K8sUtils:
 
     # ── Pod readiness utilities ──────────────────────────────────────────────
 
+    def list_files_in_spdk_pod(self, node_ip: str, path: str) -> list:
+        """
+        List files in *path* inside the ``spdk-container`` of the SPDK pod
+        running on *node_ip*.  Returns a list of filename strings (no paths).
+
+        Used as a K8s substitute for ``ssh_obj.list_files(node_ip, path)``
+        when checking for core dumps at ``/etc/simplyblock/``.
+        """
+        try:
+            pod_name = self.get_spdk_pod_name(node_ip)
+            out, _ = self._exec_kubectl(
+                f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
+                f"bash -c 'ls {shlex.quote(path)} 2>/dev/null || true'",
+                supress_logs=True,
+            )
+            return [f.strip() for f in out.splitlines() if f.strip()]
+        except Exception as e:
+            self.logger.warning(f"[list_files_in_spdk_pod] node={node_ip} path={path}: {e}")
+            return []
+
     def wait_pod_ready(self, pod_name_prefix: str, timeout: int = 300) -> str:
         """
         Wait until a pod whose name starts with *pod_name_prefix* is Running.
@@ -1050,11 +1070,11 @@ class K8sSbcliUtils:
         while timeout > 0:
             node_details = self.get_storage_node_details(node_id)
             actual_status = node_details[0].get("health_check")
-            if actual_status in status_list:
-                return node_details[0]
             self.logger.info(
                 f"[health_check] node={node_id} expected={status_list} actual={actual_status}"
             )
+            if actual_status in status_list:
+                return node_details[0]
             sleep_n_sec(1)
             timeout -= 1
 

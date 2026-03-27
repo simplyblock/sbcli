@@ -1289,13 +1289,26 @@ class TestClusterBase:
         )
     
     def check_core_dump(self):
+        if self.k8s_test:
+            # Core dumps in K8s live inside the spdk-container at /etc/simplyblock/
+            k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
+            if not k8s_obj:
+                self.logger.info("check_core_dump: k8s_utils not available, skipping.")
+                return
+            for node_ip in self.storage_nodes:
+                files = k8s_obj.list_files_in_spdk_pod(node_ip, "/etc/simplyblock/")
+                self.logger.info(f"Files in /etc/simplyblock (spdk pod for {node_ip}): {files}")
+                if any("core" in f for f in files) and not any("tmp_cores" in f for f in files):
+                    cur_date = datetime.now().strftime("%Y-%m-%d")
+                    self.logger.info(f"Core dump found in SPDK pod for node {node_ip} at {cur_date}")
+            return
         for node in self.storage_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
             if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on storage node {node} at {cur_date}")
-        
+
         for node in self.mgmt_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
