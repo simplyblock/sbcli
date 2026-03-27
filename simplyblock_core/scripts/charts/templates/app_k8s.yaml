@@ -1,3 +1,4 @@
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -18,26 +19,7 @@ spec:
       labels:
         app: simplyblock-admin-control
     spec:
-      serviceAccountName: simplyblock-control-sa
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
+      serviceAccountName: simplyblock-sa
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet 
       affinity:
@@ -55,15 +37,11 @@ spec:
         env:
         - name: LVOL_NVMF_PORT_START
           value: "{{ .Values.ports.lvolNvmfPortStart }}"
-        - name: PROMETHEUS_URL
-          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-        - name: PROMETHEUS_PORT
-          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: K8S_NAMESPACE
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
         - name: MONITORING_SECRET
           valueFrom:
             secretKeyRef:
@@ -95,11 +73,12 @@ spec:
               path: fdb.cluster
 ---
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: simplyblock-webappapi
   namespace: {{ .Release.Namespace }}
 spec:
+  replicas: 2
   selector:
     matchLabels:
       app: simplyblock-webappapi
@@ -112,25 +91,14 @@ spec:
       labels:
         app: simplyblock-webappapi
     spec:
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
+      serviceAccountName: simplyblock-sa
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: simplyblock-admin-control
+              topologyKey: kubernetes.io/hostname       
       containers:
       - name: webappapi
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -144,14 +112,25 @@ spec:
             configMapKeyRef:
               name: simplyblock-config
               key: LOG_LEVEL
+        - name: LVOL_NVMF_PORT_START
+          value: "{{ .Values.ports.lvolNvmfPortStart }}"
+        - name: ENABLE_MONITORING
+          value: "{{ .Values.observability.enabled }}"
+        - name: K8S_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+{{- if .Values.observability.enabled }}
+        - name: MONITORING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: simplyblock-grafana-secrets
+              key: MONITORING_SECRET
+{{- end }}
         - name: FLASK_DEBUG
           value: "False"
         - name: FLASK_ENV
           value: "production"
-        - name: PROMETHEUS_URL
-          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-        - name: PROMETHEUS_PORT
-          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         volumeMounts:
         - name: fdb-cluster-file
           mountPath: /etc/foundationdb/fdb.cluster
@@ -163,6 +142,20 @@ spec:
           limits:
             cpu: "500m"
             memory: "2Gi"
+      - name: fluent-bit
+        image: fluent/fluent-bit:1.8.11
+        volumeMounts:
+          - name: varlog
+            mountPath: /var/log
+          - name: config
+            mountPath: /fluent-bit/etc/
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "200Mi"
+          limits:
+            cpu: "200m"
+            memory: "400Mi"
       volumes:
       - name: fdb-cluster-file
         configMap:
@@ -170,17 +163,23 @@ spec:
           items:
             - key: cluster-file
               path: fdb.cluster
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: config
+        configMap:
+          name: simplyblock-fluent-bit-config
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simplyblock-storage-node-monitor
+  name: simplyblock-monitoring
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: simplyblock-storage-node-monitor
+      app: simplyblock-monitoring
   template:
     metadata:
       annotations:
@@ -188,29 +187,11 @@ spec:
         reloader.stakater.com/auto: "true"
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
-        app: simplyblock-storage-node-monitor
+        app: simplyblock-monitoring
     spec:
+      serviceAccountName: simplyblock-sa
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
       containers:
         - name: storage-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -227,177 +208,41 @@ spec:
 
         - name: mgmt-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/mgmt_node_monitor.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: BACKEND_TYPE
-            value: "k8s"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+            - name: BACKEND_TYPE
+              value: "k8s"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-lvol-stats-collector
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-lvol-stats-collector
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-lvol-stats-collector
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
         - name: lvol-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/lvol_stat_collector.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-main-distr-event-collector
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-main-distr-event-collector
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-main-distr-event-collector
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
         - name: main-distr-event-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/main_distr_event_collector.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -495,23 +340,29 @@ spec:
               memory: "400Mi"
 
       volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
+        - name: fdb-cluster-file
+          configMap:
+            name: simplyblock-fdb-cluster-config
+            items:
+              - key: cluster-file
+                path: fdb.cluster
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: config
+          configMap:
+            name: simplyblock-fluent-bit-config
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: simplyblock-cleanupfdb
+  name: simplyblock-tasks
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: simplyblock-cleanupfdb
+      app: simplyblock-tasks
   template:
     metadata:
       annotations:
@@ -519,639 +370,122 @@ spec:
         reloader.stakater.com/auto: "true"
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
-        app: simplyblock-cleanupfdb
+        app: simplyblock-tasks
     spec:
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
-        - name: cleanupfdb
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          command: ["python", "simplyblock_core/workers/cleanup_foundationdb.py"]
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-          env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
-          - name: LOG_DELETION_INTERVAL
-            value: "${LOG_DELETION_INTERVAL}"
-          volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-restart
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-restart
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-restart
-    spec:
+      serviceAccountName: simplyblock-sa
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
       containers:
+        - name: tasks-node-add-runner
+          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          command: ["python", "simplyblock_core/services/tasks_runner_node_add.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          env:
+            - name: LVOL_NVMF_PORT_START
+              value: "{{ .Values.ports.lvolNvmfPortStart }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
+{{ toYaml .env | nindent 12 }}
+          volumeMounts:
+{{ toYaml .volumeMounts | nindent 12 }}
+          resources:
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
+
         - name: tasks-runner-restart
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_restart.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-migration
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-migration
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-migration
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
         - name: tasks-runner-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_migration.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-failed-migration
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-failed-migration
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-failed-migration
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
+
         - name: tasks-runner-failed-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_failed_migration.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-cluster-status
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-cluster-status
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-cluster-status
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
+
         - name: tasks-runner-cluster-status
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_cluster_status.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-new-device-migration
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-new-device-migration
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-new-device-migration
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
+
         - name: tasks-runner-new-device-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_new_dev_migration.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: LVOL_NVMF_PORT_START
-            value: "{{ .Values.ports.lvolNvmfPortStart }}"
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-port-allow
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-port-allow
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-port-allow
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
         - name: tasks-runner-port-allow
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_port_allow.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-jc-comp-resume
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-jc-comp-resume
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-jc-comp-resume
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
+
         - name: tasks-runner-jc-comp-resume
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_jc_comp.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: simplyblock-tasks-runner-sync-lvol-del
-  namespace: {{ .Release.Namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: simplyblock-tasks-runner-sync-lvol-del
-  template:
-    metadata:
-      annotations:
-        log-collector/enabled: "true"
-        reloader.stakater.com/auto: "true"
-        reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
-      labels:
-        app: simplyblock-tasks-runner-sync-lvol-del
-    spec:
-      hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
+
         - name: tasks-runner-sync-lvol-del
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_sync_lvol_del.py"]
+          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
 {{ toYaml .env | nindent 12 }}
@@ -1167,97 +501,37 @@ spec:
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
-          - name: PROMETHEUS_URL
-            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
-          - name: PROMETHEUS_PORT
-            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
-          - name: SIMPLYBLOCK_LOG_LEVEL
-            valueFrom:
-              configMapKeyRef:
-                name: simplyblock-config
-                key: LOG_LEVEL
+{{ toYaml .env | nindent 12 }}
           volumeMounts:
-          - name: fdb-cluster-file
-            mountPath: /etc/foundationdb/fdb.cluster
-            subPath: fdb.cluster
+{{ toYaml .volumeMounts | nindent 12 }}
           resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
-      volumes:
-      - name: fdb-cluster-file
-        configMap:
-          name: simplyblock-fdb-cluster-config
-          items:
-            - key: cluster-file
-              path: fdb.cluster
----
-
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: simplyblock-fluent-bit
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: simplyblock-fluent-bit
-spec:
-  selector:
-    matchLabels:
-      app: simplyblock-fluent-bit
-  template:
-    metadata:
-      labels:
-        app: simplyblock-fluent-bit
-    spec:
-      {{- if .Values.nodeSelector.create }}
-      nodeSelector:
-        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
-      {{- end }}
-      {{- if .Values.tolerations.create }}
-      tolerations:
-      {{- range .Values.tolerations.list }}
-      - operator: {{ .operator | quote }}
-        {{- if .effect }}
-        effect: {{ .effect | quote }}
-        {{- end }}
-        {{- if .key }}
-        key: {{ .key | quote }}
-        {{- end }}
-        {{- if .value }}
-        value: {{ .value | quote }}
-        {{- end }}
-      {{- end }}
-      {{- end }}
-      containers:
+{{ toYaml .resources | nindent 12 }}
+{{- end }}
         - name: fluent-bit
           image: fluent/fluent-bit:1.8.11
-          securityContext:
-            privileged: true
           volumeMounts:
             - name: varlog
               mountPath: /var/log
-            - name: varlibdockercontainers
-              mountPath: /var/lib/docker/containers
-              readOnly: true
             - name: config
               mountPath: /fluent-bit/etc/
           resources:
             requests:
+              cpu: "100m"
+              memory: "200Mi"
+            limits:
               cpu: "200m"
               memory: "400Mi"
-            limits:
-              cpu: "400m"
-              memory: "1Gi"
+
       volumes:
+        - name: fdb-cluster-file
+          configMap:
+            name: simplyblock-fdb-cluster-config
+            items:
+              - key: cluster-file
+                path: fdb.cluster
         - name: varlog
           hostPath:
             path: /var/log
-        - name: varlibdockercontainers
-          hostPath:
-            path: /var/lib/docker/containers
         - name: config
           configMap:
             name: simplyblock-fluent-bit-config
