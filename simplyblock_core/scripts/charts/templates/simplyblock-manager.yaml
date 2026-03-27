@@ -22,9 +22,28 @@ spec:
         runAsGroup: 65532
         fsGroup: 65532
       serviceAccountName: simplyblock-manager
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}    
       containers:
-        - image: simplyblock/simplyblock-manager:snapshot_replication
-          imagePullPolicy: Always
+        - image: "{{ .Values.image.manager.repository }}:{{ .Values.image.manager.tag }}"
+          imagePullPolicy: "{{ .Values.image.manager.pullPolicy }}"
           name: manager
           env:
             - name: WATCH_NAMESPACE

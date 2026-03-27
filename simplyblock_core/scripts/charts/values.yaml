@@ -19,6 +19,22 @@ image:
     repository: "simplyblock/simplyblock"
     tag: "main-snap-repl"
     pullPolicy: "Always"
+  manager:
+    repository: "simplyblock/simplyblock-manager"
+    tag: "snapshot_replication"
+    pullPolicy: "Always"
+
+tolerations:
+  create: false
+  list:
+  - operator: Exists
+    effect:
+    key: 
+    value:
+nodeSelector:
+  create: false
+  key: 
+  value:
 
 ports:
   lvolNvmfPortStart: 9100
