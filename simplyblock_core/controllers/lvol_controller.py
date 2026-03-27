@@ -1791,35 +1791,32 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     host_node = db_controller.get_storage_node_by_id(lvol.node_id)
     had_lock = None
 
-    try:
-        snapshot_uuid = None
-        for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
-            if snap.snap_name == clone_name:
-                logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
-                snapshot_uuid = snap.uuid
-                break
+    snapshot_uuid = None
+    for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
+        if snap.snap_name == clone_name:
+            logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
+            snapshot_uuid = snap.uuid
+            break
 
-        if not snapshot_uuid:
-            had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
-            snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False)
-            if err:
-                snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
-                logger.error(err)
-                return False, str(err)
-        if not had_lock:
-            had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
-        new_lvol_uuid, err = snapshot_controller.clone(
-            snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False)
+    if not snapshot_uuid:
+        had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
+        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False)
         if err:
-            logger.error(err)
-            if snapshot_uuid:
-                    snapshot_controller.delete(snapshot_uuid)
             snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
+            logger.error(err)
             return False, str(err)
-
+    if not had_lock:
+        had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
+    new_lvol_uuid, err = snapshot_controller.clone(
+        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False)
+    if err:
+        logger.error(err)
+        if snapshot_uuid:
+                snapshot_controller.delete(snapshot_uuid)
         snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
-        return new_lvol_uuid, False
-    except Exception as e:
-        logger.error(e)
-        return False, str(e)
+        return False, str(err)
+
+    snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
+    return new_lvol_uuid, False
+
     
