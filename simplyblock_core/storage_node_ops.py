@@ -2,7 +2,6 @@
 import datetime
 import json
 import math
-import os
 import platform
 import socket
 
@@ -38,6 +37,8 @@ from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
+import os
+
 
 logger = utils.get_logger(__name__)
 
@@ -691,7 +692,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
                 t = threading.Thread(
                     target=_create_device_partitions,
                     args=(snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
-                          snode.jm_percent, snode.partition_size, index+1,))
+                          snode.jm_percent, snode.partition_size, index + 1,))
                 thread_list.append(t)
                 t.start()
 
@@ -1118,8 +1119,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
-             namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, format_4k=False, spdk_proxy_image=None):
+             namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
+             id_device_by_nqn=False, partition_size="", ha_jm_count=3, format_4k=False, spdk_proxy_image=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1391,6 +1392,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.cloud_name = cloud_instance['cloud'] or ""
 
         snode.namespace = namespace
+        snode.cr_name = cr_name
+        snode.cr_namespace = cr_namespace
+        snode.cr_plural = cr_plural
         snode.ssd_pcie = ssd_pcie
         snode.hostname = hostname
         snode.host_nqn = subsystem_nqn
@@ -2284,7 +2288,6 @@ def restart_storage_node(
         return False
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-    snode.health_check = True
     snode.lvstore_status = ""
     snode.write_to_db(db_controller.kv_store)
 
@@ -3412,9 +3415,9 @@ def set_node_status(node_id, status, reconnect_on_online=True):
             return False
         if snode.enable_ha_jm:
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-        snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
-        distr_controller.send_cluster_map_to_node(snode)
+        for device in snode.nvme_devices:
+            distr_controller.send_dev_status_event(device, device.status, target_node=snode)
 
         for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
             if node.get_id() == snode.get_id():
@@ -3425,7 +3428,8 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                     node = db_controller.get_storage_node_by_id(node.get_id())
                     node.remote_devices = _connect_to_remote_devs(node)
                     node.write_to_db()
-                    distr_controller.send_cluster_map_to_node(node)
+                    for device in node.nvme_devices:
+                        distr_controller.send_dev_status_event(device, device.status, target_node=node)
                 except RuntimeError:
                     logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
                     continue
@@ -3837,8 +3841,8 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             logger.error(msg)
             return False, msg
 
-    logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
+    logger.info("Add BDev to subsystem "+f"{lvol.vuid:016X}")
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id, eui64=f"{lvol.vuid:016X}")
     # Use per-lvstore port for this lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     for iface in snode.data_nics:
@@ -4162,6 +4166,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                     logger.error("Error establishing hublvol: %s", e)
                     # return False
 
+    storage_events.node_ports_changed(snode)
     return True
 
 

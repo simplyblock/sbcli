@@ -342,7 +342,7 @@ class RPCClient:
         }
         return self._request2("ultra21_alloc_ns_init", params)
 
-    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None):
+    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None):
         params = {
             "nqn": nqn,
             "namespace": {
@@ -358,6 +358,11 @@ class RPCClient:
 
         if nsid:
             params['namespace']['nsid'] = nsid
+
+        if eui64:
+            params['namespace']['eui64'] = eui64
+            params['namespace']['ptpl_file'] = "/mnt/ns_resv"+eui64+".json"
+
 
         return self._request("nvmf_subsystem_add_ns", params)
 

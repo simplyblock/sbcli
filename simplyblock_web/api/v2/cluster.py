@@ -2,7 +2,7 @@ from threading import Thread
 from typing import Annotated, List, Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from simplyblock_core.db_controller import DBController
@@ -29,7 +29,7 @@ class _UpdateParams(BaseModel):
 
 
 class ClusterParams(BaseModel):
-    name: Optional[str] = None
+    name: str = ""
     blk_size: Literal[512, 4096] = 512
     page_size_in_blocks: int = Field(2097152, gt=0)
     cap_warn: util.Percent = 0
@@ -40,7 +40,7 @@ class ClusterParams(BaseModel):
     distr_npcs: int = 1
     distr_bs: int = 4096
     distr_chunk_bs: int = 4096
-    ha_type: Literal['single', 'ha'] = 'single'
+    ha_type: Literal['single', 'ha'] = 'ha'
     qpair_count: int = 256
     max_queue_size: int = 128
     inflight_io_threshold: int = 4
@@ -58,21 +58,24 @@ class ClusterParams(BaseModel):
 
 @api.get('/', name='clusters:list')
 def list() -> List[ClusterDTO]:
-    return [
-        ClusterDTO.from_model(cluster)
-        for cluster
-        in db.get_clusters()
-    ]
+    data = []
+    for cluster in db.get_clusters():
+        stat_obj = None
+        ret = db.get_cluster_capacity(cluster, 1)
+        if ret:
+            stat_obj = ret[0]
+        data.append(ClusterDTO.from_model(cluster, stat_obj))
+    return data
 
 
 @api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
-def add(request: Request, parameters: ClusterParams):
+def add(parameters: ClusterParams):
     cluster_id_or_false = cluster_ops.add_cluster(**parameters.model_dump())
     if not cluster_id_or_false:
         raise ValueError('Failed to create cluster')
 
-    entity_url = request.app.url_path_for('get', cluster_id=cluster_id_or_false)
-    return Response(status_code=201, headers={'Location': entity_url})
+    cluster = db.get_cluster_by_id(cluster_id_or_false)
+    return ClusterDTO.from_model(cluster)
 
 
 instance_api = APIRouter(prefix='/{cluster_id}')
@@ -90,7 +93,11 @@ Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
 
 @instance_api.get('/', name='clusters:detail')
 def get(cluster: Cluster) -> ClusterDTO:
-    return ClusterDTO.from_model(cluster)
+    stat_obj = None
+    ret = db.get_cluster_capacity(cluster, 1)
+    if ret:
+        stat_obj = ret[0]
+    return ClusterDTO.from_model(cluster, stat_obj)
 
 
 class UpdatableClusterParameters(BaseModel):

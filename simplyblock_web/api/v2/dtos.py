@@ -44,9 +44,10 @@ class ClusterDTO(BaseModel):
     name: Optional[str]
     nqn: str
     status: Literal['active', 'read_only', 'inactive', 'suspended', 'degraded', 'unready', 'in_activation', 'in_expansion']
-    rebalancing: bool
+    is_re_balancing: bool
     block_size: util.Unsigned
-    coding: Tuple[util.Unsigned, util.Unsigned]
+    distr_ndcs: int
+    distr_npcs: int
     ha: bool
     utliziation_critical: util.Percent
     utilization_warning: util.Percent
@@ -67,9 +68,10 @@ class ClusterDTO(BaseModel):
             name=model.cluster_name,
             nqn=model.nqn,
             status=model.status,  # type: ignore
-            rebalancing=model.is_re_balancing,
+            is_re_balancing=model.is_re_balancing,
             block_size=model.blk_size,
-            coding=(model.distr_ndcs, model.distr_npcs),
+            distr_ndcs=model.distr_ndcs,
+            distr_npcs=model.distr_npcs,
             ha=model.ha_type == 'ha',
             utilization_warning=model.cap_warn,
             utliziation_critical=model.cap_crit,
@@ -344,6 +346,9 @@ class VolumeDTO(BaseModel):
             max_w_mbytes=model.w_mbytes_per_sec,
             allowed_hosts=[h["nqn"] for h in (model.allowed_hosts or [])],
             policy=eff_policy.policy_name if eff_policy else "",
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
+            rep_info=rep_info,
+            from_source=model.from_source,
         )
 
 
