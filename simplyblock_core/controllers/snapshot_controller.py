@@ -137,7 +137,6 @@ def add(lvol_id, snapshot_name, backup=False):
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = "Secondary node is in down status, can not create snapshot"
                     logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
                     secondary_nodes.append(sec_node)
@@ -283,15 +282,12 @@ def list(all=False, cluster_id=None, with_details=False):
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
-    migrating_lvols = set()
+    migrating_lvols = []
     for m in db_controller.get_migrations():
         if m.is_active():
-            migrating_lvols.add(m.lvol_id)
+            migrating_lvols.append(m.lvol_id)
     data = []
     for snap in snaps:
-        if node_id:
-            if snap.lvol.node_id != node_id:
-                continue
         logger.debug(snap)
         clones = []
         for lvol in db_controller.get_lvols():
