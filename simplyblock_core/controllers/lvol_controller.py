@@ -1795,8 +1795,8 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
         snapshot_uuid = None
         for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
             if snap.snap_name == clone_name:
-                logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.snap_uuid}, using it for cloning")
-                snapshot_uuid = snap.snap_uuid
+                logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
+                snapshot_uuid = snap.uuid
                 break
 
         if not snapshot_uuid:
