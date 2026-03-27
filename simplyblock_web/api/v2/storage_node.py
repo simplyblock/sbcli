@@ -46,6 +46,7 @@ class StorageNodeParams(BaseModel):
     iobuf_large_pool_count: int = Field(0)
     ha_jm_count: int = Field(3)
     format_4k: bool = Field(False)
+    spdk_proxy_image: Optional[str]
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -70,6 +71,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Re
             'full_page_unmap': parameters.full_page_unmap,
             "ha_jm_count": parameters.ha_jm_count,
             "format_4k": parameters.format_4k,
+            "spdk_proxy_image": parameters.spdk_proxy_image,
         }
     )
     if not task_id_or_false:
