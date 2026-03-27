@@ -37,6 +37,10 @@ spec:
         env:
         - name: LVOL_NVMF_PORT_START
           value: "{{ .Values.ports.lvolNvmfPortStart }}"
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: K8S_NAMESPACE
           valueFrom:
             fieldRef:
@@ -116,6 +120,10 @@ spec:
           value: "{{ .Values.ports.lvolNvmfPortStart }}"
         - name: ENABLE_MONITORING
           value: "{{ .Values.observability.enabled }}"
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: K8S_NAMESPACE
           valueFrom:
             fieldRef:
@@ -197,8 +205,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/storage_node_monitor.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -213,6 +225,10 @@ spec:
           env:
             - name: BACKEND_TYPE
               value: "k8s"
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
@@ -225,8 +241,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/lvol_stat_collector.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -238,8 +258,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/main_distr_event_collector.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -251,8 +275,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/capacity_and_stats_collector.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -264,8 +292,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/cap_monitor.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -277,8 +309,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/health_check_service.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -290,8 +326,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/device_monitor.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -303,8 +343,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/lvol_monitor.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -316,8 +360,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/snapshot_monitor.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -383,6 +431,10 @@ spec:
           env:
             - name: LVOL_NVMF_PORT_START
               value: "{{ .Values.ports.lvolNvmfPortStart }}"
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
 {{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
@@ -395,8 +447,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_restart.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -408,8 +464,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_migration.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -421,8 +481,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_failed_migration.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -434,8 +498,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_cluster_status.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -447,8 +515,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_new_dev_migration.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -460,8 +532,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_port_allow.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -473,8 +549,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_jc_comp.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -486,8 +566,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/tasks_runner_sync_lvol_del.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
@@ -499,8 +583,12 @@ spec:
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           command: ["python", "simplyblock_core/services/snapshot_replication.py"]
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
-{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
           env:
+            - name: PROMETHEUS_URL
+              value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+            - name: PROMETHEUS_PORT
+              value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+{{- with (include "simplyblock.commonContainer" . | fromYaml) }}
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}

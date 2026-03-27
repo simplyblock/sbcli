@@ -84,6 +84,9 @@ opensearch:
     enabled: false
 
 prometheus:
+  simplyblock:
+    prometheusURL: simplyblock-prometheus
+    prometheusPORT: 9090    
   server:
     fullnameOverride: simplyblock-prometheus
     enabled: true
@@ -225,7 +228,7 @@ simplyblock:
     
   storageNodes:
     name: simplyblock-node
-    clusterImage: simplyblock/simplyblock:main-snapshot-replication
+    clusterImage: simplyblock/simplyblock:main-snap-repl
     mgmtIfc: eth0
     maxLVol: 10
     maxSize: 0
@@ -235,9 +238,7 @@ simplyblock:
     spdkImage:
     coreIsolation: false
     workerNodes:
-      - israel-storage-node-1
-      - israel-storage-node-2
-      - israel-storage-node-3
+
 
   devices:
     name: simplyblock-devices
