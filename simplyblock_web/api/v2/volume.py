@@ -326,7 +326,3 @@ def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 @instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
 def clone(cluster: Cluster, pool: StoragePool, volume: Volume, clone_name: str) -> bool:
     return lvol_controller.clone_lvol(volume.get_id(), clone_name)
-
-@instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
-def clone(cluster: Cluster, pool: StoragePool, volume: Volume, clone_name: str) -> bool:
-    return lvol_controller.clone_lvol(volume.get_id(), clone_name)
