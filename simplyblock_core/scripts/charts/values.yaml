@@ -18,8 +18,8 @@ grafana:
 
 image:
   simplyblock: 
-    repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "R25.10-Hotfix"
+    repository: "simplyblock/simplyblock"
+    tag: "main-sfam-2359"
     pullPolicy: "Always"
 
 tolerations:
@@ -27,15 +27,15 @@ tolerations:
   list:
   - operator: Exists
     effect:
-    key: 
+    key:
     value:
 nodeSelector:
   create: false
-  key: 
+  key:
   value:
-  
+
 ports:
-  lvolNvmfPortStart:
+  lvolNvmfPortStart: 9100
 
 storageclass:  
   allowedTopologyZones: []
@@ -73,7 +73,7 @@ opensearch:
   persistence:
     enabled: true
     storageClass: local-hostpath
-    size: 10Gi
+    size: 20Gi
 
   resources:
     requests:
@@ -101,7 +101,7 @@ opensearch:
 prometheus:
   simplyblock:
     prometheusURL: simplyblock-prometheus
-    prometheusPORT: 9090    
+    prometheusPORT: 9090
   server:
     fullnameOverride: simplyblock-prometheus
     enabled: true
@@ -219,3 +219,46 @@ ingress:
                     - ingress
             topologyKey: "kubernetes.io/hostname"
     nodeSelector: {}
+
+
+simplyblock:
+  cluster:
+    clusterName: simplyblock-cluster
+    mgmtIfc: eth0
+    fabric: tcp
+    isSingleNode: false
+    enableNodeAffinity: false
+    strictNodeAntiAffinity: false
+    capWarn: 80
+    capCrit: 90
+    provCapWarn: 120
+    provCapCrit: 150
+
+  pool:
+    name: simplyblock-pool
+    capacityLimit: 100Gi
+
+  lvol:
+    name: simplyblock-lvol
+
+  storageNodes:
+    name: simplyblock-node
+    clusterImage: simplyblock/simplyblock:main-sfam-2359
+    mgmtIfc: eth0
+    maxLVol: 10
+    maxSize: 0
+    partitions: 0
+    corePercentage: 65
+    spdkDebug: false
+    spdkImage:
+    coreIsolation: false
+    workerNodes:
+      - israel-storage-node-1
+      - israel-storage-node-2
+      - israel-storage-node-3
+
+  devices:
+    name: simplyblock-devices
+
+  tasks:
+    name: simplyblock-task

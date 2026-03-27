@@ -107,6 +107,7 @@ class StorageNode(BaseNodeObject):
     active_rdma: bool = False
     socket: int = 0
     firewall_port: int = 5001
+    lvol_poller_mask: str = ""
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.

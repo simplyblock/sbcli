@@ -219,15 +219,20 @@ class VolumeDTO(BaseModel):
     cloned_from: Optional[util.UrlPath]
     crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
+    do_replicate: bool = False
     max_rw_iops: util.Unsigned
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
     allowed_hosts: List[str]
     policy: str
+    capacity: CapacityStatDTO
+    rep_info: Optional[dict] = None
+    from_source: bool = True
+
 
     @staticmethod
-    def from_model(model: LVol, request: Request, cluster_id: str):
+    def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None, rep_info=None):
         from simplyblock_core.controllers import migration_controller
         from simplyblock_core.db_controller import DBController as _DBC
         active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
@@ -262,6 +267,7 @@ class VolumeDTO(BaseModel):
                 else None
             ),
             high_availability=model.ha_type == 'ha',
+            do_replicate=model.do_replicate,
             max_rw_iops=model.rw_ios_per_sec,
             max_rw_mbytes=model.rw_mbytes_per_sec,
             max_r_mbytes=model.r_mbytes_per_sec,
@@ -356,4 +362,6 @@ class MigrationDTO(BaseModel):
             error_message=model.error_message or "",
             started_at=model.started_at,
             completed_at=model.completed_at,
+            rep_info=rep_info,
+            from_source=model.from_source
         )

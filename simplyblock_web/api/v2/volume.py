@@ -11,7 +11,7 @@ from simplyblock_core.models.lvol_model import LVol
 
 from .cluster import Cluster
 from .pool import StoragePool
-from .dtos import VolumeDTO, SnapshotDTO
+from .dtos import VolumeDTO, SnapshotDTO, TaskDTO
 from . import util
 
 
@@ -43,6 +43,10 @@ class _CreateParams(BaseModel):
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
+    fabric: str = "tcp"
+    max_namespace_per_subsys: int = 1
+    do_replicate: bool = False
+    replication_cluster_id: Optional[str] = None
     allowed_hosts: Optional[List[str]] = None
 
 
@@ -87,6 +91,8 @@ def add(
             ndcs=data.ndcs,
             npcs=data.npcs,
             allowed_hosts=data.allowed_hosts,
+            do_replicate=data.do_replicate,
+            replication_cluster_id=data.replication_cluster_id,
         )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(
@@ -124,7 +130,12 @@ Volume = Annotated[LVol, Depends(_lookup_volume)]
 
 @instance_api.get('/', name='clusters:storage-pools:volumes:detail')
 def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> VolumeDTO:
-    return VolumeDTO.from_model(volume, request, cluster.get_id())
+    stat_obj = None
+    ret = db.get_lvol_stats(volume, 1)
+    if ret:
+        stat_obj = ret[0]
+    rep_info = lvol_controller.get_replication_info(volume.get_id())
+    return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj, rep_info)
 
 
 class UpdatableLVolParams(BaseModel):
@@ -201,6 +212,26 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
     return Response(status_code=204)
 
+@instance_api.post('/replication_trigger', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
+def replication_trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    if not lvol_controller.replication_trigger(volume.get_id()):
+        raise ValueError('Failed to start volume snapshot replication')
+
+    return Response(status_code=204)
+
+@instance_api.post('/replication_start', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
+def replication_start(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    if not lvol_controller.replication_start(volume.get_id(), cluster.get_id()):
+        raise ValueError('Failed to start volume snapshot replication')
+
+    return Response(status_code=204)
+
+@instance_api.post('/replication_stop', name='clusters:storage-pools:volumes:replication_stop', status_code=204, responses={204: {"content": None}})
+def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    if not lvol_controller.replication_stop(volume.get_id()):
+        raise ValueError('Failed to stop volume snapshot replication')
+
+    return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
 def connect(cluster: Cluster, pool: StoragePool, volume: Volume):
@@ -263,6 +294,38 @@ def create_snapshot(
             cluster_id=cluster.get_id(), pool_id=pool.get_id(), snapshot_id=snapshot_id,
     )
     return Response(status_code=201, headers={'Location': entity_url})
+
+
+@instance_api.post('/replicate_lvol', name='clusters:storage-pools:volumes:replicate_lvol')
+def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume: Volume):
+    return lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
+
+
+class ReplicateLVolParams(BaseModel):
+    lvol_id: Optional[str] = None
+
+
+@instance_api.post('/replicate_lvol_on_source_cluster', name='clusters:storage-pools:replicate_lvol_on_source_cluster')
+def replicate_lvol_on_source_cluster(cluster: Cluster, pool: StoragePool, body: ReplicateLVolParams):
+    return lvol_controller.replicate_lvol_on_source_cluster(body.lvol_id, cluster.get_id(), pool.get_id())
+
+
+@instance_api.get('/list_replication_tasks', name='clusters:storage-pools:volumes:list_replication_tasks')
+def list_replication_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+    tasks = lvol_controller.list_replication_tasks(volume.get_id())
+    return [TaskDTO.from_model(task) for task in tasks]
+
+@instance_api.get('/suspend', name='clusters:storage-pools:volumes:suspend')
+def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
+    return lvol_controller.suspend_lvol(volume.get_id())
+
+@instance_api.get('/resume', name='clusters:storage-pools:volumes:resume')
+def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
+    return lvol_controller.resume_lvol(volume.get_id())
+
+@instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
+def clone(cluster: Cluster, pool: StoragePool, volume: Volume, clone_name: str) -> bool:
+    return lvol_controller.clone_lvol(volume.get_id(), clone_name)
 
 @instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
 def clone(cluster: Cluster, pool: StoragePool, volume: Volume, clone_name: str) -> bool:

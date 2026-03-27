@@ -1313,6 +1313,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             jc_singleton_core = new_distribution.get("jc_singleton_core")
             app_thread_core = new_distribution.get("app_thread_core")
             jm_cpu_core = new_distribution.get("jm_cpu_core")
+            lvol_poller_core = new_distribution.get("lvol_poller_core")
+            lvol_poller_mask = utils.generate_mask(lvol_poller_core)
+
         else:
             poller_cpu_cores = node_config.get("distribution").get("poller_cpu_cores")
             alceml_cpu_cores = node_config.get("distribution").get("alceml_cpu_cores")
@@ -1321,6 +1324,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             jc_singleton_core = node_config.get("distribution").get("jc_singleton_core")
             app_thread_core = node_config.get("distribution").get("app_thread_core")
             jm_cpu_core = node_config.get("distribution").get("jm_cpu_core")
+            lvol_poller_core = node_config.get("distribution").get("lvol_poller_core")
+            lvol_poller_mask = utils.generate_mask(lvol_poller_core)
+
         number_of_distribs = node_config.get("number_of_distribs")
 
         pollers_mask = utils.generate_mask(poller_cpu_cores)
@@ -1425,6 +1431,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.write_to_db(kv_store)
         snode.app_thread_mask = app_thread_mask or ""
         snode.pollers_mask = pollers_mask or ""
+        snode.lvol_poller_mask = lvol_poller_mask or ""
         snode.jm_cpu_mask = jm_cpu_mask
         snode.alceml_cpu_index = alceml_cpu_index
         snode.alceml_worker_cpu_index = alceml_worker_cpu_index
@@ -1501,6 +1508,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         rpc_client.log_set_print_level("DEBUG")
+
+        if snode.lvol_poller_mask:
+            ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+            if not ret:
+                logger.error("Failed to set pollers mask")
+                return False
 
         # 5- set app_thread cpu mask
         if snode.app_thread_mask:
@@ -2099,6 +2112,12 @@ def restart_storage_node(
 
     rpc_client.log_set_print_level("DEBUG")
 
+    if snode.lvol_poller_mask:
+        ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+        if not ret:
+            logger.error("Failed to set pollers mask")
+            return False
+
     # 5- set app_thread cpu mask
     if snode.app_thread_mask:
         ret = rpc_client.thread_get_stats()
@@ -2612,7 +2631,8 @@ def shutdown_storage_node(node_id, force=False):
         if force is False:
             return False
         for task in tasks:
-            if task.function_name != JobSchedule.FN_NODE_RESTART:
+            if task.function_name not in [
+                JobSchedule.FN_NODE_RESTART, JobSchedule.FN_SNAPSHOT_REPLICATION, JobSchedule.FN_LVOL_SYNC_DEL]:
                 tasks_controller.cancel_task(task.uuid)
 
     logger.info("Shutting down node")

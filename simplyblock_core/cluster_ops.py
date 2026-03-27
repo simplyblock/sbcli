@@ -475,7 +475,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
-    
+
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
@@ -874,6 +874,7 @@ def list() -> t.List[dict]:
             "#storage": len(st),
             "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
             "Status": status.upper(),
+            "Replicate": cl.snapshot_replication_target_cluster,
         })
     return data
 
@@ -1466,4 +1467,31 @@ def set(cl_id, attr, value) -> bool:
         logger.info(f"Setting {attr} to {value}")
         setattr(cluster, attr, value)
         cluster.write_to_db()
+    return True
+
+
+def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> bool:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(source_cl_id)
+    if not cluster:
+        raise ValueError(f"Cluster not found: {source_cl_id}")
+
+    target_cluster = db_controller.get_cluster_by_id(target_cl_id)
+    if not target_cluster:
+        raise ValueError(f"Target cluster not found: {target_cl_id}")
+
+    logger.info("Updating Cluster replication target")
+    cluster.snapshot_replication_target_cluster = target_cl_id
+    if target_pool:
+        pool = db_controller.get_pool_by_id(target_pool)
+        if not pool:
+            raise ValueError(f"Pool not found: {target_pool}")
+        if pool.status != Pool.STATUS_ACTIVE:
+            raise ValueError(f"Pool not active: {target_pool}")
+        cluster.snapshot_replication_target_pool = target_pool
+
+    if timeout and timeout > 0:
+        cluster.snapshot_replication_timeout = timeout
+    cluster.write_to_db()
+    logger.info("Done")
     return True
