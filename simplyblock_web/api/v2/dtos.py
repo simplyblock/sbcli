@@ -12,6 +12,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.models.stats import StatsObject
@@ -39,6 +40,27 @@ class CapacityStatDTO(BaseModel):
         )
 
 
+class CapacityStatDTO(BaseModel):
+    date: int
+    size_total: int
+    size_prov: int
+    size_used: int
+    size_free: int
+    size_util: int
+
+    @staticmethod
+    def from_model(model: StatsObject):
+        return CapacityStatDTO(
+            date=model.date,
+            size_total=model.size_total,
+            size_prov=model.size_prov,
+            size_used=model.size_used,
+            size_free=model.size_free,
+            size_util=model.size_util,
+        )
+
+
+
 class ClusterDTO(BaseModel):
     id: UUID
     name: Optional[str]
@@ -58,9 +80,10 @@ class ClusterDTO(BaseModel):
     tls_enabled: bool
     max_fault_tolerance: int
     backup_enabled: bool
+    capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: Cluster):
+    def from_model(model: Cluster, stat_obj: Optional[StatsObject]=None):
         return ClusterDTO(
             id=UUID(model.get_id()),
             name=model.cluster_name,
@@ -80,6 +103,7 @@ class ClusterDTO(BaseModel):
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
             backup_enabled=bool(model.backup_config),
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
         )
 
 
@@ -93,9 +117,10 @@ class DeviceDTO(BaseModel):
     nvmf_ips: List[IPv4Address]
     nvmf_nqn: str = ""
     nvmf_port: int = 0
+    capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: NVMeDevice):
+    def from_model(model: NVMeDevice, stat_obj: Optional[StatsObject]=None):
         return DeviceDTO(
             id=UUID(model.get_id()),
             status=model.status,
@@ -106,6 +131,7 @@ class DeviceDTO(BaseModel):
             nvmf_ips=[IPv4Address(ip) for ip in model.nvmf_ip.split(',')],
             nvmf_nqn=model.nvmf_nqn,
             nvmf_port=model.nvmf_port,
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
         )
 
 
@@ -135,10 +161,11 @@ class StoragePoolDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
+    capacity: CapacityStatDTO
     sec_options: dict = {}
 
     @staticmethod
-    def from_model(model: Pool):
+    def from_model(model: Pool, stat_obj: Optional[StatsObject]=None):
         return StoragePoolDTO(
             id=UUID(model.get_id()),
             name=model.pool_name,
@@ -150,6 +177,7 @@ class StoragePoolDTO(BaseModel):
             max_r_mbytes=model.max_r_mbytes_per_sec,
             max_w_mbytes=model.max_w_mbytes_per_sec,
             sec_options=model.sec_options,
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
         )
 
 
@@ -191,14 +219,34 @@ class SnapshotDTO(BaseModel):
 class StorageNodeDTO(BaseModel):
     id: UUID
     status: str
-    ip: IPv4Address
+    hostname: str
+    cpu: int
+    spdk_mem: int
+    lvols: int
+    rpc_port: int
+    lvol_subsys_port: int
+    nvmf_port: int
+    mgmt_ip: IPv4Address
+    health_check: bool
+    online_devices: str
+    capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: StorageNode):
+    def from_model(model: StorageNode, stat_obj: Optional[StatsObject]=None):
         return StorageNodeDTO(
             id=UUID(model.get_id()),
             status=model.status,
-            ip=IPv4Address(model.mgmt_ip),
+            hostname=model.hostname,
+            cpu=model.cpu,
+            spdk_mem=model.spdk_mem,
+            lvols=model.lvols,
+            rpc_port=model.rpc_port,
+            lvol_subsys_port=model.lvol_subsys_port,
+            nvmf_port=model.nvmf_port,
+            mgmt_ip=IPv4Address(model.mgmt_ip),
+            health_check=model.health_check,
+            online_devices=f"{len(model.nvme_devices)}/{len([d for d in model.nvme_devices if d.status=='online'])}",
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
         )
 
 
@@ -215,7 +263,7 @@ class TaskDTO(BaseModel):
     @staticmethod
     def from_model(model: JobSchedule):
         return TaskDTO(
-            id=UUID(model.get_id()),
+            id=UUID(model.uuid),
             status=model.status,
             canceled=model.canceled,
             function_name=model.function_name,
@@ -231,40 +279,44 @@ class VolumeDTO(BaseModel):
     name: str
     status: str
     health_check: bool
-    migrating: bool
     nqn: str
+    hostname: str
+    fabric: str
     nodes: List[util.UrlPath]
     port: util.Port
     size: util.Unsigned
+    ndcs: int
+    npcs: int
+    pool_uuid: str
+    pool_name: str
+    pvc_name: str = ""
+    snapshot_name: str = ""
+    blobid: int
+    ns_id: int
     cloned_from: Optional[util.UrlPath]
     crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
+    lvol_priority_class: util.Unsigned
     do_replicate: bool = False
+    max_namespace_per_subsys: int
     max_rw_iops: util.Unsigned
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    allowed_hosts: List[str]
-    policy: str
     capacity: CapacityStatDTO
     rep_info: Optional[dict] = None
     from_source: bool = True
 
-
     @staticmethod
     def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None, rep_info=None):
-        from simplyblock_core.controllers import migration_controller
-        from simplyblock_core.db_controller import DBController as _DBC
-        active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
-        _db = _DBC()
-        eff_policy = _db.get_policy_for_lvol(model)
         return VolumeDTO(
             id=UUID(model.get_id()),
             name=model.lvol_name,
             status=model.status,
             health_check=model.health_check,
-            migrating=active_mig is not None,
             nqn=model.nqn,
+            hostname=model.hostname,
+            fabric=model.fabric,
             nodes=[
                 str(request.url_for(
                     'clusters:storage-nodes:detail',
@@ -287,13 +339,24 @@ class VolumeDTO(BaseModel):
                 else None
             ),
             high_availability=model.ha_type == 'ha',
+            pool_uuid=model.pool_uuid,
+            pool_name=model.pool_name,
+            pvc_name=model.pvc_name,
+            snapshot_name=model.snapshot_name,
+            ndcs=model.ndcs,
+            npcs=model.npcs,
+            blobid=model.blobid,
+            ns_id=model.ns_id,
+            lvol_priority_class=model.lvol_priority_class,
             do_replicate=model.do_replicate,
+            max_namespace_per_subsys=model.max_namespace_per_subsys,
             max_rw_iops=model.rw_ios_per_sec,
             max_rw_mbytes=model.rw_mbytes_per_sec,
             max_r_mbytes=model.r_mbytes_per_sec,
             max_w_mbytes=model.w_mbytes_per_sec,
-            allowed_hosts=[h["nqn"] for h in (model.allowed_hosts or [])],
-            policy=eff_policy.policy_name if eff_policy else "",
+            capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
+            rep_info=rep_info,
+            from_source=model.from_source
         )
 
 

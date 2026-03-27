@@ -12,6 +12,7 @@ import sys
 import uuid
 import time
 import socket
+from datetime import datetime, timezone
 from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
 from docker import DockerClient
 from kubernetes import client, config
@@ -465,7 +466,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["app_thread_core"] = vcpus[0:1]
         assigned["jm_cpu_core"] = vcpus[1:2]
         assigned["jc_singleton_core"] = vcpus[2:3]
-        assigned["lvol_poller_core"] = vcpu[3:5]
+        assigned["lvol_poller_core"] = vcpus[3:5]
         assigned["alceml_cpu_cores"] = vcpus[5:5+alceml_count]
     dp = int(len(remaining) / 2)
     if 17 > dp >= 12:
