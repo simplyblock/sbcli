@@ -266,6 +266,7 @@ class SPDKParams(BaseModel):
     system_mem: int = Field(core_utils.parse_size('4GiB'))
     fdb_connection: str = Field('')
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
@@ -360,7 +361,7 @@ def spdk_process_start(body: SPDKParams):
             'CORE_JOBNAME': node_prepration_core_name,
             'NAMESPACE': namespace,
             'FDB_CONNECTION': body.fdb_connection,
-            'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+            'SIMPLYBLOCK_DOCKER_IMAGE': body.spdk_proxy_image,
             'GRAYLOG_SERVER_IP': body.cluster_ip,
             'MODE': body.cluster_mode,
             'CLUSTER_ID': first_six_cluster_id,

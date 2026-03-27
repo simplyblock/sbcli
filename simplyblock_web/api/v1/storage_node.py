@@ -261,7 +261,7 @@ def storage_node_add():
         elif isinstance(param, str):
             format_4k = param == "true"
 
-
+    spdk_proxy_image = req_data.get('spdk_proxy_image', None)
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
         "node_addr": node_addr,
@@ -278,7 +278,8 @@ def storage_node_add():
         "namespace": namespace,
         "enable_ha_jm": not disable_ha_jm,
         "ha_jm_count": ha_jm_count,
-        "format_4k": format_4k
+        "format_4k": format_4k,
+        "spdk_proxy_image": spdk_proxy_image,
     })
 
     return utils.get_response(True)

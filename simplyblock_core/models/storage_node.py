@@ -105,6 +105,7 @@ class StorageNode(BaseNodeObject):
     active_rdma: bool = False
     socket: int = 0
     firewall_port: int = 5001
+    spdk_proxy_image: str = ""
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
