@@ -147,6 +147,8 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='Max snapshot per storage node', type=int, default=5000, dest='max_snap')
+        if self.developer_mode:
+            argument = subcommand.add_argument('--spdk-proxy-image', help='SPDK Proxy image uri', type=str, dest='spdk_proxy_image')
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
@@ -189,6 +191,8 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--force', help='Force restart', dest='force', action='store_true')
         argument = subcommand.add_argument('--ssd-pcie', help='New Nvme PCIe address to add to the storage node. Can be more than one.', type=str, default='', dest='ssd_pcie', required=False, nargs='+')
         argument = subcommand.add_argument('--force-lvol-recreate', help='Force LVol recreate on node restart even if lvol bdev was not recovered', default=False, dest='force_lvol_recreate', action='store_true')
+        if self.developer_mode:
+            argument = subcommand.add_argument('--spdk-proxy-image', help='SPDK Proxy image uri', type=str, dest='spdk_proxy_image')
 
     def init_storage_node__shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'shutdown', 'Initiates a storage node shutdown')
@@ -1013,6 +1017,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.enable_ha_jm = True
                         args.id_device_by_nqn = False
                         args.max_snap = 5000
+                        args.spdk_proxy_image = None
                     ret = self.storage_node__add_node(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.storage_node__delete(sub_command, args)
@@ -1031,6 +1036,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.spdk_debug = None
                         args.small_bufsize = 0
                         args.large_bufsize = 0
+                        args.spdk_proxy_image = None
                     ret = self.storage_node__restart(sub_command, args)
                 elif sub_command in ['shutdown']:
                     ret = self.storage_node__shutdown(sub_command, args)
