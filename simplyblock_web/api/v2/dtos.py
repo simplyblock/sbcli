@@ -14,9 +14,29 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
 
 from . import util
+
+class CapacityStatDTO(BaseModel):
+    date: int
+    size_total: int
+    size_prov: int
+    size_used: int
+    size_free: int
+    size_util: int
+
+    @staticmethod
+    def from_model(model: StatsObject):
+        return CapacityStatDTO(
+            date=model.date,
+            size_total=model.size_total,
+            size_prov=model.size_prov,
+            size_used=model.size_used,
+            size_free=model.size_free,
+            size_util=model.size_util,
+        )
 
 
 class ClusterDTO(BaseModel):
@@ -374,6 +394,4 @@ class MigrationDTO(BaseModel):
             error_message=model.error_message or "",
             started_at=model.started_at,
             completed_at=model.completed_at,
-            rep_info=rep_info,
-            from_source=model.from_source
         )
