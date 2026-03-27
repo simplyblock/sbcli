@@ -1,0 +1,128 @@
+name: E2E Scheduler
+
+# Runs 4 e2e-bootstrap variants daily (sequentially) unless a stress run is active.
+# Run 1: R25.10-Hotfix  ndcs=1 npcs=1  storage: .201-.203
+# Run 2: R25.10-Hotfix  ndcs=2 npcs=2  storage: .201-.204
+# Run 3: main           ndcs=1 npcs=1  storage: .201-.203
+# Run 4: main           ndcs=2 npcs=2  storage: .201-.204
+#
+# Infrastructure defaults not listed here are defined in e2e-bootstrap.yml.
+
+on:
+  schedule:
+    - cron: '30 18 * * *'   # daily at 12:00 AM IST (18:30 UTC)
+  workflow_dispatch:       # allow manual trigger for testing
+
+jobs:
+  # ============================================================
+  # GUARD: skip all runs if a stress workflow is in progress
+  # ============================================================
+  check-stress:
+    name: Check if stress run is active
+    runs-on: [self-hosted]
+    outputs:
+      stress_running: ${{ steps.check.outputs.stress_running }}
+    steps:
+      - name: Check for in-progress stress runs
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          count1=$(gh run list --repo "${{ github.repository }}" \
+            --workflow stress-run-bootstrap.yml --status in_progress \
+            --json databaseId --jq 'length' 2>/dev/null || echo 0)
+          count2=$(gh run list --repo "${{ github.repository }}" \
+            --workflow stress-run-only.yml --status in_progress \
+            --json databaseId --jq 'length' 2>/dev/null || echo 0)
+          if [[ "$count1" -gt 0 || "$count2" -gt 0 ]]; then
+            echo "stress_running=true" >> "$GITHUB_OUTPUT"
+            echo "Stress run in progress — skipping all scheduled e2e runs."
+          else
+            echo "stress_running=false" >> "$GITHUB_OUTPUT"
+            echo "No stress run active — proceeding."
+          fi
+
+  # ============================================================
+  # RUN 1 — R25.10-Hotfix | ndcs=1 npcs=1 | 3 storage nodes
+  # ============================================================
+  e2e-run-1:
+    name: "E2E R25.10-Hotfix 1+1"
+    needs: check-stress
+    if: needs.check-stress.outputs.stress_running != 'true'
+    uses: ./.github/workflows/e2e-bootstrap.yml
+    secrets: inherit
+    with:
+      SBCLI_BRANCH:            "R25.10-Hotfix"
+      STORAGE_PRIVATE_IPS:     "192.168.10.201 192.168.10.202 192.168.10.203"
+      MNODES:                  "192.168.10.210"
+      API_INVOKE_URL:          "http://192.168.10.210/"
+      BASTION_IP:              "192.168.10.210"
+      GRAFANA_ENDPOINT:        "http://192.168.10.210/grafana"
+      BOOTSTRAP_DATA_CHUNKS:   "1"
+      BOOTSTRAP_PARITY_CHUNKS: "1"
+      BOOTSTRAP_HA_JM_COUNT:   "4"
+      BOOTSTRAP_JOURNAL_PARTITION: "1"
+
+  # ============================================================
+  # RUN 2 — R25.10-Hotfix | ndcs=2 npcs=2 | 4 storage nodes
+  # ============================================================
+  e2e-run-2:
+    name: "E2E R25.10-Hotfix 2+2"
+    needs: [check-stress, e2e-run-1]
+    if: always() && needs.check-stress.outputs.stress_running != 'true' && needs.e2e-run-1.result != 'skipped'
+    uses: ./.github/workflows/e2e-bootstrap.yml
+    secrets: inherit
+    with:
+      SBCLI_BRANCH:            "R25.10-Hotfix"
+      STORAGE_PRIVATE_IPS:     "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
+      MNODES:                  "192.168.10.210"
+      API_INVOKE_URL:          "http://192.168.10.210/"
+      BASTION_IP:              "192.168.10.210"
+      GRAFANA_ENDPOINT:        "http://192.168.10.210/grafana"
+      BOOTSTRAP_DATA_CHUNKS:   "2"
+      BOOTSTRAP_PARITY_CHUNKS: "2"
+      BOOTSTRAP_HA_JM_COUNT:   "4"
+      BOOTSTRAP_JOURNAL_PARTITION: "1"
+
+  # ============================================================
+  # RUN 3 — main | ndcs=1 npcs=1 | 3 storage nodes
+  # ============================================================
+  e2e-run-3:
+    name: "E2E main 1+1"
+    needs: [check-stress, e2e-run-2]
+    if: always() && needs.check-stress.outputs.stress_running != 'true' && needs.e2e-run-2.result != 'skipped'
+    uses: ./.github/workflows/e2e-bootstrap.yml
+    secrets: inherit
+    with:
+      SBCLI_BRANCH:            "main"
+      STORAGE_PRIVATE_IPS:     "192.168.10.201 192.168.10.202 192.168.10.203"
+      MNODES:                  "192.168.10.210"
+      API_INVOKE_URL:          "http://192.168.10.210/"
+      BASTION_IP:              "192.168.10.210"
+      GRAFANA_ENDPOINT:        "http://192.168.10.210/grafana"
+      BOOTSTRAP_DATA_CHUNKS:   "1"
+      BOOTSTRAP_PARITY_CHUNKS: "1"
+      BOOTSTRAP_HA_JM_COUNT:   "4"
+      BOOTSTRAP_JOURNAL_PARTITION: "1"
+
+  # ============================================================
+  # RUN 4 — main | ndcs=2 npcs=2 | 4 storage nodes
+  # ============================================================
+  e2e-run-4:
+    name: "E2E main 2+2"
+    needs: [check-stress, e2e-run-3]
+    if: always() && needs.check-stress.outputs.stress_running != 'true' && needs.e2e-run-3.result != 'skipped'
+    uses: ./.github/workflows/e2e-bootstrap.yml
+    secrets: inherit
+    with:
+      SBCLI_BRANCH:            "main"
+      STORAGE_PRIVATE_IPS:     "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
+      MNODES:                  "192.168.10.210"
+      API_INVOKE_URL:          "http://192.168.10.210/"
+      BASTION_IP:              "192.168.10.210"
+      GRAFANA_ENDPOINT:        "http://192.168.10.210/grafana"
+      BOOTSTRAP_DATA_CHUNKS:   "2"
+      BOOTSTRAP_PARITY_CHUNKS: "2"
+      BOOTSTRAP_HA_JM_COUNT:   "4"
+      BOOTSTRAP_JOURNAL_PARTITION: "1"

@@ -193,3 +193,8 @@ class SNodeClient:
     def disconnect_nqn(self, nqn):
         params = {"nqn": nqn}
         return self._request("POST", "disconnect_nqn", params)
+
+
+    def ping_ip(self, ip_address):
+        params = {"ip": ip_address}
+        return self._request("GET", "ping_ip", params)

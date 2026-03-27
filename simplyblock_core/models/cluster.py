@@ -75,6 +75,7 @@ class Cluster(BaseModel):
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10
+    client_data_nic: str = ""
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

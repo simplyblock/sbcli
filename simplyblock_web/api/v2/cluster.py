@@ -53,6 +53,8 @@ class ClusterParams(BaseModel):
     cr_plural: str = ""
     cluster_ip: str = ""
     grafana_secret: str = ""
+    client_data_nic: str = ""
+
 
 @api.get('/', name='clusters:list')
 def list() -> List[ClusterDTO]:
