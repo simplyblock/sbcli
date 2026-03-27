@@ -1786,7 +1786,7 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
-        return False
+        return False, str(e)
 
     host_node = db_controller.get_storage_node_by_id(lvol.node_id)
     had_lock = None
@@ -1805,7 +1805,7 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
             if err:
                 snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
                 logger.error(err)
-                return False
+                return False, str(e)
         if not had_lock:
             had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
         new_lvol_uuid, err = snapshot_controller.clone(
@@ -1815,10 +1815,11 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
             if snapshot_uuid:
                     snapshot_controller.delete(snapshot_uuid)
             snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
-            return False
+            return False, str(e)
 
         snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
-        return new_lvol_uuid
+        return new_lvol_uuid, False
     except Exception as e:
         logger.error(e)
-        return False
+        return False, str(e)
+    

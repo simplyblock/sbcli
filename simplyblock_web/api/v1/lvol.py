@@ -314,5 +314,5 @@ def clone():
     clone_name = cl_data['clone_name']
     new_size = cl_data.get('new_size', None)
     pvc_name = cl_data.get('pvc_name', None)
-    ret = lvol_controller.clone_lvol(lvol_id, clone_name, new_size, pvc_name)
-    return utils.get_response(ret)
+    clone_id, error = lvol_controller.clone_lvol(lvol_id, clone_name, new_size, pvc_name)
+    return utils.get_response(clone_id, error, http_code=400)
