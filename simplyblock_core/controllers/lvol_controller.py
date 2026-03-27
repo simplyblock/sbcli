@@ -2206,23 +2206,29 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
 
     try:
         snapshot_uuid = None
-        for i in range(10):
-            snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
-            if err:
-                logger.error(err)
-                time.sleep(3)
-                continue
-        else:
-            if not snapshot_uuid:
-                logger.error("Failed to create snapshot for clone after 10 attempts")
-                return False
+        for snap in db_controller.get_snapshots_by_lvol_id(lvol_id):
+            if snap.snap_name == clone_name:
+                logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.snap_uuid}, using it for cloning")
+                snapshot_uuid = snap.snap_uuid
+                break
+        if not snapshot_uuid:
+            for i in range(10):
+                snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
+                if err:
+                    logger.error(err)
+                    time.sleep(1)
+                    continue
+            else:
+                if not snapshot_uuid:
+                    logger.error("Failed to create snapshot for clone after 10 attempts")
+                    return False
         new_lvol_uuid = None
         for i in range(10):
-            new_lvol_uuid, err = snapshot_controller.clone(snapshot_uuid, clone_name, new_size, pvc_name,
-                                                           delete_snap_on_lvol_delete=True)
+            new_lvol_uuid, err = snapshot_controller.clone(
+                snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True)
             if err:
                 logger.error(err)
-                time.sleep(3)
+                time.sleep(1)
                 continue
         else:
             if not new_lvol_uuid:
