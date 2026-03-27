@@ -74,7 +74,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    if snode.lvol_sync_del():
+    if snode.lvol_sync_del() and lock:
         logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
         return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
@@ -441,7 +441,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.exception(msg)
         return False, msg
 
-    if snode.lvol_sync_del():
+    if snode.lvol_sync_del() and lock:
         logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
         return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
