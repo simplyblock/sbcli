@@ -133,7 +133,6 @@ def add(lvol_id, snapshot_name, backup=False):
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = "Secondary node is in down status, can not create snapshot"
                     logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
                     secondary_nodes.append(sec_node)
