@@ -49,7 +49,7 @@ data:
     type: FILESYSTEM
     config:
       directory: /mnt/thanos
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
