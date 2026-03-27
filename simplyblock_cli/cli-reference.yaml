@@ -244,6 +244,11 @@ commands:
             type: int
             default: 5000
             private: true
+          - name: "--spdk-proxy-image"
+            help: "SPDK Proxy image uri"
+            dest: spdk_proxy_image
+            type: str
+            private: true
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >
@@ -393,6 +398,11 @@ commands:
             type: bool
             action: store_true
             default: False
+          - name: "--spdk-proxy-image"
+            help: "SPDK Proxy image uri"
+            dest: spdk_proxy_image
+            type: str
+            private: true
       - name: shutdown
         help: "Initiates a storage node shutdown"
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
