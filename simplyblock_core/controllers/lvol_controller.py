@@ -2196,8 +2196,7 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     return True, None
 
 
-def clone_lvol(lvol_id, clone_name):
-    # create snapshot and clone it
+def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2219,7 +2218,8 @@ def clone_lvol(lvol_id, clone_name):
                 return False
         new_lvol_uuid = None
         for i in range(10):
-            new_lvol_uuid, err = snapshot_controller.clone(snapshot_uuid, clone_name)
+            new_lvol_uuid, err = snapshot_controller.clone(snapshot_uuid, clone_name, new_size, pvc_name,
+                                                           delete_snap_on_lvol_delete=True)
             if err:
                 logger.error(err)
                 time.sleep(3)
