@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from json import JSONDecodeError
 from typing import Any, Optional
 
@@ -12,6 +14,12 @@ from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 logger = utils.get_logger()
+
+# Shared per-node cache for expensive read-only RPCs (e.g. bdev_get_bdevs, nvmf_get_subsystems).
+# Key: (ip_address, port, method_name), Value: (timestamp, result)
+_rpc_cache: dict[tuple, tuple[float, Any]] = {}
+_rpc_cache_lock = threading.Lock()
+RPC_CACHE_TTL_SEC = 15  # cached results are valid for this many seconds
 
 
 _response_schema = {
@@ -100,6 +108,21 @@ class RPCClient:
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
 
+    def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
+        """Like _request but returns a cached result if one exists within cache_ttl seconds."""
+        cache_key = (self.ip_address, self.port, method, json.dumps(params, sort_keys=True) if params else None)
+        now = time.monotonic()
+        with _rpc_cache_lock:
+            if cache_key in _rpc_cache:
+                ts, cached_result = _rpc_cache[cache_key]
+                if now - ts < cache_ttl:
+                    logger.debug("Cache hit for %s on %s:%s", method, self.ip_address, self.port)
+                    return cached_result
+        result = self._request(method, params)
+        with _rpc_cache_lock:
+            _rpc_cache[cache_key] = (now, result)
+        return result
+
     def _request(self, method, params=None):
         ret, _ = self._request2(method, params)
         return ret
@@ -171,7 +194,7 @@ class RPCClient:
         return self._request("spdk_get_version")
 
     def subsystem_list(self, nqn_name=None):
-        data = self._request("nvmf_get_subsystems")
+        data = self._request_cached("nvmf_get_subsystems")
         if data and nqn_name:
             for d in data:
                 if d['nqn'] == nqn_name:
@@ -433,7 +456,7 @@ class RPCClient:
         params = None
         if name:
             params = {"name": name}
-        return self._request("bdev_get_bdevs", params)
+        return self._request_cached("bdev_get_bdevs", params)
 
     def resize_lvol(self, lvol_bdev, blockcnt):
         params = {
