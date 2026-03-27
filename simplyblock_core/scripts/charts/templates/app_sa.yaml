@@ -25,7 +25,7 @@ rules:
     resources: ["simplyblockpools/status", "simplyblocklvols/status", "simplyblockstorageclusters/status", "simplyblockstoragenodes/status", "simplyblockdevices/status", "simplyblocktasks/status"]
     verbs: ["get", "patch", "update"]
   - apiGroups: ["simplyblock.simplyblock.io"] 
-    resources: ["simplyblockpools", "simplyblocklvols", "simplyblockstorageclusters", "simplyblockstoragenodes", "simplyblockdevices", "simplyblocktasks"]
+    resources: ["namespaces","simplyblockpools", "simplyblocklvols", "simplyblockstorageclusters", "simplyblockstoragenodes", "simplyblockdevices", "simplyblocktasks"]
     verbs: ["get","list" ,"patch", "update", "watch"]
 
 ---

@@ -36,9 +36,6 @@ spec:
     - name: host-rootfs
       hostPath:
         path: /
-    - name: foundationdb
-      hostPath:
-        path: /var/foundationdb
     - name: etc-simplyblock
       hostPath:
         path: /var/simplyblock
@@ -65,14 +62,6 @@ spec:
         name: simplyblock-fluent-bit-config
     {% endif %}
 
-  initContainers:
-    - name: copy-script
-      image: public.ecr.aws/simply-block/busybox
-      command: ["sh", "-c", "echo \"{{ FDB_CONNECTION }}\" > /etc/foundationdb/fdb.cluster"]
-      volumeMounts:
-        - name: foundationdb
-          mountPath: /etc/foundationdb
-
   containers:
     - name: spdk-container
       image: {{ SPDK_IMAGE }}
@@ -98,16 +87,6 @@ spec:
           value: "{{ NSOCKET }}"
         - name: FW_PORT
           value: "{{ FW_PORT }}"
-        - name: SPDKCSI_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: simplyblock-csi-secret
-              key: secret.json
-        - name: CLUSTER_CONFIG
-          valueFrom:
-            configMapKeyRef:
-              name: simplyblock-csi-cm
-              key: config.json
       lifecycle:
         postStart:
           exec:

@@ -12,6 +12,7 @@ class LVol(BaseModel):
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
+    STATUS_DELETED = 'deleted'
 
     _STATUS_CODE_MAP = {
         STATUS_ONLINE: 1,
@@ -66,6 +67,9 @@ class LVol(BaseModel):
     fabric: str = "tcp"
     ndcs: int = 0
     npcs: int = 0
+    do_replicate: bool = False
+    replication_node_id: str = ""
+    from_source: bool = True
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)

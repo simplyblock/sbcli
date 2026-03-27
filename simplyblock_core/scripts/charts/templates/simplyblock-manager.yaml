@@ -23,7 +23,7 @@ spec:
         fsGroup: 65532
       serviceAccountName: simplyblock-manager
       containers:
-        - image: simplyblock/simplyblock-manager:main
+        - image: simplyblock/simplyblock-manager:snapshot_replication
           imagePullPolicy: Always
           name: manager
           env:
@@ -145,6 +145,7 @@ rules:
   - simplyblockstoragenodes
   - simplyblockdevices
   - simplyblocktasks
+  - simplyblocksnapshotreplications
   verbs:
   - create
   - delete
@@ -162,6 +163,7 @@ rules:
   - simplyblockstoragenodes/finalizers
   - simplyblockdevices/finalizers
   - simplyblocktasks/finalizers
+  - simplyblocksnapshotreplications/finalizers
   verbs:
   - update
   - delete
@@ -174,6 +176,7 @@ rules:
   - simplyblockstoragenodes/status
   - simplyblockdevices/status
   - simplyblocktasks/status
+  - simplyblocksnapshotreplications/status
   verbs:
   - get
   - patch

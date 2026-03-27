@@ -261,15 +261,19 @@ class VolumeDTO(BaseModel):
     crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
     lvol_priority_class: util.Unsigned
+    do_replicate: bool = False
     max_namespace_per_subsys: int
     max_rw_iops: util.Unsigned
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
     capacity: CapacityStatDTO
+    rep_info: Optional[dict] = None
+    from_source: bool = True
+
 
     @staticmethod
-    def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None):
+    def from_model(model: LVol, request: Request, cluster_id: str, stat_obj: Optional[StatsObject]=None, rep_info=None):
         return VolumeDTO(
             id=UUID(model.get_id()),
             name=model.lvol_name,
@@ -309,10 +313,13 @@ class VolumeDTO(BaseModel):
             blobid=model.blobid,
             ns_id=model.ns_id,
             lvol_priority_class=model.lvol_priority_class,
+            do_replicate=model.do_replicate,
             max_namespace_per_subsys=model.max_namespace_per_subsys,
             max_rw_iops=model.rw_ios_per_sec,
             max_rw_mbytes=model.rw_mbytes_per_sec,
             max_r_mbytes=model.r_mbytes_per_sec,
             max_w_mbytes=model.w_mbytes_per_sec,
             capacity=CapacityStatDTO.from_model(stat_obj if stat_obj else StatsObject()),
+            rep_info=rep_info,
+            from_source=model.from_source
         )

@@ -22,6 +22,7 @@ class JobSchedule(BaseModel):
     FN_BALANCING_AFTER_DEV_REMOVE = "balancing_on_dev_rem"
     FN_BALANCING_AFTER_DEV_EXPANSION = "balancing_on_dev_add"
     FN_JC_COMP_RESUME = "jc_comp_resume"
+    FN_SNAPSHOT_REPLICATION = "snapshot_replication"
     FN_LVOL_SYNC_DEL = "lvol_sync_del"
 
     canceled: bool = False

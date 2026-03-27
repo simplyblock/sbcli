@@ -5,10 +5,11 @@ import math
 import time
 import uuid
 
-from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller
 
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
@@ -35,16 +36,19 @@ def add(lvol_id, snapshot_name):
         return False, msg
 
     if lvol.cloned_from_snap:
-        snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
-        ref_count = snap.ref_count
-        if snap.snap_ref_id:
-            ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
-            ref_count = ref_snap.ref_count
+        try:
+            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            ref_count = snap.ref_count
+            if snap.snap_ref_id:
+                ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
+                ref_count = ref_snap.ref_count
 
-        if ref_count >= constants.MAX_SNAP_COUNT:
-            msg = f"Can not create more than {constants.MAX_SNAP_COUNT} snaps from this clone"
-            logger.error(msg)
-            return False, msg
+            if ref_count >= constants.MAX_SNAP_COUNT:
+                msg = f"Can not create more than {constants.MAX_SNAP_COUNT} snaps from this clone"
+                logger.error(msg)
+                return False, msg
+        except KeyError:
+            pass
 
     for sn in db_controller.get_snapshots():
         if sn.cluster_id == pool.cluster_id:
@@ -224,13 +228,39 @@ def add(lvol_id, snapshot_name):
             snap.snap_ref_id = original_snap.get_id()
             snap.write_to_db(db_controller.kv_store)
 
-    logger.info("Done")
+    for sn in db_controller.get_snapshots(cluster.get_id()):
+        if sn.get_id() == snap.get_id():
+            continue
+        if sn.lvol.get_id() == lvol_id:
+            if not sn.next_snap_uuid:
+                sn.next_snap_uuid = snap.get_id()
+                snap.prev_snap_uuid = sn.get_id()
+                sn.write_to_db()
+                snap.write_to_db()
+                break
+
     snapshot_events.snapshot_create(snap)
+    if lvol.do_replicate:
+        task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
+        if task:
+            snapshot_events.replication_task_created(snap)
+    if lvol.cloned_from_snap:
+        lvol_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+        if lvol_snap.source_replicated_snap_uuid:
+            try:
+                org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
+                if org_snap and org_snap.status == SnapShot.STATUS_ONLINE:
+                    task = tasks_controller.add_snapshot_replication_task(
+                        snap.cluster_id, org_snap.lvol.node_id, snap.get_id(), replicate_to_source=True)
+                    if task:
+                        logger.info("Created snapshot replication task on original node")
+            except KeyError:
+                pass
     return snap.uuid, False
 
 
-def list(node_id=None):
-    snaps = db_controller.get_snapshots()
+def list(all=False, cluster_id=None, with_details=False):
+    snaps = db_controller.get_snapshots(cluster_id)
     data = []
     for snap in snaps:
         if node_id:
@@ -241,7 +271,7 @@ def list(node_id=None):
         for lvol in db_controller.get_lvols():
             if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
                 clones.append(lvol.get_id())
-        data.append({
+        d = {
             "UUID": snap.uuid,
             "BDdev UUID": snap.snap_uuid,
             "BlobID": snap.blobid,
@@ -253,7 +283,13 @@ def list(node_id=None):
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
             "Base Snapshot": snap.snap_ref_id,
             "Clones": clones,
-        })
+        }
+        if with_details:
+            d["Replication target snap"] = snap.target_replicated_snap_uuid
+            d["Replication source snap"] = snap.source_replicated_snap_uuid
+            d["Rrev snap"] = snap.prev_snap_uuid
+            d["Next snap"] = snap.next_snap_uuid
+        data.append(d)
     return utils.print_table(data)
 
 
@@ -264,10 +300,17 @@ def delete(snapshot_uuid, force_delete=False):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
+    if snap.status == SnapShot.STATUS_IN_REPLICATION:
+        logger.error("Snapshot is in replication")
+        return False
+
     try:
         snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
     except KeyError:
         logger.exception(f"Storage node not found {snap.lvol.node_id}")
+        if force_delete:
+            snap.remove(db_controller.kv_store)
+            return True
         return False
 
     clones = []
@@ -364,6 +407,9 @@ def delete(snapshot_uuid, force_delete=False):
             lvol_controller.delete_lvol(base_lvol.get_id())
     except KeyError:
         pass
+
+    if snap.target_replicated_snap_uuid:
+        delete_replicated(snap.uuid)
 
     logger.info("Done")
     return True
@@ -504,7 +550,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         lvol.crypto_key1 = snap.lvol.crypto_key1
         lvol.crypto_key2 = snap.lvol.crypto_key2
 
-    conv_new_size = 0  
+    conv_new_size = 0
     if new_size:
         conv_new_size = math.ceil(new_size / (1024 * 1024 * 1024)) * 1024 * 1024 * 1024
         if snap.lvol.size > conv_new_size:
@@ -608,32 +654,96 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     return lvol.uuid, False
 
 
-def list_by_node(node_id=None, is_json=False):
-    snaps = db_controller.get_snapshots()
-    snaps = sorted(snaps, key=lambda snap: snap.created_at)
+def list_replication_tasks(cluster_id):
+    tasks = db_controller.get_job_tasks(cluster_id)
+
     data = []
-    for snap in snaps:
-        if node_id:
-            if snap.lvol.node_id != node_id:
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            logger.debug(task)
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
                 continue
-        logger.debug(snap)
-        clones = []
-        for lvol in db_controller.get_lvols():
-            if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
-                clones.append(lvol.get_id())
-        data.append({
-            "UUID": snap.uuid,
-            "BDdev UUID": snap.snap_uuid,
-            "BlobID": snap.blobid,
-            "Name": snap.snap_name,
-            "Size": utils.humanbytes(snap.used_size),
-            "BDev": snap.snap_bdev.split("/")[1],
-            "Node ID": snap.lvol.node_id,
-            "LVol ID": snap.lvol.get_id(),
-            "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
-            "Base Snapshot": snap.snap_ref_id,
-            "Clones": clones,
-        })
-    if is_json:
-        return json.dumps(data, indent=2)
+
+            duration = ""
+            try:
+                if task.status == JobSchedule.STATUS_RUNNING:
+                    duration = utils.strfdelta_seconds(int(time.time()) - task.function_params["start_time"])
+                elif "end_time" in task.function_params:
+                    duration = utils.strfdelta_seconds(
+                        task.function_params["end_time"] - task.function_params["start_time"])
+            except Exception as e:
+                logger.error(e)
+            status = task.status
+            if task.canceled:
+                status = "cancelled"
+            replicate_to = "target"
+            if "replicate_to_source" in task.function_params:
+                if task.function_params["replicate_to_source"] is True:
+                    replicate_to = "source"
+            offset = 0
+            if "offset" in task.function_params:
+                offset = task.function_params["offset"]
+            data.append({
+                "Task ID": task.uuid,
+                "Snapshot ID": snap.uuid,
+                "Size": utils.humanbytes(snap.used_size),
+                "Duration": duration,
+                "Offset": offset,
+                "Status": status,
+                "Replicate to": replicate_to,
+                "Result": task.function_result,
+                "Cluster ID": task.cluster_id,
+            })
     return utils.print_table(data)
+
+
+def delete_replicated(snapshot_id):
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_id)
+    except KeyError:
+        logger.error(f"Snapshot not found {snapshot_id}")
+        return False
+
+    try:
+        target_replicated_snap = db_controller.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+        logger.info("Deleting replicated snapshot %s", target_replicated_snap.uuid)
+        ret = delete(target_replicated_snap.uuid)
+        if not ret:
+            logger.error("Failed to delete snapshot %s", target_replicated_snap.uuid)
+            return False
+
+    except KeyError:
+        logger.error(f"Snapshot not found {snap.target_replicated_snap_uuid}")
+        return False
+
+    return True
+
+
+def get(snapshot_uuid):
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+    except KeyError:
+        logger.error(f"Snapshot not found {snapshot_uuid}")
+        return False
+
+    return json.dumps(snap.get_clean_dict(), indent=2)
+
+
+def set(snapshot_uuid, attr, value) -> bool:
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+    except KeyError:
+        logger.error(f"Snapshot not found {snapshot_uuid}")
+        return False
+
+    if attr not in snap.get_attrs_map():
+        raise KeyError('Attribute not found')
+
+    value = snap.get_attrs_map()[attr]['type'](value)
+    logger.info(f"Setting {attr} to {value}")
+    setattr(snap, attr, value)
+    snap.write_to_db()
+    return True
+

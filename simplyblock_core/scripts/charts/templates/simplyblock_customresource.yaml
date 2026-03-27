@@ -110,6 +110,10 @@ spec:
   spdkDebug: {{ .Values.simplyblock.storageNodes.spdkDebug }}
   {{- end }}
 
+  {{- if .Values.simplyblock.storageNodes.spdkImage }}
+  spdkImage: {{ .Values.simplyblock.storageNodes.spdkImage }}
+  {{- end }}
+
   {{- if hasKey .Values.simplyblock.storageNodes "coreIsolation" }}
   coreIsolation: {{ .Values.simplyblock.storageNodes.coreIsolation }}
   {{- end }}
