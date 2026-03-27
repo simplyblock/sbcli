@@ -299,6 +299,7 @@ def list(node_id=None):
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
             "Base Snapshot": snap.snap_ref_id,
             "Clones": clones,
+            "Status": snap.status,
         })
     return utils.print_table(data)
 
