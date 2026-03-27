@@ -199,8 +199,9 @@ class K8sUtils:
             raise RuntimeError(f"[K8sUtils] spdk.sock not found in {pod_name}")
         return sock
 
-    def dump_lvstore_k8s(self, sbcli_cmd: str, storage_node_id: str,
-                          storage_node_ip: str, logs_path: str) -> None:
+    def dump_lvstore_k8s(self, storage_node_id: str,
+                          storage_node_ip: str, logs_path: str,
+                          sbcli_cmd: str = "sbctl") -> None:
         """
         K8s equivalent of ssh_utils.dump_lvstore:
           1. Run sbcli sn dump-lvstore via admin pod.
@@ -492,7 +493,7 @@ class K8sSbcliUtils:
             return
 
         cmd = (
-            f"{self.sbcli_cmd} lvol add"
+            f"{self.sbcli_cmd} -d lvol add"
             f" {shlex.quote(lvol_name)} {size} {shlex.quote(pool_name)}"
         )
         if host_id:
@@ -515,7 +516,7 @@ class K8sSbcliUtils:
                 return
             raise Exception(f"No such Lvol {lvol_name} found!!")
 
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} lvol delete {lvol_id}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol delete {lvol_id}")
 
         attempt = 0
         while attempt < max_attempt:
@@ -537,7 +538,7 @@ class K8sSbcliUtils:
             self.delete_lvol(lvol_name=name)
 
     def resize_lvol(self, lvol_id, new_size):
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} lvol resize {lvol_id} {new_size}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol resize {lvol_id} {new_size}")
 
     # ── storage node methods ──────────────────────────────────────────────────
 
@@ -576,17 +577,17 @@ class K8sSbcliUtils:
 
     def shutdown_node(self, node_uuid, expected_error_code=None, force=False):
         force_flag = " --force" if force else ""
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} sn shutdown {node_uuid}{force_flag}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn shutdown {node_uuid}{force_flag}")
 
     def suspend_node(self, node_uuid, expected_error_code=None):
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} sn suspend {node_uuid}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn suspend {node_uuid}")
 
     def resume_node(self, node_uuid):
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} sn resume {node_uuid}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn resume {node_uuid}")
 
     def restart_node(self, node_uuid, expected_error_code=None, force=False):
         force_flag = " --force" if force else ""
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} sn restart {node_uuid}{force_flag}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn restart {node_uuid}{force_flag}")
 
     def wait_for_storage_node_status(self, node_id, status, timeout=60):
         actual_status = None
@@ -658,14 +659,14 @@ class K8sSbcliUtils:
             return
         cid = cluster_id or self.cluster_id
         self.logger.info(f"[pool] Creating pool '{pool_name}' in cluster '{cid}'")
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} pool add {shlex.quote(pool_name)} {cid}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d pool add {shlex.quote(pool_name)} {cid}")
 
     def delete_storage_pool(self, pool_name):
         pool_id = self.get_storage_pool_id(pool_name)
         if not pool_id:
             self.logger.info("Pool does not exist. Skipping")
             return
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} pool delete {pool_id}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d pool delete {pool_id}")
 
     def delete_all_storage_pools(self):
         for name in list(self.list_storage_pools().keys()):
@@ -829,7 +830,7 @@ class K8sSbcliUtils:
 
     def add_snapshot(self, lvol_id: str, snapshot_name: str, retry: int = 10):
         self.k8s.exec_sbcli(
-            f"{self.sbcli_cmd} snapshot add {lvol_id} {shlex.quote(snapshot_name)}"
+            f"{self.sbcli_cmd} -d snapshot add {lvol_id} {shlex.quote(snapshot_name)}"
         )
         self.wait_for_snapshot(snapshot_name, present=True, timeout=60)
 
@@ -882,7 +883,7 @@ class K8sSbcliUtils:
                 self.logger.info(f"Snapshot not found (skip_error=True). snap_name={snap_name}")
                 return
             raise Exception(f"Snapshot not found. snap_name={snap_name}")
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} snapshot delete {snap_id}")
+        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d snapshot delete {snap_id}")
         # Wait for it to disappear from the list
         resolve_name = snap_name or next(
             (k for k, v in self.list_snapshots().items() if v == snap_id), None
@@ -906,7 +907,7 @@ class K8sSbcliUtils:
     def add_clone(self, snapshot_id: str, clone_name: str):
         """Create a clone lvol from snapshot_id and wait for it to appear in lvol list."""
         out, err = self.k8s.exec_sbcli(
-            f"{self.sbcli_cmd} snapshot clone {snapshot_id} {shlex.quote(clone_name)}"
+            f"{self.sbcli_cmd} -d snapshot clone {snapshot_id} {shlex.quote(clone_name)}"
         )
         # Poll until the clone appears in lvol list
         deadline = time.time() + 60

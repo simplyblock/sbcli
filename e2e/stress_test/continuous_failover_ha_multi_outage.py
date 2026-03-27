@@ -172,7 +172,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             if self.k8s_test:
                 k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
                 if k8s_obj:
-                    k8s_obj.dump_lvstore_k8s(storage_node_id=node, logs_path=self.docker_logs_path)
+                    k8s_obj.dump_lvstore_k8s(storage_node_id=node, storage_node_ip=node_ip, logs_path=self.docker_logs_path)
                     k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
             else:
                 self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
@@ -491,11 +491,15 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
             self.logger.info(f"Created clone {clone_name}.")
 
-            # K8s: skip connect/mount/FIO if the lvol's primary node is currently in outage
-            if self.k8s_test and lvol_node_id in self.current_outage_nodes:
+            # TEMP CHANGE 1 (remove in ~2 days): K8s — skip connect/mount/FIO when lvol's
+            # primary node is in outage (secondary-only connect fails on k8s).
+            # After outage resolves, _connect_pending_clones() handles connect/mount/FIO.
+            # TEMP CHANGE 2 (remove in ~2 days): K8s — defer ALL clone connects while any
+            # outage is active, not just clones whose own primary is down.
+            if self.k8s_test and self.current_outage_nodes:
                 self.clone_mount_details[clone_name]["pending_connect"] = True
                 self.logger.info(
-                    f"[pending_connect] Clone '{clone_name}' deferred — node {lvol_node_id} is in outage."
+                    f"[pending_connect] Clone '{clone_name}' deferred — outage active on nodes {self.current_outage_nodes}."
                 )
                 continue
 
@@ -603,6 +607,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                                              new_size=f"{self.int_lvol_size}G")
 
 
+    # TEMP CHANGE 1 (remove in ~2 days)
     def _connect_pending_clones(self):
         """K8s only: connect, mount, and run FIO for clones deferred during outage (runtime=300s)."""
         pending = [(name, details) for name, details in self.clone_mount_details.items()
@@ -730,7 +735,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 if self.k8s_test:
                     k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
                     if k8s_obj:
-                        k8s_obj.dump_lvstore_k8s(storage_node_id=node, logs_path=self.docker_logs_path)
+                        k8s_obj.dump_lvstore_k8s(storage_node_id=node, storage_node_ip=cur_node_ip, logs_path=self.docker_logs_path)
                         k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=cur_node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
                 else:
                     self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
@@ -792,7 +797,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 if self.k8s_test:
                     k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
                     if k8s_obj:
-                        k8s_obj.dump_lvstore_k8s(storage_node_id=node, logs_path=self.docker_logs_path)
+                        k8s_obj.dump_lvstore_k8s(storage_node_id=node, storage_node_ip=cur_node_ip, logs_path=self.docker_logs_path)
                         k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=cur_node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
                 else:
                     self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],

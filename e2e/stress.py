@@ -4,6 +4,7 @@ import traceback
 import os
 import time
 import subprocess
+import shutil
 from __init__ import get_stress_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
@@ -139,6 +140,16 @@ def main():
         finally:
             if log_path:
                 logger.info(f"Test logs saved at: {log_path}")
+            # Copy e2e/logs/ folder to NFS share so automation logs are accessible post-run
+            if log_path:
+                logs_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+                if os.path.isdir(logs_src):
+                    logs_dest = os.path.join(log_path, "automation_logs")
+                    try:
+                        shutil.copytree(logs_src, logs_dest, dirs_exist_ok=True)
+                        logger.info(f"Automation logs copied to: {logs_dest}")
+                    except Exception as _copy_err:
+                        logger.warning(f"Failed to copy automation logs to NFS: {_copy_err}")
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
