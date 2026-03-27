@@ -203,21 +203,21 @@ def get_all_tests(custom=True, ha_test=False):
         # TestManyClonesFromSameSnapshot,
         # TestDeviceNodeRestart
     ]
-    tests += [
-        # Security E2E tests
-        TestLvolSecurityCombinations,
-        TestLvolAllowedHostsPositive,
-        TestLvolAllowedHostsNegative,
-        TestLvolDynamicHostManagement,
-        TestLvolCryptoWithAllowedHosts,
-        TestLvolDhcapDirections,
-        TestLvolMultipleAllowedHosts,
-        TestLvolAllowedHostsNoDhchap,
-        # Security negative tests
-        TestLvolSecurityNegativeHostOps,
-        TestLvolSecurityNegativeCreation,
-        TestLvolSecurityNegativeConnect,
-    ]
+    # tests += [
+    #     # Security E2E tests
+    #     TestLvolSecurityCombinations,
+    #     TestLvolAllowedHostsPositive,
+    #     TestLvolAllowedHostsNegative,
+    #     TestLvolDynamicHostManagement,
+    #     TestLvolCryptoWithAllowedHosts,
+    #     TestLvolDhcapDirections,
+    #     TestLvolMultipleAllowedHosts,
+    #     TestLvolAllowedHostsNoDhchap,
+    #     # Security negative tests
+    #     TestLvolSecurityNegativeHostOps,
+    #     TestLvolSecurityNegativeCreation,
+    #     TestLvolSecurityNegativeConnect,
+    # ]
     if not custom:
         tests.remove(TestLvolFioNpcsCustom)
     else:

@@ -342,6 +342,19 @@ class K8sUtils:
             f"[K8sUtils] snode-spdk-pod on {k8s_node} did not reach Running within {timeout}s"
         )
 
+    def restart_spdk_pod(self, node_ip: str) -> None:
+        """
+        K8s equivalent of ssh_utils.stop_spdk_process:
+        delete the SPDK pod on the given node so Kubernetes restarts it automatically.
+        """
+        try:
+            pod_name = self.get_spdk_pod_name(node_ip)
+            self.logger.info(f"[restart_spdk_pod] Deleting pod {pod_name} on {node_ip}")
+            self._exec_kubectl(f"kubectl delete pod {pod_name} -n {self.namespace}")
+            self.logger.info(f"[restart_spdk_pod] Pod {pod_name} deleted; waiting for restart")
+        except Exception as e:
+            self.logger.warning(f"[restart_spdk_pod] FAILED for {node_ip}: {e}")
+
     # ── Cluster credentials ──────────────────────────────────────────────────
 
     def get_cluster_credentials(self, sbcli_cmd: str = "sbctl") -> tuple:
@@ -918,3 +931,139 @@ class K8sSbcliUtils:
             self.logger.info(f"[add_clone] Waiting for '{clone_name}' to appear in lvol list...")
             time.sleep(3)
         raise TimeoutError(f"[add_clone] '{clone_name}' did not appear in lvol list within 60s")
+
+    # ── task / balancing methods ──────────────────────────────────────────────
+
+    def get_task_subtasks(self, task_id: str) -> list:
+        """
+        Return list of subtask dicts for the given master task_id.
+
+        Parses the output of ``cluster get-subtasks <task_id>`` which uses the
+        same table format as ``cluster list-tasks``.
+
+        Each dict contains: id, function_name, status.
+        """
+        try:
+            out = self._run(f"{self.sbcli_cmd} cluster get-subtasks {task_id}")
+        except Exception as e:
+            self.logger.warning(f"[get_task_subtasks] Failed to fetch subtasks for {task_id}: {e}")
+            return []
+
+        subtasks = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith("+") or "Task ID" in line:
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            # ['', sub_id, target_id, function, retry, status, result, updated_at, '']
+            if len(parts) < 6:
+                continue
+            sub_id = parts[1]
+            if not sub_id or len(sub_id) != 36 or sub_id.count("-") != 4:
+                continue
+            subtasks.append({
+                "id": sub_id,
+                "function_name": parts[3] if len(parts) > 3 else "",
+                "status": parts[5] if len(parts) > 5 else "",
+            })
+        return subtasks
+
+    def _wait_for_balancing_subtasks(self, node_id: str, timeout: int = 600) -> None:
+        """
+        After a node comes back online, find the latest ``balancing_on_restart``
+        master task and poll its subtasks until all are ``done``.
+
+        Polls every 15 s for up to *timeout* seconds (default 10 min).
+        Logs a warning (does not raise) if the timeout is reached so the test
+        can continue to the health-check step.
+        """
+        self.logger.info(
+            f"[balancing] Waiting for balancing_on_restart subtasks after node {node_id} recovery."
+        )
+        tasks = self.get_cluster_tasks(self.cluster_id)
+        balancing_tasks = [t for t in tasks if "balancing_on" in t.get("function_name", "")]
+
+        if not balancing_tasks:
+            self.logger.info("[balancing] No balancing_on_restart tasks found. Skipping subtask check.")
+            return
+
+        # Use the most recently updated balancing task
+        latest_task = max(balancing_tasks, key=lambda t: t["date"])
+        task_id = latest_task["id"]
+        self.logger.info(
+            f"[balancing] Latest balancing task: {task_id} status={latest_task['status']}"
+        )
+
+        if latest_task["status"] == "done":
+            self.logger.info(f"[balancing] Task {task_id} is already done.")
+            return
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            subtasks = self.get_task_subtasks(task_id)
+            if not subtasks:
+                self.logger.info(f"[balancing] No subtasks returned for {task_id} yet. Waiting 15s…")
+                time.sleep(15)
+                continue
+
+            done_count = sum(1 for st in subtasks if st["status"] == "done")
+            total = len(subtasks)
+            self.logger.info(
+                f"[balancing] Task {task_id}: {done_count}/{total} subtasks done."
+            )
+            if done_count == total:
+                self.logger.info(f"[balancing] All {total} subtasks done for task {task_id}.")
+                return
+
+            time.sleep(15)
+
+        self.logger.warning(
+            f"[balancing] Timed out after {timeout}s waiting for subtasks of task {task_id}. "
+            f"Proceeding to health-check anyway."
+        )
+
+    def wait_for_health_status(self, node_id, status, timeout=60, device_id=None):
+        """
+        K8s equivalent of SbcliUtils.wait_for_health_status.
+
+        Before checking the node's ``health_check`` field this method first
+        waits for all ``balancing_on_restart`` subtasks to complete (up to
+        10 minutes), then polls the node health flag until it matches *status*.
+
+        The ``device_id`` branch is not supported in K8s mode (no REST API);
+        a warning is logged and the method returns None if device_id is given.
+        """
+        if device_id:
+            self.logger.warning(
+                "[K8s] wait_for_health_status: device_id branch not supported in K8s mode. "
+                "Skipping device health check."
+            )
+            return None
+
+        # Step 1: wait for balancing_on_restart subtasks to finish
+        self._wait_for_balancing_subtasks(node_id, timeout=600)
+
+        # Step 2: poll node health_check flag
+        actual_status = None
+        status_list = status if isinstance(status, list) else [status]
+        node_details = None
+        while timeout > 0:
+            node_details = self.get_storage_node_details(node_id)
+            actual_status = node_details[0].get("health_check")
+            if actual_status in status_list:
+                return node_details[0]
+            self.logger.info(
+                f"[health_check] node={node_id} expected={status_list} actual={actual_status}"
+            )
+            sleep_n_sec(1)
+            timeout -= 1
+
+        # Mirror sbcli_utils: if waiting for False and node is not offline, assert True
+        if node_details and False in status_list and node_details[0].get("status") != "offline":
+            assert actual_status is True, "Health Status not True for node not in offline state"
+            return node_details[0]
+
+        raise TimeoutError(
+            f"Timed out waiting for health_check, node_id={node_id}, "
+            f"Expected: {status_list}, Actual: {actual_status}"
+        )
