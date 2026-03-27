@@ -2298,15 +2298,31 @@ def clone_lvol(lvol_id, clone_name):
         return False
 
     try:
-        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
-        if err:
-            logger.error(err)
-            return False
-        new_lvol_uuid, err = snapshot_controller.clone(snapshot_uuid, clone_name)
-        if err:
-            logger.error(err)
-            return False
-        new_lvol = db_controller.get_lvol_by_id(new_lvol_uuid)
+        snapshot_uuid = None
+        for i in range(10):
+            snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
+            if err:
+                logger.error(err)
+                time.sleep(3)
+                continue
+        else:
+            if not snapshot_uuid:
+                logger.error("Failed to create snapshot for clone after 10 attempts")
+                return False
+        new_lvol_uuid = None
+        for i in range(10):
+            new_lvol_uuid, err = snapshot_controller.clone(snapshot_uuid, clone_name)
+            if err:
+                logger.error(err)
+                time.sleep(3)
+                continue
+        else:
+            if not new_lvol_uuid:
+                logger.error("Failed to clone lvol after 10 attempts")
+                if snapshot_uuid:
+                    snapshot_controller.delete(snapshot_uuid)
+                return False
+
         return new_lvol_uuid
     except Exception as e:
         logger.error(e)
