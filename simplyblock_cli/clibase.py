@@ -607,6 +607,9 @@ class CLIWrapperBase:
     def volume__inflate(self, sub_command, args):
         return lvol_controller.inflate_lvol(args.volume_id)
 
+    def volume__clone_lvol(self, sub_command, args):
+        return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
+
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_ip = args.cluster_ip

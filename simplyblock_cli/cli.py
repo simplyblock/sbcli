@@ -575,6 +575,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
+        self.init_volume__clone_lvol(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -680,6 +681,11 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__inflate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+
+    def init_volume__clone_lvol(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clone-lvol', 'Create logical volume clone by taking a snapshot and then cloning it.')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('clone_name', help='New lvol clone name', type=str)
 
 
     def init_control_plane(self):
@@ -1115,6 +1121,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
+                elif sub_command in ['clone-lvol']:
+                    ret = self.volume__clone_lvol(sub_command, args)
                 else:
                     self.parser.print_help()
 
