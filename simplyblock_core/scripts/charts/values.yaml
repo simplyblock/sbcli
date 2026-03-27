@@ -1,38 +1,24 @@
-graylog:
-  rootPasswordSha2: "b87c15a8ae4736d771ca60a7cc2014baaeab19b11c31f5fedef9421958a403c9"
-  passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
 
-monitoring:
-  enabled: true
+
+observability:
+  enabled: false
   secret: "sWbpOgba1bKnCfcPkVQi"
-
-log:
   deletionInterval: "3d"
-  retentionPeriod: "7d"
   level: "DEBUG"
-  maxNumberIndex: "3"
-
-grafana:
-  endpoint: ""
-  contactPoint: "https://hooks.slack.com/services/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"
+  graylog:
+    rootPasswordSha2: "b87c15a8ae4736d771ca60a7cc2014baaeab19b11c31f5fedef9421958a403c9"
+    passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
+    maxNumberIndex: "3"
+    retentionPeriod: "7d"
+  grafana:
+    endpoint: ""
+    contactPoint: "https://hooks.slack.com/services/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"
 
 image:
   simplyblock: 
     repository: "simplyblock/simplyblock"
     tag: "main-snap-repl"
     pullPolicy: "Always"
-
-tolerations:
-  create: false
-  list:
-  - operator: Exists
-    effect:
-    key:
-    value:
-nodeSelector:
-  create: false
-  key:
-  value:
 
 ports:
   lvolNvmfPortStart: 9100
@@ -101,7 +87,7 @@ opensearch:
 prometheus:
   simplyblock:
     prometheusURL: simplyblock-prometheus
-    prometheusPORT: 9090
+    prometheusPORT: 9090    
   server:
     fullnameOverride: simplyblock-prometheus
     enabled: true
@@ -195,7 +181,7 @@ prometheus:
     enabled: false
 
 ingress:
-  enabled: true
+  enabled: false
   ingressClassName: nginx
   useDNS: false
   host: ""
@@ -240,10 +226,10 @@ simplyblock:
 
   lvol:
     name: simplyblock-lvol
-
+    
   storageNodes:
     name: simplyblock-node
-    clusterImage: simplyblock/simplyblock:main-sfam-2359
+    clusterImage: simplyblock/simplyblock:main-snap-repl
     mgmtIfc: eth0
     maxLVol: 10
     maxSize: 0
@@ -253,9 +239,7 @@ simplyblock:
     spdkImage:
     coreIsolation: false
     workerNodes:
-      - israel-storage-node-1
-      - israel-storage-node-2
-      - israel-storage-node-3
+
 
   devices:
     name: simplyblock-devices
