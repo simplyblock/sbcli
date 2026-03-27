@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
 apiVersion: mongodbcommunity.mongodb.com/v1
 kind: MongoDBCommunity
 metadata:
@@ -52,5 +52,5 @@ metadata:
   name: admin-password
 type: Opaque
 stringData:
-  password: {{ .Values.monitoring.secret }}
+  password: {{ .Values.observability.secret }}
 {{- end }}
