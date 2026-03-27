@@ -19,7 +19,7 @@ grafana:
 image:
   simplyblock: 
     repository: "simplyblock/simplyblock"
-    tag: "main-sfam-2359"
+    tag: "main-snap-repl"
     pullPolicy: "Always"
 
 tolerations:
