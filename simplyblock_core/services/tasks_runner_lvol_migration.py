@@ -85,7 +85,6 @@ happen immediately via a tail-recursive call to ``task_runner``, eliminating
 the 3-second service-loop gap between phases.
 """
 
-import logging
 import time
 
 from simplyblock_core import db_controller as db_mod, utils, constants

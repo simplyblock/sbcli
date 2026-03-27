@@ -18,8 +18,7 @@ All external dependencies (FDB, RPC) are mocked.
 """
 
 import unittest
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
@@ -63,15 +62,15 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
 
 
 def _lvol(uuid, node_id, status=LVol.STATUS_ONLINE, nodes=None, ha_type="ha"):
-    l = LVol()
-    l.uuid = uuid
-    l.node_id = node_id
-    l.status = status
-    l.ha_type = ha_type
-    l.nodes = nodes or [node_id]
-    l.lvs_name = "lvs_test"
-    l.lvol_bdev = "bdev_test"
-    return l
+    lv = LVol()
+    lv.uuid = uuid
+    lv.node_id = node_id
+    lv.status = status
+    lv.ha_type = ha_type
+    lv.nodes = nodes or [node_id]
+    lv.lvs_name = "lvs_test"
+    lv.lvol_bdev = "bdev_test"
+    return lv
 
 
 def _snap(uuid, lvol_uuid, node_id, snap_bdev=""):
@@ -652,7 +651,7 @@ class TestCheckSecNodeHublvolPrimaryResolution(unittest.TestCase):
 
     def test_explicit_primary_node_id_overrides(self):
         """When primary_node_id is passed explicitly, it should be used."""
-        sec = _node("sec", lvstore_stack_secondary_1="primary-A",
+        _node("sec", lvstore_stack_secondary_1="primary-A",
                      lvstore_stack_secondary_2="primary-B")
         explicit = "primary-B"
         primary_ref = explicit  # simulating the function logic

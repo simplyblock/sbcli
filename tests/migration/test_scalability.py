@@ -394,8 +394,8 @@ class TestScalability:
         vols_per_sec = 20 / elapsed
         snaps_per_sec = total_snaps / elapsed
 
-        print(f"\n--- Scalability throughput ---")
-        print(f"  Volumes migrated: 20")
+        print("\n--- Scalability throughput ---")
+        print("  Volumes migrated: 20")
         print(f"  Snapshots migrated: {total_snaps}")
         print(f"  Elapsed: {elapsed:.1f}s")
         print(f"  Volumes/sec: {vols_per_sec:.2f}")
@@ -545,7 +545,7 @@ class TestLargeVolumeMigration:
                 assert snap.snap_bdev.startswith(tgt.lvstore + "/"), (
                     f"snap {snap_uuid} snap_bdev not updated: {snap.snap_bdev}")
 
-        print(f"\n--- Large volume migration ---")
+        print("\n--- Large volume migration ---")
         print(f"  Snapshots: {NUM_LARGE_SNAPS}")
         print(f"  Snaps migrated: {len(m.snaps_migrated)}")
         print(f"  Elapsed: {elapsed:.1f}s")

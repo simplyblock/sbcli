@@ -36,7 +36,6 @@ import requests
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 
 from tests.migration.topology_loader import (
@@ -120,16 +119,16 @@ def cmd_lvol_list(args):
         lvols = db.get_lvols_by_node_id(node_id)
     else:
         lvols = db.get_lvols()
-    for l in lvols:
-        if cluster_id and l.cluster_id != cluster_id:
+    for lv in lvols:
+        if cluster_id and lv.cluster_id != cluster_id:
             continue
         print(json.dumps({
-            "uuid": l.uuid,
-            "name": l.lvol_name,
-            "status": l.status,
-            "node_id": l.node_id,
-            "nqn": l.nqn,
-            "cloned_from_snap": l.cloned_from_snap,
+            "uuid": lv.uuid,
+            "name": lv.lvol_name,
+            "status": lv.status,
+            "node_id": lv.node_id,
+            "nqn": lv.nqn,
+            "cloned_from_snap": lv.cloned_from_snap,
         }, indent=2))
 
 

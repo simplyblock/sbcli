@@ -1,5 +1,4 @@
 # coding=utf-8
-import json
 import logging
 import re
 import time
@@ -8,7 +7,6 @@ import uuid
 import boto3
 from botocore.exceptions import ClientError
 
-from simplyblock_core import constants, utils
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment

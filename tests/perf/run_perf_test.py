@@ -1,4 +1,9 @@
-import json, re, time, os, statistics, argparse, socket, boto3
+import json
+import re
+import time
+import os
+import argparse
+import boto3
 import paramiko
 from concurrent.futures import ThreadPoolExecutor
 
@@ -41,7 +46,7 @@ class PersistentSSH:
             try:
                 self.client.connect(hostname=self.ip, username=self.user, key_filename=self.key_path, timeout=10)
                 return
-            except:
+            except Exception:
                 time.sleep(5)
         raise Exception(f"Failed to connect to {self.ip} after 15 attempts.")
 
@@ -50,7 +55,8 @@ class PersistentSSH:
         return stdout.read().decode('utf-8'), stderr.read().decode('utf-8')
 
     def close(self):
-        if self.client: self.client.close()
+        if self.client:
+            self.client.close()
 
 
 # --- 4. AWS Client Provisioning ---
@@ -379,7 +385,7 @@ def main():
                                                       f"echo 'Connecting {vol_name}...'",
                                                   ] + connect_cmds + [
                                                       "sudo udevadm settle", "sleep 1", find_dev,
-                                                      f"sudo mkfs.xfs -f $DEV", f"sudo mkdir -p {mnt}",
+                                                      "sudo mkfs.xfs -f $DEV", f"sudo mkdir -p {mnt}",
                                                       f"sudo mount $DEV {mnt}", f"sudo chown {USER}:{USER} {mnt}"
                                                   ])
 
@@ -390,8 +396,8 @@ def main():
         print (script_text)
         c = PersistentSSH(ip, USER, KEY_PATH)
         stdin, stdout, stderr = c.client.exec_command("sudo bash")
-        stdin.write(script_text);
-        stdin.flush();
+        stdin.write(script_text)
+        stdin.flush()
         stdin.channel.shutdown_write()
         if stdout.channel.recv_exit_status() != 0:
             print(f"  [!] {name} Failed: {stderr.read().decode()}")

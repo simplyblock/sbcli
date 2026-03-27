@@ -13,9 +13,3 @@ dist
 .ruff_cache
 .env
 .tox
-
-# Helm packaged charts
-simplyblock_core/scripts/charts/charts/
-
-# Helm dependency lock file
-simplyblock_core/scripts/charts/requirements.lock

@@ -225,7 +225,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
-                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
+                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -346,6 +346,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
+    cluster.container_image_prefix = container_image_prefix or ""
 
     if nvmeof_tls_config:
         cluster.tls = True
@@ -1454,7 +1455,7 @@ def set(cl_id, attr, value) -> bool:
 
     if len(key_splits) > 1:
         key_info = cluster.get_attrs_map()[key]
-        if key_info["type"] == dict:
+        if key_info["type"] is dict:
             sub_key = key_splits[1]
             if sub_key in cluster[key]:
                 cluster[key][sub_key] = value

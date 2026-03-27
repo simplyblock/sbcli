@@ -44,7 +44,6 @@ class _CreateParams(BaseModel):
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
     allowed_hosts: Optional[List[str]] = None
-    sec_options: Optional[dict] = None
 
 
 class _CloneParams(BaseModel):
@@ -88,7 +87,6 @@ def add(
             ndcs=data.ndcs,
             npcs=data.npcs,
             allowed_hosts=data.allowed_hosts,
-            sec_options=data.sec_options,
         )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(
@@ -168,12 +166,11 @@ def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
 class _AddHostParams(BaseModel):
     host_nqn: str
-    sec_options: Optional[dict] = None
 
 
 @instance_api.post('/hosts', name='clusters:storage-pools:volumes:add-host', status_code=201)
 def add_host(cluster: Cluster, pool: StoragePool, volume: Volume, body: _AddHostParams):
-    result, error = lvol_controller.add_host_to_lvol(volume.get_id(), body.host_nqn, body.sec_options)
+    result, error = lvol_controller.add_host_to_lvol(volume.get_id(), body.host_nqn)
     if error:
         raise HTTPException(400, error)
     return result
@@ -266,3 +263,7 @@ def create_snapshot(
             cluster_id=cluster.get_id(), pool_id=pool.get_id(), snapshot_id=snapshot_id,
     )
     return Response(status_code=201, headers={'Location': entity_url})
+
+@instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
+def clone(cluster: Cluster, pool: StoragePool, volume: Volume, clone_name: str) -> bool:
+    return lvol_controller.clone_lvol(volume.get_id(), clone_name)

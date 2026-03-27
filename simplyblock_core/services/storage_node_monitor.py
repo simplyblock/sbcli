@@ -189,7 +189,8 @@ def update_cluster_status(cluster_id):
 
 
 def set_node_online(node):
-    if node.status != StorageNode.STATUS_ONLINE:
+    node = db.get_storage_node_by_id(node.get_id())
+    if node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
 
         # set node online
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
@@ -227,6 +228,13 @@ def set_node_offline(node):
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     device_controller.device_set_unavailable(dev.get_id())
             update_cluster_status(cluster_id)
+
+            # ANA failover: update subsystem states on surviving nodes
+            try:
+                storage_node_ops.trigger_ana_failover_for_node(node)
+            except Exception as ana_e:
+                logger.error("ANA failover for node %s failed: %s", node.get_id(), ana_e)
+
             # initiate restart
             tasks_controller.add_node_to_auto_restart(node)
         except Exception as e:
@@ -239,28 +247,6 @@ def set_node_unreachable(node):
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
             update_cluster_status(cluster_id)
-
-            # ANA tiering failover for FT=2
-            # Case 1: Primary node failed — promote first_sec→optimized, second_sec→non_optimized
-            if not node.is_secondary_node and node.secondary_node_id_2:
-                try:
-                    storage_node_ops._failover_primary_ana(node)
-                except Exception as ana_e:
-                    logger.error("Failover ANA for primary %s failed: %s", node.get_id(), ana_e)
-
-            # Case 2: First secondary failed — promote second_sec from inaccessible→non_optimized
-            if node.is_secondary_node:
-                for primary_node in db.get_primary_storage_nodes_by_secondary_node_id(node.get_id()):
-                    # Only if this node is the first secondary (not the second)
-                    if primary_node.secondary_node_id == node.get_id() and primary_node.secondary_node_id_2:
-                        second_sec = db.get_storage_node_by_id(primary_node.secondary_node_id_2)
-                        if second_sec and second_sec.status == StorageNode.STATUS_ONLINE:
-                            if primary_node.status == StorageNode.STATUS_ONLINE:
-                                try:
-                                    storage_node_ops._failover_first_sec_ana(primary_node, second_sec)
-                                except Exception as ana_e:
-                                    logger.error("Failover ANA for first sec %s failed: %s", node.get_id(), ana_e)
-
         except Exception as e:
             logger.debug("Setting node to UNREACHABLE state failed")
             logger.error(e)

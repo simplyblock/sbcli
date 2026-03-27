@@ -69,6 +69,7 @@ class LVol(BaseModel):
     ndcs: int = 0
     npcs: int = 0
     allowed_hosts: List[dict] = []
+    delete_snap_on_lvol_delete: bool = False
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)

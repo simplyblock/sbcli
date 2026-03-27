@@ -304,7 +304,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
-                allowed_hosts=None, sec_options=None):
+                allowed_hosts=None):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -575,8 +575,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.crypto_key2 = crypto_key2
 
     # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
+    # Security options are inherited from the pool
     if allowed_hosts and not namespace:
-        host_entries = _build_host_entries(allowed_hosts, sec_options)
+        host_entries = _build_host_entries(allowed_hosts, pool.sec_options or None)
         if isinstance(host_entries, tuple):
             return host_entries  # (False, error_message)
         lvol.allowed_hosts = host_entries
@@ -1020,6 +1021,10 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error(f"Cannot delete lvol {lvol.uuid}: active migration {active_mig.uuid}")
         return False
 
+    if lvol.status == LVol.STATUS_RESTORING and not force_delete:
+        logger.error(f"Cannot delete lvol {lvol.uuid}: backup restore in progress")
+        return False
+
     if lvol.status == LVol.STATUS_IN_DELETION:
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
@@ -1153,8 +1158,12 @@ def delete_lvol(id_or_name, force_delete=False):
     lvol.write_to_db()
     lvol_events.lvol_status_change(lvol, lvol.status, old_status)
 
+    if lvol.cloned_from_snap and lvol.delete_snap_on_lvol_delete:
+        logger.info(f"Deleting snap: {lvol.cloned_from_snap}")
+        snapshot_controller.delete(lvol.cloned_from_snap)
+
     # if lvol is clone and snapshot is deleted, then delete snapshot
-    if lvol.cloned_from_snap:
+    elif lvol.cloned_from_snap:
         try:
             snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
             if snap.snap_ref_id:
@@ -1322,14 +1331,12 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
     data = []
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
-    from simplyblock_core.controllers import migration_controller
     migrating_lvols = set()
     for m in db_controller.get_migrations(cluster_id):
         if m.is_active():
             migrating_lvols.add(m.lvol_id)
 
     # Build policy lookup maps (single scan of attachments + policies)
-    from simplyblock_core.models.backup import BackupPolicyAttachment
     all_attachments = db_controller.get_backup_policy_attachments(cluster_id)
     all_policies = {p.uuid: p for p in db_controller.get_backup_policies(cluster_id)}
     lvol_policy_map = {}   # lvol_id -> policy
@@ -2044,9 +2051,10 @@ def _build_host_entries(allowed_hosts, sec_options=None):
     return entries
 
 
-def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
+def add_host_to_lvol(lvol_id, host_nqn):
     """Add an allowed host to a volume's subsystem.
 
+    Security options are inherited from the volume's pool.
     Returns a dict with the host NQN and any auto-generated keys, or (False, error).
     """
     db_controller = DBController()
@@ -2060,6 +2068,15 @@ def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
     for h in lvol.allowed_hosts:
         if h["nqn"] == host_nqn:
             return False, f"Host {host_nqn} is already allowed"
+
+    # Get sec_options from the pool
+    sec_options = None
+    if lvol.pool_uuid:
+        try:
+            pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+            sec_options = pool.sec_options or None
+        except KeyError:
+            pass
 
     entry = {"nqn": host_nqn}
     if sec_options:
@@ -2177,3 +2194,50 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     if errors:
         return True, f"Warning: SPDK remove_host failed on nodes: {', '.join(errors)}"
     return True, None
+
+
+def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    try:
+        snapshot_uuid = None
+        for snap in db_controller.get_snapshots_by_lvol_id(lvol_id):
+            if snap.snap_name == clone_name:
+                logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.snap_uuid}, using it for cloning")
+                snapshot_uuid = snap.snap_uuid
+                break
+        if not snapshot_uuid:
+            for i in range(10):
+                snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
+                if err:
+                    logger.error(err)
+                    time.sleep(1)
+                    continue
+            else:
+                if not snapshot_uuid:
+                    logger.error("Failed to create snapshot for clone after 10 attempts")
+                    return False
+        new_lvol_uuid = None
+        for i in range(10):
+            new_lvol_uuid, err = snapshot_controller.clone(
+                snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True)
+            if err:
+                logger.error(err)
+                time.sleep(1)
+                continue
+        else:
+            if not new_lvol_uuid:
+                logger.error("Failed to clone lvol after 10 attempts")
+                if snapshot_uuid:
+                    snapshot_controller.delete(snapshot_uuid)
+                return False
+
+        return new_lvol_uuid
+    except Exception as e:
+        logger.error(e)
+        return False

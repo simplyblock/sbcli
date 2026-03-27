@@ -23,7 +23,7 @@ def _generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id, qos_host=None):
+def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id, qos_host=None, sec_options=None):
     db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
@@ -84,6 +84,14 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
         return False
 
     pool.qos_host = qos_host
+
+    if sec_options:
+        ok, err = utils.validate_sec_options(sec_options)
+        if not ok:
+            logger.error(err)
+            return False
+        pool.sec_options = sec_options
+
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_add(pool)
@@ -177,19 +185,48 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
 
     # Update values if needed
     fields_to_update = [
-        ("pool_max_size", pool_max),
-        ("lvol_max_size", lvol_max),
         ("max_rw_ios_per_sec", max_rw_iops),
         ("max_rw_mbytes_per_sec", max_rw_mbytes),
         ("max_r_mbytes_per_sec", max_r_mbytes),
         ("max_w_mbytes_per_sec", max_w_mbytes),
     ]
-
     for key, val in fields_to_update:
         if val:
             success, err = set_pool_value_if_above(pool, key, val)
             if err:
                 return False, err
+
+    if pool_max == 0:
+        pool.pool_max_size = 0
+    elif pool_max > 0:
+        total_lvol_size = 0
+        for lvol in db_controller.get_lvols_by_pool_id(uuid):
+            total_lvol_size += lvol.size
+        if total_lvol_size > pool_max:
+            msg = f"Pool max size can't be less than total provisioned size of lvols: {utils.humanbytes(total_lvol_size)}"
+            logger.error(msg)
+            return False, msg
+        pool.pool_max_size = pool_max
+    else:
+        msg = "pool_max can not be negative"
+        logger.error(msg)
+        return False, msg
+
+    if lvol_max == 0:
+        pool.lvol_max_size = 0
+    elif lvol_max > 0:
+        lvol_size_max = 0
+        for lvol in db_controller.get_lvols_by_pool_id(uuid):
+            lvol_size_max = max(lvol_size_max, lvol.size)
+        if lvol_size_max > lvol_max:
+            msg = f"LVol max size can't be less than max provisioned size of lvols: {utils.humanbytes(lvol_size_max)}"
+            logger.error(msg)
+            return False, msg
+        pool.pool_max_size = lvol_max
+    else:
+        msg = "lvol_max can not be negative"
+        logger.error(msg)
+        return False, msg
 
     # Apply QoS settings via RPC
     for hostname in db_controller.get_hostnames_by_pool_id(uuid):
@@ -248,6 +285,7 @@ def list_pools(is_json, cluster_id=None):
             "LVols": f"{len(lvs)}",
             "QOS": f"{pool.has_qos()}",
             "QOS Host": f"{pool.qos_host}",
+            "Security": ", ".join(sorted(pool.sec_options.keys())) if pool.sec_options else "none",
             "Status": pool.status,
         })
 

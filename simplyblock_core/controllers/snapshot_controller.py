@@ -133,7 +133,6 @@ def add(lvol_id, snapshot_name, backup=False):
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = "Secondary node is in down status, can not create snapshot"
                     logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
                     secondary_nodes.append(sec_node)
@@ -253,7 +252,6 @@ def list(node_id=None):
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
-    from simplyblock_core.controllers import migration_controller
     migrating_lvols = set()
     for m in db_controller.get_migrations():
         if m.is_active():
@@ -428,7 +426,7 @@ def delete(snapshot_uuid, force_delete=False):
     return True
 
 
-def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None):
+def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
@@ -529,6 +527,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.subsys_port = snap.lvol.subsys_port
     lvol.fabric = snap.fabric
     lvol.allowed_hosts = snap.lvol.allowed_hosts
+    lvol.delete_snap_on_lvol_delete = bool(delete_snap_on_lvol_delete)
+    lvol.ndcs = snap.lvol.ndcs
+    lvol.npcs = snap.lvol.npcs
 
     if pvc_name:
         lvol.pvc_name = pvc_name
