@@ -220,7 +220,7 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
 def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     db_controller = DBController()
-    hostname = None
+    hostname = ""
     if mode == "docker":
         hostname = utils.get_hostname()
     try:

@@ -595,7 +595,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                         return False, True, _WAIT
                     break  # one check is enough
 
-            transfers = []
+            transfers: list[dict] = []
             for snap_uuid in unprocessed:
                 snap_index = plan.index(snap_uuid)
                 try:
@@ -1474,7 +1474,7 @@ def task_runner(task):
 
         elif phase == LVolMigration.PHASE_CLEANUP_TARGET:
             done, suspend, error = _handle_cleanup_target(migration, tgt_node, tgt_rpc)
-            next_phase = None  # terminal failure path
+            next_phase = ""  # terminal failure path
 
         else:
             _fail_task(task, migration, f"unknown phase: {phase}")

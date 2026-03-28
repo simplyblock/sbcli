@@ -902,7 +902,7 @@ def get_next_lvstore_ports(cluster_id):
     """Allocate two consecutive NVMe-oF ports for a new lvstore (lvol_subsys + hublvol)."""
     nvmf_base, _, _ = _get_cluster_port_config(cluster_id)
     used_ports = _get_all_nvmf_ports(cluster_id)
-    ports = []
+    ports: list[int] = []
     next_port = nvmf_base
     while len(ports) < 2:
         if next_port not in used_ports:

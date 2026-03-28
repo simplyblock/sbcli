@@ -306,6 +306,7 @@ def list(all=False, cluster_id=None, with_details=False):
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
             "Base Snapshot": snap.snap_ref_id,
             "Clones": clones,
+            "Status": snap.status,
         }
         if with_details:
             d["Replication target snap"] = snap.target_replicated_snap_uuid
@@ -816,3 +817,33 @@ def set(snapshot_uuid, attr, value) -> bool:
     snap.write_to_db()
     return True
 
+def list_by_node(node_id=None, is_json=False):
+    snaps = db_controller.get_snapshots()
+    snaps = sorted(snaps, key=lambda snap: snap.created_at)
+    data = []
+    for snap in snaps:
+        if node_id:
+            if snap.lvol.node_id != node_id:
+                continue
+        logger.debug(snap)
+        clones = []
+        for lvol in db_controller.get_lvols():
+            if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
+                clones.append(lvol.get_id())
+        data.append({
+            "UUID": snap.uuid,
+            "BDdev UUID": snap.snap_uuid,
+            "BlobID": snap.blobid,
+            "Name": snap.snap_name,
+            "Size": utils.humanbytes(snap.used_size),
+            "BDev": snap.snap_bdev.split("/")[1],
+            "Node ID": snap.lvol.node_id,
+            "LVol ID": snap.lvol.get_id(),
+            "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
+            "Base Snapshot": snap.snap_ref_id,
+            "Clones": clones,
+            "Status": snap.status,
+        })
+    if is_json:
+        return json.dumps(data, indent=2)
+    return utils.print_table(data)
