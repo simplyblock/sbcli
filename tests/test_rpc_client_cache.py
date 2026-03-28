@@ -4,13 +4,11 @@ test_rpc_client_cache.py – unit tests for RPCClient._request_cached and
 the cached wrappers get_bdevs / subsystem_list.
 """
 
-import json
 import time
 import threading
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from simplyblock_core import rpc_client as mod
 from simplyblock_core.rpc_client import RPCClient, _rpc_cache, _rpc_cache_lock
 
 

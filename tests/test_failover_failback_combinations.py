@@ -20,7 +20,7 @@ All external dependencies (FDB, RPC, SPDK) are mocked.
 """
 
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
@@ -261,8 +261,8 @@ class TestAnaFailover(unittest.TestCase):
 
         # First secondary should be set to optimized
         ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
-        optimized_calls = [c for c in ana_calls if c[1].get('ana_state') == 'optimized'
-                           or (len(c[0]) > 0 and 'optimized' in str(c))]
+        # optimized_calls = [c for c in ana_calls if c[1].get('ana_state') == 'optimized'
+        #                    or (len(c[0]) > 0 and 'optimized' in str(c))]
         self.assertTrue(len(ana_calls) > 0, "Should have ANA state change calls")
 
     def test_ftt2_failover_primary_to_both_secondaries(self):
@@ -342,7 +342,7 @@ class TestAnaFailback(unittest.TestCase):
 
         rpc = self._run_failback(nodes, "node-1", lvols)
 
-        ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
+        # ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
         # With FTT=1, no secondary_node_id_2, so _failback_primary_ana not called
         # (it requires secondary_node_id_2). No-op for FTT=1 via this path.
         # The actual failback for FTT=1 happens inside recreate_lvstore.
@@ -378,7 +378,7 @@ class TestAnaFailback(unittest.TestCase):
         lvols = [_lvol("lv1", "node-1")]
         nodes["node-3"].status = StorageNode.STATUS_OFFLINE
 
-        rpc = self._run_failback(nodes, "node-2", lvols)
+        _ = self._run_failback(nodes, "node-2", lvols)
 
         # With second sec offline, failback for first sec role doesn't demote anyone
         # (second sec is not online so it's skipped)
@@ -619,7 +619,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
         nodes = _build_ftt2_nodes()
         nodes["node-1"].status = StorageNode.STATUS_OFFLINE  # primary offline
         secondary = nodes["node-2"]  # first secondary, restarting
-        second_sec = nodes["node-3"]  # second secondary, online
+        # second_sec = nodes["node-3"]  # second secondary, online
 
         lvols = [_lvol("lv1", "node-1")]
         db = _make_db_mock(nodes, lvols)

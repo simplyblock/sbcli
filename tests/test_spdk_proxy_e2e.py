@@ -12,7 +12,6 @@ NOTE: Requires AF_UNIX (Linux/macOS). Skipped on Windows.
 import base64
 import json
 import os
-import socket
 import socketserver
 import sys
 import tempfile
@@ -264,7 +263,6 @@ class TestProxyReadinessGate(unittest.TestCase):
 
     def test_proxy_waits_for_spdk(self):
         """Proxy should not accept HTTP requests until SPDK responds."""
-        import simplyblock_core.services.spdk_http_proxy_server as mod
 
         tmpdir = tempfile.mkdtemp()
         sock_path = os.path.join(tmpdir, "spdk_delayed.sock")
@@ -282,7 +280,7 @@ class TestProxyReadinessGate(unittest.TestCase):
         spdk_thread = threading.Thread(target=delayed_spdk, daemon=True)
         spdk_thread.start()
 
-        start = time.monotonic()
+        _ = time.monotonic()
         _, stop_event, mod_ref = _start_proxy(sock_path, http_port, max_concurrent=4, timeout=5)
 
         # Wait for proxy to come up
