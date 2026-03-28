@@ -119,8 +119,9 @@ class RPCClient:
                     logger.debug("Cache hit for %s on %s:%s", method, self.ip_address, self.port)
                     return cached_result
         result = self._request(method, params)
-        with _rpc_cache_lock:
-            _rpc_cache[cache_key] = (now, result)
+        if result is not None:
+            with _rpc_cache_lock:
+                _rpc_cache[cache_key] = (now, result)
         return result
 
     def _request(self, method, params=None):
@@ -194,7 +195,7 @@ class RPCClient:
         return self._request("spdk_get_version")
 
     def subsystem_list(self, nqn_name=None):
-        data = self._request_cached("nvmf_get_subsystems")
+        data = self._request("nvmf_get_subsystems")
         if data and nqn_name:
             for d in data:
                 if d['nqn'] == nqn_name:
@@ -461,7 +462,7 @@ class RPCClient:
         params = None
         if name:
             params = {"name": name}
-        return self._request_cached("bdev_get_bdevs", params)
+        return self._request("bdev_get_bdevs", params)
 
     def resize_lvol(self, lvol_bdev, blockcnt):
         params = {

@@ -228,10 +228,22 @@ class CLIWrapperBase:
             return False
 
     def storage_node__shutdown(self, sub_command, args):
-        return storage_ops.shutdown_storage_node(args.node_id, args.force)
+        ret = storage_ops.shutdown_storage_node(args.node_id, args.force)
+        if isinstance(ret, tuple):
+            ok, reason = ret
+            if not ok:
+                print(f"Error: {reason}")
+            return ok
+        return ret
 
     def storage_node__suspend(self, sub_command, args):
-        return storage_ops.suspend_storage_node(args.node_id, args.force)
+        ret = storage_ops.suspend_storage_node(args.node_id, args.force)
+        if isinstance(ret, tuple):
+            ok, reason = ret
+            if not ok:
+                print(f"Error: {reason}")
+            return ok
+        return ret
 
     def storage_node__resume(self, sub_command, args):
         return storage_ops.resume_storage_node(args.node_id)
