@@ -2535,47 +2535,6 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     return new_lvol.lvol_uuid
 
 
-
-def clone_lvol(lvol_id, clone_name):
-    # create snapshot and clone it
-    db_controller = DBController()
-    try:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-    except KeyError as e:
-        logger.error(e)
-        return False
-
-    try:
-        snapshot_uuid = None
-        for i in range(10):
-            snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
-            if err:
-                logger.error(err)
-                time.sleep(3)
-                continue
-        else:
-            if not snapshot_uuid:
-                logger.error("Failed to create snapshot for clone after 10 attempts")
-                return False
-        new_lvol_uuid = None
-        for i in range(10):
-            new_lvol_uuid, err = snapshot_controller.clone(snapshot_uuid, clone_name)
-            if err:
-                logger.error(err)
-                time.sleep(3)
-                continue
-        else:
-            if not new_lvol_uuid:
-                logger.error("Failed to clone lvol after 10 attempts")
-                if snapshot_uuid:
-                    snapshot_controller.delete(snapshot_uuid)
-                return False
-
-        return new_lvol_uuid
-    except Exception as e:
-        logger.error(e)
-        return False
-
 def _build_host_entries(allowed_hosts, sec_options=None):
     """Build the allowed_hosts list with auto-generated keys.
 
@@ -2754,7 +2713,7 @@ def remove_host_from_lvol(lvol_id, host_nqn):
 def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     db_controller = DBController()
     try:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+        _ = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
         return False

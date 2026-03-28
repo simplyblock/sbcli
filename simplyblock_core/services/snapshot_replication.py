@@ -167,7 +167,7 @@ def process_snap_replicate_finish(task, snapshot):
     # chain snaps on primary
     if target_prev_snap:
         logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap.snap_bdev}")
-        ret = remote_snode.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
+        ret = remote_snode.rpc_client().bdev_lvol_add_clone( remote_lv.top_bdev, target_prev_snap.snap_bdev)
         if not ret:
             logger.error("Failed to chain replicated snapshot on primary node")
             return False
@@ -183,7 +183,7 @@ def process_snap_replicate_finish(task, snapshot):
     if sec_node.status == StorageNode.STATUS_ONLINE:
         if target_prev_snap:
             logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap.snap_bdev}")
-            ret = sec_node.rpc_client().bdev_lvol_add_clone(target_prev_snap.snap_bdev, remote_lv.top_bdev)
+            ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap.snap_bdev)
             if not ret:
                 logger.error("Failed to chain replicated snapshot on secondary node")
                 return False

@@ -1235,44 +1235,6 @@ class RPCClient:
         }
         return self._request("bdev_distrib_check_inflight_io", params)
 
-    def bdev_lvol_transfer(self, lvol_name, offset, cluster_batch, gateway, operation):
-        # --operation {migrate,replicate}
-        params = {
-            "lvol_name": lvol_name,
-            "offset": offset,
-            "cluster_batch": cluster_batch,
-            "gateway": gateway,
-            "operation": operation,
-        }
-        return self._request("bdev_lvol_transfer", params)
-
-    def bdev_lvol_transfer_stat(self, lvol_name):
-        """
-        example:
-            ./rpc.py bdev_lvol_transfer_stat lvs_raid0_lvol/snapshot_1
-            {
-                "transfer_state": "No process",
-                "offset": 0
-            }
-            transfer_state values:
-                - No process
-                - In progress
-                - Failed
-                - Done
-        """
-        params = {
-            "lvol_name": lvol_name,
-        }
-        return self._request("bdev_lvol_transfer_stat", params)
-
-    def bdev_lvol_convert(self, lvol_name):
-        """
-        convert lvol to snapshot
-        """
-        params = {
-            "lvol_name": lvol_name,
-        }
-        return self._request("bdev_lvol_convert", params)
 
     def bdev_lvol_remove_from_group(self, group_id, lvol_name_list):
         params = {
@@ -1321,13 +1283,6 @@ class RPCClient:
 
     def nvmf_get_blocked_ports_rdma(self):
         return self._request("nvmf_get_blocked_ports")
-
-    def bdev_lvol_add_clone(self, lvol_name, child_name):
-        params = {
-            "lvol_name": lvol_name,
-            "child_name": child_name,
-        }
-        return self._request("bdev_lvol_add_clone", params)
 
     def bdev_raid_get_bdevs(self):
         params = {
