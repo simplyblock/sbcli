@@ -2868,7 +2868,7 @@ def suspend_storage_node(node_id, force=False):
             return False
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
-    if task_id:
+    if tasks:
         logger.error(f"Migration task found: {len(tasks)}, can not suspend storage node, use --force")
         if force is False:
             return False
@@ -2883,58 +2883,59 @@ def suspend_storage_node(node_id, force=False):
 
     logger.info("Suspending node")
 
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            device_controller.device_set_unavailable(dev.get_id())
-
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        logger.info("Setting JM unavailable")
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
-
-    logger.info("Setting node status to suspended")
-    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
-
     rpc_client = snode.rpc_client()
     fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
     if snode.active_rdma:
         port_type = "udp"
-    if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
-        nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
-        if nodes:
-            for node in nodes:
-                try:
-                    # Block per-lvstore ports for secondary lvstores on this node
+
+    # Track all blocked ports so we can revert on failure
+    blocked_ports = []  # list of (port, port_type, rpc_port) tuples
+
+    def _block_port(port):
+        fw_api.firewall_set_port(port, port_type, "block", snode.rpc_port, is_reject=True)
+        blocked_ports.append(port)
+
+    def _revert_blocked_ports():
+        for port in blocked_ports:
+            try:
+                fw_api.firewall_set_port(port, port_type, "unblock", snode.rpc_port)
+            except Exception as revert_e:
+                logger.error(f"Failed to revert port block for port {port}: {revert_e}")
+
+    try:
+        # Block per-lvstore ports for secondary lvstores hosted on this node
+        if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
+            nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+            if nodes:
+                for node in nodes:
                     sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
                     sec_hub_port = node.get_hublvol_port(node.lvstore)
                     if sec_hub_port:
-                        fw_api.firewall_set_port(
-                            sec_hub_port, port_type, "block", snode.rpc_port, is_reject=True)
-                    fw_api.firewall_set_port(
-                        sec_lvs_port, port_type, "block", snode.rpc_port, is_reject=True)
+                        _block_port(sec_hub_port)
+                    _block_port(sec_lvs_port)
                     time.sleep(0.5)
                     rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
                     rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-                except Exception as e:
-                    logger.error(e)
-                    return False
 
-    try:
         # Block per-lvstore ports for this node's own primary lvstore
         own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
         own_hub_port = snode.get_hublvol_port(snode.lvstore)
         if own_hub_port:
-            fw_api.firewall_set_port(
-                own_hub_port, port_type, "block", snode.rpc_port, is_reject=True)
-        fw_api.firewall_set_port(
-            own_lvs_port, port_type, "block", snode.rpc_port, is_reject=True)
+            _block_port(own_hub_port)
+        _block_port(own_lvs_port)
         time.sleep(0.5)
         rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
         rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
         time.sleep(1)
     except Exception as e:
-        logger.error(e)
+        logger.error(f"Failed during suspend port blocking/leadership transfer: {e}")
+        logger.info("Reverting blocked ports")
+        _revert_blocked_ports()
         return False
+
+    logger.info("Setting node status to suspended")
+    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
 
     logger.info("Done")
     return True
