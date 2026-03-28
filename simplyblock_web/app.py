@@ -25,14 +25,14 @@ app.include_router(public, prefix='/api')
 app.mount('/api/v1', WSGIMiddleware(v1.api))  # For some reason this fails if done in `api/__init__.py`
 
 
-@app.route('/', methods=['GET'])
-@app.route('/cluster/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.route('/mgmtnode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.route('/device/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.route('/lvol/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.route('/snapshot/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.route('/storagenode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.route('/pool/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+@app.route('/', methods=['GET'])  # type: ignore[attr-defined]
+@app.route('/cluster/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])  # type: ignore[attr-defined]
+@app.route('/mgmtnode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])  # type: ignore[attr-defined]
+@app.route('/device/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])  # type: ignore[attr-defined]
+@app.route('/lvol/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])  # type: ignore[attr-defined]
+@app.route('/snapshot/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])  # type: ignore[attr-defined]
+@app.route('/storagenode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])  # type: ignore[attr-defined]
+@app.route('/pool/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])  # type: ignore[attr-defined]
 def redirect_legacy(request: Request) -> RedirectResponse:
     """
     Redirect legacy API routes to their corresponding v1 endpoints.

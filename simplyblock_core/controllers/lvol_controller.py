@@ -1460,7 +1460,7 @@ def get_replication_info(lvol_id_or_name):
     out = {
         "last_snapshot_id": "",
         "last_replication_time": "",
-        "last_replication_duration": 0,
+        "last_replication_duration": "",
         "replicated_count": 0,
         "snaps": [],
         "tasks": [],
@@ -1495,7 +1495,7 @@ def get_replication_info(lvol_id_or_name):
         elif "start_time" in last_task.function_params:
             duration = utils.strfdelta_seconds(int(time.time()) - last_task.function_params["start_time"])
         else:
-            duration = 0
+            duration = ""
         out["last_replication_duration"] = duration
 
     return out
@@ -2089,7 +2089,7 @@ def replication_trigger(lvol_id):
         "lvol": lvol,
         "last_snapshot_id": "",
         "last_replication_time": "",
-        "last_replication_duration": 0,
+        "last_replication_duration": "",
         "replicated_count": 0,
         "snaps": [],
         "tasks": [],
@@ -2117,7 +2117,7 @@ def replication_trigger(lvol_id):
         last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
         out["last_snapshot_id"] = last_snap.get_id()
         out["last_replication_time"] = last_task.updated_at
-        duration = 0
+        duration = ""
         if "start_time" in last_task.function_params:
             if "end_time" in last_task.function_params:
                 duration = utils.strfdelta_seconds(

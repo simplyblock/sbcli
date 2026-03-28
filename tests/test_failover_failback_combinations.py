@@ -340,7 +340,7 @@ class TestAnaFailback(unittest.TestCase):
         nodes = _build_ftt1_nodes()
         lvols = [_lvol("lv1", "node-1")]
 
-        rpc = self._run_failback(nodes, "node-1", lvols)
+        _ = self._run_failback(nodes, "node-1", lvols)
 
         # ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
         # With FTT=1, no secondary_node_id_2, so _failback_primary_ana not called

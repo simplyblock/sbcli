@@ -614,8 +614,8 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
-    used_nodes_as_sec: list[str] = []
-    used_nodes_as_sec_2: list[str] = []
+    used_nodes_as_sec: t.List[str] = []
+    used_nodes_as_sec_2: t.List[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
