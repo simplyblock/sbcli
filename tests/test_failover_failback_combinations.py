@@ -957,5 +957,85 @@ class TestPortAllowTask(unittest.TestCase):
                        "force_to_non_leader must use sn_rpc from sec_ids iteration")
 
 
+# ===========================================================================
+# Delete / Create / Resize with second secondary fallback tests
+# ===========================================================================
+
+class TestLvolSecondSecondaryFallback(unittest.TestCase):
+    """Test that delete/create/resize fall back to second secondary when primary + first sec are offline."""
+
+    def _read_lvol_controller_source(self):
+        import os
+        src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "simplyblock_core", "controllers", "lvol_controller.py")
+        with open(src_path, "r") as f:
+            return f.read()
+
+    def _get_function_source(self, full_src, func_name):
+        fn_start = full_src.find(f"def {func_name}(")
+        if fn_start < 0:
+            return ""
+        fn_end = full_src.find("\ndef ", fn_start + 1)
+        return full_src[fn_start:fn_end] if fn_end > fn_start else full_src[fn_start:]
+
+    # --- delete_lvol ---
+
+    def test_delete_code_checks_second_secondary(self):
+        """delete_lvol must check all_sec_nodes[1:] when first_sec is offline."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
+        self.assertIn("all_sec_nodes[1:]", src,
+                       "delete_lvol must check second secondary")
+
+    def test_delete_code_does_not_fail_immediately(self):
+        """delete_lvol must not return error before checking second secondary."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
+        # Find the "Host nodes are not online" error
+        err_pos = src.find('"Host nodes are not online"')
+        # Find "all_sec_nodes[1:]" — must appear BEFORE the error
+        check_pos = src.find("all_sec_nodes[1:]")
+        self.assertGreater(err_pos, check_pos,
+                           "Second secondary check must appear before 'not online' error")
+
+    # --- create_lvol ---
+
+    def test_create_code_checks_second_secondary(self):
+        """add_lvol_ha must check secondary_ids[1:] when first_sec is offline."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "add_lvol_ha")
+        self.assertIn("secondary_ids[1:]", src,
+                       "add_lvol_ha must check second secondary")
+
+    def test_create_code_promotes_second_sec_before_error(self):
+        """add_lvol_ha must try second secondary before returning 'not online'."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "add_lvol_ha")
+        err_pos = src.find('"Host nodes are not online"')
+        check_pos = src.rfind("secondary_ids[1:]", 0, err_pos)
+        self.assertGreater(check_pos, 0,
+                           "Second secondary check must appear before 'not online' error in add_lvol_ha")
+
+    # --- resize (update_lvol_size) ---
+
+    def test_resize_code_checks_second_secondary(self):
+        """Resize function must check all_sec_nodes[1:] when first_sec is offline."""
+        full_src = self._read_lvol_controller_source()
+        # Find the function containing "Resizing LVol"
+        resize_marker = full_src.find("Resizing LVol")
+        fn_start = full_src.rfind("def ", 0, resize_marker)
+        fn_end = full_src.find("\ndef ", fn_start + 1)
+        fn_src = full_src[fn_start:fn_end] if fn_end > fn_start else full_src[fn_start:]
+        self.assertIn("all_sec_nodes[1:]", fn_src,
+                       "resize function must check second secondary")
+
+    # --- first_sec online adds remaining secondaries ---
+
+    def test_delete_first_sec_online_adds_remaining_secs(self):
+        """When host offline + first_sec online, remaining secs must be added for cleanup."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
+        # After "primary_node = first_sec", there should be a loop adding all_sec_nodes[1:]
+        first_sec_promote = src.find("primary_node = first_sec")
+        after_promote = src[first_sec_promote:first_sec_promote + 200]
+        self.assertIn("all_sec_nodes[1:]", after_promote,
+                       "After promoting first_sec, remaining secs must be added for cleanup")
+
+
 if __name__ == '__main__':
     unittest.main()
