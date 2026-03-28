@@ -32,14 +32,11 @@ Stress scenarios
 
 from __future__ import annotations
 
-import itertools
 import os
 import random
-import string
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 
 from e2e_tests.backup.test_backup_restore import BackupTestBase, _rand_suffix
 from logger_config import setup_logger
@@ -161,7 +158,7 @@ class BackupStressBase(BackupTestBase):
         """Create a snapshot + trigger S3 backup; return backup_id or None on failure."""
         snap_name = f"str_{label}_{_rand_suffix()}"
         try:
-            snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+            self._create_snapshot(lvol_id, snap_name, backup=True)
             # backup_id is not always directly returned by snapshot add --backup;
             # we resolve it from backup list after a short wait
             sleep_n_sec(5)
@@ -608,7 +605,7 @@ class BackupStressPolicyRetention(BackupStressBase):
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
         lvol_name, lvol_id = self._create_lvol(name=f"ret_str_{_rand_suffix()}")
-        pool_id = self.sbcli_utils.get_storage_pool_id(pool_name=self.pool_name)
+        self.sbcli_utils.get_storage_pool_id(pool_name=self.pool_name)
 
         # TC-BCK-STR-040: create policy with versions=3
         policy_name = f"ret_pol_{_rand_suffix()}"
@@ -648,7 +645,7 @@ class BackupStressPolicyRetention(BackupStressBase):
                 self._restore_backup(latest_id, ret_restored)
                 self._wait_for_restore(ret_restored)
                 self.logger.info(
-                    f"TC-BCK-STR-043: restore after merges succeeded ✓")
+                    "TC-BCK-STR-043: restore after merges succeeded ✓")
 
         # TC-BCK-STR-044: detach policy, more snapshots → no auto-backup
         self._detach_policy(policy_id, "lvol", lvol_id)
@@ -833,7 +830,7 @@ class TestBackupInterruptedBackup(BackupStressBase):
         # snapshot+backup after recovery and use that for the restore test
         snap2_name = f"intr_{label}_snap2_{_rand_suffix()}"
         self.logger.info(f"[{label}] Taking fresh snapshot+backup after recovery")
-        snap2_id = self._create_snapshot(lvol_id, snap2_name, backup=True)
+        self._create_snapshot(lvol_id, snap2_name, backup=True)
         sleep_n_sec(20)
 
         backups = self._list_backups()
@@ -1132,7 +1129,7 @@ class TestBackupInterruptedRestore(BackupStressBase):
         self.logger.info(f"Setup: {len(orig_checksums)} checksum(s) captured")
 
         snap_name = f"intr_rst_snap_{_rand_suffix()}"
-        snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+        self._create_snapshot(lvol_id, snap_name, backup=True)
         self.logger.info("Setup: waiting for backup to complete before restore test")
         sleep_n_sec(30)
         backups = self._list_backups()
@@ -1218,7 +1215,7 @@ class TestBackupInterruptedRestore(BackupStressBase):
         c_checksums = self.ssh_obj.generate_checksums(self.fio_node, c_files)
 
         c_snap = f"intr_rst_c_snap_{_rand_suffix()}"
-        c_snap_id = self._create_snapshot(crypto_id, c_snap, backup=True)
+        self._create_snapshot(crypto_id, c_snap, backup=True)
         sleep_n_sec(20)
         c_backups = self._list_backups()
         if c_backups:

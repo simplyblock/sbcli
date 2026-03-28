@@ -62,7 +62,6 @@ import os
 import re
 import random
 import string
-import threading
 import time
 from pathlib import Path
 
@@ -426,7 +425,7 @@ class BackupTestBase(TestClusterBase):
         """
         if not text:
             return []
-        lines = [l for l in text.splitlines() if l.strip()]
+        lines = [ln for ln in text.splitlines() if ln.strip()]
         if len(lines) < 2:
             return []
         # Find header line (first non-separator line)
@@ -624,7 +623,7 @@ class TestBackupBasicPositive(BackupTestBase):
 
         # --- TC-BCK-004: Trigger backup via `snapshot backup` on new snapshot ---
         snap2_name = f"snap2_{_rand_suffix()}"
-        self.logger.info(f"TC-BCK-004: snapshot backup via separate command")
+        self.logger.info("TC-BCK-004: snapshot backup via separate command")
         snap2_id = self._create_snapshot(lvol_id, snap2_name, backup=False)
         backup_id = self._snapshot_backup(snap2_id)
         assert backup_id, "TC-BCK-004: backup_id must be non-empty after snapshot backup"
@@ -668,7 +667,7 @@ class TestBackupBasicPositive(BackupTestBase):
         # --- TC-BCK-007: Three snapshot backups → chain kept to ≤ 3 ---
         self.logger.info("TC-BCK-007: third backup triggers delta chain (≤3 total)")
         snap3_name = f"snap3_{_rand_suffix()}"
-        snap3_id = self._create_snapshot(lvol_id, snap3_name, backup=True)
+        self._create_snapshot(lvol_id, snap3_name, backup=True)
         snap3_bk_id = self._wait_for_backup_by_snap(snap3_name, "TC-BCK-007")
         self.logger.info(f"TC-BCK-007: snap3 backup {snap3_bk_id} completed ✓")
         backups_final = self._list_backups()
@@ -832,7 +831,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         # --- TC-BCK-014: Checksum validation ---
         self.logger.info("TC-BCK-014: verifying checksums on restored lvol")
         restored_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        restored_checksums = self.ssh_obj.generate_checksums(self.fio_node, restored_files)
+        self.ssh_obj.generate_checksums(self.fio_node, restored_files)
         self.ssh_obj.verify_checksums(
             self.fio_node, restored_files, original_checksums, by_name=True)
         self.logger.info("TC-BCK-014: checksums match ✓")
@@ -1025,7 +1024,7 @@ class TestBackupPolicy(BackupTestBase):
         self.logger.info("TC-BCK-023: lvol snapshot auto-triggers backup via policy")
         lvol_name, lvol_id = self._create_lvol()
         snap_name = f"pol_snap_{_rand_suffix()}"
-        snap_id = self._create_snapshot(lvol_id, snap_name, backup=False)
+        self._create_snapshot(lvol_id, snap_name, backup=False)
         # Policy should have triggered a backup automatically
         sleep_n_sec(15)
         backups = self._list_backups()
@@ -1213,7 +1212,7 @@ class TestBackupNegative(BackupTestBase):
         device2, mount2 = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount2, runtime=20)
         snap39 = f"snap39_{_rand_suffix()}"
-        snap39_id = self._create_snapshot(lvol_id, snap39, backup=True)
+        self._create_snapshot(lvol_id, snap39, backup=True)
         bk39_id = self._wait_for_backup_by_snap(snap39, "TC-BCK-039")
         self.logger.info(f"TC-BCK-039: backup {bk39_id} completed, testing restore conflict")
         out, err = self._sbcli(
@@ -1266,7 +1265,7 @@ class TestBackupCryptoLvol(BackupTestBase):
         # --- TC-BCK-051: snapshot + backup of crypto lvol ---
         self.logger.info("TC-BCK-051: snapshot + backup of crypto lvol")
         snap_name = f"crypto_snap_{_rand_suffix()}"
-        snap_id = self._create_snapshot(crypto_id, snap_name, backup=True)
+        self._create_snapshot(crypto_id, snap_name, backup=True)
         sleep_n_sec(5)
 
         backups = self._list_backups()
@@ -1347,7 +1346,7 @@ class TestBackupCustomGeometry(BackupTestBase):
             orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
 
             snap_name = f"geom_snap_{ndcs}_{npcs}_{_rand_suffix()}"
-            snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+            self._create_snapshot(lvol_id, snap_name, backup=True)
             sleep_n_sec(5)
 
             backups = self._list_backups()

@@ -140,6 +140,14 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         """
         Select K outage nodes such that no two are in a primary/secondary
         relationship (in either direction). Candidates = keys of the map.
+
+        Two-phase approach:
+          Phase 1 (sequential): pick outage types + pre-dump logs for ALL nodes
+                                 before any outage is triggered.
+          Phase 2 (parallel):   trigger every node's outage simultaneously via
+                                 threads, eliminating the sequential delay that
+                                 previously allowed early-outage nodes to recover
+                                 before later-outage nodes were even taken down.
         """
         # Candidates are nodes that are primary *for someone* (map keys)
         primary_candidates = list(self.sn_primary_secondary_map.keys())
@@ -152,9 +160,11 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
         outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
         self.logger.info(f"Selected outage nodes: {outage_nodes}")
-        outage_combinations = []
+
+        # ── Phase 1: pick types + pre-dump for ALL nodes (before any outage) ──
+        node_plans = []  # (node, outage_type, node_ip, node_rpc_port, position)
         outage_num = 0
-        for node in outage_nodes:
+        for i, node in enumerate(outage_nodes):
             if outage_num == 0:
                 # When only 1 outage per cycle, use outage_types2 so that
                 # container_stop is also eligible (no second-node timing risk).
@@ -165,6 +175,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 outage_num = 1
             else:
                 outage_type = random.choice(self.outage_types2)
+
             node_details = self.sbcli_utils.get_storage_node_details(node)
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
@@ -185,10 +196,15 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 if not status:
                     raise RuntimeError("Placement Dump Status incorrect!!!")
 
-            self.logger.info(f"Performing {outage_type} on primary node {node}.")
-            self.log_outage_event(node, outage_type, "Outage started")
+            node_plans.append((node, outage_type, node_ip, node_rpc_port, i))
 
+        # ── Phase 2: trigger all outages simultaneously via threads ────────────
+        outage_results = {}  # node → (effective_type, outage_dur)
+
+        def _trigger(node, outage_type, node_ip, node_rpc_port, position):
+            self.logger.info(f"Performing {outage_type} on primary node {node}.")
             node_outage_dur = 0
+            effective_type = outage_type
             if outage_type == "container_stop":
                 self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             elif outage_type == "graceful_shutdown":
@@ -197,9 +213,23 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 self._disconnect_partial_interface(node, node_ip)
                 node_outage_dur = 300
             elif outage_type == "interface_full_network_interrupt":
-                node_outage_dur = self._disconnect_full_interface(node, node_ip)
+                node_outage_dur, effective_type = self._disconnect_full_interface(node, node_ip, position)
+            self.log_outage_event(node, effective_type, "Outage started")
+            outage_results[node] = (effective_type, node_outage_dur)
 
-            outage_combinations.append((node, outage_type, node_outage_dur))
+        threads = [
+            threading.Thread(target=_trigger, args=(node, otype, nip, nrpc, pos))
+            for node, otype, nip, nrpc, pos in node_plans
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        outage_combinations = []
+        for node, _, _, _, _ in node_plans:
+            effective_type, node_outage_dur = outage_results[node]
+            outage_combinations.append((node, effective_type, node_outage_dur))
             self.current_outage_nodes.append(node)
 
         self.outage_start_time = int(datetime.now().timestamp())
@@ -272,17 +302,23 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         )
         self.disconnect_thread.start()
 
-    def _disconnect_full_interface(self, node, node_ip):
+    def _disconnect_full_interface(self, node, node_ip, outage_position=0):
         self.logger.info("Handling full interface based network interruption...")
         active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-        outage_dur = random.choice([300, 30])
-        self.logger.info(f"Selected Outage seconds for n/w outage: {outage_dur}")
+        # Force 300s for the first outage in a multi-outage scenario so the
+        # network is still down when subsequent outages are triggered.
+        if outage_position == 0 and self.npcs > 1:
+            outage_dur = 300
+        else:
+            outage_dur = random.choice([300, 30])
+        effective_name = f"interface_full_network_interrupt_{outage_dur}sec"
+        self.logger.info(f"[N/W Outage] duration={outage_dur}s → {effective_name}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
             args=(node_ip, active_interfaces, outage_dur)
         )
         self.disconnect_thread.start()
-        return outage_dur
+        return outage_dur, effective_name
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage, skipping lvols on any outage node."""
@@ -721,7 +757,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             for node, outage_type, node_outage_dur in outage_events:
                 self.current_outage_node = node
                 self.outage_dur = node_outage_dur
-                if outage_type in ["container_stop", "interface_full_network_interrupt"] and self.npcs > 1:
+                if (outage_type == "container_stop" or "interface_full_network_interrupt" in outage_type) and self.npcs > 1:
                     self.restart_nodes_after_failover(outage_type, True)
                 else:
                     self.restart_nodes_after_failover(outage_type)

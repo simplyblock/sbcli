@@ -19,7 +19,7 @@ class MultipleExceptions(Exception):
                 tb_str = ex_info[1] if len(ex_info) > 1 else None
                 if tb_str:
                     # Include last meaningful line of traceback for context
-                    tb_lines = [l.strip() for l in tb_str.strip().splitlines() if l.strip()]
+                    tb_lines = [ln.strip() for ln in tb_str.strip().splitlines() if ln.strip()]
                     detail = tb_lines[-1] if tb_lines else str(exc)
                     messages.append(f"{case}: {detail}")
                 else:

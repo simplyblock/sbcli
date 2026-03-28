@@ -183,7 +183,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
         if truly_failed:
             raise Exception(
-                f"NVMe reconnect did not converge within fault tolerance: "
+                "NVMe reconnect did not converge within fault tolerance: "
                 + "; ".join(truly_failed)
             )
         self.logger.info(

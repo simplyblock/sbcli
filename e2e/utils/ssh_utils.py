@@ -1998,7 +1998,7 @@ class SshUtils:
             # Try rsync first (preserves timestamps and is idempotent)
             out, err = self.exec_command(
                 node_ip,
-                f"which rsync 2>/dev/null",
+                "which rsync 2>/dev/null",
                 supress_logs=True,
             )
             if out and "rsync" in out:

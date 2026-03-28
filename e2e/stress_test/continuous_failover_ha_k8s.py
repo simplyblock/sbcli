@@ -298,6 +298,12 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
         Identical to the parent except that ``container_stop`` outage type
         calls ``_k8s_stop_spdk_pod`` (kubectl delete pod) instead of
         ``ssh_obj.stop_spdk_process`` (docker stop).
+
+        Two-phase approach (same as parent):
+          Phase 1 (sequential): pick outage types + pre-dump logs for ALL nodes
+                                 before any outage is triggered.
+          Phase 2 (parallel):   trigger every node's outage simultaneously via
+                                 threads, eliminating the sequential delay.
         """
         from datetime import datetime
 
@@ -313,7 +319,9 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
 
         outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
         self.logger.info(f"Selected outage nodes: {outage_nodes}")
-        outage_combinations = []
+
+        # ── Phase 1: pick types + pre-dump for ALL nodes (before any outage) ──
+        node_plans = []  # (node, outage_type, node_ip, node_rpc_port)
         outage_num = 0
 
         for node in outage_nodes:
@@ -354,11 +362,15 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 if not status:
                     raise RuntimeError("Placement Dump Status incorrect!!!")
 
+            node_plans.append((node, outage_type, node_ip, node_rpc_port))
+
+        # ── Phase 2: trigger all outages simultaneously via threads ────────────
+        outage_results = {}  # node → (outage_type, outage_dur)
+
+        def _trigger_k8s(node, outage_type, node_ip, node_rpc_port):
             self.logger.info(
                 f"Performing {outage_type} on primary node {node} (K8s mode)."
             )
-            self.log_outage_event(node, outage_type, "Outage started")
-
             node_outage_dur = 0
             if outage_type == "container_stop":
                 # K8s: delete SPDK pod instead of docker stop
@@ -368,8 +380,22 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                     self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             elif outage_type == "graceful_shutdown":
                 self._graceful_shutdown_node(node)
+            self.log_outage_event(node, outage_type, "Outage started")
+            outage_results[node] = (outage_type, node_outage_dur)
 
-            outage_combinations.append((node, outage_type, node_outage_dur))
+        threads = [
+            threading.Thread(target=_trigger_k8s, args=(node, otype, nip, nrpc))
+            for node, otype, nip, nrpc in node_plans
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        outage_combinations = []
+        for node, _, _, _ in node_plans:
+            otype, odur = outage_results[node]
+            outage_combinations.append((node, otype, odur))
             self.current_outage_nodes.append(node)
 
         self.outage_start_time = int(datetime.now().timestamp())
