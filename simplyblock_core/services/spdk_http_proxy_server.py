@@ -23,7 +23,8 @@ logger.setLevel(logging.INFO)
 read_line_time_diff: dict = {}
 recv_from_spdk_time_diff: dict = {}
 def print_stats():
-    while True:
+    t = threading.current_thread()
+    while getattr(t, "do_run", True):
         try:
             time.sleep(3)
             t = time.time_ns()
@@ -249,7 +250,8 @@ def run_server(host, port, user, password, is_threading_enabled=False):
     # encoding user and password
     key = base64.b64encode((user+':'+password).encode(encoding='ascii')).decode('ascii')
     print_stats_thread = threading.Thread(target=print_stats, )
-    # print_stats_thread.start()
+    print_stats_thread.do_run = True
+    print_stats_thread.start()
     wait_for_spdk_ready()
     try:
         ServerHandler.key = key
@@ -260,6 +262,7 @@ def run_server(host, port, user, password, is_threading_enabled=False):
     except KeyboardInterrupt:
         logger.info('Shutting down server')
         httpd.socket.close()
+    print_stats_thread.do_run = False
 
 
 TIMEOUT = int(get_env_var("TIMEOUT", is_required=False, default=60*5))
