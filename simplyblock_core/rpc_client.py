@@ -119,8 +119,9 @@ class RPCClient:
                     logger.debug("Cache hit for %s on %s:%s", method, self.ip_address, self.port)
                     return cached_result
         result = self._request(method, params)
-        with _rpc_cache_lock:
-            _rpc_cache[cache_key] = (now, result)
+        if result is not None:
+            with _rpc_cache_lock:
+                _rpc_cache[cache_key] = (now, result)
         return result
 
     def _request(self, method, params=None):
