@@ -3524,13 +3524,15 @@ def recreate_lvstore_on_sec(secondary_node):
 
         primary_lvs_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
 
-        # Failback ANA: if first secondary restarting, demote second secondary BEFORE blocking primary port
+        # Failback ANA: if first secondary restarting, demote second secondary BEFORE blocking ports
         is_second_sec = (primary_node.secondary_node_id_2 == secondary_node.get_id())
         if not is_second_sec and primary_node.secondary_node_id_2:
             second_sec = db_controller.get_storage_node_by_id(primary_node.secondary_node_id_2)
             if second_sec and second_sec.status == StorageNode.STATUS_ONLINE:
-                if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
-                    _failback_first_sec_ana(primary_node, second_sec)
+                _failback_first_sec_ana(primary_node, second_sec)
+
+        # Collect nodes that need port block/unblock during this failback
+        nodes_to_unblock = []
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
@@ -3538,10 +3540,66 @@ def recreate_lvstore_on_sec(secondary_node):
             fw_api.firewall_set_port(primary_lvs_port, port_type, "block", primary_node.rpc_port)
             tcp_ports_events.port_deny(primary_node, primary_lvs_port)
 
-            ### 4- set leadership to false
-            # primary_rpc_client.bdev_lvol_set_leader(primary_node.lvstore, leader=False)
-            # primary_rpc_client.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
-            # time.sleep(1)
+            time.sleep(0.5)
+
+            ### 4- set leadership to false and wait for inflight IO
+            primary_rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port,
+                                           primary_node.rpc_username, primary_node.rpc_password)
+            primary_rpc_client.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
+            primary_rpc_client.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+            logger.info(f"Checking for inflight IO from node: {primary_node.get_id()}")
+            for i in range(100):
+                is_inflight = primary_rpc_client.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
+                if is_inflight:
+                    logger.info("Inflight IO found, retry in 100ms")
+                    time.sleep(0.1)
+                else:
+                    logger.info("Inflight IO NOT found, continuing")
+                    break
+            else:
+                logger.error(
+                    f"Timeout while checking for inflight IO after 10 seconds on node {primary_node.get_id()}")
+
+            nodes_to_unblock.append(primary_node)
+
+        elif not is_second_sec:
+            ### 3b- Primary is offline, this is the first secondary.
+            # The other secondary may be the active leader for this group.
+            # Drop leadership on all other online secondaries before examine,
+            # to prevent writer conflicts when this node's JC connects to remote JMs.
+            other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.secondary_node_id_2]
+                            if sid and sid != secondary_node.get_id()]
+            for other_sec_id in other_sec_ids:
+                other_sec = db_controller.get_storage_node_by_id(other_sec_id)
+                if other_sec and other_sec.status == StorageNode.STATUS_ONLINE:
+                    logger.info(f"Primary offline: dropping leadership for jm_vuid {primary_node.jm_vuid} "
+                                f"on other secondary {other_sec.get_id()}")
+                    other_fw_api = FirewallClient(other_sec, timeout=5, retry=2)
+                    other_sec_port_type = "udp" if other_sec.active_rdma else "tcp"
+                    other_fw_api.firewall_set_port(
+                        primary_lvs_port, other_sec_port_type, "block", other_sec.rpc_port)
+                    tcp_ports_events.port_deny(other_sec, primary_lvs_port)
+
+                    time.sleep(0.5)
+
+                    other_rpc = RPCClient(other_sec.mgmt_ip, other_sec.rpc_port,
+                                          other_sec.rpc_username, other_sec.rpc_password)
+                    other_rpc.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
+                    other_rpc.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+                    logger.info(f"Checking for inflight IO from node: {other_sec.get_id()}")
+                    for i in range(100):
+                        is_inflight = other_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
+                        if is_inflight:
+                            logger.info("Inflight IO found, retry in 100ms")
+                            time.sleep(0.1)
+                        else:
+                            logger.info("Inflight IO NOT found, continuing")
+                            break
+                    else:
+                        logger.error(
+                            f"Timeout while checking for inflight IO after 10 seconds on node {other_sec.get_id()}")
+
+                    nodes_to_unblock.append(other_sec)
 
         ### 5- examine
         ret = secondary_rpc_client.bdev_examine(primary_node.raid)
@@ -3559,10 +3617,12 @@ def recreate_lvstore_on_sec(secondary_node):
                 logger.error("Error connecting to hublvol: %s", e)
                 # return False
 
-            fw_api = FirewallClient(primary_node, timeout=5, retry=2)
-            ### 8- allow port on primary
-            fw_api.firewall_set_port(primary_lvs_port, port_type, "allow", primary_node.rpc_port)
-            tcp_ports_events.port_allowed(primary_node, primary_lvs_port)
+        ### 8- allow ports on nodes that were blocked
+        for node_to_unblock in nodes_to_unblock:
+            fw_api = FirewallClient(node_to_unblock, timeout=5, retry=2)
+            unblock_port_type = "udp" if node_to_unblock.active_rdma else "tcp"
+            fw_api.firewall_set_port(primary_lvs_port, unblock_port_type, "allow", node_to_unblock.rpc_port)
+            tcp_ports_events.port_allowed(node_to_unblock, primary_lvs_port)
 
         ### 7- add lvols to subsystems
         lvol_ana_state = "inaccessible" if is_second_sec else "non_optimized"
