@@ -403,5 +403,285 @@ class TestEdgeCases(unittest.TestCase):
         self.assertIn("2 not-online", reason)
 
 
+# ---------------------------------------------------------------------------
+# FTT=1 additional scenarios
+# ---------------------------------------------------------------------------
+
+class TestFTT1Additional(unittest.TestCase):
+
+    def test_unreachable_counts_as_not_online(self):
+        cl = _cluster(npcs=1, ft=1)
+        nodes = [_node("n1"), _node("n2"), _node("n3", status=StorageNode.STATUS_UNREACHABLE)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    def test_schedulable_counts_as_not_online(self):
+        cl = _cluster(npcs=1, ft=1)
+        nodes = [_node("n1"), _node("n2"), _node("n3", status=StorageNode.STATUS_SCHEDULABLE)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    def test_in_shutdown_counts_as_not_online(self):
+        cl = _cluster(npcs=1, ft=1)
+        nodes = [_node("n1"), _node("n2"), _node("n3", status=StorageNode.STATUS_IN_SHUTDOWN)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    def test_restarting_counts_as_not_online(self):
+        cl = _cluster(npcs=1, ft=1)
+        nodes = [_node("n1"), _node("n2"), _node("n3", status=StorageNode.STATUS_RESTARTING)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    def test_two_nodes_both_online_allows(self):
+        """Minimal cluster: 2 online nodes, removing one is allowed for FTT=1."""
+        cl = _cluster(npcs=1, ft=1)
+        nodes = [_node("n1"), _node("n2")]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_jm_replication_on_target_node_not_counted(self):
+        """Journal replication on the node being removed should not block removal."""
+        cl = _cluster(npcs=1, ft=1)
+        nodes = [_node("n1"), _node("n2")]
+        _set_jm_replicating(nodes[0])  # n1 is the target, its replication shouldn't matter
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_jm_replication_plus_offline_both_count(self):
+        """Offline node + journal replication = 2 not-online → blocked even for FTT=1."""
+        cl = _cluster(npcs=1, ft=1)
+        nodes = [_node("n1"), _node("n2"), _node("n3"),
+                 _node("n4", status=StorageNode.STATUS_OFFLINE)]
+        _set_jm_replicating(nodes[1])
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("journal replication", reason)
+
+
+# ---------------------------------------------------------------------------
+# FTT=2 additional scenarios
+# ---------------------------------------------------------------------------
+
+class TestFTT2Additional(unittest.TestCase):
+
+    def test_two_jm_replications_blocks(self):
+        """Only one jm_replication_active flag, but it still counts as +1 with 1 offline = 2."""
+        cl = _cluster(npcs=2, ft=2)
+        nodes = [_node("n1"), _node("n2"), _node("n3"),
+                 _node("n4", status=StorageNode.STATUS_SUSPENDED), _node("n5")]
+        _set_jm_replicating(nodes[1])
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    def test_removed_plus_offline_only_offline_counts(self):
+        """Removed node doesn't count; only the offline one does. FTT=2 allows one."""
+        cl = _cluster(npcs=2, ft=2)
+        nodes = [_node("n1"), _node("n2"), _node("n3"),
+                 _node("n4", status=StorageNode.STATUS_REMOVED),
+                 _node("n5", status=StorageNode.STATUS_OFFLINE)]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_three_offline_blocks(self):
+        cl = _cluster(npcs=2, ft=2)
+        nodes = [_node("n1"), _node("n2"),
+                 _node("n3", status=StorageNode.STATUS_OFFLINE),
+                 _node("n4", status=StorageNode.STATUS_DOWN),
+                 _node("n5", status=StorageNode.STATUS_SUSPENDED)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+
+# ---------------------------------------------------------------------------
+# npcs=2, ft=1 additional scenarios
+# ---------------------------------------------------------------------------
+
+class TestNpcs2Ft1Additional(unittest.TestCase):
+
+    def test_secondary_suspended_blocks_primary(self):
+        """Suspended secondary also blocks its primary."""
+        cl = _cluster(npcs=2, ft=1)
+        nodes = [_node("n1", secondary_id="n2"),
+                 _node("n2", status=StorageNode.STATUS_SUSPENDED),
+                 _node("n3"), _node("n4")]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("secondary", reason)
+
+    def test_primary_down_blocks_secondary(self):
+        cl = _cluster(npcs=2, ft=1)
+        nodes = [_node("n1", secondary_id="n2", status=StorageNode.STATUS_DOWN),
+                 _node("n2"), _node("n3"), _node("n4")]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n2", db)
+        self.assertFalse(allowed)
+        self.assertIn("primary", reason)
+
+    def test_both_secondaries_online_allows(self):
+        """Node with two secondaries, both online → allowed."""
+        cl = _cluster(npcs=2, ft=1)
+        nodes = [_node("n1", secondary_id="n2", secondary_id_2="n3"),
+                 _node("n2"), _node("n3"), _node("n4")]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_second_secondary_offline_blocks(self):
+        """secondary_id_2 offline blocks primary removal."""
+        cl = _cluster(npcs=2, ft=1)
+        nodes = [_node("n1", secondary_id="n2", secondary_id_2="n3"),
+                 _node("n2"),
+                 _node("n3", status=StorageNode.STATUS_OFFLINE),
+                 _node("n4")]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("n3", reason)
+
+    def test_node_is_secondary_of_two_primaries_one_offline(self):
+        """Node n3 is secondary of both n1 and n2. n1 is offline → n3 cannot be removed."""
+        cl = _cluster(npcs=2, ft=1)
+        nodes = [_node("n1", secondary_id="n3", status=StorageNode.STATUS_OFFLINE),
+                 _node("n2", secondary_id="n3"),
+                 _node("n3"), _node("n4")]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n3", db)
+        self.assertFalse(allowed)
+        self.assertIn("n1", reason)
+
+    def test_jm_replication_counts_but_pair_still_checked(self):
+        """With jm replication (count=1), if secondary is also offline → count=2 → blocked by capacity before pair check."""
+        cl = _cluster(npcs=2, ft=1)
+        nodes = [_node("n1", secondary_id="n2"),
+                 _node("n2", status=StorageNode.STATUS_OFFLINE),
+                 _node("n3"), _node("n4")]
+        _set_jm_replicating(nodes[2])  # n3 replicating
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+
+# ---------------------------------------------------------------------------
+# Rebalancing additional scenarios
+# ---------------------------------------------------------------------------
+
+class TestRebalancingAdditional(unittest.TestCase):
+
+    def test_rebalancing_ndcs4_npcs2_six_nodes_blocks(self):
+        """ndcs=4, npcs=2: minimum=6. With 6 nodes, rebalancing → headroom=0 → block."""
+        cl = _cluster(npcs=2, ndcs=4, ft=2, rebalancing=True)
+        nodes = [_node(f"n{i}") for i in range(6)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n0", db)
+        self.assertFalse(allowed)
+        self.assertIn("rebalancing", reason)
+
+    def test_rebalancing_ndcs4_npcs2_seven_nodes_allows(self):
+        """ndcs=4, npcs=2: minimum=6. With 7 nodes, rebalancing → headroom=1 → allowed."""
+        cl = _cluster(npcs=2, ndcs=4, ft=2, rebalancing=True)
+        nodes = [_node(f"n{i}") for i in range(7)]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n0", db)
+        self.assertTrue(allowed)
+
+    def test_rebalancing_ndcs1_npcs1_two_nodes_blocks(self):
+        """ndcs=1, npcs=1: minimum=2. With 2 nodes, rebalancing → block."""
+        cl = _cluster(npcs=1, ndcs=1, ft=1, rebalancing=True)
+        nodes = [_node("n1"), _node("n2")]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("rebalancing", reason)
+
+    def test_rebalancing_ndcs1_npcs1_three_nodes_allows(self):
+        """ndcs=1, npcs=1: minimum=2. With 3 nodes, rebalancing → allowed."""
+        cl = _cluster(npcs=1, ndcs=1, ft=1, rebalancing=True)
+        nodes = [_node("n1"), _node("n2"), _node("n3")]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_rebalancing_in_creation_not_counted_as_active(self):
+        """in_creation nodes reduce active count, reducing headroom."""
+        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=True)
+        # 4 nodes but 1 in_creation → 3 active → minimum → block
+        nodes = [_node("n1"), _node("n2"), _node("n3"),
+                 _node("n4", status=StorageNode.STATUS_IN_CREATION)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    def test_rebalancing_check_happens_before_ftt_check(self):
+        """Even if FTT would allow it, rebalancing with no headroom blocks."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, rebalancing=True)
+        # 4 nodes, all online, FTT=2 would allow but rebalancing blocks (headroom=0)
+        nodes = [_node(f"n{i}") for i in range(4)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n0", db)
+        self.assertFalse(allowed)
+        self.assertIn("rebalancing", reason)
+
+
+# ---------------------------------------------------------------------------
+# Reason string validation
+# ---------------------------------------------------------------------------
+
+class TestReasonStrings(unittest.TestCase):
+
+    def test_ftt1_reason_includes_count(self):
+        cl = _cluster(npcs=1, ft=1)
+        nodes = [_node("n1"), _node("n2"),
+                 _node("n3", status=StorageNode.STATUS_OFFLINE),
+                 _node("n4", status=StorageNode.STATUS_DOWN)]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("2 not-online", reason)
+
+    def test_ftt2_reason_includes_count(self):
+        cl = _cluster(npcs=2, ft=2)
+        nodes = [_node("n1"), _node("n2"),
+                 _node("n3", status=StorageNode.STATUS_OFFLINE),
+                 _node("n4", status=StorageNode.STATUS_DOWN),
+                 _node("n5")]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("2 not-online", reason)
+
+    def test_rebalancing_reason_includes_node_counts(self):
+        cl = _cluster(npcs=1, ndcs=2, ft=1, rebalancing=True)
+        nodes = [_node("n1"), _node("n2"), _node("n3")]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("3 active nodes", reason)
+        self.assertIn("rebalancing", reason)
+
+    def test_pair_reason_includes_node_ids(self):
+        cl = _cluster(npcs=2, ft=1)
+        nodes = [_node("n1", secondary_id="n2"),
+                 _node("n2", status=StorageNode.STATUS_OFFLINE),
+                 _node("n3"), _node("n4")]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("n1", reason)
+        self.assertIn("n2", reason)
+        self.assertIn("offline", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
