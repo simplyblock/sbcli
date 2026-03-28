@@ -6,6 +6,7 @@ import threading
 import string
 import random
 import os
+import time
 
 
 generated_sequences = set()
@@ -312,80 +313,23 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
         if outage_type == "graceful_shutdown":
-            # self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            # self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
-            sleep_n_sec(10)
-            # self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            # self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=4000)
-            max_retries = 10
-            retry_delay = 10  # seconds
-            # Retry mechanism for suspending the node
-            # for attempt in range(max_retries):
-            #     try:
-            #         if attempt == max_retries - 1:
-            #             self.logger.info("[CHECK] Suspending Node via CLI as via API Fails.")
-            #             self.ssh_obj.suspend_node(node=self.mgmt_nodes[0],
-            #                                       node_id=self.current_outage_node)
-            #         else:
-            #             self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            #         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=1000)
-            #         break  # Exit loop if successful
-            #     except Exception as _:
-            #         if attempt < max_retries - 2:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node. Retrying in {retry_delay} seconds...")
-            #             sleep_n_sec(retry_delay)
-            #         elif attempt < max_retries - 1:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node via API. Retrying in {retry_delay} seconds via CMD...")
-            #             sleep_n_sec(retry_delay)
-            #         else:
-            #             self.logger.info("Max retries reached. Failed to suspend node.")
-            #             raise  # Rethrow the last exception
-            # for attempt in range(max_retries):
-            #     try:
-            #         if attempt == max_retries - 1:
-            #             self.logger.info("[CHECK] Suspending Node via CLI as via API Fails.")
-            #             self.ssh_obj.suspend_node(node=self.mgmt_nodes[0],
-            #                                       node_id=self.current_outage_node)
-            #         else:
-            #             self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            #         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=1000)
-            #         break  # Exit loop if successful
-            #     except Exception as _:
-            #         if attempt < max_retries - 2:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node. Retrying in {retry_delay} seconds...")
-            #             sleep_n_sec(retry_delay)
-            #         elif attempt < max_retries - 1:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node via API. Retrying in {retry_delay} seconds via CMD...")
-            #             sleep_n_sec(retry_delay)
-            #         else:
-            #             self.logger.info("Max retries reached. Failed to suspend node.")
-            #             raise  # Rethrow the last exception
-
-            sleep_n_sec(10)  # Wait before shutting down
-
-            # Retry mechanism for shutting down the node
-            for attempt in range(max_retries):
+            self.logger.info(f"Issuing graceful shutdown (no --force) for node {self.current_outage_node}.")
+            deadline = time.time() + 300  # 5 minutes
+            while True:
                 try:
-                    if attempt == max_retries - 1:
-                        self.logger.info("[CHECK] Shutting down Node via CLI as via API Fails.")
-                        self.ssh_obj.shutdown_node(node=self.mgmt_nodes[0],
-                                                   node_id=self.current_outage_node,
-                                                   force=True)
-                    else:
-                        self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=True,
-                                                       expected_error_code=[503])
-                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=1000)
-                    break  # Exit loop if successful
-                except Exception as _:
-                    if attempt < max_retries - 2:
-                        self.logger.info(f"Attempt {attempt + 1} failed to shutdown node. Retrying in {retry_delay} seconds...")
-                        sleep_n_sec(retry_delay)
-                    elif attempt < max_retries - 1:
-                        self.logger.info(f"Attempt {attempt + 1} failed to shutdown node via API. Retrying in {retry_delay} seconds via CMD...")
-                        sleep_n_sec(retry_delay)
-                    else:
-                        self.logger.info("Max retries reached. Failed to shutdown node.")
-                        raise  # Rethrow the last exception
+                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=False)
+                except Exception as e:
+                    self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
+                sleep_n_sec(20)
+                node_detail = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
+                if node_detail[0]["status"] == "offline":
+                    self.logger.info(f"Node {self.current_outage_node} is offline.")
+                    break
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"Node {self.current_outage_node} did not go offline within 5 minutes of graceful shutdown."
+                    )
+                self.logger.info(f"Node {self.current_outage_node} not yet offline; retrying shutdown...")
         elif outage_type == "container_stop":
             self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
         elif outage_type == "port_network_interrupt":

@@ -7,7 +7,7 @@ import threading
 import string
 import random
 import os
-# import time
+import time
 
 
 generated_sequences = set()
@@ -236,62 +236,31 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         return outage_combinations
 
     def _graceful_shutdown_node(self, node):
-        try:
-            sleep_n_sec(10)
-            max_retries = 10
-            retry_delay = 10  # seconds
-            # Retry mechanism for suspending the node
-            # for attempt in range(max_retries):
-            #     try:
-            #         if attempt == max_retries - 1:
-            #             self.logger.info("[CHECK] Suspending Node via CLI as via API Fails.")
-            #             self.ssh_obj.suspend_node(node=self.mgmt_nodes[0],
-            #                                       node_id=node)
-            #         else:
-            #             self.sbcli_utils.suspend_node(node_uuid=node, expected_error_code=[503])
-            #         self.sbcli_utils.wait_for_storage_node_status(node, "suspended", timeout=1000)
-            #         break  # Exit loop if successful
-            #     except Exception as _:
-            #         if attempt < max_retries - 2:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node. Retrying in {retry_delay} seconds...")
-            #             sleep_n_sec(retry_delay)
-            #         elif attempt < max_retries - 1:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node via API. Retrying in {retry_delay} seconds via CMD...")
-            #             sleep_n_sec(retry_delay)
-            #         else:
-            #             self.logger.info("Max retries reached. Failed to suspend node.")
-            #             raise  # Rethrow the last exception
+        """Shutdown node without --force; retry every 20 s for up to 5 minutes.
 
-            sleep_n_sec(10)  # Wait before shutting down
-
-            # Retry mechanism for shutting down the node
-            for attempt in range(max_retries):
-                try:
-                    if attempt == max_retries - 1:
-                        self.logger.info("[CHECK] Shutting down Node via CLI as via API Fails.")
-                        if self.k8s_test:
-                            self.sbcli_utils.shutdown_node(node_uuid=node, force=True)
-                        else:
-                            self.ssh_obj.shutdown_node(node=self.mgmt_nodes[0],
-                                                       node_id=node,
-                                                       force=True)
-                    else:
-                        self.sbcli_utils.shutdown_node(node_uuid=node, force=True,
-                                                       expected_error_code=[503])
-                    self.sbcli_utils.wait_for_storage_node_status(node, "offline", timeout=1000)
-                    break  # Exit loop if successful
-                except Exception as _:
-                    if attempt < max_retries - 2:
-                        self.logger.info(f"Attempt {attempt + 1} failed to shutdown node. Retrying in {retry_delay} seconds...")
-                        sleep_n_sec(retry_delay)
-                    elif attempt < max_retries - 1:
-                        self.logger.info(f"Attempt {attempt + 1} failed to shutdown node via API. Retrying in {retry_delay} seconds via CMD...")
-                        sleep_n_sec(retry_delay)
-                    else:
-                        self.logger.info("Max retries reached. Failed to shutdown node.")
-                        raise  # Rethrow the last exception
-        except Exception as e:
-            self.logger.error(f"Failed graceful shutdown for node {node}: {str(e)}")
+        The shutdown command now triggers an internal suspend before shutting
+        down.  After each call we wait 20 seconds and check the node status.
+        If the node is still not offline we re-issue the command and try again
+        until the 5-minute deadline, then raise so the test captures the failure
+        rather than masking it with a force-kill.
+        """
+        self.logger.info(f"Issuing graceful shutdown (no --force) for node {node}.")
+        deadline = time.time() + 300  # 5 minutes
+        while True:
+            try:
+                self.sbcli_utils.shutdown_node(node_uuid=node, force=False)
+            except Exception as e:
+                self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
+            sleep_n_sec(20)
+            node_detail = self.sbcli_utils.get_storage_node_details(node)
+            if node_detail[0]["status"] == "offline":
+                self.logger.info(f"Node {node} is offline.")
+                return
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"Node {node} did not go offline within 5 minutes of graceful shutdown."
+                )
+            self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
 
     def _disconnect_partial_interface(self, node, node_ip):
         active_interfaces = [nic["if_name"] for nic in self.sbcli_utils.get_storage_node_details(node)[0]["data_nics"]]

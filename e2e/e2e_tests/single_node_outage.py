@@ -1,6 +1,7 @@
 ### simplyblock e2e tests
 from datetime import datetime
 import os
+import time
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
@@ -151,15 +152,23 @@ class TestSingleNodeOutage(TestClusterBase):
 
         timestamp = int(datetime.now().timestamp())
 
-        self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
-        try:
-            self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=True)
-        except Exception as _:
-            self.logger.info("Waiting for node shutdown")
-
-        self.sbcli_utils.wait_for_storage_node_status(node_id=no_lvol_node_uuid,
-                                                      status="offline",
-                                                      timeout=100)
+        self.logger.info(f"Issuing graceful shutdown (no --force) for node {no_lvol_node_uuid}.")
+        deadline = time.time() + 300  # 5 minutes
+        while True:
+            try:
+                self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=False)
+            except Exception as e:
+                self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
+            sleep_n_sec(20)
+            node_detail = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
+            if node_detail[0]["status"] == "offline":
+                self.logger.info(f"Node {no_lvol_node_uuid} is offline.")
+                break
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"Node {no_lvol_node_uuid} did not go offline within 5 minutes of graceful shutdown."
+                )
+            self.logger.info(f"Node {no_lvol_node_uuid} not yet offline; retrying shutdown...")
 
         self.logger.info("Sleeping for 30 seconds")
         sleep_n_sec(30)
@@ -415,15 +424,23 @@ class TestHASingleNodeOutage(TestClusterBase):
         for i in range(2):
             timestamp = int(datetime.now().timestamp())
             sleep_n_sec(30)
-            self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
-            try:
-                self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=True)
-            except Exception as _:
-                self.logger.info("Waiting for node shutdown")
-
-            self.sbcli_utils.wait_for_storage_node_status(node_id=no_lvol_node_uuid,
-                                                        status="offline",
-                                                        timeout=100)
+            self.logger.info(f"Issuing graceful shutdown (no --force) for node {no_lvol_node_uuid}.")
+            deadline = time.time() + 300  # 5 minutes
+            while True:
+                try:
+                    self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=False)
+                except Exception as e:
+                    self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
+                sleep_n_sec(20)
+                node_detail = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
+                if node_detail[0]["status"] == "offline":
+                    self.logger.info(f"Node {no_lvol_node_uuid} is offline.")
+                    break
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"Node {no_lvol_node_uuid} did not go offline within 5 minutes of graceful shutdown."
+                    )
+                self.logger.info(f"Node {no_lvol_node_uuid} not yet offline; retrying shutdown...")
 
             self.logger.info("Sleeping for 30 seconds")
             sleep_n_sec(30)

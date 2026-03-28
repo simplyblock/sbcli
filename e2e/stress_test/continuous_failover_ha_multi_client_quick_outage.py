@@ -11,6 +11,7 @@ import os
 import random
 import string
 import threading
+import time
 from datetime import datetime
 from utils.common_utils import sleep_n_sec
 from exceptions.custom_exception import LvolNotConnectException
@@ -395,19 +396,23 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         node_rpc_port = node_details[0]["rpc_port"]
 
         if outage_type == "graceful_shutdown":
-            # suspend -> wait SUSPENDED -> shutdown -> wait OFFLINE
-            try:
-                self.logger.info(f"[LFNG] Suspending node via: sbcli-dev sn suspend {self.current_outage_node}")
-                self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-                self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=600)
-            except Exception:
-                self.logger.warning("[LFNG] Suspend failed from API; ignoring if already suspended")
-
-            try:
-                self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=True, expected_error_code=[503])
-            except Exception:
-                self.ssh_obj.shutdown_node(node=self.mgmt_nodes[0], node_id=self.current_outage_node, force=True)
-            self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=900)
+            self.logger.info(f"Issuing graceful shutdown (no --force) for node {self.current_outage_node}.")
+            deadline = time.time() + 300  # 5 minutes
+            while True:
+                try:
+                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=False)
+                except Exception as e:
+                    self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
+                sleep_n_sec(20)
+                node_detail = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
+                if node_detail[0]["status"] == "offline":
+                    self.logger.info(f"Node {self.current_outage_node} is offline.")
+                    break
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"Node {self.current_outage_node} did not go offline within 5 minutes of graceful shutdown."
+                    )
+                self.logger.info(f"Node {self.current_outage_node} not yet offline; retrying shutdown...")
 
             for node in self.sn_nodes_with_sec:
                 if node != self.current_outage_node:
