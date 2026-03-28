@@ -2597,6 +2597,156 @@ def list_storage_devices(node_id, is_json):
         return out
 
 
+def _check_ftt_allows_node_removal(node_id, db_controller):
+    """Check whether FTT constraints allow removing (suspend/shutdown) a node.
+
+    Returns (allowed: bool, reason: str).
+    """
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        return False, "Node not found"
+
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+
+    if cluster.ha_type != "ha":
+        return True, ""
+
+    npcs = cluster.distr_npcs  # parity chunk count (1 or 2)
+    ndcs = cluster.distr_ndcs  # data chunk count
+    ft = cluster.max_fault_tolerance  # declared fault tolerance level
+
+    # Count total active nodes (excluding in_creation and removed)
+    total_active_nodes = sum(
+        1 for node in snodes
+        if node.status not in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]
+    )
+
+    # Block suspend/shutdown during rebalancing based on node headroom.
+    # A cluster needs ndcs+npcs nodes minimum. During rebalancing:
+    #   - With exactly ndcs+npcs nodes: no shutdowns allowed (no headroom)
+    #   - With ndcs+npcs+1 nodes: one shutdown allowed (one spare)
+    #   - With ndcs+npcs+2+ nodes: two shutdowns allowed, etc.
+    # The number of allowed shutdowns during rebalancing is:
+    #   total_active_nodes - (ndcs + npcs)
+    # This must be greater than the number of already-not-online nodes.
+    if cluster.is_re_balancing:
+        not_online_already = sum(
+            1 for node in snodes
+            if node.get_id() != node_id
+            and node.status != StorageNode.STATUS_ONLINE
+            and node.status not in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]
+        )
+        headroom = total_active_nodes - (ndcs + npcs)
+        if headroom <= not_online_already:
+            return False, (
+                f"Cluster is rebalancing with {total_active_nodes} active nodes "
+                f"({not_online_already} already not online, "
+                f"need >{ndcs + npcs} for ndcs={ndcs}, npcs={npcs}). "
+                f"Wait for rebalancing to complete before removing a node."
+            )
+
+    # Count nodes that are not online (excluding the node being removed,
+    # and excluding nodes in creation or already removed).
+    not_online_nodes = []
+    for node in snodes:
+        if node.get_id() == node_id:
+            continue
+        if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            not_online_nodes.append(node)
+
+    # Check for journal replication in progress on any online node.
+    # A node with active journal replication counts as one additional not-online node.
+    jm_replication_active = False
+    for node in snodes:
+        if node.get_id() == node_id:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            lvstores = node.rpc_client(timeout=5, retry=1).bdev_lvol_get_lvstores(node.lvstore)
+            if lvstores:
+                ret = node.rpc_client(timeout=5, retry=1).jc_get_jm_status(node.jm_vuid)
+                for jm in ret:
+                    if ret[jm] is False:
+                        jm_replication_active = True
+                        break
+        except Exception:
+            pass
+        if jm_replication_active:
+            break
+
+    not_online_count = len(not_online_nodes)
+    if jm_replication_active:
+        not_online_count += 1
+
+    if npcs == 1:
+        # FTT=1: no room at all if anything is already not online or journal replicating
+        if not_online_count > 0:
+            return False, (
+                f"FTT=1 (npcs=1): cannot remove node, cluster already has "
+                f"{len(not_online_nodes)} not-online node(s)"
+                f"{' and journal replication in progress' if jm_replication_active else ''}"
+            )
+
+    elif npcs == 2:
+        if ft >= 2:
+            # FTT=2: room for one not-online node, block if already have one+
+            if not_online_count >= 2:
+                return False, (
+                    f"FTT=2 (npcs=2): cannot remove node, cluster already has "
+                    f"{len(not_online_nodes)} not-online node(s)"
+                    f"{' and journal replication in progress' if jm_replication_active else ''}"
+                )
+        else:
+            # npcs=2, ft=1: like FTT=2 for capacity, but additionally
+            # cannot remove both primary and its secondary
+            if not_online_count >= 2:
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node, cluster already has "
+                    f"{len(not_online_nodes)} not-online node(s)"
+                    f"{' and journal replication in progress' if jm_replication_active else ''}"
+                )
+
+            # Check primary-secondary pair constraint:
+            # If the node being removed is a primary, check its secondary is online.
+            # If the node being removed is a secondary, check its primary is online.
+            for not_online_node in not_online_nodes:
+                # Is any not-online node the secondary of the node we're removing?
+                if snode.secondary_node_id == not_online_node.get_id():
+                    return False, (
+                        f"npcs=2/ft=1: cannot remove node {node_id}, "
+                        f"its secondary {not_online_node.get_id()} is not online "
+                        f"(status: {not_online_node.status})"
+                    )
+                if snode.secondary_node_id_2 == not_online_node.get_id():
+                    return False, (
+                        f"npcs=2/ft=1: cannot remove node {node_id}, "
+                        f"its secondary {not_online_node.get_id()} is not online "
+                        f"(status: {not_online_node.status})"
+                    )
+
+            # Is the node we're removing a secondary of any not-online primary?
+            for not_online_node in not_online_nodes:
+                if not_online_node.secondary_node_id == node_id:
+                    return False, (
+                        f"npcs=2/ft=1: cannot remove node {node_id}, "
+                        f"it is secondary of not-online primary {not_online_node.get_id()} "
+                        f"(status: {not_online_node.status})"
+                    )
+                if not_online_node.secondary_node_id_2 == node_id:
+                    return False, (
+                        f"npcs=2/ft=1: cannot remove node {node_id}, "
+                        f"it is secondary of not-online primary {not_online_node.get_id()} "
+                        f"(status: {not_online_node.status})"
+                    )
+
+    return True, ""
+
+
 def shutdown_storage_node(node_id, force=False):
     db_controller = DBController()
     try:
@@ -2606,10 +2756,28 @@ def shutdown_storage_node(node_id, force=False):
         return False
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
+
+    # If node is not yet suspended and force is not used, run suspend first
     if snode.status != StorageNode.STATUS_SUSPENDED:
-        logger.error("Node is not in suspended state")
-        if force is False:
+        if force:
+            logger.warning("Node is not in suspended state, proceeding with force")
+        elif snode.status == StorageNode.STATUS_ONLINE:
+            logger.info("Node is online, suspending before shutdown")
+            ret = suspend_storage_node(node_id, force=False)
+            if not ret:
+                logger.error("Failed to suspend node, cannot proceed with shutdown")
+                return False
+            snode = db_controller.get_storage_node_by_id(node_id)
+        else:
+            logger.error("Node is not in suspended or online state, use --force")
             return False
+
+    # FTT check (suspend already checked this, but verify again for direct shutdown calls)
+    if not force:
+        allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
+        if not allowed:
+            logger.error(f"Cannot shutdown node: {reason}")
+            return False, reason
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
@@ -2700,100 +2868,74 @@ def suspend_storage_node(node_id, force=False):
             return False
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
-    if task_id:
+    if tasks:
         logger.error(f"Migration task found: {len(tasks)}, can not suspend storage node, use --force")
         if force is False:
             return False
         for task in tasks:
             tasks_controller.cancel_task(task.uuid)
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-    online_nodes = 0
-    offline_nodes = 0
-    for node in snodes:
-        if node.status == node.STATUS_ONLINE:
-            online_nodes += 1
-        else:
-            if node.status == StorageNode.STATUS_DOWN and node.get_id() != snode.secondary_node_id:
-                online_nodes += 1
-            else:
-                offline_nodes += 1
-
-    if cluster.ha_type == "ha":
-        if online_nodes < 3 and cluster.status == cluster.STATUS_ACTIVE:
-            logger.warning("Cluster mode is HA but online storage nodes are less than 3")
-            if force is False:
-                return False
-
-        if cluster.status == cluster.STATUS_DEGRADED and force is False:
-            logger.warning("Cluster status is degraded, use --force but this will suspend the cluster")
-            return False
-
-    if offline_nodes > 0:
-        if force is False:
-            logger.error("Offline storage nodes found, cannot suspend node without --force")
-            return False
-
-    if offline_nodes > 0:
-        if force is False:
-            logger.error("Offline storage nodes found, cannot suspend node without --force")
-            return False
+    if not force:
+        allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
+        if not allowed:
+            logger.error(f"Cannot suspend node: {reason}")
+            return False, reason
 
     logger.info("Suspending node")
-
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            device_controller.device_set_unavailable(dev.get_id())
-
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        logger.info("Setting JM unavailable")
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
-
-    logger.info("Setting node status to suspended")
-    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
 
     rpc_client = snode.rpc_client()
     fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
     if snode.active_rdma:
         port_type = "udp"
-    if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
-        nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
-        if nodes:
-            for node in nodes:
-                try:
-                    # Block per-lvstore ports for secondary lvstores on this node
+
+    # Track all blocked ports so we can revert on failure
+    blocked_ports = []  # list of (port, port_type, rpc_port) tuples
+
+    def _block_port(port):
+        fw_api.firewall_set_port(port, port_type, "block", snode.rpc_port, is_reject=True)
+        blocked_ports.append(port)
+
+    def _revert_blocked_ports():
+        for port in blocked_ports:
+            try:
+                fw_api.firewall_set_port(port, port_type, "unblock", snode.rpc_port)
+            except Exception as revert_e:
+                logger.error(f"Failed to revert port block for port {port}: {revert_e}")
+
+    try:
+        # Block per-lvstore ports for secondary lvstores hosted on this node
+        if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
+            nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+            if nodes:
+                for node in nodes:
                     sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
                     sec_hub_port = node.get_hublvol_port(node.lvstore)
                     if sec_hub_port:
-                        fw_api.firewall_set_port(
-                            sec_hub_port, port_type, "block", snode.rpc_port, is_reject=True)
-                    fw_api.firewall_set_port(
-                        sec_lvs_port, port_type, "block", snode.rpc_port, is_reject=True)
+                        _block_port(sec_hub_port)
+                    _block_port(sec_lvs_port)
                     time.sleep(0.5)
                     rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
                     rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-                except Exception as e:
-                    logger.error(e)
-                    return False
 
-    try:
         # Block per-lvstore ports for this node's own primary lvstore
         own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
         own_hub_port = snode.get_hublvol_port(snode.lvstore)
         if own_hub_port:
-            fw_api.firewall_set_port(
-                own_hub_port, port_type, "block", snode.rpc_port, is_reject=True)
-        fw_api.firewall_set_port(
-            own_lvs_port, port_type, "block", snode.rpc_port, is_reject=True)
+            _block_port(own_hub_port)
+        _block_port(own_lvs_port)
         time.sleep(0.5)
         rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
         rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
         time.sleep(1)
     except Exception as e:
-        logger.error(e)
+        logger.error(f"Failed during suspend port blocking/leadership transfer: {e}")
+        logger.info("Reverting blocked ports")
+        _revert_blocked_ports()
         return False
+
+    logger.info("Setting node status to suspended")
+    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
 
     logger.info("Done")
     return True

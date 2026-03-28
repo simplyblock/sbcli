@@ -640,11 +640,21 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             primary_node = sec_node
 
         else:
-            # both primary and secondary are not online
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            lvol.remove(db_controller.kv_store)
-            return False, msg
+            # Primary and first secondary are both offline.
+            # Check if second secondary (FTT=2) is online.
+            for extra_sec_id in secondary_ids[1:]:
+                try:
+                    extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
+                    if extra_sec.status == StorageNode.STATUS_ONLINE:
+                        primary_node = extra_sec
+                        break
+                except KeyError:
+                    pass
+            if not primary_node:
+                msg = "Host nodes are not online"
+                logger.error(msg)
+                lvol.remove(db_controller.kv_store)
+                return False, msg
 
         # Add additional secondaries (secondary_node_id_2, etc.) if online
         for extra_sec_id in secondary_ids[1:]:
@@ -1120,11 +1130,26 @@ def delete_lvol(id_or_name, force_delete=False):
 
         elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             primary_node = first_sec
+            # Add remaining online secondaries (second_sec etc.) for cleanup
+            for sn in all_sec_nodes[1:]:
+                if sn.status == StorageNode.STATUS_ONLINE:
+                    secondary_nodes.append(sn)
 
         else:
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            return False, msg
+            # Primary and first secondary are both offline.
+            # Check if any other secondary (e.g. second_sec in FTT=2) is online.
+            for sn in all_sec_nodes[1:]:
+                if sn.status == StorageNode.STATUS_ONLINE:
+                    primary_node = sn
+                    # Add remaining online secondaries for cleanup
+                    for other_sn in all_sec_nodes:
+                        if other_sn.get_id() != sn.get_id() and other_sn.status == StorageNode.STATUS_ONLINE:
+                            secondary_nodes.append(other_sn)
+                    break
+            if not primary_node:
+                msg = "Host nodes are not online"
+                logger.error(msg)
+                return False, msg
 
         # 1- delete subsystem from all secondaries
         for sec in secondary_nodes:
@@ -1671,11 +1696,24 @@ def resize_lvol(id, new_size):
 
         elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             primary_node = first_sec
+            for sn in all_sec_nodes[1:]:
+                if sn.status == StorageNode.STATUS_ONLINE:
+                    secondary_nodes.append(sn)
 
         else:
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            return False, msg
+            # Primary and first secondary are both offline.
+            # Check if any other secondary (e.g. second_sec in FTT=2) is online.
+            for sn in all_sec_nodes[1:]:
+                if sn.status == StorageNode.STATUS_ONLINE:
+                    primary_node = sn
+                    for other_sn in all_sec_nodes:
+                        if other_sn.get_id() != sn.get_id() and other_sn.status == StorageNode.STATUS_ONLINE:
+                            secondary_nodes.append(other_sn)
+                    break
+            if not primary_node:
+                msg = "Host nodes are not online"
+                logger.error(msg)
+                return False, msg
 
 
         if primary_node:

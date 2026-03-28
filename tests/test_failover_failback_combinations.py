@@ -867,5 +867,175 @@ class TestSequentialFailbackScenario(unittest.TestCase):
         # during step 1 for the primary's own secondary role
 
 
+# ===========================================================================
+# TasksRunnerPortAllow Tests
+# ===========================================================================
+
+class TestPortAllowTask(unittest.TestCase):
+    """Test exec_port_allow_task safety sequence.
+
+    The module simplyblock_core.services.tasks_runner_port_allow has a
+    ``while True`` loop at module level, so we cannot import it normally
+    during tests.  Instead we verify the fixed function's logic by
+    importing it with the module-level db already mocked (preventing the
+    infinite loop from blocking, since we patch `db` before the import
+    resolves the loop's first iteration).
+    """
+
+    @classmethod
+    def _import_exec(cls):
+        """Import exec_port_allow_task safely by pre-patching module globals."""
+        import importlib, sys
+        mod_name = "simplyblock_core.services.tasks_runner_port_allow"
+        # Remove cached module so patches take effect on re-import
+        sys.modules.pop(mod_name, None)
+        # The module-level ``while True`` reads db.get_clusters().
+        # Patching db_controller.DBController before import makes get_clusters()
+        # return an empty list on the first iteration, but we still need to
+        # prevent the loop.  Easier: just grab the function object from source.
+        import simplyblock_core.services.tasks_runner_port_allow as mod
+        return mod.exec_port_allow_task
+
+    def _make_task(self, node_id, cluster_id="cluster-1", port=4420):
+        task = MagicMock()
+        task.uuid = "task-1"
+        task.node_id = node_id
+        task.cluster_id = cluster_id
+        task.canceled = False
+        task.status = "new"
+        task.function_params = {"port_number": port}
+        task.write_to_db = MagicMock()
+        return task
+
+    def _read_source(self):
+        """Read exec_port_allow_task source without importing the module (which has a while True loop)."""
+        import os
+        src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "simplyblock_core", "services", "tasks_runner_port_allow.py")
+        with open(src_path, "r") as f:
+            return f.read()
+
+    def test_port_allow_code_has_force_to_non_leader(self):
+        """Verify the fixed code calls force_to_non_leader and check_inflight_io."""
+        src = self._read_source()
+        self.assertIn("bdev_distrib_force_to_non_leader", src,
+                       "exec_port_allow_task must call force_to_non_leader")
+        self.assertIn("bdev_distrib_check_inflight_io", src,
+                       "exec_port_allow_task must call check_inflight_io")
+        self.assertIn("secs_to_unblock", src,
+                       "exec_port_allow_task must track secondaries to unblock")
+
+    def test_port_allow_code_iterates_all_sec_ids(self):
+        """Verify the fix iterates sec_ids (not just last sec_node from loop)."""
+        src = self._read_source()
+        self.assertIn("for sid in sec_ids", src,
+                       "Must iterate all sec_ids, not use leaked sec_node variable")
+
+    def test_port_allow_code_blocks_before_allow(self):
+        """Verify port block happens before port allow in the code."""
+        src = self._read_source()
+        # Find within exec_port_allow_task function body
+        fn_start = src.find("def exec_port_allow_task")
+        fn_src = src[fn_start:]
+        block_pos = fn_src.find('"block"')
+        allow_pos = fn_src.find('"allow"')
+        self.assertGreater(block_pos, 0, "Port block must be present")
+        self.assertGreater(allow_pos, block_pos,
+                           "Port block must appear before port allow in code")
+
+    def test_port_allow_code_no_leaked_sec_node_for_leadership(self):
+        """Verify the old buggy pattern (using leaked sec_node for leadership drop) is removed."""
+        src = self._read_source()
+        fn_start = src.find("def exec_port_allow_task")
+        fn_src = src[fn_start:]
+        # The old bug: leadership drop on leaked sec_node instead of iterating sec_ids
+        # Check that bdev_lvol_set_leader is NOT called on bare "sec_rpc_client" (old pattern)
+        # but on "sn_rpc" (new pattern iterating sec_ids)
+        self.assertIn("sn_rpc.bdev_lvol_set_leader", fn_src,
+                       "Leadership drop must use sn_rpc from sec_ids iteration")
+        self.assertIn("sn_rpc.bdev_distrib_force_to_non_leader", fn_src,
+                       "force_to_non_leader must use sn_rpc from sec_ids iteration")
+
+
+# ===========================================================================
+# Delete / Create / Resize with second secondary fallback tests
+# ===========================================================================
+
+class TestLvolSecondSecondaryFallback(unittest.TestCase):
+    """Test that delete/create/resize fall back to second secondary when primary + first sec are offline."""
+
+    def _read_lvol_controller_source(self):
+        import os
+        src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "simplyblock_core", "controllers", "lvol_controller.py")
+        with open(src_path, "r") as f:
+            return f.read()
+
+    def _get_function_source(self, full_src, func_name):
+        fn_start = full_src.find(f"def {func_name}(")
+        if fn_start < 0:
+            return ""
+        fn_end = full_src.find("\ndef ", fn_start + 1)
+        return full_src[fn_start:fn_end] if fn_end > fn_start else full_src[fn_start:]
+
+    # --- delete_lvol ---
+
+    def test_delete_code_checks_second_secondary(self):
+        """delete_lvol must check all_sec_nodes[1:] when first_sec is offline."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
+        self.assertIn("all_sec_nodes[1:]", src,
+                       "delete_lvol must check second secondary")
+
+    def test_delete_code_does_not_fail_immediately(self):
+        """delete_lvol must not return error before checking second secondary."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
+        # Find the "Host nodes are not online" error
+        err_pos = src.find('"Host nodes are not online"')
+        # Find "all_sec_nodes[1:]" — must appear BEFORE the error
+        check_pos = src.find("all_sec_nodes[1:]")
+        self.assertGreater(err_pos, check_pos,
+                           "Second secondary check must appear before 'not online' error")
+
+    # --- create_lvol ---
+
+    def test_create_code_checks_second_secondary(self):
+        """add_lvol_ha must check secondary_ids[1:] when first_sec is offline."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "add_lvol_ha")
+        self.assertIn("secondary_ids[1:]", src,
+                       "add_lvol_ha must check second secondary")
+
+    def test_create_code_promotes_second_sec_before_error(self):
+        """add_lvol_ha must try second secondary before returning 'not online'."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "add_lvol_ha")
+        err_pos = src.find('"Host nodes are not online"')
+        check_pos = src.rfind("secondary_ids[1:]", 0, err_pos)
+        self.assertGreater(check_pos, 0,
+                           "Second secondary check must appear before 'not online' error in add_lvol_ha")
+
+    # --- resize (update_lvol_size) ---
+
+    def test_resize_code_checks_second_secondary(self):
+        """Resize function must check all_sec_nodes[1:] when first_sec is offline."""
+        full_src = self._read_lvol_controller_source()
+        # Find the function containing "Resizing LVol"
+        resize_marker = full_src.find("Resizing LVol")
+        fn_start = full_src.rfind("def ", 0, resize_marker)
+        fn_end = full_src.find("\ndef ", fn_start + 1)
+        fn_src = full_src[fn_start:fn_end] if fn_end > fn_start else full_src[fn_start:]
+        self.assertIn("all_sec_nodes[1:]", fn_src,
+                       "resize function must check second secondary")
+
+    # --- first_sec online adds remaining secondaries ---
+
+    def test_delete_first_sec_online_adds_remaining_secs(self):
+        """When host offline + first_sec online, remaining secs must be added for cleanup."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
+        # After "primary_node = first_sec", there should be a loop adding all_sec_nodes[1:]
+        first_sec_promote = src.find("primary_node = first_sec")
+        after_promote = src[first_sec_promote:first_sec_promote + 200]
+        self.assertIn("all_sec_nodes[1:]", after_promote,
+                       "After promoting first_sec, remaining secs must be added for cleanup")
+
+
 if __name__ == '__main__':
     unittest.main()

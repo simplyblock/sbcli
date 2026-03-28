@@ -151,6 +151,12 @@ def storage_node_shutdown(uuid):
     except Exception:
         pass
 
+    if not force:
+        from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
+        allowed, reason = _check_ftt_allows_node_removal(uuid, db)
+        if not allowed:
+            return utils.get_response_error(reason, 400)
+
     threading.Thread(
         target=storage_node_ops.shutdown_storage_node,
         args=(uuid, force)
