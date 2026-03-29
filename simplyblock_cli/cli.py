@@ -641,6 +641,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=0, dest='ndcs')
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=0, dest='npcs')
         argument = subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
+        argument = subcommand.add_argument('--allowed-hosts', help='Path to JSON file with host NQNs allowed to access this volume\'s subsystem', type=str, dest='allowed_hosts')
 
     def init_volume__add_host(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-host', 'Add an allowed host NQN to a volume\'s subsystem')

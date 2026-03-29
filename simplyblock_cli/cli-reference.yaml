@@ -1570,6 +1570,10 @@ commands:
             dest: replicate
             type: bool
             action: store_true
+          - name: "--allowed-hosts"
+            help: "Path to JSON file with host NQNs allowed to access this volume's subsystem"
+            dest: allowed_hosts
+            type: str
       - name: qos-set
         help: "Changes QoS settings for an active logical volume"
         arguments:
