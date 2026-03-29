@@ -1,11 +1,13 @@
+import random
+import threading
+from datetime import datetime
+
 from utils.common_utils import sleep_n_sec
 from exceptions.custom_exception import LvolNotConnectException
 from stress_test.continuous_failover_ha_multi_outage import (
     RandomMultiClientMultiFailoverTest,
     generate_random_sequence,
 )
-import threading
-import random
 
 
 class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
@@ -17,14 +19,30 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
       - only rdma     →  all lvols use fabric="rdma"
       - only tcp      →  all lvols use fabric="tcp"
 
-    The number of simultaneous outages (K) is derived from max_fault_tolerance:
-      - max_fault_tolerance = 1  →  1 outage at a time  (1+1 topology)
-      - max_fault_tolerance = 2  →  2 outages at a time (N+2 topology)
+    The number of simultaneous outages (K) equals self.npcs (number of parity
+    chunks, passed via CLI):
+      - npcs = 1  →  1 node outaged at a time
+      - npcs > 1  →  K nodes outaged simultaneously
+
+    Outage node selection strategy (controlled by max_fault_tolerance, a
+    separate cluster property):
+      - ft > 1  →  all-nodes mode: any K nodes may be chosen, including
+                   primary+secondary pairs from the same replica group.
+                   The cluster's fault tolerance guarantees it can survive.
+      - ft <= 1 →  non-related-nodes mode: delegates to base class which
+                   ensures no primary+secondary pair is taken simultaneously.
+
+    Network outage duration is 30, 300, or 600 s:
+      - 30 s  : network blip — SPDK stays running, tests reconnect recovery.
+      - 300/600 s: triggers SPDK abort, tests full restart/recovery path.
+    For the first node in a multi-outage the duration is forced to 300 or
+    600 s (>1 min) so both nodes are simultaneously in outage.
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "n_plus_k_failover_rdma_ha"
+        self.max_fault_tolerance = 1  # updated in run() from cluster details
         self.available_fabrics = ["rdma"]   # overwritten in run() from cluster info
         self.outage_types = [
             "graceful_shutdown",
@@ -41,7 +59,11 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
     # per-lvol from self.available_fabrics.
     # ------------------------------------------------------------------
     def create_lvols_with_fio(self, count):
-        """Create lvols (fabric chosen per-lvol) and start FIO."""
+        """Create ``count`` lvols (fabric chosen per-lvol from self.available_fabrics) and start FIO.
+
+        Skips nodes that are currently in outage to avoid placing new lvols on
+        unavailable storage nodes.
+        """
         for i in range(count):
             fabric = random.choice(self.available_fabrics)
             fs_type = random.choice(["ext4", "xfs"])
@@ -193,24 +215,156 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
             sleep_n_sec(10)
 
     # ------------------------------------------------------------------
-    # Network outage: 600 s (suits both RDMA and mixed-fabric clusters)
+    # Network outage: 30 / 300 / 600 s — tests both SPDK-abort and no-abort paths
     # ------------------------------------------------------------------
-    def _disconnect_full_interface(self, node, node_ip):
-        self.logger.info("Handling full interface network interruption (600 s)...")
+    def _disconnect_full_interface(self, node, node_ip, outage_position=0):
+        """Disconnect all network interfaces for 30, 300, or 600 s.
+
+        Duration determines whether the node's SPDK process is aborted:
+          - 30 s  (<1 min): network blip only — SPDK stays running, tests
+                            reconnect/recovery without a process restart.
+          - 300/600 s (>1 min): triggers SPDK abort on the node, tests full
+                                restart and recovery path.
+
+        Selection logic:
+          - First node in a multi-outage (outage_position == 0, npcs > 1):
+            forced to random.choice([600, 300]) so the interface is still
+            down (>1 min) when the second outage fires simultaneously.
+          - All other cases: random.choice([600, 300, 30]).
+
+        Returns:
+            (outage_dur, effective_name): duration in seconds and the canonical
+            outage-type string e.g. ``"interface_full_network_interrupt_30sec"``.
+        """
+        self.logger.info("Handling full interface network interruption (RDMA)...")
         active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-        outage_dur = 600
-        self.logger.info(f"Outage duration: {outage_dur} s")
+        if outage_position == 0 and self.npcs > 1:
+            outage_dur = random.choice([600, 300])
+        else:
+            outage_dur = random.choice([600, 300, 30])
+        effective_name = f"interface_full_network_interrupt_{outage_dur}sec"
+        self.logger.info(f"[N/W Outage] duration={outage_dur}s → {effective_name}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
             args=(node_ip, active_interfaces, outage_dur),
         )
         self.disconnect_thread.start()
-        return outage_dur
+        return outage_dur, effective_name
+
+    # ------------------------------------------------------------------
+    # perform_n_plus_k_outages: node selection depends on fault tolerance
+    #   ft > 1  →  any K nodes (including primary+secondary pairs) — all-nodes mode
+    #   ft <= 1 →  K non-related nodes (no primary-secondary pairs) — base class
+    # ------------------------------------------------------------------
+    def perform_n_plus_k_outages(self):
+        """Select outage nodes and trigger K simultaneous outages.
+
+        Node selection strategy:
+          - ft > 1: sample from ALL storage nodes; primary+secondary pairs are
+            permitted because the cluster fault tolerance covers it.
+          - ft <= 1: delegate to the base class which enforces the non-related-
+            nodes constraint (no primary+secondary pair taken together).
+
+        Uses a two-phase approach so all outages start nearly simultaneously:
+          Phase 1 (sequential): collect node details + run pre-dumps for every
+            outage node before any outage is triggered.
+          Phase 2 (parallel): fire each outage in its own thread so all nodes
+            go down within a few seconds of each other.
+        """
+        if self.max_fault_tolerance <= 1:
+            # Single outage or non-related-node constraint: delegate to base class
+            return super().perform_n_plus_k_outages()
+
+        # ft > 1: pick from ALL nodes — primary+secondary pairs are allowed
+        all_nodes = list(self.sn_nodes_with_sec)
+        self.current_outage_nodes = []
+
+        k = self.npcs
+        if len(all_nodes) < k:
+            raise Exception(
+                f"Need {k} outage nodes, but only {len(all_nodes)} nodes exist."
+            )
+
+        outage_nodes = random.sample(all_nodes, k)
+        self.logger.info(
+            f"Selected outage nodes (all-nodes mode, ft={self.max_fault_tolerance}): {outage_nodes}"
+        )
+
+        # ── Phase 1: pick types + pre-dump for ALL nodes ──────────────────────
+        node_plans = []
+        outage_num = 0
+        for i, node in enumerate(outage_nodes):
+            outage_type = (
+                random.choice(self.outage_types) if outage_num == 0
+                else random.choice(self.outage_types2)
+            )
+            outage_num = 1
+
+            node_details = self.sbcli_utils.get_storage_node_details(node)
+            node_ip = node_details[0]["mgmt_ip"]
+            node_rpc_port = node_details[0]["rpc_port"]
+
+            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
+                                      storage_node_id=node)
+            self.ssh_obj.fetch_distrib_logs(
+                storage_node_ip=node_ip,
+                storage_node_id=node,
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
+            )
+
+            node_plans.append((node, outage_type, node_ip, node_rpc_port, i))
+
+        # ── Phase 2: trigger all outages simultaneously via threads ────────────
+        outage_results = {}
+
+        def _trigger(node, outage_type, node_ip, node_rpc_port, position):
+            self.logger.info(f"Performing {outage_type} on node {node}.")
+            node_outage_dur = 0
+            effective_type = outage_type
+            if outage_type == "container_stop":
+                self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
+            elif outage_type == "graceful_shutdown":
+                self._graceful_shutdown_node(node)
+            elif outage_type == "interface_partial_network_interrupt":
+                self._disconnect_partial_interface(node, node_ip)
+                node_outage_dur = 300
+            elif outage_type == "interface_full_network_interrupt":
+                node_outage_dur, effective_type = self._disconnect_full_interface(
+                    node, node_ip, position)
+            self.log_outage_event(node, effective_type, "Outage started")
+            outage_results[node] = (effective_type, node_outage_dur)
+
+        threads = [
+            threading.Thread(target=_trigger, args=(node, otype, nip, nrpc, pos))
+            for node, otype, nip, nrpc, pos in node_plans
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        outage_combinations = []
+        for node, _, _, _, _ in node_plans:
+            effective_type, node_outage_dur = outage_results[node]
+            outage_combinations.append((node, effective_type, node_outage_dur))
+            self.current_outage_nodes.append(node)
+
+        self.outage_start_time = int(datetime.now().timestamp())
+        return outage_combinations
 
     # ------------------------------------------------------------------
     # run(): read cluster fabric flags + fault tolerance, then delegate
     # ------------------------------------------------------------------
     def run(self):
+        """Read cluster config, set fabric list + fault tolerance, then run.
+
+        Derives self.available_fabrics from the cluster's fabric_rdma / fabric_tcp
+        flags and reads max_fault_tolerance into self.max_fault_tolerance so that
+        perform_n_plus_k_outages() can choose the right node-selection mode.
+        self.npcs (outage count) is already set from CLI kwargs and is not changed.
+        """
         self.logger.info("Reading cluster config for RDMA N+K test.")
         cluster_details = self.sbcli_utils.get_cluster_details()
 
@@ -225,12 +379,13 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
             self.available_fabrics = ["tcp"]
         self.logger.info(f"Available fabrics: {self.available_fabrics}")
 
-        # Derive simultaneous outage count from fault tolerance
+        # Read fault tolerance for node-selection mode; npcs (outage count) comes from CLI kwargs
         max_fault_tolerance = cluster_details.get("max_fault_tolerance", 1)
         self.logger.info(f"Cluster max_fault_tolerance: {max_fault_tolerance}")
-        self.npcs = max_fault_tolerance
+        self.max_fault_tolerance = max_fault_tolerance
         self.logger.info(
-            f"N+K test: {self.npcs} simultaneous outage(s) per cycle, "
+            f"N+K test: {self.npcs} simultaneous outage(s) per cycle "
+            f"({'all-nodes' if max_fault_tolerance > 1 else 'non-related-nodes'} mode), "
             f"fabrics: {self.available_fabrics}"
         )
         super().run()
