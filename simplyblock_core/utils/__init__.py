@@ -345,7 +345,7 @@ def process_records(records, records_count, keys=None):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"ping -c 3 -W 3 {ip} > /dev/null")
+    response = os.system(f"ping -c 1 -W 2 {ip} > /dev/null")
     if response == 0:
         logger.debug(f"{ip} is UP")
         return True
@@ -824,6 +824,27 @@ def _get_cluster_port_config(cluster_id):
     return constants.NVMF_BASE_PORT, constants.RPC_BASE_PORT, constants.SNODE_API_PORT
 
 
+def get_next_fw_port(cluster_id, mgmt_ip=None):
+    """Get the SNodeAPI/firewall port. One per host IP."""
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+
+    if mgmt_ip:
+        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.mgmt_ip == mgmt_ip and node.firewall_port > 0:
+                return node.firewall_port
+
+    _, _, snode_api_port = _get_cluster_port_config(cluster_id)
+    used_ports = set()
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.firewall_port > 0:
+            used_ports.add(node.firewall_port)
+    next_port = snode_api_port
+    while next_port in used_ports:
+        next_port += 1
+    return next_port
+
+
 def _get_all_nvmf_ports(cluster_id):
     """Collect all NVMe-oF ports in use across the cluster (lvol, hublvol, device)."""
     from simplyblock_core.db_controller import DBController
@@ -877,25 +898,6 @@ def get_next_rpc_port(cluster_id):
     return 0
 
 
-def get_next_fw_port(cluster_id, mgmt_ip=None):
-    """Get the SNodeAPI/firewall port. One per host IP."""
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-
-    if mgmt_ip:
-        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.mgmt_ip == mgmt_ip and node.firewall_port > 0:
-                return node.firewall_port
-
-    _, _, snode_api_port = _get_cluster_port_config(cluster_id)
-    used_ports = set()
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.firewall_port > 0:
-            used_ports.add(node.firewall_port)
-    next_port = snode_api_port
-    while next_port in used_ports:
-        next_port += 1
-    return next_port
 
 
 def get_next_lvstore_ports(cluster_id):

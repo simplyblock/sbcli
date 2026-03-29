@@ -20,12 +20,14 @@ EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_writ
 
 
 def remove_remote_device_from_node(node_id, device_id):
+    # Re-read node immediately before write to avoid overwriting concurrent changes
+    # (e.g. lvstore_ports set during cluster activation)
     node = db.get_storage_node_by_id(node_id)
-    for remote_dev in node.remote_devices:
-        if remote_dev.get_id() == device_id:
-            node.remote_devices.remove(remote_dev)
-            node.write_to_db()
-            break
+    updated_devices = [d for d in node.remote_devices if d.get_id() != device_id]
+    if len(updated_devices) != len(node.remote_devices):
+        fresh = db.get_storage_node_by_id(node_id)
+        fresh.remote_devices = [d for d in fresh.remote_devices if d.get_id() != device_id]
+        fresh.write_to_db()
 
 
 def process_device_event(event, logger):

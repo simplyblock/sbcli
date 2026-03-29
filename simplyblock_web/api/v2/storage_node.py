@@ -46,6 +46,7 @@ class StorageNodeParams(BaseModel):
     iobuf_large_pool_count: int = Field(0)
     ha_jm_count: int = Field(3)
     format_4k: bool = Field(False)
+    spdk_proxy_image: Optional[str]
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -70,6 +71,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams) -> Re
             'full_page_unmap': parameters.full_page_unmap,
             "ha_jm_count": parameters.ha_jm_count,
             "format_4k": parameters.format_4k,
+            "spdk_proxy_image": parameters.spdk_proxy_image,
         }
     )
     if not task_id_or_false:
@@ -172,8 +174,12 @@ def nic_iostats(cluster: Cluster, storage_node: StorageNode, nic_id: str):
 
 @instance_api.post('/suspend', name='clusters:storage-nodes:suspend', status_code=204, responses={204: {"content": None}})
 def suspend(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
-    storage_node = storage_node
-    if not storage_node_ops.suspend_storage_node(storage_node.get_id(), force):
+    ret = storage_node_ops.suspend_storage_node(storage_node.get_id(), force)
+    if isinstance(ret, tuple):
+        ok, reason = ret
+        if not ok:
+            raise ValueError(reason)
+    elif not ret:
         raise ValueError('Failed to suspend storage node')
 
     return Response(status_code=204)
@@ -190,7 +196,13 @@ def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
 
 @instance_api.post('/shutdown', name='clusters:storage-nodes:shutdown', status_code=202, responses={202: {"content": None}})
 def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
-    storage_node = storage_node
+    if not force:
+        from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
+        from simplyblock_core.db_controller import DBController
+        allowed, reason = _check_ftt_allows_node_removal(storage_node.get_id(), DBController())
+        if not allowed:
+            raise ValueError(reason)
+
     Thread(
         target=storage_node_ops.shutdown_storage_node,
         args=(storage_node.get_id(), force)

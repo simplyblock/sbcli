@@ -133,7 +133,6 @@ def add(lvol_id, snapshot_name, backup=False):
                 if sec_node.status == StorageNode.STATUS_DOWN:
                     msg = "Secondary node is in down status, can not create snapshot"
                     logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
                     return False, msg
                 elif sec_node.status == StorageNode.STATUS_ONLINE:
                     secondary_nodes.append(sec_node)
@@ -253,7 +252,6 @@ def list(node_id=None):
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
-    from simplyblock_core.controllers import migration_controller
     migrating_lvols = set()
     for m in db_controller.get_migrations():
         if m.is_active():
@@ -292,6 +290,11 @@ def delete(snapshot_uuid, force_delete=False):
     except KeyError:
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
+
+    if snap.status == SnapShot.STATUS_IN_DELETION:
+        logger.error(f"Snapshot is in deletion {snapshot_uuid}")
+        if not force_delete:
+            return True
 
     # Block deletion if the snapshot's parent volume is being migrated
     from simplyblock_core.controllers import migration_controller
@@ -361,32 +364,40 @@ def delete(snapshot_uuid, force_delete=False):
 
         primary_node = None
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+        sec_nodes = []
+        if snode.secondary_node_id:
+            sec_nodes.append(db_controller.get_storage_node_by_id(snode.secondary_node_id))
+        if snode.secondary_node_id_2:
+            sec_nodes.append(db_controller.get_storage_node_by_id(snode.secondary_node_id_2))
+
         if host_node.status == StorageNode.STATUS_ONLINE:
             if lvol_controller.is_node_leader(host_node, snap.lvol.lvs_name):
                 primary_node = host_node
-                if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = "Secondary node is in down status, can not delete snapshot"
-                    logger.error(msg)
-                    return False
-
-            elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if lvol_controller.is_node_leader(sec_node, snap.lvol.lvs_name):
-                    primary_node = sec_node
-                else:
-                    # both nodes are non leaders and online, set primary as leader
+                # Check if any secondary is in DOWN status
+                for sec_node in sec_nodes:
+                    if sec_node.status == StorageNode.STATUS_DOWN:
+                        msg = "Secondary node is in down status, can not delete snapshot"
+                        logger.error(msg)
+                        return False
+            else:
+                # Check if any secondary is the leader
+                for sec_node in sec_nodes:
+                    if sec_node.status == StorageNode.STATUS_ONLINE and \
+                            lvol_controller.is_node_leader(sec_node, snap.lvol.lvs_name):
+                        primary_node = sec_node
+                        break
+                if not primary_node:
+                    # no secondary is leader, use host as leader
                     primary_node = host_node
 
-            else:
-                # sec node is not online, set primary as leader
-                primary_node = host_node
-
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            # primary is not online but secondary is, create on secondary and set leader if needed,
-            primary_node = sec_node
-
         else:
-            # both primary and secondary are not online
+            # host is not online, find an online secondary
+            for sec_node in sec_nodes:
+                if sec_node.status == StorageNode.STATUS_ONLINE:
+                    primary_node = sec_node
+                    break
+
+        if not primary_node:
             msg = "Host nodes are not online"
             logger.error(msg)
             return False
@@ -420,7 +431,7 @@ def delete(snapshot_uuid, force_delete=False):
     return True
 
 
-def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None):
+def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
@@ -511,7 +522,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.nodes = snap.lvol.nodes
     lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
-    lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
     lvol.pool_uuid = pool.get_id()
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
@@ -521,10 +531,41 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.subsys_port = snap.lvol.subsys_port
     lvol.fabric = snap.fabric
     lvol.allowed_hosts = snap.lvol.allowed_hosts
+    lvol.delete_snap_on_lvol_delete = bool(delete_snap_on_lvol_delete)
+    lvol.ndcs = snap.lvol.ndcs
+    lvol.npcs = snap.lvol.npcs
+
+    # Inherit namespace sharing from the source lvol.  Find the master
+    # lvol that owns the subsystem (either the source itself or its master
+    # if the source is already a namespace member).
+    source_lvol = snap.lvol
+    if source_lvol.namespace:
+        try:
+            master_lvol = db_controller.get_lvol_by_id(source_lvol.namespace)
+        except KeyError:
+            master_lvol = source_lvol
+    else:
+        master_lvol = source_lvol
+
+    if master_lvol.max_namespace_per_subsys > 1:
+        # Count how many lvols currently share this master's subsystem
+        ns_count = 0
+        for lv in db_controller.get_lvols(cluster.get_id()):
+            if lv.nqn == master_lvol.nqn and lv.status not in [LVol.STATUS_IN_DELETION]:
+                ns_count += 1
+        if ns_count < master_lvol.max_namespace_per_subsys:
+            lvol.nqn = master_lvol.nqn
+            lvol.namespace = master_lvol.get_id()
+        else:
+            # Subsystem full — create a new one but keep the same capacity
+            lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+            lvol.max_namespace_per_subsys = master_lvol.max_namespace_per_subsys
+    else:
+        lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
 
     if pvc_name:
         lvol.pvc_name = pvc_name
-    if pvc_namespace:
+    if pvc_namespace and not lvol.namespace:
         lvol.namespace = pvc_namespace
 
     lvol.status = LVol.STATUS_IN_CREATION

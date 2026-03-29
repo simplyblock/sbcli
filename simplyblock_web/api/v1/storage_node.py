@@ -151,6 +151,12 @@ def storage_node_shutdown(uuid):
     except Exception:
         pass
 
+    if not force:
+        from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
+        allowed, reason = _check_ftt_allows_node_removal(uuid, db)
+        if not allowed:
+            return utils.get_response_error(reason, 400)
+
     threading.Thread(
         target=storage_node_ops.shutdown_storage_node,
         args=(uuid, force)
@@ -261,7 +267,7 @@ def storage_node_add():
         elif isinstance(param, str):
             format_4k = param == "true"
 
-
+    spdk_proxy_image = req_data.get('spdk_proxy_image', None)
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
         "node_addr": node_addr,
@@ -278,7 +284,8 @@ def storage_node_add():
         "namespace": namespace,
         "enable_ha_jm": not disable_ha_jm,
         "ha_jm_count": ha_jm_count,
-        "format_4k": format_4k
+        "format_4k": format_4k,
+        "spdk_proxy_image": spdk_proxy_image,
     })
 
     return utils.get_response(True)

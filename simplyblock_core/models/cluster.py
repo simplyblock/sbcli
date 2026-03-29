@@ -78,6 +78,7 @@ class Cluster(BaseModel):
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
+    container_image_prefix: str = ""
     kms_unseal_key: str = ""
     kms_root_token: str = ""
     deploy_kms: bool = False

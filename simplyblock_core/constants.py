@@ -33,7 +33,7 @@ LOG_WEB_DEBUG = True if LOG_WEB_LEVEL == logging.DEBUG else False
 
 INSTALL_DIR = os.path.dirname(os.path.realpath(__file__))
 
-NODE_MONITOR_INTERVAL_SEC = 10
+NODE_MONITOR_INTERVAL_SEC = 3
 DEVICE_MONITOR_INTERVAL_SEC = 5
 STAT_COLLECTOR_INTERVAL_SEC = 60*5  # 5 minutes
 LVOL_STAT_COLLECTOR_INTERVAL_SEC = 5
@@ -166,7 +166,8 @@ K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
-PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
+PROMETHEUS_STATEFULSET_NAME = os.getenv('PROMETHEUS_URL', "simplyblock-prometheus")
+PROMETHEUS_STATEFULSET_PORT = os.getenv('PROMETHEUS_PORT', "9090")
 FDB_SERVICE_NAME = "simplyblock-fdb-cluster"
 FDB_CONFIG_NAME = "simplyblock-fdb-cluster-config"
 ADMIN_DEPLOY_NAME = "simplyblock-admin-control"

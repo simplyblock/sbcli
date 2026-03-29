@@ -102,6 +102,9 @@ opensearch:
     enabled: false
 
 prometheus:
+  simplyblock:
+    prometheusURL: simplyblock-prometheus
+    prometheusPORT: 9090    
   server:
     fullnameOverride: simplyblock-prometheus
     enabled: true

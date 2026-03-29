@@ -225,7 +225,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic, deploy_kms=True,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
-                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
+                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -348,6 +348,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
+    cluster.container_image_prefix = container_image_prefix or ""
 
     if nvmeof_tls_config:
         cluster.tls = True
@@ -612,6 +613,9 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             continue
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
+        # Re-read node fresh before lvstore creation to avoid writing stale fields
+        # (previous create_lvstore calls may have modified this node as a secondary)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
         if snode.lvstore and force_lvstore_create is False:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             try:
@@ -1423,13 +1427,25 @@ def delete_cluster(cl_id) -> None:
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
 
-def set(cl_id, attr, value) -> None:
+def set(cl_id, attr, value) -> bool:
     cluster = db_controller.get_cluster_by_id(cl_id)
-
-    if attr not in cluster.get_attrs_map():
+    key_splits = attr.split(".")
+    key = key_splits[0]
+    if key not in cluster.get_attrs_map():
         raise KeyError('Attribute not found')
 
-    value = cluster.get_attrs_map()[attr]['type'](value)
-    logger.info(f"Setting {attr} to {value}")
-    setattr(cluster, attr, value)
-    cluster.write_to_db()
+    if len(key_splits) > 1:
+        key_info = cluster.get_attrs_map()[key]
+        if key_info["type"] is dict:
+            sub_key = key_splits[1]
+            if sub_key in cluster[key]:
+                cluster[key][sub_key] = value
+                logger.info(f"Setting {attr} to {value}")
+                cluster.write_to_db()
+                return True
+    else:
+        value = cluster.get_attrs_map()[attr]['type'](value)
+        logger.info(f"Setting {attr} to {value}")
+        setattr(cluster, attr, value)
+        cluster.write_to_db()
+    return True

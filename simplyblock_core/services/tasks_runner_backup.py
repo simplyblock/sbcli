@@ -179,6 +179,23 @@ def _run_restore(task):
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=30)
 
+    # Check that the target lvol still exists in DB before doing any RPC work
+    lvol_id = task.function_params.get("lvol_id")
+    if lvol_id:
+        try:
+            from simplyblock_core.models.lvol_model import LVol
+            lvol = db.get_lvol_by_id(lvol_id)
+            if lvol.status in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED):
+                task.function_result = f"Restore target {lvol_id} has been deleted"
+                task.status = JobSchedule.STATUS_DONE
+                task.write_to_db(db.kv_store)
+                return
+        except KeyError:
+            task.function_result = f"Restore target {lvol_id} no longer exists"
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db(db.kv_store)
+            return
+
     if not recovery_started:
         try:
             ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=16)

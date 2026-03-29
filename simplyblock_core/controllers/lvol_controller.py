@@ -60,11 +60,18 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
             logger.error("Failed to write key file %s on node %s: %s", key_name, snode.get_id(), error)
             continue
         key_path = result
-        # Register in SPDK keyring
-        ret = rpc_client.keyring_file_add_key(key_name, key_path)
-        if not ret:
-            logger.error("Failed to register key %s in SPDK keyring on node %s", key_name, snode.get_id())
-            continue
+        # Register in SPDK keyring — "File exists" (code -17) means the key
+        # is already registered, which is fine (e.g. same host on another volume).
+        ret, err = rpc_client._request2("keyring_file_add_key",
+                                        {"name": key_name, "path": key_path})
+        if not ret and err:
+            if err.get("code") == -17:
+                logger.info("Key %s already in SPDK keyring on node %s, reusing",
+                            key_name, snode.get_id())
+            else:
+                logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
+                             key_name, snode.get_id(), err.get("message", err))
+                continue
         key_names[key_type] = key_name
 
     return key_names
@@ -333,7 +340,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 distr_vuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
-                allowed_hosts=None, sec_options=None):
+                allowed_hosts=None):
 
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
@@ -610,8 +617,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             lvol.crypto_key2 = crypto_key2
 
     # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
+    # Security options are inherited from the pool
     if allowed_hosts and not namespace:
-        host_entries = _build_host_entries(allowed_hosts, sec_options)
+        host_entries = _build_host_entries(allowed_hosts, pool.sec_options or None)
         if isinstance(host_entries, tuple):
             return host_entries  # (False, error_message)
         lvol.allowed_hosts = host_entries
@@ -674,11 +682,21 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
             primary_node = sec_node
 
         else:
-            # both primary and secondary are not online
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            lvol.remove(db_controller.kv_store)
-            return False, msg
+            # Primary and first secondary are both offline.
+            # Check if second secondary (FTT=2) is online.
+            for extra_sec_id in secondary_ids[1:]:
+                try:
+                    extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
+                    if extra_sec.status == StorageNode.STATUS_ONLINE:
+                        primary_node = extra_sec
+                        break
+                except KeyError:
+                    pass
+            if not primary_node:
+                msg = "Host nodes are not online"
+                logger.error(msg)
+                lvol.remove(db_controller.kv_store)
+                return False, msg
 
         # Add additional secondaries (secondary_node_id_2, etc.) if online
         for extra_sec_id in secondary_ids[1:]:
@@ -823,9 +841,10 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 else:
                     rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
-        ana_state = "non_optimized"
-        if lvol.node_id == snode.get_id():
+        if is_primary or lvol.node_id == snode.get_id():
             ana_state = "optimized"
+        else:
+            ana_state = "non_optimized"
 
         # add listeners
         # Use the per-lvstore port for the lvol's lvstore
@@ -1060,6 +1079,10 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error(f"Cannot delete lvol {lvol.uuid}: active migration {active_mig.uuid}")
         return False
 
+    if lvol.status == LVol.STATUS_RESTORING and not force_delete:
+        logger.error(f"Cannot delete lvol {lvol.uuid}: backup restore in progress")
+        return False
+
     if lvol.status == LVol.STATUS_IN_DELETION:
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
@@ -1155,11 +1178,26 @@ def delete_lvol(id_or_name, force_delete=False):
 
         elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             primary_node = first_sec
+            # Add remaining online secondaries (second_sec etc.) for cleanup
+            for sn in all_sec_nodes[1:]:
+                if sn.status == StorageNode.STATUS_ONLINE:
+                    secondary_nodes.append(sn)
 
         else:
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            return False, msg
+            # Primary and first secondary are both offline.
+            # Check if any other secondary (e.g. second_sec in FTT=2) is online.
+            for sn in all_sec_nodes[1:]:
+                if sn.status == StorageNode.STATUS_ONLINE:
+                    primary_node = sn
+                    # Add remaining online secondaries for cleanup
+                    for other_sn in all_sec_nodes:
+                        if other_sn.get_id() != sn.get_id() and other_sn.status == StorageNode.STATUS_ONLINE:
+                            secondary_nodes.append(other_sn)
+                    break
+            if not primary_node:
+                msg = "Host nodes are not online"
+                logger.error(msg)
+                return False, msg
 
         # 1- delete subsystem from all secondaries
         for sec in secondary_nodes:
@@ -1193,8 +1231,12 @@ def delete_lvol(id_or_name, force_delete=False):
     lvol.write_to_db()
     lvol_events.lvol_status_change(lvol, lvol.status, old_status)
 
+    if lvol.cloned_from_snap and lvol.delete_snap_on_lvol_delete:
+        logger.info(f"Deleting snap: {lvol.cloned_from_snap}")
+        snapshot_controller.delete(lvol.cloned_from_snap)
+
     # if lvol is clone and snapshot is deleted, then delete snapshot
-    if lvol.cloned_from_snap:
+    elif lvol.cloned_from_snap:
         try:
             snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
             if snap.snap_ref_id:
@@ -1326,9 +1368,14 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     if not ret:
         return "Error setting qos limits"
 
+    secondary_ids = []
     if snode.secondary_node_id:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        if sec_node and sec_node.status == [StorageNode.STATUS_ONLINE,  StorageNode.STATUS_DOWN]:
+        secondary_ids.append(snode.secondary_node_id)
+    if snode.secondary_node_id_2:
+        secondary_ids.append(snode.secondary_node_id_2)
+    for sec_id in secondary_ids:
+        sec_node = db_controller.get_storage_node_by_id(sec_id)
+        if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             ret = sec_node.rpc_client().bdev_set_qos_limit(
                 lvol.top_bdev, rw_ios_per_sec, rw_mbytes_per_sec, r_mbytes_per_sec, w_mbytes_per_sec)
             if not ret:
@@ -1365,14 +1412,12 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
     data = []
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
-    from simplyblock_core.controllers import migration_controller
     migrating_lvols = set()
     for m in db_controller.get_migrations(cluster_id):
         if m.is_active():
             migrating_lvols.add(m.lvol_id)
 
     # Build policy lookup maps (single scan of attachments + policies)
-    from simplyblock_core.models.backup import BackupPolicyAttachment
     all_attachments = db_controller.get_backup_policy_attachments(cluster_id)
     all_policies = {p.uuid: p for p in db_controller.get_backup_policies(cluster_id)}
     lvol_policy_map = {}   # lvol_id -> policy
@@ -1500,7 +1545,10 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
 
     # Look up host entry for secrets when host_nqn is provided
     host_entry = None
-    if host_nqn and lvol.allowed_hosts:
+    if lvol.allowed_hosts:
+        if not host_nqn:
+            logger.error(f"Volume {uuid} has allowed hosts configured; --host-nqn is required")
+            return False
         for h in lvol.allowed_hosts:
             if h["nqn"] == host_nqn:
                 host_entry = h
@@ -1508,6 +1556,10 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         if not host_entry:
             logger.error(f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}")
             return False
+    elif host_nqn:
+        # host_nqn provided but no allowed_hosts — volume allows any host,
+        # so just pass host_nqn through without secrets
+        pass
 
     out = []
     nodes_ids = []
@@ -1517,12 +1569,17 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     elif lvol.ha_type == "ha":
         nodes_ids.extend(lvol.nodes)
 
+    # Get the port from the primary node (first in list) — all nodes hosting
+    # the same lvstore must use the same client-facing port.
+    primary_snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    lvstore_port = primary_snode.get_lvol_subsys_port(lvol.lvs_name)
+
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         for nic in snode.data_nics:
             ip = nic.ip4_address
-            port = snode.get_lvol_subsys_port(lvol.lvs_name)
+            port = lvstore_port
             transport = "tcp"
             if nic.ip4_address and lvol.fabric == nic.trtype.lower():
                 transport = nic.trtype.lower()
@@ -1695,11 +1752,24 @@ def resize_lvol(id, new_size):
 
         elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             primary_node = first_sec
+            for sn in all_sec_nodes[1:]:
+                if sn.status == StorageNode.STATUS_ONLINE:
+                    secondary_nodes.append(sn)
 
         else:
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            return False, msg
+            # Primary and first secondary are both offline.
+            # Check if any other secondary (e.g. second_sec in FTT=2) is online.
+            for sn in all_sec_nodes[1:]:
+                if sn.status == StorageNode.STATUS_ONLINE:
+                    primary_node = sn
+                    for other_sn in all_sec_nodes:
+                        if other_sn.get_id() != sn.get_id() and other_sn.status == StorageNode.STATUS_ONLINE:
+                            secondary_nodes.append(other_sn)
+                    break
+            if not primary_node:
+                msg = "Host nodes are not online"
+                logger.error(msg)
+                return False, msg
 
 
         if primary_node:
@@ -2075,9 +2145,10 @@ def _build_host_entries(allowed_hosts, sec_options=None):
     return entries
 
 
-def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
+def add_host_to_lvol(lvol_id, host_nqn):
     """Add an allowed host to a volume's subsystem.
 
+    Security options are inherited from the volume's pool.
     Returns a dict with the host NQN and any auto-generated keys, or (False, error).
     """
     db_controller = DBController()
@@ -2091,6 +2162,15 @@ def add_host_to_lvol(lvol_id, host_nqn, sec_options=None):
     for h in lvol.allowed_hosts:
         if h["nqn"] == host_nqn:
             return False, f"Host {host_nqn} is already allowed"
+
+    # Get sec_options from the pool
+    sec_options = None
+    if lvol.pool_uuid:
+        try:
+            pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+            sec_options = pool.sec_options or None
+        except KeyError:
+            pass
 
     entry = {"nqn": host_nqn}
     if sec_options:
@@ -2208,3 +2288,50 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     if errors:
         return True, f"Warning: SPDK remove_host failed on nodes: {', '.join(errors)}"
     return True, None
+
+
+def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    try:
+        snapshot_uuid = None
+        for snap in db_controller.get_snapshots_by_lvol_id(lvol_id):
+            if snap.snap_name == clone_name:
+                logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.snap_uuid}, using it for cloning")
+                snapshot_uuid = snap.snap_uuid
+                break
+        if not snapshot_uuid:
+            for i in range(10):
+                snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
+                if err:
+                    logger.error(err)
+                    time.sleep(1)
+                    continue
+            else:
+                if not snapshot_uuid:
+                    logger.error("Failed to create snapshot for clone after 10 attempts")
+                    return False
+        new_lvol_uuid = None
+        for i in range(10):
+            new_lvol_uuid, err = snapshot_controller.clone(
+                snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True)
+            if err:
+                logger.error(err)
+                time.sleep(1)
+                continue
+        else:
+            if not new_lvol_uuid:
+                logger.error("Failed to clone lvol after 10 attempts")
+                if snapshot_uuid:
+                    snapshot_controller.delete(snapshot_uuid)
+                return False
+
+        return new_lvol_uuid
+    except Exception as e:
+        logger.error(e)
+        return False

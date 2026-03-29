@@ -11,4 +11,5 @@ sudo service docker restart
 sudo docker container prune -f
 sudo docker volume prune -a -f
 sudo rm -rf /etc/foundationdb/data/
+sudo rm -rf /etc/simplyblock/dhchap_keys/
 echo "Done"

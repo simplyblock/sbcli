@@ -108,6 +108,7 @@ def exec_port_allow_task(task):
             task.write_to_db(db.kv_store)
             return
         else:
+            # Re-read fresh before writing to avoid overwriting concurrent changes
             node = db.get_storage_node_by_id(task.node_id)
             node.remote_devices = remote_devices
             node.write_to_db()
@@ -122,6 +123,7 @@ def exec_port_allow_task(task):
             task.write_to_db(db.kv_store)
             return
         else:
+            # Re-read fresh before writing to avoid overwriting concurrent changes
             node = db.get_storage_node_by_id(task.node_id)
             node.remote_jm_devices = remote_jm_devices
             node.write_to_db()
@@ -222,23 +224,56 @@ def exec_port_allow_task(task):
             time.sleep(3)
             lvol_sync_del_found = tasks_controller.get_lvol_sync_del_task(task.cluster_id, task.node_id)
 
-        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-            sec_rpc_client = sec_node.rpc_client()
-            ret = sec_node.wait_for_jm_rep_tasks_to_finish(node.jm_vuid)
+        # Drop leadership and drain inflight IO on ALL online secondaries before
+        # allowing the port.  Without this, the primary's JC reconnects to remote
+        # JMs that still hold stale write locks, triggering writer conflicts that
+        # cascade into block_port / IO errors on the secondary.
+        port_number = task.function_params["port_number"]
+        secs_to_unblock = []
+        for sid in sec_ids:
+            sn = db.get_storage_node_by_id(sid)
+            if not sn or sn.status != StorageNode.STATUS_ONLINE:
+                continue
+
+            sn_rpc = sn.rpc_client()
+            ret = sn.wait_for_jm_rep_tasks_to_finish(node.jm_vuid)
             if not ret:
-                msg = "JM replication task found on secondary"
+                msg = f"JM replication task found on secondary {sn.get_id()}"
                 logger.warning(msg)
                 task.function_result = msg
                 task.status = JobSchedule.STATUS_SUSPENDED
                 task.write_to_db(db.kv_store)
                 return
-            sec_rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+
+            # Block → sleep → drop leadership → force non-leader → check inflight
+            sn_fw = FirewallClient(sn, timeout=5, retry=2)
+            sn_port_type = "udp" if sn.active_rdma else "tcp"
+            sn_fw.firewall_set_port(port_number, sn_port_type, "block", sn.rpc_port)
+            tcp_ports_events.port_deny(sn, port_number)
+
+            time.sleep(0.5)
+
+            sn_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+            sn_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
+            logger.info(f"Checking for inflight IO from node: {sn.get_id()}")
+            for i in range(100):
+                is_inflight = sn_rpc.bdev_distrib_check_inflight_io(node.jm_vuid)
+                if is_inflight:
+                    logger.info("Inflight IO found, retry in 100ms")
+                    time.sleep(0.1)
+                else:
+                    logger.info("Inflight IO NOT found, continuing")
+                    break
+            else:
+                logger.error(
+                    f"Timeout while checking for inflight IO after 10 seconds on node {sn.get_id()}")
+
+            secs_to_unblock.append(sn)
 
     except Exception as e:
         logger.error(e)
         return
 
-    port_number = task.function_params["port_number"]
     logger.info(f"Allow port {port_number} on node {node.get_id()}")
     fw_api = FirewallClient(snode, timeout=5, retry=2)
     port_type = "tcp"
@@ -246,6 +281,13 @@ def exec_port_allow_task(task):
         port_type = "udp"
     fw_api.firewall_set_port(port_number, port_type, "allow", node.rpc_port)
     tcp_ports_events.port_allowed(node, port_number)
+
+    # Unblock ports on secondaries that were blocked above
+    for sn in secs_to_unblock:
+        sn_fw = FirewallClient(sn, timeout=5, retry=2)
+        sn_port_type = "udp" if sn.active_rdma else "tcp"
+        sn_fw.firewall_set_port(port_number, sn_port_type, "allow", sn.rpc_port)
+        tcp_ports_events.port_allowed(sn, port_number)
 
     task.function_result = f"Port {port_number} allowed on node"
     task.status = JobSchedule.STATUS_DONE

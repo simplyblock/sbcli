@@ -1,4 +1,5 @@
 # coding=utf-8
+import json
 import os.path
 
 import fdb
@@ -13,7 +14,7 @@ from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.port_stat import PortStat
-from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
+from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.qos import QOSClass
 from simplyblock_core.models.snapshot import SnapShot
@@ -345,6 +346,63 @@ class DBController(metaclass=Singleton):
             return ret[0]
         else:
             return None
+
+    def get_backup_chain_lock(self, snapshot_id) -> Optional[BackupChainLock]:
+        ret = BackupChainLock().read_from_db(self.kv_store, id=snapshot_id)
+        if ret:
+            return ret[0]
+        return None
+
+    def _acquire_backup_chain_locks_tx(self, tr, snapshot_ids, requested_snapshot_id, lvol_id):
+        import time
+
+        existing_lock = None
+        keys = []
+        for snapshot_id in snapshot_ids:
+            lock = BackupChainLock()
+            lock.uuid = snapshot_id
+            lock.snapshot_id = snapshot_id
+            key = lock.get_db_id().encode()
+            keys.append((key, lock))
+            raw = tr.get(key).wait()
+            if raw.present():
+                existing_lock = BackupChainLock().from_dict(json.loads(raw))
+                break
+
+        if existing_lock is not None:
+            return False, existing_lock
+
+        # The lock only protects the enqueue window; wall-clock time is sufficient here.
+        now = int(time.time())
+
+        for key, lock in keys:
+            lock.requested_snapshot_id = requested_snapshot_id
+            lock.lvol_id = lvol_id
+            lock.created_at = now
+            tr[key] = json.dumps(lock.to_dict()).encode()
+
+        return True, None
+
+    def acquire_backup_chain_locks(self, snapshot_ids, requested_snapshot_id, lvol_id):
+        if not self.kv_store or not snapshot_ids:
+            return True, None
+        ordered_snapshot_ids = sorted(set(snapshot_ids))
+        transactional = fdb.transactional(DBController._acquire_backup_chain_locks_tx)
+        return transactional(self, self.kv_store, ordered_snapshot_ids, requested_snapshot_id, lvol_id)
+
+    def _release_backup_chain_locks_tx(self, tr, snapshot_ids):
+        for snapshot_id in snapshot_ids:
+            lock = BackupChainLock()
+            lock.uuid = snapshot_id
+            lock.snapshot_id = snapshot_id
+            del tr[lock.get_db_id().encode()]
+
+    def release_backup_chain_locks(self, snapshot_ids):
+        if not self.kv_store or not snapshot_ids:
+            return
+        ordered_snapshot_ids = sorted(set(snapshot_ids))
+        transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
+        transactional(self, self.kv_store, ordered_snapshot_ids)
 
     # ---- S3 Backup ----
 

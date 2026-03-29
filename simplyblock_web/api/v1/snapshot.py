@@ -64,11 +64,13 @@ def clone_snapshot():
     if 'new_size' in cl_data:
         new_size = core_utils.parse_size(cl_data['new_size'])
 
+    delete_snap_on_lvol_delete = cl_data.get('delete_snap_on_lvol_delete', False)
     clone_id, error = snapshot_controller.clone(
         cl_data['snapshot_id'],
         cl_data['clone_name'],
         new_size,
         cl_data.get('pvc_name', None),
-        cl_data.get('pvc_namespace', None)
+        cl_data.get('pvc_namespace', None),
+        delete_snap_on_lvol_delete
     )
     return utils.get_response(clone_id, error, http_code=400)

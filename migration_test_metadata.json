@@ -1,0 +1,32 @@
+{
+  "mgmt": {
+    "instance_id": "i-040ddfe93116110ec",
+    "public_ip": "18.215.245.217",
+    "private_ip": "172.31.45.126"
+  },
+  "storage_nodes": [
+    {
+      "instance_id": "i-0343198791c2c2bcd",
+      "public_ip": "35.173.240.211",
+      "private_ip": "172.31.43.160"
+    },
+    {
+      "instance_id": "i-079e26ebf3c370822",
+      "public_ip": "100.54.215.34",
+      "private_ip": "172.31.45.212"
+    },
+    {
+      "instance_id": "i-0c5fca7aa77135617",
+      "public_ip": "18.232.154.28",
+      "private_ip": "172.31.36.104"
+    }
+  ],
+  "clients": [
+    {
+      "instance_id": "i-05972c0d5fde800ce",
+      "public_ip": "3.89.43.66",
+      "private_ip": "172.31.47.177"
+    }
+  ],
+  "cluster_uuid": "1045b8b9-bf6d-454c-a2c3-da36e388d54c"
+}

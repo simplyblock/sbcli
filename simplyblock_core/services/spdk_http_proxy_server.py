@@ -68,6 +68,45 @@ def get_env_var(name, default=None, is_required=False):
     return os.environ.get(name, default)
 
 unix_sockets: list[socket] = []  # type: ignore[valid-type]
+spdk_semaphore: threading.Semaphore = None  # type: ignore[assignment]  # initialized after env vars are read
+spdk_ready = False
+
+
+def wait_for_spdk_ready():
+    """Block until SPDK responds to spdk_get_version on the unix socket."""
+    global spdk_ready
+    payload = json.dumps({'id': 1, 'method': 'spdk_get_version'}).encode('ascii')
+    while not spdk_ready:
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect(rpc_sock)
+            sock.sendall(payload)
+            buf = b''
+            while True:
+                data = sock.recv(4096)
+                if data == b'':
+                    break
+                buf += data
+                try:
+                    json.loads(buf.decode('ascii'))
+                    spdk_ready = True
+                    logger.info("SPDK is ready (spdk_get_version responded)")
+                    return
+                except ValueError:
+                    continue
+        except (socket.error, OSError) as e:
+            logger.info(f"Waiting for SPDK to be ready: {e}")
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        time.sleep(1)
+
+
 def rpc_call(req):
     logger.info(f"active threads: {threading.active_count()}")
     logger.info(f"active unix sockets: {len(unix_sockets)}")
@@ -77,44 +116,60 @@ def rpc_call(req):
     if "params" in req_data:
         params = str(req_data['params'])
     logger.info(f"Request:{req_time} function: {str(req_data['method'])}, params: {params}")
+    spdk_semaphore.acquire()
+    try:
+        return _rpc_call_inner(req, req_data, req_time)
+    finally:
+        spdk_semaphore.release()
+
+def _rpc_call_inner(req, req_data, req_time):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     unix_sockets.append(sock)
-    sock.settimeout(TIMEOUT)
-    sock.connect(rpc_sock)
-    sock.sendall(req)
+    try:
+        sock.settimeout(TIMEOUT)
+        sock.connect(rpc_sock)
+        sock.sendall(req)
 
-    if 'id' not in req_data:
-        sock.close()
-        return None
+        if 'id' not in req_data:
+            return None
 
-    buf = ''
-    closed = False
-    response = None
-    recv_from_spdk_time_start = time.time_ns()
-    while not closed:
-        newdata = sock.recv(1024*1024*1024)
-        if newdata == b'':
-            closed = True
-        buf += newdata.decode('ascii')
+        buf = ''
+        closed = False
+        response = None
+        recv_from_spdk_time_start = time.time_ns()
+        while not closed:
+            newdata = sock.recv(1024*1024*1024)
+            if newdata == b'':
+                closed = True
+            buf += newdata.decode('ascii')
+            try:
+                response = json.loads(buf)
+            except ValueError:
+                continue  # incomplete response; keep buffering
+            break
+        recv_from_spdk_time_end = time.time_ns()
+        time_diff = recv_from_spdk_time_end - recv_from_spdk_time_start
+        logger.info(f"recv_from_spdk_time_diff: {time_diff}")
+        recv_from_spdk_time_diff[recv_from_spdk_time_start] = time_diff
+
+        if not response and len(buf) > 0:
+            raise ValueError('Invalid response')
+
+        logger.info(f"Response:{req_time}")
+
+        return buf
+    except socket.timeout:
+        logger.error(f"Socket timeout waiting for SPDK response (request {req_time}, function: {req_data.get('method', 'unknown')})")
+        raise ValueError('SPDK response timeout')
+    finally:
         try:
-            response = json.loads(buf)
+            sock.close()
+        except OSError:
+            pass
+        try:
+            unix_sockets.remove(sock)
         except ValueError:
-            continue  # incomplete response; keep buffering
-        break
-    recv_from_spdk_time_end = time.time_ns()
-    time_diff = recv_from_spdk_time_end - recv_from_spdk_time_start
-    logger.info(f"recv_from_spdk_time_diff: {time_diff}")
-    recv_from_spdk_time_diff[recv_from_spdk_time_start] = time_diff
-
-    sock.close()
-    unix_sockets.remove(sock)
-
-    if not response and len(buf) > 0:
-        raise ValueError('Invalid response')
-
-    logger.info(f"Response:{req_time}")
-
-    return buf
+            pass
 
 
 class ServerHandler(BaseHTTPRequestHandler):
@@ -181,6 +236,8 @@ class ServerHandler(BaseHTTPRequestHandler):
                 else:
                     self.do_HEAD_no_content()
 
+            except BrokenPipeError:
+                logger.warning(f"BrokenPipeError: client disconnected before response could be sent (request {req_time})")
             except ValueError:
                 self.do_INTERNALERROR()
         self.server_session.remove(req_time)
@@ -191,6 +248,7 @@ def run_server(host, port, user, password, is_threading_enabled=False):
     key = base64.b64encode((user+':'+password).encode(encoding='ascii')).decode('ascii')
     print_stats_thread = threading.Thread(target=print_stats, )
     print_stats_thread.start()
+    wait_for_spdk_ready()
     try:
         ServerHandler.key = key
         httpd = (ThreadingHTTPServer if is_threading_enabled else HTTPServer)((host, port), ServerHandler)
@@ -203,6 +261,7 @@ def run_server(host, port, user, password, is_threading_enabled=False):
 
 
 TIMEOUT = int(get_env_var("TIMEOUT", is_required=False, default=60*5))
+MAX_CONCURRENT_SPDK = int(get_env_var("MAX_CONCURRENT_SPDK", is_required=False, default=16))
 is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
 server_ip = get_env_var("SERVER_IP", is_required=True, default="")
 rpc_port = get_env_var("RPC_PORT", is_required=True)
@@ -214,6 +273,9 @@ try:
 except Exception:
     rpc_port = 8080
 rpc_sock = f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
+
+spdk_semaphore = threading.Semaphore(MAX_CONCURRENT_SPDK)
+logger.info(f"SPDK concurrency limit: {MAX_CONCURRENT_SPDK}")
 
 is_threading_enabled = bool(is_threading_enabled)
 run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)

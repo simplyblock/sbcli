@@ -25,7 +25,7 @@ Usage::
 import time
 import uuid as _uuid_mod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.hublvol import HubLVol

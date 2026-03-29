@@ -36,10 +36,16 @@ def set_device_health_check(cluster_id, device, health_check_status):
             for dev in node.nvme_devices:
                 if dev.get_id() == device.get_id():
                     old_status = dev.health_check
-                    dev.health_check = health_check_status
-                    node.write_to_db()
+                    # Re-read node fresh before writing to avoid overwriting
+                    # concurrent changes (e.g. lvstore_ports during activation)
+                    fresh_node = db.get_storage_node_by_id(node.get_id())
+                    for fresh_dev in fresh_node.nvme_devices:
+                        if fresh_dev.get_id() == device.get_id():
+                            fresh_dev.health_check = health_check_status
+                            break
+                    fresh_node.write_to_db()
                     device_events.device_health_check_change(
-                        dev, dev.health_check, old_status, caused_by="monitor")
+                        dev, health_check_status, old_status, caused_by="monitor")
                     return
 
 
@@ -155,12 +161,13 @@ def check_node(snode):
                         bdev_names=list(node_bdev_names), reattach=False,
                     )
                     connected_devices.append(org_dev.get_id())
+                    # Re-read right before write to avoid overwriting concurrent changes
                     sn = db.get_storage_node_by_id(snode.get_id())
                     for d in sn.remote_devices:
                         if d.get_id() == remote_device.get_id():
                             d.status = NVMeDevice.STATUS_ONLINE
-                            sn.write_to_db()
                             break
+                    sn.write_to_db()
                     distr_controller.send_dev_status_event(org_dev, NVMeDevice.STATUS_ONLINE, snode)
                 except RuntimeError:
                     logger.error(f"Failed to connect to device: {org_dev.get_id()}")

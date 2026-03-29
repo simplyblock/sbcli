@@ -17,7 +17,6 @@ import time
 import re
 import json
 import os
-import sys
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 
@@ -333,7 +332,7 @@ def main():
     print("\n=== TEST: Get storage node UUIDs ===")
     sn_list = ssh_exec(mgmt_ip, ["sudo /usr/local/bin/sbctl sn list"],
                        get_output=True)[0]
-    sn_uuids = parse_all_uuids(sn_list)
+    parse_all_uuids(sn_list)
     # Filter to only the node UUIDs (first UUID on each table row)
     node_uuids = []
     for line in sn_list.splitlines():
@@ -541,7 +540,7 @@ def main():
     else:
         print("\n=== Keeping cluster alive for debugging ===")
         print(f"  Mgmt: {mgmt_ip}")
-        print(f"  To tear down manually: python3 tests/perf/test_lvol_migration_e2e.py --teardown")
+        print("  To tear down manually: python3 tests/perf/test_lvol_migration_e2e.py --teardown")
 
     print("\nDONE.")
 

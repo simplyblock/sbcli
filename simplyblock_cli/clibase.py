@@ -181,7 +181,8 @@ class CLIWrapperBase:
                 id_device_by_nqn=args.id_device_by_nqn,
                 partition_size=args.partition_size,
                 ha_jm_count=ha_jm_count,
-                format_4k=format_4k
+                format_4k=format_4k,
+                spdk_proxy_image=getattr(args, 'spdk_proxy_image', None),
             )
         except Exception as e:
             print(e)
@@ -221,16 +222,28 @@ class CLIWrapperBase:
                 node_id, max_lvol, max_snap, max_prov,
                 spdk_image, spdk_debug,
                 small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
-                new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
+                new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate, spdk_proxy_image=getattr(args, 'spdk_proxy_image', None))
         except Exception as e:
             print(e)
             return False
 
     def storage_node__shutdown(self, sub_command, args):
-        return storage_ops.shutdown_storage_node(args.node_id, args.force)
+        ret = storage_ops.shutdown_storage_node(args.node_id, args.force)
+        if isinstance(ret, tuple):
+            ok, reason = ret
+            if not ok:
+                print(f"Error: {reason}")
+            return ok
+        return ret
 
     def storage_node__suspend(self, sub_command, args):
-        return storage_ops.suspend_storage_node(args.node_id, args.force)
+        ret = storage_ops.suspend_storage_node(args.node_id, args.force)
+        if isinstance(ret, tuple):
+            ok, reason = ret
+            if not ok:
+                print(f"Error: {reason}")
+            return ok
+        return ret
 
     def storage_node__resume(self, sub_command, args):
         return storage_ops.resume_storage_node(args.node_id)
@@ -523,11 +536,6 @@ class CLIWrapperBase:
                 print("Error: --allowed-hosts JSON must be a list of host NQN strings")
                 return False
 
-        sec_options = None
-        if args.sec_options:
-            with open(args.sec_options, 'r') as f:
-                sec_options = _json.load(f)
-
         results, error = lvol_controller.add_lvol_ha(
             name, size, host_id, ha_type, pool, comp, crypto,
             distr_vuid,
@@ -540,7 +548,7 @@ class CLIWrapperBase:
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace,
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
-            allowed_hosts=allowed_hosts, sec_options=sec_options)
+            allowed_hosts=allowed_hosts)
         if results:
             return results
         else:
@@ -548,11 +556,7 @@ class CLIWrapperBase:
 
     def volume__add_host(self, sub_command, args):
         import json as _json
-        sec_options = None
-        if args.sec_options:
-            with open(args.sec_options, 'r') as f:
-                sec_options = _json.load(f)
-        result, error = lvol_controller.add_host_to_lvol(args.volume_id, args.host_nqn, sec_options)
+        result, error = lvol_controller.add_host_to_lvol(args.volume_id, args.host_nqn)
         if error:
             print(f"Error: {error}")
             return False
@@ -695,6 +699,11 @@ class CLIWrapperBase:
         return mgmt_ops.remove_mgmt_node(args.node_id)
 
     def storage_pool__add(self, sub_command, args):
+        import json as _json
+        sec_options = None
+        if args.sec_options:
+            with open(args.sec_options, 'r') as f:
+                sec_options = _json.load(f)
         return pool_controller.add_pool(
             args.name,
             args.pool_max,
@@ -704,7 +713,8 @@ class CLIWrapperBase:
             args.max_r_mbytes,
             args.max_w_mbytes,
             args.cluster_id,
-            args.qos_host
+            args.qos_host,
+            sec_options=sec_options,
         )
 
     def storage_pool__set(self, sub_command, args):

@@ -1,5 +1,4 @@
 # coding=utf-8
-import json
 import logging
 import re
 import time
@@ -8,7 +7,6 @@ import uuid
 import boto3
 from botocore.exceptions import ClientError
 
-from simplyblock_core import constants, utils
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
@@ -342,28 +340,40 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     if not cluster_id:
         cluster_id = snode.cluster_id
 
-    # Walk the snapshot chain and back up all unbacked ancestors first
     snap_chain = _get_snapshot_chain(snapshot)
+    chain_snapshot_ids = [snap.get_id() for snap in snap_chain]
+    acquired, existing_lock = db_controller.acquire_backup_chain_locks(
+        chain_snapshot_ids, snapshot_id, lvol.get_id())
+    if not acquired:
+        lock_snapshot = getattr(existing_lock, "requested_snapshot_id", "") or getattr(existing_lock, "snapshot_id", "")
+        return None, (
+            "A backup request is already preparing this snapshot chain"
+            + (f" (requested snapshot {lock_snapshot})" if lock_snapshot else "")
+        )
+
     prev_backup = _get_latest_backup_for_lvol(lvol.get_id())
     final_backup_id = None
+    try:
+        # Walk the snapshot chain and back up all unbacked ancestors first
+        for snap in snap_chain:
+            if _snapshot_has_backup(snap.get_id()):
+                # Already backed up — update prev_backup pointer for chain linking
+                backups = db_controller.get_backups_by_snapshot_id(snap.get_id())
+                existing = next(
+                    (b for b in backups if b.status in (
+                        Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
+                        Backup.STATUS_COMPLETED)),
+                    None)
+                if existing:
+                    prev_backup = existing
+                continue
 
-    for snap in snap_chain:
-        if _snapshot_has_backup(snap.get_id()):
-            # Already backed up — update prev_backup pointer for chain linking
-            backups = db_controller.get_backups_by_snapshot_id(snap.get_id())
-            existing = next(
-                (b for b in backups if b.status in (
-                    Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
-                    Backup.STATUS_COMPLETED)),
-                None)
-            if existing:
-                prev_backup = existing
-            continue
-
-        backup = _create_single_backup(snap, lvol, node_id, cluster_id, prev_backup)
-        prev_backup = backup
-        if snap.get_id() == snapshot_id:
-            final_backup_id = backup.uuid
+            backup = _create_single_backup(snap, lvol, node_id, cluster_id, prev_backup)
+            prev_backup = backup
+            if snap.get_id() == snapshot_id:
+                final_backup_id = backup.uuid
+    finally:
+        db_controller.release_backup_chain_locks(chain_snapshot_ids)
 
     if not final_backup_id:
         # The target snapshot was already backed up
@@ -544,6 +554,7 @@ def delete_backups(lvol_id):
 def list_backups(cluster_id=None):
     """List all backups, optionally filtered by cluster."""
     backups = db_controller.get_backups(cluster_id)
+    backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
     data = []
     for b in backups:
         source = b.source_cluster_id or b.cluster_id
@@ -556,7 +567,7 @@ def list_backups(cluster_id=None):
             "Node": b.node_id[:8] if b.node_id else "",
             "Status": b.status,
             "Prev": b.prev_backup_id[:8] if b.prev_backup_id else "-",
-            "Created": time.strftime("%Y-%m-%d %H:%M", time.localtime(b.created_at)) if b.created_at else "",
+            "Created": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(b.created_at)) if b.created_at else "",
             "Source": source[:8] if is_external else "local",
         }
         data.append(entry)

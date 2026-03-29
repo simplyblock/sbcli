@@ -64,6 +64,92 @@ def _reapply_allowed_hosts(lvol, snode, rpc_client):
             rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
 
+def _set_lvol_ana_on_node(lvol, node, ana_state):
+    """Set ANA state for a single lvol's listeners on a given node."""
+    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10, retry=2)
+    listener_port = node.get_lvol_subsys_port(lvol.lvs_name)
+    for iface in node.data_nics:
+        if iface.ip4_address and (lvol.fabric == iface.trtype.lower() or (lvol.fabric == "tcp" and node.active_tcp)):
+            trtype = iface.trtype if lvol.fabric == iface.trtype.lower() else "TCP"
+            ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
+                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state)
+            if not ret:
+                logger.warning("Failed to set ANA state %s for %s on %s", ana_state, lvol.nqn, node.get_id())
+            else:
+                logger.info("ANA: %s on %s (%s) → %s", lvol.nqn, node.get_id(), iface.ip4_address, ana_state)
+
+
+def _failover_primary_ana(primary_node):
+    """Primary failed: promote first_sec→optimized.
+
+    The second_sec stays at non_optimized (its permanent state).
+    """
+    db_ctrl = DBController()
+    lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
+                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
+
+    first_sec = None
+    if primary_node.secondary_node_id:
+        first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
+
+    for lvol in lvol_list:
+        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+            _set_lvol_ana_on_node(lvol, first_sec, "optimized")
+
+
+def _failback_primary_ana(primary_node):
+    """Primary restarting: demote first_sec→non_optimized.
+
+    The second_sec is already non_optimized and never changes.
+    """
+    db_ctrl = DBController()
+    lvol_list = [lv for lv in db_ctrl.get_lvols_by_node_id(primary_node.get_id())
+                 if lv.status in [LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE]]
+
+    first_sec = None
+    if primary_node.secondary_node_id:
+        first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
+
+    for lvol in lvol_list:
+        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+            _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
+
+
+def trigger_ana_failover_for_node(offline_node):
+    """Trigger ANA failover when a node goes offline.
+
+    Only action needed: if the offline node is a primary, promote its
+    first_sec to optimized.  The second_sec is always non_optimized and
+    never needs ANA state changes.
+    """
+    node_id = offline_node.get_id()
+
+    if offline_node.secondary_node_id:
+        logger.info("ANA failover: node %s is primary, promoting first_sec", node_id)
+        try:
+            _failover_primary_ana(offline_node)
+        except Exception as e:
+            logger.error("ANA failover for primary role of %s failed: %s", node_id, e)
+
+
+def trigger_ana_failback_for_node(restarting_node):
+    """Trigger ANA failback when a primary comes back online.
+
+    Demote first_sec from optimized back to non_optimized.
+    The second_sec is always non_optimized and never changes.
+    """
+    node_id = restarting_node.get_id()
+
+    if restarting_node.secondary_node_id:
+        first_sec = DBController().get_storage_node_by_id(restarting_node.secondary_node_id)
+        if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
+            logger.info("ANA failback: primary %s restarting, demoting first_sec", node_id)
+            try:
+                _failback_primary_ana(restarting_node)
+            except Exception as e:
+                logger.error("ANA failback for primary %s failed: %s", node_id, e)
+
+
 def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool):
     """Connect snode to device
 
@@ -910,6 +996,21 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     return new_devs
 
 
+def _refresh_cluster_maps_after_node_recovery(snode: StorageNode):
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(snode.get_id())
+
+    # Push a full cluster map after reconnect/restart recovery so peers do not
+    # remain on stale per-device availability derived from transient reconnect state.
+    distr_controller.send_cluster_map_to_node(snode)
+
+    for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if node.get_id() == snode.get_id():
+            continue
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            distr_controller.send_cluster_map_to_node(node)
+
+
 def ifc_is_tcp(nic):
     addrs = psutil.net_if_addrs().get(nic, [])
     for addr in addrs:
@@ -937,7 +1038,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, format_4k=False):
+             partition_size="", ha_jm_count=3, format_4k=False, spdk_proxy_image=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1097,6 +1198,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 snode_api.format_device_with_4k(ssd)
                 snode_api.bind_device_to_spdk(ssd)
             snode_api.bind_device_to_spdk(ssd)
+
+        if not spdk_proxy_image:
+            spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
         try:
             results, err = snode_api.spdk_process_start(
                 l_cores, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
@@ -1104,7 +1208,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=node_socket, firewall_port=firewall_port, cluster_id=cluster_id)
+                socket=node_socket, firewall_port=firewall_port, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image)
             time.sleep(5)
 
         except Exception as e:
@@ -1222,6 +1326,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.minimum_sys_memory = minimum_sys_memory
         snode.active_tcp = active_tcp
         snode.active_rdma = active_rdma
+        snode.spdk_proxy_image = spdk_proxy_image
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -1629,7 +1734,8 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[], force_lvol_recreate=False):
+        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        force_lvol_recreate=False, spdk_proxy_image=None):
     db_controller = DBController()
     logger.info("Restarting storage node")
     try:
@@ -1816,6 +1922,11 @@ def restart_storage_node(
         if n.api_endpoint == snode.api_endpoint and n.socket == snode.socket and n.uuid != snode.uuid:
             total_mem += (n.spdk_mem + 500000000)
 
+    if spdk_proxy_image:
+        snode.spdk_proxy_image = spdk_proxy_image
+    if not snode.spdk_proxy_image:
+        snode.spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
+
     results = None
     try:
         if new_ssd_pcie and type(new_ssd_pcie) is list:
@@ -1833,7 +1944,8 @@ def restart_storage_node(
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-            socket=snode.socket, firewall_port=snode.firewall_port, cluster_id=snode.cluster_id)
+            socket=snode.socket, firewall_port=snode.firewall_port, cluster_id=snode.cluster_id,
+            spdk_proxy_image=snode.spdk_proxy_image)
 
     except Exception as e:
         logger.error(e)
@@ -2100,6 +2212,8 @@ def restart_storage_node(
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             try:
+                # Re-read node from DB to avoid overwriting concurrent changes
+                node = db_controller.get_storage_node_by_id(node.get_id())
                 node.remote_devices = _connect_to_remote_devs(node, reattach=True, force_connect_restarting_nodes=True)
             except RuntimeError:
                 logger.error('Failed to connect to remote devices')
@@ -2114,9 +2228,16 @@ def restart_storage_node(
         if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
             device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
+        # ANA failback: demote secondaries BEFORE port unblock/online
+        try:
+            trigger_ana_failback_for_node(snode)
+        except Exception as ana_e:
+            logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
+
         logger.info("Cluster is not ready yet")
         logger.info("Setting node status to Online")
         set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
+        _refresh_cluster_maps_after_node_recovery(snode)
         return True
 
     else:
@@ -2130,14 +2251,16 @@ def restart_storage_node(
             snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
-            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            if sec_node:
-                if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            restart_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+                if not sec_id:
+                    continue
+                sec_node = db_controller.get_storage_node_by_id(sec_id)
+                if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                     fw_api = FirewallClient(sec_node, timeout=5, retry=2)
                     port_type = "tcp"
                     if sec_node.active_rdma:
                         port_type = "udp"
-                    restart_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
                     fw_api.firewall_set_port(restart_lvs_port, port_type, "allow", sec_node.rpc_port)
                     tcp_ports_events.port_allowed(sec_node, restart_lvs_port)
             return False
@@ -2167,6 +2290,8 @@ def restart_storage_node(
                     continue
 
                 try:
+                    # Re-read node from DB to avoid overwriting concurrent changes
+                    node = db_controller.get_storage_node_by_id(node.get_id())
                     node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
                 except RuntimeError:
                     logger.error('Failed to connect to remote devices')
@@ -2181,8 +2306,15 @@ def restart_storage_node(
             if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
                 device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
+            # ANA failback: demote secondaries BEFORE port unblock/online
+            try:
+                trigger_ana_failback_for_node(snode)
+            except Exception as ana_e:
+                logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
+
             logger.info("Setting node status to Online")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+            _refresh_cluster_maps_after_node_recovery(snode)
 
             lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
             logger.info(f"Found {len(lvol_list)} lvols")
@@ -2269,7 +2401,6 @@ def list_storage_nodes(is_json, cluster_id=None):
             "LVOL P": node.lvol_subsys_port,
             "DEV P": node.nvmf_port,
             "HUB P": node.hublvol.nvmf_port if node.hublvol else "-",
-            "FW P": node.firewall_port,
             "LVS Ports": _format_lvstore_ports(node),
             # "Cloud ID": node.cloud_instance_id,
             # "JM VUID": node.jm_vuid,
@@ -2385,6 +2516,156 @@ def list_storage_devices(node_id, is_json):
         return out
 
 
+def _check_ftt_allows_node_removal(node_id, db_controller):
+    """Check whether FTT constraints allow removing (suspend/shutdown) a node.
+
+    Returns (allowed: bool, reason: str).
+    """
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        return False, "Node not found"
+
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+
+    if cluster.ha_type != "ha":
+        return True, ""
+
+    npcs = cluster.distr_npcs  # parity chunk count (1 or 2)
+    ndcs = cluster.distr_ndcs  # data chunk count
+    ft = cluster.max_fault_tolerance  # declared fault tolerance level
+
+    # Count total active nodes (excluding in_creation and removed)
+    total_active_nodes = sum(
+        1 for node in snodes
+        if node.status not in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]
+    )
+
+    # Block suspend/shutdown during rebalancing based on node headroom.
+    # A cluster needs ndcs+npcs nodes minimum. During rebalancing:
+    #   - With exactly ndcs+npcs nodes: no shutdowns allowed (no headroom)
+    #   - With ndcs+npcs+1 nodes: one shutdown allowed (one spare)
+    #   - With ndcs+npcs+2+ nodes: two shutdowns allowed, etc.
+    # The number of allowed shutdowns during rebalancing is:
+    #   total_active_nodes - (ndcs + npcs)
+    # This must be greater than the number of already-not-online nodes.
+    if cluster.is_re_balancing:
+        not_online_already = sum(
+            1 for node in snodes
+            if node.get_id() != node_id
+            and node.status != StorageNode.STATUS_ONLINE
+            and node.status not in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]
+        )
+        headroom = total_active_nodes - (ndcs + npcs)
+        if headroom <= not_online_already:
+            return False, (
+                f"Cluster is rebalancing with {total_active_nodes} active nodes "
+                f"({not_online_already} already not online, "
+                f"need >{ndcs + npcs} for ndcs={ndcs}, npcs={npcs}). "
+                f"Wait for rebalancing to complete before removing a node."
+            )
+
+    # Count nodes that are not online (excluding the node being removed,
+    # and excluding nodes in creation or already removed).
+    not_online_nodes = []
+    for node in snodes:
+        if node.get_id() == node_id:
+            continue
+        if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            not_online_nodes.append(node)
+
+    # Check for journal replication in progress on any online node.
+    # A node with active journal replication counts as one additional not-online node.
+    jm_replication_active = False
+    for node in snodes:
+        if node.get_id() == node_id:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            lvstores = node.rpc_client(timeout=5, retry=1).bdev_lvol_get_lvstores(node.lvstore)
+            if lvstores:
+                ret = node.rpc_client(timeout=5, retry=1).jc_get_jm_status(node.jm_vuid)
+                for jm in ret:
+                    if ret[jm] is False:
+                        jm_replication_active = True
+                        break
+        except Exception:
+            pass
+        if jm_replication_active:
+            break
+
+    not_online_count = len(not_online_nodes)
+    if jm_replication_active:
+        not_online_count += 1
+
+    if npcs == 1:
+        # FTT=1: no room at all if anything is already not online or journal replicating
+        if not_online_count > 0:
+            return False, (
+                f"FTT=1 (npcs=1): cannot remove node, cluster already has "
+                f"{len(not_online_nodes)} not-online node(s)"
+                f"{' and journal replication in progress' if jm_replication_active else ''}"
+            )
+
+    elif npcs == 2:
+        if ft >= 2:
+            # FTT=2: room for one not-online node, block if already have one+
+            if not_online_count >= 2:
+                return False, (
+                    f"FTT=2 (npcs=2): cannot remove node, cluster already has "
+                    f"{len(not_online_nodes)} not-online node(s)"
+                    f"{' and journal replication in progress' if jm_replication_active else ''}"
+                )
+        else:
+            # npcs=2, ft=1: like FTT=2 for capacity, but additionally
+            # cannot remove both primary and its secondary
+            if not_online_count >= 2:
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node, cluster already has "
+                    f"{len(not_online_nodes)} not-online node(s)"
+                    f"{' and journal replication in progress' if jm_replication_active else ''}"
+                )
+
+            # Check primary-secondary pair constraint:
+            # If the node being removed is a primary, check its secondary is online.
+            # If the node being removed is a secondary, check its primary is online.
+            for not_online_node in not_online_nodes:
+                # Is any not-online node the secondary of the node we're removing?
+                if snode.secondary_node_id == not_online_node.get_id():
+                    return False, (
+                        f"npcs=2/ft=1: cannot remove node {node_id}, "
+                        f"its secondary {not_online_node.get_id()} is not online "
+                        f"(status: {not_online_node.status})"
+                    )
+                if snode.secondary_node_id_2 == not_online_node.get_id():
+                    return False, (
+                        f"npcs=2/ft=1: cannot remove node {node_id}, "
+                        f"its secondary {not_online_node.get_id()} is not online "
+                        f"(status: {not_online_node.status})"
+                    )
+
+            # Is the node we're removing a secondary of any not-online primary?
+            for not_online_node in not_online_nodes:
+                if not_online_node.secondary_node_id == node_id:
+                    return False, (
+                        f"npcs=2/ft=1: cannot remove node {node_id}, "
+                        f"it is secondary of not-online primary {not_online_node.get_id()} "
+                        f"(status: {not_online_node.status})"
+                    )
+                if not_online_node.secondary_node_id_2 == node_id:
+                    return False, (
+                        f"npcs=2/ft=1: cannot remove node {node_id}, "
+                        f"it is secondary of not-online primary {not_online_node.get_id()} "
+                        f"(status: {not_online_node.status})"
+                    )
+
+    return True, ""
+
+
 def shutdown_storage_node(node_id, force=False):
     db_controller = DBController()
     try:
@@ -2394,10 +2675,28 @@ def shutdown_storage_node(node_id, force=False):
         return False
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
+
+    # If node is not yet suspended and force is not used, run suspend first
     if snode.status != StorageNode.STATUS_SUSPENDED:
-        logger.error("Node is not in suspended state")
-        if force is False:
+        if force:
+            logger.warning("Node is not in suspended state, proceeding with force")
+        elif snode.status == StorageNode.STATUS_ONLINE:
+            logger.info("Node is online, suspending before shutdown")
+            ret = suspend_storage_node(node_id, force=False)
+            if not ret:
+                logger.error("Failed to suspend node, cannot proceed with shutdown")
+                return False
+            snode = db_controller.get_storage_node_by_id(node_id)
+        else:
+            logger.error("Node is not in suspended or online state, use --force")
             return False
+
+    # FTT check (suspend already checked this, but verify again for direct shutdown calls)
+    if not force:
+        allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
+        if not allowed:
+            logger.error(f"Cannot shutdown node: {reason}")
+            return False, reason
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
@@ -2448,6 +2747,13 @@ def shutdown_storage_node(node_id, force=False):
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
 
+    # ANA failover: update subsystem states on surviving nodes
+    snode = db_controller.get_storage_node_by_id(node_id)
+    try:
+        trigger_ana_failover_for_node(snode)
+    except Exception as ana_e:
+        logger.error("ANA failover during shutdown of %s failed: %s", node_id, ana_e)
+
     tasks = db_controller.get_job_tasks(snode.cluster_id)
     for task in tasks:
         if task.node_id == node_id and task.status != JobSchedule.STATUS_DONE:
@@ -2481,100 +2787,74 @@ def suspend_storage_node(node_id, force=False):
             return False
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
-    if task_id:
+    if tasks:
         logger.error(f"Migration task found: {len(tasks)}, can not suspend storage node, use --force")
         if force is False:
             return False
         for task in tasks:
             tasks_controller.cancel_task(task.uuid)
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-    online_nodes = 0
-    offline_nodes = 0
-    for node in snodes:
-        if node.status == node.STATUS_ONLINE:
-            online_nodes += 1
-        else:
-            if node.status == StorageNode.STATUS_DOWN and node.get_id() != snode.secondary_node_id:
-                online_nodes += 1
-            else:
-                offline_nodes += 1
-
-    if cluster.ha_type == "ha":
-        if online_nodes < 3 and cluster.status == cluster.STATUS_ACTIVE:
-            logger.warning("Cluster mode is HA but online storage nodes are less than 3")
-            if force is False:
-                return False
-
-        if cluster.status == cluster.STATUS_DEGRADED and force is False:
-            logger.warning("Cluster status is degraded, use --force but this will suspend the cluster")
-            return False
-
-    if offline_nodes > 0:
-        if force is False:
-            logger.error("Offline storage nodes found, cannot suspend node without --force")
-            return False
-
-    if offline_nodes > 0:
-        if force is False:
-            logger.error("Offline storage nodes found, cannot suspend node without --force")
-            return False
+    if not force:
+        allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
+        if not allowed:
+            logger.error(f"Cannot suspend node: {reason}")
+            return False, reason
 
     logger.info("Suspending node")
-
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_ONLINE:
-            device_controller.device_set_unavailable(dev.get_id())
-
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        logger.info("Setting JM unavailable")
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
-
-    logger.info("Setting node status to suspended")
-    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
 
     rpc_client = snode.rpc_client()
     fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
     if snode.active_rdma:
         port_type = "udp"
-    if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
-        nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
-        if nodes:
-            for node in nodes:
-                try:
-                    # Block per-lvstore ports for secondary lvstores on this node
+
+    # Track all blocked ports so we can revert on failure
+    blocked_ports = []  # list of (port, port_type, rpc_port) tuples
+
+    def _block_port(port):
+        fw_api.firewall_set_port(port, port_type, "block", snode.rpc_port, is_reject=True)
+        blocked_ports.append(port)
+
+    def _revert_blocked_ports():
+        for port in blocked_ports:
+            try:
+                fw_api.firewall_set_port(port, port_type, "unblock", snode.rpc_port)
+            except Exception as revert_e:
+                logger.error(f"Failed to revert port block for port {port}: {revert_e}")
+
+    try:
+        # Block per-lvstore ports for secondary lvstores hosted on this node
+        if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
+            nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+            if nodes:
+                for node in nodes:
                     sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
                     sec_hub_port = node.get_hublvol_port(node.lvstore)
                     if sec_hub_port:
-                        fw_api.firewall_set_port(
-                            sec_hub_port, port_type, "block", snode.rpc_port, is_reject=True)
-                    fw_api.firewall_set_port(
-                        sec_lvs_port, port_type, "block", snode.rpc_port, is_reject=True)
+                        _block_port(sec_hub_port)
+                    _block_port(sec_lvs_port)
                     time.sleep(0.5)
                     rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
                     rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
-                except Exception as e:
-                    logger.error(e)
-                    return False
 
-    try:
         # Block per-lvstore ports for this node's own primary lvstore
         own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
         own_hub_port = snode.get_hublvol_port(snode.lvstore)
         if own_hub_port:
-            fw_api.firewall_set_port(
-                own_hub_port, port_type, "block", snode.rpc_port, is_reject=True)
-        fw_api.firewall_set_port(
-            own_lvs_port, port_type, "block", snode.rpc_port, is_reject=True)
+            _block_port(own_hub_port)
+        _block_port(own_lvs_port)
         time.sleep(0.5)
         rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
         rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
         time.sleep(1)
     except Exception as e:
-        logger.error(e)
+        logger.error(f"Failed during suspend port blocking/leadership transfer: {e}")
+        logger.info("Reverting blocked ports")
+        _revert_blocked_ports()
         return False
+
+    logger.info("Setting node status to suspended")
+    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
 
     logger.info("Done")
     return True
@@ -2620,6 +2900,7 @@ def resume_storage_node(node_id):
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db()
+    _refresh_cluster_maps_after_node_recovery(snode)
 
     fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
@@ -3182,6 +3463,8 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 continue
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                 try:
+                    # Re-read node from DB to avoid overwriting concurrent changes
+                    node = db_controller.get_storage_node_by_id(node.get_id())
                     node.remote_devices = _connect_to_remote_devs(node)
                     node.write_to_db()
                     distr_controller.send_cluster_map_to_node(node)
@@ -3210,7 +3493,16 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 if primary_node and primary_node.lvstore_status == "ready":
                     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                         try:
-                            snode.connect_to_hublvol(primary_node)
+                            # If this node is sec_2 for this primary, multipath to sec_1
+                            failover_node = None
+                            if sec_attr == 'lvstore_stack_secondary_2' and primary_node.secondary_node_id:
+                                try:
+                                    sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+                                    if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                                        failover_node = sec1
+                                except KeyError:
+                                    pass
+                            snode.connect_to_hublvol(primary_node, failover_node=failover_node)
                         except Exception as e:
                             logger.error("Error establishing hublvol: %s", e)
 
@@ -3279,16 +3571,77 @@ def recreate_lvstore_on_sec(secondary_node):
 
         primary_lvs_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
 
+        is_second_sec = (primary_node.secondary_node_id_2 == secondary_node.get_id())
+
+        # Collect nodes that need port block/unblock during this failback
+        nodes_to_unblock = []
+
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
             ### 3- block primary port
             fw_api.firewall_set_port(primary_lvs_port, port_type, "block", primary_node.rpc_port)
             tcp_ports_events.port_deny(primary_node, primary_lvs_port)
 
-            ### 4- set leadership to false
-            # primary_rpc_client.bdev_lvol_set_leader(primary_node.lvstore, leader=False)
-            # primary_rpc_client.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
-            # time.sleep(1)
+            time.sleep(0.5)
+
+            ### 4- set leadership to false and wait for inflight IO
+            primary_rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port,
+                                           primary_node.rpc_username, primary_node.rpc_password)
+            primary_rpc_client.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
+            primary_rpc_client.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+            logger.info(f"Checking for inflight IO from node: {primary_node.get_id()}")
+            for i in range(100):
+                is_inflight = primary_rpc_client.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
+                if is_inflight:
+                    logger.info("Inflight IO found, retry in 100ms")
+                    time.sleep(0.1)
+                else:
+                    logger.info("Inflight IO NOT found, continuing")
+                    break
+            else:
+                logger.error(
+                    f"Timeout while checking for inflight IO after 10 seconds on node {primary_node.get_id()}")
+
+            nodes_to_unblock.append(primary_node)
+
+        elif not is_second_sec:
+            ### 3b- Primary is offline, this is the first secondary.
+            # The other secondary may be the active leader for this group.
+            # Drop leadership on all other online secondaries before examine,
+            # to prevent writer conflicts when this node's JC connects to remote JMs.
+            other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.secondary_node_id_2]
+                            if sid and sid != secondary_node.get_id()]
+            for other_sec_id in other_sec_ids:
+                other_sec = db_controller.get_storage_node_by_id(other_sec_id)
+                if other_sec and other_sec.status == StorageNode.STATUS_ONLINE:
+                    logger.info(f"Primary offline: dropping leadership for jm_vuid {primary_node.jm_vuid} "
+                                f"on other secondary {other_sec.get_id()}")
+                    other_fw_api = FirewallClient(other_sec, timeout=5, retry=2)
+                    other_sec_port_type = "udp" if other_sec.active_rdma else "tcp"
+                    other_fw_api.firewall_set_port(
+                        primary_lvs_port, other_sec_port_type, "block", other_sec.rpc_port)
+                    tcp_ports_events.port_deny(other_sec, primary_lvs_port)
+
+                    time.sleep(0.5)
+
+                    other_rpc = RPCClient(other_sec.mgmt_ip, other_sec.rpc_port,
+                                          other_sec.rpc_username, other_sec.rpc_password)
+                    other_rpc.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
+                    other_rpc.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+                    logger.info(f"Checking for inflight IO from node: {other_sec.get_id()}")
+                    for i in range(100):
+                        is_inflight = other_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
+                        if is_inflight:
+                            logger.info("Inflight IO found, retry in 100ms")
+                            time.sleep(0.1)
+                        else:
+                            logger.info("Inflight IO NOT found, continuing")
+                            break
+                    else:
+                        logger.error(
+                            f"Timeout while checking for inflight IO after 10 seconds on node {other_sec.get_id()}")
+
+                    nodes_to_unblock.append(other_sec)
 
         ### 5- examine
         ret = secondary_rpc_client.bdev_examine(primary_node.raid)
@@ -3300,21 +3653,43 @@ def recreate_lvstore_on_sec(secondary_node):
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             try:
-                secondary_node.connect_to_hublvol(primary_node)
+                # If this is sec_1, create a secondary hublvol so sec_2 can multipath
+                if not is_second_sec and primary_node.secondary_node_id_2:
+                    try:
+                        cluster = db_controller.get_cluster_by_id(primary_node.cluster_id)
+                        secondary_node.create_secondary_hublvol(primary_node, cluster.nqn)
+                    except Exception as e:
+                        logger.error("Error creating secondary hublvol: %s", e)
+
+                # If this is sec_2, connect with multipath to primary + sec_1
+                failover_node = None
+                if is_second_sec and primary_node.secondary_node_id:
+                    try:
+                        sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+                        if sec1.status == StorageNode.STATUS_ONLINE:
+                            failover_node = sec1
+                    except KeyError:
+                        pass
+
+                secondary_node.connect_to_hublvol(primary_node, failover_node=failover_node)
 
             except Exception as e:
                 logger.error("Error connecting to hublvol: %s", e)
                 # return False
 
-            fw_api = FirewallClient(primary_node, timeout=5, retry=2)
-            ### 8- allow port on primary
-            fw_api.firewall_set_port(primary_lvs_port, port_type, "allow", primary_node.rpc_port)
-            tcp_ports_events.port_allowed(primary_node, primary_lvs_port)
+        ### 8- allow ports on nodes that were blocked
+        for node_to_unblock in nodes_to_unblock:
+            fw_api = FirewallClient(node_to_unblock, timeout=5, retry=2)
+            unblock_port_type = "udp" if node_to_unblock.active_rdma else "tcp"
+            fw_api.firewall_set_port(primary_lvs_port, unblock_port_type, "allow", node_to_unblock.rpc_port)
+            tcp_ports_events.port_allowed(node_to_unblock, primary_lvs_port)
 
         ### 7- add lvols to subsystems
+        lvol_ana_state = "non_optimized"
+
         executor = ThreadPoolExecutor(max_workers=50)
         for lvol in lvol_list:
-            executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state="non_optimized")
+            executor.submit(add_lvol_thread, lvol, secondary_node, lvol_ana_state=lvol_ana_state)
 
         primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
         primary_node.lvstore_status = "ready"
@@ -3332,19 +3707,28 @@ def recreate_lvstore(snode, force=False):
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
     snode.write_to_db()
-    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-        # check jc_compression status
-        jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
-        retries = 10
-        while jc_compression_is_active:
-            if retries <= 0:
-                logger.warning("Timeout waiting for JC compression task to finish")
-                break
-            retries -= 1
-            logger.info(f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
-            time.sleep(60)
-            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(sec_node.jm_vuid)
+
+    # Gather all secondary nodes for this primary
+    sec_nodes = []
+    for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+        if sec_id:
+            sec = db_controller.get_storage_node_by_id(sec_id)
+            if sec:
+                sec_nodes.append(sec)
+
+    for sec_node in sec_nodes:
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            # check jc_compression status
+            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(snode.jm_vuid)
+            retries = 10
+            while jc_compression_is_active:
+                if retries <= 0:
+                    logger.warning("Timeout waiting for JC compression task to finish")
+                    break
+                retries -= 1
+                logger.info(f"JC compression task found on node: {sec_node.get_id()}, retrying in 60 seconds")
+                time.sleep(60)
+                jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(sec_node.jm_vuid)
 
     ### 1- create distribs and raid
     ret, err = _create_bdev_stack(snode, [])
@@ -3368,9 +3752,10 @@ def recreate_lvstore(snode, force=False):
                 lvol_list.append(lv)
 
     prim_node_suspend = False
-    if sec_node:
+    for sec_node in sec_nodes:
         if sec_node.status == StorageNode.STATUS_UNREACHABLE:
             prim_node_suspend = True
+            break
     if not lvol_list:
         prim_node_suspend = False
 
@@ -3393,8 +3778,13 @@ def recreate_lvstore(snode, force=False):
             if lvol.allowed_hosts:
                 _reapply_allowed_hosts(lvol, snode, rpc_client)
 
-    if sec_node:
+    # Failback ANA: demote first_sec back to non_optimized BEFORE blocking ports
+    if snode.secondary_node_id and lvol_list:
+        _failback_primary_ana(snode)
 
+    snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
+    any_sec_unreachable = False
+    for sec_node in sec_nodes:
         if sec_node.status == StorageNode.STATUS_ONLINE:
             sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
                                        sec_node.rpc_password)
@@ -3415,7 +3805,6 @@ def recreate_lvstore(snode, force=False):
                 logger.error(msg)
                 storage_events.jm_repl_tasks_found(sec_node, snode.jm_vuid)
 
-            snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
             fw_api.firewall_set_port(snode_lvs_port, port_type, "block", sec_node.rpc_port)
             tcp_ports_events.port_deny(sec_node, snode_lvs_port)
 
@@ -3424,7 +3813,7 @@ def recreate_lvstore(snode, force=False):
             sec_rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False, bs_nonleadership=True)
             sec_rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
             ### 4-1 check for inflight IO. retry every 100ms up to 10 seconds
-            logger.info(f"Checking for inflight IO from node: {snode.secondary_node_id}")
+            logger.info(f"Checking for inflight IO from node: {sec_node.get_id()}")
             for i in range(100):
                 is_inflight = sec_rpc_client.bdev_distrib_check_inflight_io(snode.jm_vuid)
                 if is_inflight:
@@ -3435,11 +3824,14 @@ def recreate_lvstore(snode, force=False):
                     break
             else:
                 logger.error(
-                    f"Timeout while checking for inflight IO after 10 seconds on node {snode.secondary_node_id}")
+                    f"Timeout while checking for inflight IO after 10 seconds on node {sec_node.get_id()}")
 
         if sec_node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN]:
-            logger.info(f"Secondary node is not online, forcing journal replication on node: {snode.get_id()}")
-            rpc_client.jc_explicit_synchronization(snode.jm_vuid)
+            any_sec_unreachable = True
+
+    if any_sec_unreachable:
+        logger.info(f"Secondary node is not online, forcing journal replication on node: {snode.get_id()}")
+        rpc_client.jc_explicit_synchronization(snode.jm_vuid)
 
     ### 5- examine
     # time.sleep(0.2)
@@ -3496,7 +3888,7 @@ def recreate_lvstore(snode, force=False):
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
-    if sec_node:
+    if sec_nodes:
         ### 7- create and connect hublvol
         try:
             snode.recreate_hublvol()
@@ -3509,21 +3901,30 @@ def recreate_lvstore(snode, force=False):
     for lvol in lvol_list:
         executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
-    if sec_node:
+    # sec_1 creates secondary hublvol for multipath, then each sec connects
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    sec1 = sec_nodes[0] if sec_nodes else None
+    if sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+        try:
+            sec1.create_secondary_hublvol(snode, cluster.nqn)
+        except Exception as e:
+            logger.error("Error creating secondary hublvol on sec_1: %s", e)
+
+    for i, sec_node in enumerate(sec_nodes):
         if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            # sec_2 gets multipath failover to sec_1
+            failover_node = sec1 if i >= 1 and sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN] else None
             try:
-                sec_node.connect_to_hublvol(snode)
+                sec_node.connect_to_hublvol(snode, failover_node=failover_node)
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
             ### 8- allow secondary port
 
             fw_api = FirewallClient(sec_node, timeout=5, retry=2)
-            ### 3- block secondary port
             port_type = "tcp"
             if sec_node.active_rdma:
                 port_type = "udp"
-            snode_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
             fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", sec_node.rpc_port)
             tcp_ports_events.port_allowed(sec_node, snode_lvs_port)
 
@@ -3533,10 +3934,11 @@ def recreate_lvstore(snode, force=False):
         return False
 
     ### 10- finish
-    if sec_node.status == StorageNode.STATUS_ONLINE:
-        sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-        sec_node.lvstore_status = "ready"
-        sec_node.write_to_db()
+    for sec_node in sec_nodes:
+        if sec_node.status == StorageNode.STATUS_ONLINE:
+            sec_node = db_controller.get_storage_node_by_id(sec_node.get_id())
+            sec_node.lvstore_status = "ready"
+            sec_node.write_to_db()
 
     # all lvols to their respect loops
     if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
