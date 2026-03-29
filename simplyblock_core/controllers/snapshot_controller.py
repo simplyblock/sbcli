@@ -311,6 +311,11 @@ def delete(snapshot_uuid, force_delete=False):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
+    if snap.status == SnapShot.STATUS_IN_DELETION:
+        logger.error(f"Snapshot is in deletion {snapshot_uuid}")
+        if not force_delete:
+            return True
+
     try:
         snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
     except KeyError:
