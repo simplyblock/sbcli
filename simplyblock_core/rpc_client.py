@@ -717,15 +717,21 @@ class RPCClient:
         return self._request("distr_status_events_update", params)
 
     def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype, multipath=False):
+        """Attach an NVMe-oF controller.
+
+        multipath: False/"disable", True/"failover", or "multipath" (ANA-based).
+        """
         params = {
             "name": name,
             "trtype": trtype,
             "traddr": traddr,
             "trsvcid": str(trsvcid),
             "subnqn": nqn,
+            "adrfam": "ipv4",
         }
-        params.update({"adrfam": "ipv4"})
-        if multipath:
+        if multipath == "multipath":
+            params["multipath"] = "multipath"
+        elif multipath:
             params["multipath"] = "failover"
         else:
             params["multipath"] = "disable"

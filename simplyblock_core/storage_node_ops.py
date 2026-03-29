@@ -3493,7 +3493,16 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 if primary_node and primary_node.lvstore_status == "ready":
                     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                         try:
-                            snode.connect_to_hublvol(primary_node)
+                            # If this node is sec_2 for this primary, multipath to sec_1
+                            failover_node = None
+                            if sec_attr == 'lvstore_stack_secondary_2' and primary_node.secondary_node_id:
+                                try:
+                                    sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+                                    if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                                        failover_node = sec1
+                                except KeyError:
+                                    pass
+                            snode.connect_to_hublvol(primary_node, failover_node=failover_node)
                         except Exception as e:
                             logger.error("Error establishing hublvol: %s", e)
 
@@ -3644,7 +3653,25 @@ def recreate_lvstore_on_sec(secondary_node):
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             try:
-                secondary_node.connect_to_hublvol(primary_node)
+                # If this is sec_1, create a secondary hublvol so sec_2 can multipath
+                if not is_second_sec and primary_node.secondary_node_id_2:
+                    try:
+                        cluster = db_controller.get_cluster_by_id(primary_node.cluster_id)
+                        secondary_node.create_secondary_hublvol(primary_node, cluster.nqn)
+                    except Exception as e:
+                        logger.error("Error creating secondary hublvol: %s", e)
+
+                # If this is sec_2, connect with multipath to primary + sec_1
+                failover_node = None
+                if is_second_sec and primary_node.secondary_node_id:
+                    try:
+                        sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+                        if sec1.status == StorageNode.STATUS_ONLINE:
+                            failover_node = sec1
+                    except KeyError:
+                        pass
+
+                secondary_node.connect_to_hublvol(primary_node, failover_node=failover_node)
 
             except Exception as e:
                 logger.error("Error connecting to hublvol: %s", e)
@@ -3874,10 +3901,21 @@ def recreate_lvstore(snode, force=False):
     for lvol in lvol_list:
         executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
 
-    for sec_node in sec_nodes:
+    # sec_1 creates secondary hublvol for multipath, then each sec connects
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    sec1 = sec_nodes[0] if sec_nodes else None
+    if sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+        try:
+            sec1.create_secondary_hublvol(snode, cluster.nqn)
+        except Exception as e:
+            logger.error("Error creating secondary hublvol on sec_1: %s", e)
+
+    for i, sec_node in enumerate(sec_nodes):
         if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            # sec_2 gets multipath failover to sec_1
+            failover_node = sec1 if i >= 1 and sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN] else None
             try:
-                sec_node.connect_to_hublvol(snode)
+                sec_node.connect_to_hublvol(snode, failover_node=failover_node)
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
