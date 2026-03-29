@@ -301,7 +301,17 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
         if not passed and auto_fix and primary_node.lvstore_status == "ready" \
                 and primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
-                node.connect_to_hublvol(primary_node)
+                # If this node is sec_2 for this primary, set up multipath to sec_1
+                failover_node = None
+                is_sec2 = (node.lvstore_stack_secondary_2 == primary_node.get_id())
+                if is_sec2 and primary_node.secondary_node_id:
+                    try:
+                        sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+                        if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                            failover_node = sec1
+                    except KeyError:
+                        pass
+                node.connect_to_hublvol(primary_node, failover_node=failover_node)
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
             ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)

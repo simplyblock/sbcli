@@ -265,8 +265,8 @@ class TestAnaFailover(unittest.TestCase):
         #                    or (len(c[0]) > 0 and 'optimized' in str(c))]
         self.assertTrue(len(ana_calls) > 0, "Should have ANA state change calls")
 
-    def test_ftt2_failover_primary_to_both_secondaries(self):
-        """FTT=2: primary goes offline → sec1=optimized, sec2=non_optimized."""
+    def test_ftt2_failover_primary_to_first_sec(self):
+        """FTT=2: primary goes offline → sec1=optimized (sec2 stays non_optimized, no ANA call)."""
         nodes = _build_ftt2_nodes()
         lvols = [_lvol("lv1", "node-1")]
         nodes["node-1"].status = StorageNode.STATUS_OFFLINE
@@ -274,10 +274,11 @@ class TestAnaFailover(unittest.TestCase):
         rpc = self._run_failover(nodes, "node-1", lvols)
 
         ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
-        self.assertTrue(len(ana_calls) >= 2, "Should set ANA on both secondaries")
+        # Only first secondary gets promoted — sec2 is already non_optimized
+        self.assertTrue(len(ana_calls) >= 1, "Should set ANA on first secondary")
 
-    def test_ftt2_failover_first_sec_offline_promotes_second_sec(self):
-        """FTT=2: first secondary goes offline → second secondary promoted to non_optimized."""
+    def test_ftt2_failover_first_sec_offline_promotes_own_sec(self):
+        """FTT=2: first secondary goes offline → promotes its own LVStore's sec (node-2 is also a primary)."""
         nodes = _build_ftt2_nodes()
         lvols = [_lvol("lv1", "node-1")]
         nodes["node-2"].status = StorageNode.STATUS_OFFLINE
@@ -285,8 +286,9 @@ class TestAnaFailover(unittest.TestCase):
         rpc = self._run_failover(nodes, "node-2", lvols)
 
         ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
-        # Second secondary should be promoted
-        self.assertTrue(len(ana_calls) > 0, "Second secondary should get ANA update")
+        # node-2 is a primary for its own LVStore, so its sec gets promoted
+        # But no action for node-1's LVStore (sec_2 already non_optimized)
+        self.assertTrue(len(ana_calls) >= 1)
 
     def test_ftt2_failover_primary_offline_second_sec_already_offline(self):
         """FTT=2: primary goes offline, second secondary already offline → only first sec promoted."""
@@ -302,17 +304,17 @@ class TestAnaFailover(unittest.TestCase):
         self.assertTrue(len(ana_calls) > 0)
 
     def test_ftt2_failover_primary_offline_first_sec_already_offline(self):
-        """FTT=2: primary offline, first sec already offline → second sec promoted."""
+        """FTT=2: primary offline, first sec already offline → no ANA change (sec2 already non_optimized)."""
         nodes = _build_ftt2_nodes()
         lvols = [_lvol("lv1", "node-1")]
         nodes["node-1"].status = StorageNode.STATUS_OFFLINE
         nodes["node-2"].status = StorageNode.STATUS_OFFLINE
 
-        # When primary goes offline, second secondary should still get non_optimized
+        # sec_1 is offline so can't be promoted; sec_2 is already non_optimized
         rpc = self._run_failover(nodes, "node-1", lvols)
 
         ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
-        self.assertTrue(len(ana_calls) > 0)
+        self.assertEqual(len(ana_calls), 0, "No ANA changes when both primary and sec_1 offline")
 
 
 # ===========================================================================
@@ -348,29 +350,31 @@ class TestAnaFailback(unittest.TestCase):
         # The actual failback for FTT=1 happens inside recreate_lvstore.
 
     def test_ftt2_failback_primary_restarts_both_secs_online(self):
-        """FTT=2: primary restarts, both secondaries online → sec2=inaccessible, sec1=non_optimized."""
+        """FTT=2: primary restarts, both secondaries online → sec1=non_optimized (sec2 unchanged)."""
         nodes = _build_ftt2_nodes()
         lvols = [_lvol("lv1", "node-1")]
 
         rpc = self._run_failback(nodes, "node-1", lvols)
 
         ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
-        self.assertTrue(len(ana_calls) >= 2,
-                        "Should set ANA on both secondaries (inaccessible + non_optimized)")
+        # Only first secondary gets demoted — sec2 is always non_optimized
+        self.assertTrue(len(ana_calls) >= 1,
+                        "Should set ANA on first secondary (non_optimized)")
 
-    def test_ftt2_failback_first_sec_restarts_demotes_second_sec(self):
-        """FTT=2: first secondary restarts, primary online → second secondary demoted to inaccessible."""
+    def test_ftt2_failback_first_sec_restarts_own_lvstore_only(self):
+        """FTT=2: first secondary restarts → only its own LVStore's sec gets demoted (node-2 is also primary)."""
         nodes = _build_ftt2_nodes()
         lvols = [_lvol("lv1", "node-1")]
-        # Primary must be online for trigger_ana_failback_for_node to demote second sec
         nodes["node-1"].status = StorageNode.STATUS_ONLINE
 
         rpc = self._run_failback(nodes, "node-2", lvols)
 
         ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
-        # Second secondary should be set to inaccessible
-        self.assertTrue(len(ana_calls) > 0,
-                        "Second secondary should be demoted to inaccessible")
+        # node-2 is a primary, so its own first_sec gets demoted on failback
+        # But no sec_2 demotion to inaccessible anywhere
+        inaccessible_calls = [c for c in ana_calls if 'inaccessible' in str(c)]
+        self.assertEqual(len(inaccessible_calls), 0,
+                        "No inaccessible state should be set")
 
     def test_ftt2_failback_first_sec_restarts_second_sec_offline(self):
         """FTT=2: first secondary restarts, second secondary offline → no ANA change."""
@@ -777,10 +781,10 @@ class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_ana_failback_called_when_primary_offline(
+    def test_no_ana_failback_on_sec2_when_primary_offline(
             self, mock_db_cls, mock_create_bdev,
             mock_rpc_cls, mock_fw_cls, mock_tasks, mock_tcp_events, mock_storage_events):
-        """ANA failback (demote second sec to inaccessible) should happen even when primary is offline."""
+        """sec_2 is always non_optimized — no ANA failback to inaccessible needed."""
         nodes = _build_ftt2_nodes()
         nodes["node-1"].status = StorageNode.STATUS_OFFLINE
         secondary = nodes["node-2"]  # first secondary restarting
@@ -801,13 +805,12 @@ class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
         result = recreate_lvstore_on_sec(secondary)
         self.assertTrue(result)
 
-        # ANA state should be set on second secondary (inaccessible)
+        # No inaccessible calls — sec_2 is always non_optimized
         ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
         inaccessible_calls = [c for c in ana_calls
                               if 'inaccessible' in str(c)]
-        self.assertTrue(len(inaccessible_calls) > 0,
-                        "Second secondary should be set to inaccessible via ANA failback "
-                        "even when primary is offline")
+        self.assertEqual(len(inaccessible_calls), 0,
+                        "Second secondary should never be set to inaccessible")
 
 
 # ===========================================================================

@@ -560,7 +560,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.nodes = snap.lvol.nodes
     lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
-    lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
     lvol.pool_uuid = pool.get_id()
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
@@ -574,9 +573,37 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.ndcs = snap.lvol.ndcs
     lvol.npcs = snap.lvol.npcs
 
+    # Inherit namespace sharing from the source lvol.  Find the master
+    # lvol that owns the subsystem (either the source itself or its master
+    # if the source is already a namespace member).
+    source_lvol = snap.lvol
+    if source_lvol.namespace:
+        try:
+            master_lvol = db_controller.get_lvol_by_id(source_lvol.namespace)
+        except KeyError:
+            master_lvol = source_lvol
+    else:
+        master_lvol = source_lvol
+
+    if master_lvol.max_namespace_per_subsys > 1:
+        # Count how many lvols currently share this master's subsystem
+        ns_count = 0
+        for lv in db_controller.get_lvols(cluster.get_id()):
+            if lv.nqn == master_lvol.nqn and lv.status not in [LVol.STATUS_IN_DELETION]:
+                ns_count += 1
+        if ns_count < master_lvol.max_namespace_per_subsys:
+            lvol.nqn = master_lvol.nqn
+            lvol.namespace = master_lvol.get_id()
+        else:
+            # Subsystem full — create a new one but keep the same capacity
+            lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+            lvol.max_namespace_per_subsys = master_lvol.max_namespace_per_subsys
+    else:
+        lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+
     if pvc_name:
         lvol.pvc_name = pvc_name
-    if pvc_namespace:
+    if pvc_namespace and not lvol.namespace:
         lvol.namespace = pvc_namespace
 
     lvol.status = LVol.STATUS_IN_CREATION

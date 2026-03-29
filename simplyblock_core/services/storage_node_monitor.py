@@ -253,6 +253,58 @@ def set_node_unreachable(node):
             logger.debug("Setting node to UNREACHABLE state failed")
             logger.error(e)
 
+    # Check data-plane health from surviving nodes.  If all online peers
+    # report the unreachable node's remote JM as disconnected, the data
+    # plane is truly down and we can escalate to offline.
+    try:
+        _check_data_plane_and_escalate(node)
+    except Exception as e:
+        logger.error("Data-plane check for unreachable node %s failed: %s", node.get_id(), e)
+
+
+def _check_data_plane_and_escalate(unreachable_node):
+    """Query surviving nodes' jc_get_jm_status for the unreachable node.
+
+    If every online primary node reports the remote JM of the unreachable
+    node as disconnected (False), the data plane is down and we escalate
+    the node to offline (which triggers ANA failover + auto-restart).
+    """
+    node_id = unreachable_node.get_id()
+    cluster_nodes = db.get_storage_nodes_by_cluster_id(unreachable_node.cluster_id)
+
+    online_primaries = [
+        n for n in cluster_nodes
+        if n.get_id() != node_id
+        and n.status == StorageNode.STATUS_ONLINE
+        and not n.is_secondary_node
+        and n.jm_vuid
+    ]
+
+    if not online_primaries:
+        logger.debug("No online primary peers to verify data plane for %s", node_id)
+        return
+
+    remote_jm_key = f"remote_jm_{node_id}n1"
+    all_disconnected = True
+
+    for peer in online_primaries:
+        try:
+            ret = peer.rpc_client(timeout=5, retry=1).jc_get_jm_status(peer.jm_vuid)
+            if ret and ret.get(remote_jm_key) is True:
+                logger.info("Data-plane check: peer %s still sees %s JM as connected",
+                            peer.get_id(), node_id)
+                all_disconnected = False
+                break
+        except Exception as e:
+            logger.debug("jc_get_jm_status on peer %s failed: %s", peer.get_id(), e)
+            # Can't confirm disconnection from this peer, skip it
+            continue
+
+    if all_disconnected:
+        logger.info("Data-plane check: all peers report %s JM disconnected, escalating to offline",
+                    node_id)
+        set_node_offline(unreachable_node)
+
 
 def set_node_schedulable(node):
     node = db.get_storage_node_by_id(node.get_id())
@@ -337,7 +389,8 @@ def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
-                            StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN, StorageNode.STATUS_IN_SHUTDOWN]:
+                            StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN,
+                            StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_OFFLINE]:
         logger.info(f"Node status is: {snode.status}, skipping")
         return False
 
@@ -347,6 +400,15 @@ def check_node(snode):
 
     logger.info(f"Checking node {snode.hostname}")
 
+    # If the node is offline, ensure ANA failover + auto-restart were processed.
+    # Another service may have set the node offline without triggering these
+    # (e.g. sbctl shutdown, or a race in status transitions).
+    if snode.status == StorageNode.STATUS_OFFLINE:
+        try:
+            storage_node_ops.trigger_ana_failover_for_node(snode)
+        except Exception as e:
+            logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
+        tasks_controller.add_node_to_auto_restart(snode)
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)
