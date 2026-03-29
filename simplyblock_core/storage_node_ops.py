@@ -169,7 +169,8 @@ def trigger_ana_failover_for_node(offline_node):
     # Role 2: This node is a secondary for other primaries
     primary_nodes = db_ctrl.get_primary_storage_nodes_by_secondary_node_id(node_id)
     for primary_node in primary_nodes:
-        if primary_node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+        if primary_node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                                       StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE]:
             continue
         if primary_node.secondary_node_id == node_id and primary_node.secondary_node_id_2:
             # This offline node is the first-secondary — promote second-secondary
