@@ -213,7 +213,7 @@ outage_node() {
             sbctl sn shutdown "$node_uuid" --force 2>&1 | tail -1 || true
             sleep "$duration"
             log "    Restarting $node_uuid..."
-            sbctl sn restart "$node_uuid" 2>&1 | tail -1 || true
+            sbctl sn restart "$node_uuid" --force 2>&1 | tail -1 || true
             ;;
     esac
 }
@@ -248,7 +248,7 @@ for n in json.load(sys.stdin):
                     sbctl sn shutdown "$uuid" --force 2>&1 | tail -1 || true
                     sleep 3
                 fi
-                sbctl sn restart "$uuid" 2>&1 | tail -1 || true
+                sbctl sn restart "$uuid" --force 2>&1 | tail -1 || true
             fi
 
             sleep 10
