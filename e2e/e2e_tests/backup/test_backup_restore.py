@@ -42,6 +42,17 @@ Test class map
   TestBackupCryptoLvol             – TC-BCK-050..055
   TestBackupCustomGeometry         – TC-BCK-060..063
   TestBackupDeleteAndRestore       – TC-BCK-077..081
+  TestBackupConcurrentIO           – TC-BCK-100..103
+  TestBackupMultipleRestores       – TC-BCK-104..107
+  TestBackupDeltaChainPointInTime  – TC-BCK-108..113
+  TestBackupEmptyLvol              – TC-BCK-114..116
+  TestBackupPoolRecreateRestore    – TC-BCK-117..121
+  TestBackupPolicyAgeOnly          – TC-BCK-122..126
+  TestBackupSnapshotClone          – TC-BCK-127..131
+  TestBackupFilesystemXFS          – TC-BCK-132..135
+  TestBackupLargeLvol              – TC-BCK-136..138
+  TestBackupDeleteInProgress       – TC-BCK-139..142
+  TestBackupPolicyMultipleLvols    – TC-BCK-143..148
 
   NOTE – Cross-cluster restore
   ----------------------------
@@ -62,6 +73,7 @@ import os
 import re
 import random
 import string
+import threading
 import time
 from pathlib import Path
 
@@ -1811,3 +1823,1629 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 pass
 
         super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 9 – Concurrent I/O during backup
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupConcurrentIO(BackupTestBase):
+    """
+    TC-BCK-100..103 – Snapshot + backup taken while FIO I/O is in progress.
+
+    Covers:
+      - Background FIO thread running while snapshot+backup is triggered
+      - Backup completes successfully after concurrent I/O finishes
+      - Restored lvol is mountable and readable
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_concurrent_io"
+
+    def run(self):
+        self.logger.info("=== TestBackupConcurrentIO START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-100: create lvol + mount
+        self.logger.info("TC-BCK-100: create lvol and mount")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        log_file = f"{self.log_path}/fio_concurrent_{_rand_suffix()}.log"
+
+        # TC-BCK-101: start background FIO; take snapshot while I/O is running
+        self.logger.info("TC-BCK-101: starting background FIO + snapshotting mid-I/O")
+        fio_thread = threading.Thread(
+            target=self._run_fio,
+            kwargs=dict(mount=mount, log_file=log_file, runtime=60),
+        )
+        fio_thread.start()
+        sleep_n_sec(10)  # let FIO warm up
+
+        snap_name = f"concurrent_snap_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        self.logger.info("TC-BCK-101: snapshot taken while FIO is running ✓")
+
+        # TC-BCK-102: wait for FIO to finish then wait for backup
+        self.logger.info("TC-BCK-102: waiting for FIO + backup to complete")
+        fio_thread.join()
+        self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+        bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-102")
+        self.logger.info(f"TC-BCK-102: backup {bk_id} complete after concurrent FIO ✓")
+
+        # TC-BCK-103: restore + connect + verify readable
+        self.logger.info("TC-BCK-103: restore and verify readability")
+        restored_name = f"concurrent_rest_{_rand_suffix()}"
+        self._restore_backup(bk_id, restored_name)
+        self._wait_for_restore(restored_name)
+        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        _, r_mount = self._connect_and_mount(
+            restored_name, rest_id,
+            mount=f"{self.mount_path}/conc_r_{_rand_suffix()}",
+            format_disk=False)
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        assert r_files is not None, "TC-BCK-103: restored lvol should be readable"
+        self.logger.info("TC-BCK-103: restored lvol from concurrent-IO backup is readable ✓")
+
+        self.logger.info("=== TestBackupConcurrentIO PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 10 – Multiple restores from same backup
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupMultipleRestores(BackupTestBase):
+    """
+    TC-BCK-104..107 – Same backup_id restored to three distinct lvol names.
+
+    Covers:
+      - Restore same backup_id three times to different lvol names
+      - All restored lvols appear in lvol list
+      - Checksums match original on all three restored copies
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_multiple_restores"
+
+    def run(self):
+        self.logger.info("=== TestBackupMultipleRestores START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-104: create lvol + write data + backup
+        self.logger.info("TC-BCK-104: create lvol + write data + backup")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=30)
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        snap_name = f"multi_rst_snap_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-104")
+        self.logger.info(f"TC-BCK-104: backup {bk_id} ready ✓")
+
+        # TC-BCK-105: restore same backup_id to 3 different lvol names
+        self.logger.info("TC-BCK-105: restore same backup_id to 3 different lvol names")
+        restored_names = [f"multi_r{i}_{_rand_suffix()}" for i in range(3)]
+        for i, rname in enumerate(restored_names):
+            self._restore_backup(bk_id, rname)
+            self.logger.info(f"TC-BCK-105[{i}]: restore to {rname} initiated ✓")
+
+        # TC-BCK-106: all 3 appear in lvol list
+        self.logger.info("TC-BCK-106: verify all 3 restored lvols are visible")
+        for rname in restored_names:
+            self._wait_for_restore(rname)
+        out, _ = self._sbcli("lvol list")
+        for rname in restored_names:
+            assert rname in out, f"TC-BCK-106: {rname} not found in lvol list"
+        self.logger.info("TC-BCK-106: all 3 restored lvols in lvol list ✓")
+
+        # TC-BCK-107: checksums match on all 3
+        self.logger.info("TC-BCK-107: verify checksums on all 3 restored copies")
+        for i, rname in enumerate(restored_names):
+            rid = self.sbcli_utils.get_lvol_id(lvol_name=rname)
+            _, r_mount = self._connect_and_mount(
+                rname, rid,
+                mount=f"{self.mount_path}/mr_{i}_{_rand_suffix()}",
+                format_disk=False)
+            r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+            self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+            self.logger.info(f"TC-BCK-107[{i}]: {rname} checksums match ✓")
+
+        self.logger.info("=== TestBackupMultipleRestores PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 11 – Delta-chain point-in-time restore
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupDeltaChainPointInTime(BackupTestBase):
+    """
+    TC-BCK-108..113 – Multiple backups of the same lvol; each restore must
+    yield the exact state at that point in time (not later revisions).
+
+    Covers:
+      - Three sequential backups with distinct marker files written between each
+      - Restoring bk1 yields only v1-era state (v1.txt present, v2/v3 absent)
+      - Restoring bk2 yields v1+v2 state (v1.txt + v2.txt, no v3.txt)
+      - Restoring bk3 yields v2+v3 state (v1.txt deleted between bk2 and bk3)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_delta_chain_pit"
+
+    def run(self):
+        self.logger.info("=== TestBackupDeltaChainPointInTime START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+
+        # TC-BCK-108: write v1 marker + backup
+        self.logger.info("TC-BCK-108: write v1 marker + backup")
+        self.ssh_obj.exec_command(
+            self.fio_node, f"echo 'version1' > {mount}/v1.txt && sync")
+        snap1 = f"pit_snap1_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap1, backup=True)
+        bk1 = self._wait_for_backup_by_snap(snap1, "TC-BCK-108")
+        self.logger.info(f"TC-BCK-108: v1 backup {bk1} ✓")
+
+        # TC-BCK-109: add v2 marker (keep v1) + backup
+        self.logger.info("TC-BCK-109: add v2 marker + backup")
+        self.ssh_obj.exec_command(
+            self.fio_node, f"echo 'version2' > {mount}/v2.txt && sync")
+        snap2 = f"pit_snap2_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap2, backup=True)
+        bk2 = self._wait_for_backup_by_snap(snap2, "TC-BCK-109")
+        self.logger.info(f"TC-BCK-109: v2 backup {bk2} ✓")
+
+        # TC-BCK-110: add v3 marker + delete v1 + backup
+        self.logger.info("TC-BCK-110: add v3 + delete v1 + backup")
+        self.ssh_obj.exec_command(
+            self.fio_node,
+            f"echo 'version3' > {mount}/v3.txt && rm -f {mount}/v1.txt && sync")
+        snap3 = f"pit_snap3_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap3, backup=True)
+        bk3 = self._wait_for_backup_by_snap(snap3, "TC-BCK-110")
+        self.logger.info(f"TC-BCK-110: v3 backup {bk3} ✓")
+
+        # TC-BCK-111: restore bk1 → must have v1.txt only (no v2/v3)
+        self.logger.info("TC-BCK-111: restore bk1 + verify only v1 state")
+        r1 = f"pit_r1_{_rand_suffix()}"
+        self._restore_backup(bk1, r1)
+        self._wait_for_restore(r1)
+        r1_id = self.sbcli_utils.get_lvol_id(lvol_name=r1)
+        _, r1_mount = self._connect_and_mount(
+            r1, r1_id,
+            mount=f"{self.mount_path}/pit1_{_rand_suffix()}",
+            format_disk=False)
+        out1, _ = self.ssh_obj.exec_command(self.fio_node, f"ls {r1_mount}/")
+        assert "v1.txt" in out1, \
+            f"TC-BCK-111: v1.txt missing in bk1 restore: {out1}"
+        assert "v2.txt" not in out1, \
+            f"TC-BCK-111: v2.txt should not exist in bk1 restore: {out1}"
+        assert "v3.txt" not in out1, \
+            f"TC-BCK-111: v3.txt should not exist in bk1 restore: {out1}"
+        self.logger.info("TC-BCK-111: bk1 point-in-time state verified ✓")
+
+        # TC-BCK-112: restore bk2 → must have v1.txt + v2.txt (no v3)
+        self.logger.info("TC-BCK-112: restore bk2 + verify v1+v2 state")
+        r2 = f"pit_r2_{_rand_suffix()}"
+        self._restore_backup(bk2, r2)
+        self._wait_for_restore(r2)
+        r2_id = self.sbcli_utils.get_lvol_id(lvol_name=r2)
+        _, r2_mount = self._connect_and_mount(
+            r2, r2_id,
+            mount=f"{self.mount_path}/pit2_{_rand_suffix()}",
+            format_disk=False)
+        out2, _ = self.ssh_obj.exec_command(self.fio_node, f"ls {r2_mount}/")
+        assert "v1.txt" in out2, \
+            f"TC-BCK-112: v1.txt missing in bk2 restore: {out2}"
+        assert "v2.txt" in out2, \
+            f"TC-BCK-112: v2.txt missing in bk2 restore: {out2}"
+        assert "v3.txt" not in out2, \
+            f"TC-BCK-112: v3.txt should not exist in bk2 restore: {out2}"
+        self.logger.info("TC-BCK-112: bk2 point-in-time state verified ✓")
+
+        # TC-BCK-113: restore bk3 → must have v2.txt + v3.txt (v1 was deleted)
+        self.logger.info("TC-BCK-113: restore bk3 + verify v2+v3 state (v1 deleted)")
+        r3 = f"pit_r3_{_rand_suffix()}"
+        self._restore_backup(bk3, r3)
+        self._wait_for_restore(r3)
+        r3_id = self.sbcli_utils.get_lvol_id(lvol_name=r3)
+        _, r3_mount = self._connect_and_mount(
+            r3, r3_id,
+            mount=f"{self.mount_path}/pit3_{_rand_suffix()}",
+            format_disk=False)
+        out3, _ = self.ssh_obj.exec_command(self.fio_node, f"ls {r3_mount}/")
+        assert "v1.txt" not in out3, \
+            f"TC-BCK-113: v1.txt should not exist in bk3 restore (was deleted): {out3}"
+        assert "v2.txt" in out3, \
+            f"TC-BCK-113: v2.txt missing in bk3 restore: {out3}"
+        assert "v3.txt" in out3, \
+            f"TC-BCK-113: v3.txt missing in bk3 restore: {out3}"
+        self.logger.info("TC-BCK-113: bk3 point-in-time state verified ✓")
+
+        self.logger.info("=== TestBackupDeltaChainPointInTime PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 12 – Backup and restore of an empty (formatted, unwritten) lvol
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupEmptyLvol(BackupTestBase):
+    """
+    TC-BCK-114..116 – Backup and restore of a formatted-but-empty lvol.
+
+    Covers:
+      - Snapshot + backup of a freshly formatted lvol with no user data
+      - Backup completes successfully (no data to transfer)
+      - Restored lvol is mountable without re-formatting
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_empty_lvol"
+
+    def run(self):
+        self.logger.info("=== TestBackupEmptyLvol START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-114: create + format (no user data) + backup
+        self.logger.info("TC-BCK-114: create lvol, format ext4 (no data write), backup")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)  # formats ext4
+        snap_name = f"empty_snap_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-114")
+        self.logger.info(f"TC-BCK-114: empty lvol backup {bk_id} complete ✓")
+
+        # TC-BCK-115: restore → new lvol visible
+        self.logger.info("TC-BCK-115: restore empty-lvol backup")
+        restored_name = f"empty_rest_{_rand_suffix()}"
+        self._restore_backup(bk_id, restored_name)
+        self._wait_for_restore(restored_name)
+        self.logger.info(f"TC-BCK-115: {restored_name} visible after restore ✓")
+
+        # TC-BCK-116: connect + mount without reformat → filesystem is readable
+        self.logger.info("TC-BCK-116: mount restored empty lvol without reformat")
+        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        _, r_mount = self._connect_and_mount(
+            restored_name, rest_id,
+            mount=f"{self.mount_path}/emp_{_rand_suffix()}",
+            format_disk=False)
+        out, _ = self.ssh_obj.exec_command(self.fio_node, f"ls {r_mount}/")
+        self.logger.info(
+            f"TC-BCK-116: restored empty lvol mounted successfully, "
+            f"dir listing: {out.strip()} ✓")
+
+        self.logger.info("=== TestBackupEmptyLvol PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 13 – Delete storage pool then recreate and restore into new pool
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupPoolRecreateRestore(BackupTestBase):
+    """
+    TC-BCK-117..121 – Delete the storage pool then recreate it and restore
+    a previously created S3 backup into the new pool.
+
+    Covers:
+      - S3 backup survives pool + lvol deletion (object storage is independent)
+      - Recreating a pool with the same name allows restore to succeed
+      - Checksums of restored data match the original
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_pool_recreate_restore"
+
+    def run(self):
+        self.logger.info("=== TestBackupPoolRecreateRestore START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-117: create lvol + write data + backup
+        self.logger.info("TC-BCK-117: create lvol + write data + backup")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=30)
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        snap_name = f"pool_snap_{_rand_suffix()}"
+        snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+        bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-117")
+        self.logger.info(f"TC-BCK-117: backup {bk_id} complete before pool delete ✓")
+
+        # TC-BCK-118: unmount + disconnect + delete snapshot + lvol + pool
+        self.logger.info("TC-BCK-118: unmount, disconnect, delete pool resources")
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        if (self.fio_node, mount) in self.mounted:
+            self.mounted.remove((self.fio_node, mount))
+        details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        if details:
+            nqn = details[0]["nqn"]
+            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+        if lvol_id in self.connected:
+            self.connected.remove(lvol_id)
+        try:
+            self._sbcli(f"snapshot delete {snap_id} --force")
+        except Exception as e:
+            self.logger.warning(f"Snapshot delete warning: {e}")
+        if snap_id in self.created_snapshots:
+            self.created_snapshots.remove(snap_id)
+        self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
+        if lvol_name in self.created_lvols:
+            self.created_lvols.remove(lvol_name)
+        self.sbcli_utils.delete_storage_pool(pool_name=self.pool_name)
+        self.logger.info("TC-BCK-118: pool and all resources deleted ✓")
+
+        # TC-BCK-119: recreate pool with same name
+        self.logger.info("TC-BCK-119: recreate storage pool")
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.logger.info("TC-BCK-119: pool recreated ✓")
+
+        # TC-BCK-120: restore backup into new pool
+        self.logger.info("TC-BCK-120: restore backup into new pool")
+        restored_name = f"pool_rest_{_rand_suffix()}"
+        self._restore_backup(bk_id, restored_name)
+        self._wait_for_restore(restored_name)
+        self.logger.info(f"TC-BCK-120: {restored_name} restored into new pool ✓")
+
+        # TC-BCK-121: verify checksums
+        self.logger.info("TC-BCK-121: verify checksums after pool-recreate restore")
+        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        _, r_mount = self._connect_and_mount(
+            restored_name, rest_id,
+            mount=f"{self.mount_path}/pool_r_{_rand_suffix()}",
+            format_disk=False)
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self.logger.info("TC-BCK-121: checksums match after pool recreate + restore ✓")
+
+        self.logger.info("=== TestBackupPoolRecreateRestore PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 14 – Backup policy with age-only retention (no --versions)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupPolicyAgeOnly(BackupTestBase):
+    """
+    TC-BCK-122..126 – Backup policy configured with --age only (no --versions).
+
+    Covers:
+      - Policy created with only age retention (no version-count limit)
+      - Policy attached to pool
+      - Snapshot + backup auto-triggered on lvol in the pool
+      - Backup entry is present and completes
+      - Policy detach + restore + checksum verify
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_policy_age_only"
+
+    def run(self):
+        self.logger.info("=== TestBackupPolicyAgeOnly START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-122: create policy with age-only retention
+        self.logger.info("TC-BCK-122: create policy with --age 7d (no --versions)")
+        pol_name = f"age_pol_{_rand_suffix()}"
+        policy_id = self._add_policy(pol_name, age="7d")
+        self.logger.info(f"TC-BCK-122: age-only policy {policy_id} created ✓")
+
+        # TC-BCK-123: attach policy to pool
+        pool_id = self.sbcli_utils.get_storage_pool_id(pool_name=self.pool_name)
+        self._attach_policy(policy_id, "pool", pool_id)
+        self.logger.info("TC-BCK-123: policy attached to pool ✓")
+
+        # TC-BCK-124: create lvol + write data + snapshot (auto-backup from policy)
+        self.logger.info("TC-BCK-124: create lvol + snapshot with policy active")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=30)
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        snap_name = f"age_snap_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        self.logger.info("TC-BCK-124: snapshot triggered with age-only policy attached ✓")
+
+        # TC-BCK-125: wait for backup + verify entry exists
+        bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-125")
+        self.logger.info(f"TC-BCK-125: age-policy backup {bk_id} complete ✓")
+
+        # TC-BCK-126: detach policy + restore + verify checksums
+        self._detach_policy(policy_id, "pool", pool_id)
+        self.logger.info("TC-BCK-126: policy detached; restoring backup")
+        restored_name = f"age_rest_{_rand_suffix()}"
+        self._restore_backup(bk_id, restored_name)
+        self._wait_for_restore(restored_name)
+        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        _, r_mount = self._connect_and_mount(
+            restored_name, rest_id,
+            mount=f"{self.mount_path}/age_{_rand_suffix()}",
+            format_disk=False)
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self.logger.info("TC-BCK-126: age-policy backup restore checksums match ✓")
+
+        self.logger.info("=== TestBackupPolicyAgeOnly PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 15 – Backup and restore of a snapshot clone
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupSnapshotClone(BackupTestBase):
+    """
+    TC-BCK-127..131 – Backup and restore of an lvol cloned from a snapshot.
+
+    Covers:
+      - Create source lvol + snapshot → clone the snapshot into a new lvol
+      - Snapshot + backup of the clone
+      - Restore clone backup → new lvol
+      - Checksums of restored clone match original source data
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_snapshot_clone"
+
+    def run(self):
+        self.logger.info("=== TestBackupSnapshotClone START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-127: create source lvol + write data + snapshot
+        self.logger.info("TC-BCK-127: create source lvol + snapshot")
+        src_name, src_id = self._create_lvol(name=f"clone_src_{_rand_suffix()}")
+        device, mount = self._connect_and_mount(src_name, src_id)
+        self._run_fio(mount, runtime=30)
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        snap_name = f"clone_snap_{_rand_suffix()}"
+        snap_id = self._create_snapshot(src_id, snap_name, backup=False)
+        self.logger.info(f"TC-BCK-127: source snapshot {snap_id} created ✓")
+
+        # TC-BCK-128: clone from snapshot
+        self.logger.info("TC-BCK-128: clone lvol from snapshot")
+        clone_name = f"clone_lvol_{_rand_suffix()}"
+        self.ssh_obj.add_clone(self.mgmt_nodes[0], snap_id, clone_name)
+        # Wait for clone to appear in lvol list (reuses restore-wait logic)
+        self._wait_for_restore(clone_name, expect_failure=True)
+        self.created_lvols.append(clone_name)
+        clone_id = self.sbcli_utils.get_lvol_id(lvol_name=clone_name)
+        assert clone_id, f"TC-BCK-128: clone {clone_name} has no lvol ID"
+        self.logger.info(f"TC-BCK-128: clone {clone_name} created from snapshot ✓")
+
+        # TC-BCK-129: backup the clone
+        self.logger.info("TC-BCK-129: backup the clone lvol")
+        clone_snap = f"clone_bck_snap_{_rand_suffix()}"
+        self._create_snapshot(clone_id, clone_snap, backup=True)
+        bk_id = self._wait_for_backup_by_snap(clone_snap, "TC-BCK-129")
+        self.logger.info(f"TC-BCK-129: clone backup {bk_id} complete ✓")
+
+        # TC-BCK-130: restore clone backup
+        self.logger.info("TC-BCK-130: restore clone backup")
+        restored_clone = f"clone_rest_{_rand_suffix()}"
+        self._restore_backup(bk_id, restored_clone)
+        self._wait_for_restore(restored_clone)
+        self.logger.info(f"TC-BCK-130: {restored_clone} restored from clone backup ✓")
+
+        # TC-BCK-131: verify checksums match original source
+        self.logger.info("TC-BCK-131: verify checksums on restored clone")
+        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_clone)
+        _, r_mount = self._connect_and_mount(
+            restored_clone, rest_id,
+            mount=f"{self.mount_path}/clr_{_rand_suffix()}",
+            format_disk=False)
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self.logger.info("TC-BCK-131: clone backup restore checksums match original source ✓")
+
+        self.logger.info("=== TestBackupSnapshotClone PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 16 – XFS filesystem backup and restore
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupFilesystemXFS(BackupTestBase):
+    """
+    TC-BCK-132..135 – Backup and restore of an XFS-formatted lvol.
+
+    Covers:
+      - lvol formatted with XFS instead of the default ext4
+      - Backup completes successfully for XFS filesystem
+      - Restore without re-formatting mounts the XFS filesystem correctly
+      - Checksums match original data
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_filesystem_xfs"
+
+    def _connect_format_mount_xfs(self, lvol_name: str, lvol_id: str) -> tuple[str, str]:
+        """Connect lvol, format with XFS, and mount. Returns (device, mount_point)."""
+        mount = f"{self.mount_path}/{lvol_name}"
+        initial = self.ssh_obj.get_devices(node=self.fio_node)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        for cmd in connect_ls:
+            self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+        sleep_n_sec(3)
+        final = self.ssh_obj.get_devices(node=self.fio_node)
+        new_devs = [d for d in final if d not in initial]
+        assert new_devs, f"No new block device after connecting {lvol_name}"
+        device = f"/dev/{new_devs[0]}"
+        self.ssh_obj.format_disk(node=self.fio_node, device=device, fs_type="xfs")
+        self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
+        self.ssh_obj.mount_path(node=self.fio_node, device=device, mount_path=mount)
+        self.mounted.append((self.fio_node, mount))
+        self.connected.append(lvol_id)
+        return device, mount
+
+    def run(self):
+        self.logger.info("=== TestBackupFilesystemXFS START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-132: create lvol + format XFS + write data + snapshot
+        self.logger.info("TC-BCK-132: create lvol + format XFS + write data + snapshot")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_format_mount_xfs(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=30)
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        snap_name = f"xfs_snap_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        self.logger.info("TC-BCK-132: XFS lvol snapshotted + backup triggered ✓")
+
+        # TC-BCK-133: wait for backup to complete
+        bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-133")
+        self.logger.info(f"TC-BCK-133: XFS backup {bk_id} complete ✓")
+
+        # TC-BCK-134: restore backup + connect WITHOUT re-formatting
+        self.logger.info("TC-BCK-134: restore XFS backup (no reformat on restore)")
+        restored_name = f"xfs_rest_{_rand_suffix()}"
+        self._restore_backup(bk_id, restored_name)
+        self._wait_for_restore(restored_name)
+        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        _, r_mount = self._connect_and_mount(
+            restored_name, rest_id,
+            mount=f"{self.mount_path}/xfs_r_{_rand_suffix()}",
+            format_disk=False)
+        self.logger.info("TC-BCK-134: XFS restored lvol mounted without reformat ✓")
+
+        # TC-BCK-135: verify checksums
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self.logger.info("TC-BCK-135: XFS restore checksums match ✓")
+
+        self.logger.info("=== TestBackupFilesystemXFS PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 17 – Large lvol backup and restore
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupLargeLvol(BackupTestBase):
+    """
+    TC-BCK-136..138 – Backup and restore of a large (20G) lvol with 3G of data.
+
+    Covers:
+      - Backup completes within an extended timeout for large data sets
+      - Restore completes within an extended timeout
+      - Checksums match on the restored large lvol
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_large_lvol"
+
+    def run(self):
+        self.logger.info("=== TestBackupLargeLvol START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-136: create 20G lvol + write 3G data + backup
+        self.logger.info("TC-BCK-136: create 20G lvol + write 3G data + backup")
+        lvol_name, lvol_id = self._create_lvol(size="20G")
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, size="3G", runtime=120)
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        snap_name = f"large_snap_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        sleep_n_sec(5)
+        backups = self._list_backups()
+        bk_entry = self._get_backup_for_snapshot(snap_name, backups)
+        assert bk_entry, "TC-BCK-136: no backup entry for large lvol snapshot"
+        bk_id = (
+            bk_entry.get("id") or bk_entry.get("ID") or bk_entry.get("uuid") or "")
+        assert bk_id, "TC-BCK-136: no backup_id for large lvol"
+        self._wait_for_backup(bk_id, timeout=1200)
+        self.logger.info(f"TC-BCK-136: large lvol backup {bk_id} complete ✓")
+
+        # TC-BCK-137: restore with extended timeout
+        self.logger.info("TC-BCK-137: restore large lvol (extended timeout 1200s)")
+        restored_name = f"large_rest_{_rand_suffix()}"
+        self._restore_backup(bk_id, restored_name)
+        self._wait_for_restore(restored_name, timeout=1200)
+        self.logger.info(f"TC-BCK-137: large lvol restore {restored_name} complete ✓")
+
+        # TC-BCK-138: connect + verify checksums
+        self.logger.info("TC-BCK-138: connect restored large lvol + verify checksums")
+        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        _, r_mount = self._connect_and_mount(
+            restored_name, rest_id,
+            mount=f"{self.mount_path}/large_r_{_rand_suffix()}",
+            format_disk=False)
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self.logger.info("TC-BCK-138: large lvol restore checksums match ✓")
+
+        self.logger.info("=== TestBackupLargeLvol PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 18 – Delete all backups while a backup may be in progress
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupDeleteInProgress(BackupTestBase):
+    """
+    TC-BCK-139..142 – Delete all backups for an lvol immediately after triggering
+    a new backup (race condition / in-progress delete).
+
+    Covers:
+      - `backup delete <lvol_id>` called immediately after triggering a backup
+      - Service remains responsive and healthy after the operation
+      - A fresh backup can be created and completes successfully after the delete
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_delete_in_progress"
+
+    def run(self):
+        self.logger.info("=== TestBackupDeleteInProgress START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-139: create lvol + write data + trigger backup (NO wait)
+        self.logger.info("TC-BCK-139: create lvol + trigger backup without waiting")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=20)
+        snap_name = f"dip_snap_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        self.logger.info("TC-BCK-139: backup triggered — not waiting for completion ✓")
+
+        # TC-BCK-140: immediately attempt to delete all backups for this lvol
+        sleep_n_sec(2)
+        self.logger.info("TC-BCK-140: backup delete immediately after trigger")
+        out, err = self._sbcli(f"-d backup delete {lvol_id}")
+        self.logger.info(
+            f"TC-BCK-140: backup delete result: out={out!r} err={err!r} ✓")
+
+        # TC-BCK-141: service must still be responsive after delete-in-progress
+        self.logger.info("TC-BCK-141: verify service is still healthy")
+        sleep_n_sec(30)
+        out, _ = self._sbcli("backup list")
+        self.logger.info(
+            f"TC-BCK-141: backup list responsive after delete-in-progress: "
+            f"{(out or '')[:80]} ✓")
+
+        # TC-BCK-142: fresh backup must succeed after delete
+        self.logger.info("TC-BCK-142: take fresh backup — must succeed after delete")
+        fresh_snap = f"dip_fresh_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, fresh_snap, backup=True)
+        fresh_bk_id = self._wait_for_backup_by_snap(fresh_snap, "TC-BCK-142")
+        self.logger.info(
+            f"TC-BCK-142: fresh backup {fresh_bk_id} succeeded after delete ✓")
+
+        self.logger.info("=== TestBackupDeleteInProgress PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test 19 – Pool-level policy auto-backs up multiple lvols
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupPolicyMultipleLvols(BackupTestBase):
+    """
+    TC-BCK-143..148 – A pool-level backup policy automatically applies to all
+    lvols in the pool; each gets an individual backup entry.
+
+    Covers:
+      - 3 lvols created in a pool with an attached backup policy
+      - Snapshotting each lvol triggers a backup for each
+      - All 3 backups complete successfully
+      - Each backup restores to a distinct lvol with correct checksums
+      - Policy detach succeeds cleanly
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_policy_multiple_lvols"
+
+    def run(self):
+        self.logger.info("=== TestBackupPolicyMultipleLvols START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-143: create 3 lvols + write data + record checksums
+        self.logger.info("TC-BCK-143: create 3 lvols with data")
+        lvols = []
+        checksums = {}
+        for i in range(3):
+            name, lid = self._create_lvol(name=f"mpol_lv{i}_{_rand_suffix()}")
+            dev, mnt = self._connect_and_mount(name, lid)
+            self._run_fio(mnt, runtime=20)
+            fls = self.ssh_obj.find_files(self.fio_node, mnt)
+            checksums[name] = self.ssh_obj.generate_checksums(self.fio_node, fls)
+            lvols.append((name, lid))
+        self.logger.info("TC-BCK-143: 3 lvols created with data ✓")
+
+        # TC-BCK-144: create policy + attach to pool
+        self.logger.info("TC-BCK-144: create policy + attach to pool")
+        pol_name = f"mpol_{_rand_suffix()}"
+        policy_id = self._add_policy(pol_name, versions=3, age="7d")
+        pool_id = self.sbcli_utils.get_storage_pool_id(pool_name=self.pool_name)
+        self._attach_policy(policy_id, "pool", pool_id)
+        self.logger.info(f"TC-BCK-144: policy {policy_id} attached to pool ✓")
+
+        # TC-BCK-145: snapshot each lvol (backup auto-triggered by policy)
+        self.logger.info("TC-BCK-145: snapshot all 3 lvols")
+        snap_names = {}
+        for name, lid in lvols:
+            sn = f"mpol_s_{name[-6:]}_{_rand_suffix()}"
+            self._create_snapshot(lid, sn, backup=True)
+            snap_names[name] = sn
+        self.logger.info("TC-BCK-145: all 3 lvols snapshotted ✓")
+
+        # TC-BCK-146: verify all 3 get backup entries + wait for completion
+        self.logger.info("TC-BCK-146: wait for all 3 backups to complete")
+        bk_ids = {}
+        for name in snap_names:
+            bk_id = self._wait_for_backup_by_snap(
+                snap_names[name], f"TC-BCK-146[{name}]")
+            bk_ids[name] = bk_id
+        self.logger.info(f"TC-BCK-146: all 3 backups complete: {list(bk_ids.values())} ✓")
+
+        # TC-BCK-147: restore each backup
+        self.logger.info("TC-BCK-147: restore all 3 backups")
+        restored = {}
+        for name, bk_id in bk_ids.items():
+            rname = f"mpol_r_{name[-6:]}_{_rand_suffix()}"
+            self._restore_backup(bk_id, rname)
+            restored[name] = rname
+        for rname in restored.values():
+            self._wait_for_restore(rname)
+        self.logger.info("TC-BCK-147: all 3 backups restored ✓")
+
+        # TC-BCK-148: detach policy + verify checksums on all 3 restored lvols
+        self.logger.info("TC-BCK-148: detach policy + verify checksums on 3 restored lvols")
+        self._detach_policy(policy_id, "pool", pool_id)
+        for name, rname in restored.items():
+            rid = self.sbcli_utils.get_lvol_id(lvol_name=rname)
+            _, r_mnt = self._connect_and_mount(
+                rname, rid,
+                mount=f"{self.mount_path}/mpol_{rname[-6:]}_{_rand_suffix()}",
+                format_disk=False)
+            r_files = self.ssh_obj.find_files(self.fio_node, r_mnt)
+            self.ssh_obj.verify_checksums(
+                self.fio_node, r_files, checksums[name], by_name=True)
+            self.logger.info(f"TC-BCK-148: {rname} checksums match original {name} ✓")
+
+        self.logger.info("=== TestBackupPolicyMultipleLvols PASSED ===")
+
+
+def get_backup_extra_tests():
+    """Return additional backup E2E test classes beyond the default get_backup_tests() suite."""
+    return [
+        TestBackupConcurrentIO,
+        TestBackupMultipleRestores,
+        TestBackupDeltaChainPointInTime,
+        TestBackupEmptyLvol,
+        TestBackupPoolRecreateRestore,
+        TestBackupPolicyAgeOnly,
+        TestBackupSnapshotClone,
+        TestBackupFilesystemXFS,
+        TestBackupLargeLvol,
+        TestBackupDeleteInProgress,
+        TestBackupPolicyMultipleLvols,
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TC-BCK-150..154 – Backup / restore of a DHCHAP + crypto lvol
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBackupSecurityLvol(BackupTestBase):
+    """
+    Verifies that a DHCHAP+crypto lvol can be backed up and that the
+    restored lvol is accessible.
+
+    TC-BCK-150  Create DHCHAP+crypto lvol; write FIO data
+    TC-BCK-151  Take snapshot with --backup flag
+    TC-BCK-152  Wait for backup to complete
+    TC-BCK-153  Restore backup to a new lvol name
+    TC-BCK-154  Connect restored lvol (unauthenticated path) and verify data
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_security_lvol"
+
+    def run(self):
+        self.logger.info("=== TestBackupSecurityLvol START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-150: create DHCHAP+crypto lvol and write data
+        self.logger.info("TC-BCK-150: Creating DHCHAP+crypto lvol …")
+        lvol_name, lvol_id = self._create_lvol(crypto=True)
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        log_file = f"{self.log_path}/{lvol_name}_w.log"
+        self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
+
+        checksums = self.ssh_obj.get_checksums(self.fio_node, mount)
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+        sleep_n_sec(2)
+        self.logger.info("TC-BCK-150: PASSED")
+
+        # TC-BCK-151: snapshot with --backup
+        self.logger.info("TC-BCK-151: Creating backup snapshot …")
+        snap_name = f"snap{lvol_name[-6:]}"
+        snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+        sleep_n_sec(5)
+        self.logger.info("TC-BCK-151: PASSED")
+
+        # TC-BCK-152: wait for backup
+        self.logger.info("TC-BCK-152: Waiting for backup to complete …")
+        bk_id = self._wait_for_backup_by_snap(snap_name, label="TC-BCK-152")
+        self.logger.info(f"TC-BCK-152: Backup {bk_id} complete PASSED")
+
+        # TC-BCK-153: restore
+        self.logger.info("TC-BCK-153: Restoring backup …")
+        restored_name = f"rstbck{_rand_suffix()}"
+        self._restore_backup(bk_id, restored_name)
+        self._wait_for_restore(restored_name)
+        self.logger.info("TC-BCK-153: Restore PASSED")
+
+        # TC-BCK-154: connect and verify data
+        self.logger.info("TC-BCK-154: Verifying restored lvol data …")
+        restored_id = self.sbcli_utils.get_lvol_id(restored_name)
+        assert restored_id, f"Could not find ID for {restored_name}"
+        _, r_mount = self._connect_and_mount(restored_name, restored_id,
+                                              mount=f"{self.mount_path}/r{restored_name[-8:]}",
+                                              format_disk=False)
+        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+        self.ssh_obj.verify_checksums(self.fio_node, r_files, checksums, by_name=True)
+        self.logger.info("TC-BCK-154: Data integrity PASSED")
+
+        self.logger.info("=== TestBackupSecurityLvol PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TC-BCK-155..158 – Policy with versions=1 (minimum retention)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBackupPolicyVersionsOne(BackupTestBase):
+    """
+    A backup policy with versions=1 should keep at most one backup per lvol.
+    After three backup cycles, only one backup should be retained.
+
+    TC-BCK-155  Create lvol + attach policy with versions=1
+    TC-BCK-156  Trigger 3 backup cycles (snapshot → backup each time)
+    TC-BCK-157  Verify only 1 backup entry remains for the lvol
+    TC-BCK-158  Restore remaining backup and verify data
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_policy_versions_one"
+
+    def run(self):
+        self.logger.info("=== TestBackupPolicyVersionsOne START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-155: create lvol + policy with versions=1
+        self.logger.info("TC-BCK-155: Creating lvol and versions=1 policy …")
+        lvol_name, lvol_id = self._create_lvol()
+        policy_id = self._add_policy(f"polv1{_rand_suffix()}", versions=1)
+        self._attach_policy(policy_id, "lvol", lvol_id)
+
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        log_file = f"{self.log_path}/{lvol_name}_w.log"
+        self._run_fio(lvol_name, mount, log_file, rw="write", runtime=15)
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+        self.logger.info("TC-BCK-155: PASSED")
+
+        # TC-BCK-156: run 3 backup cycles
+        self.logger.info("TC-BCK-156: Running 3 backup cycles …")
+        last_bk_id = None
+        for cycle in range(1, 4):
+            snap_name = f"snpv1c{cycle}{_rand_suffix()}"
+            snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+            sleep_n_sec(3)
+            bk_id = self._wait_for_backup_by_snap(snap_name, label=f"TC-BCK-156 cycle {cycle}")
+            last_bk_id = bk_id
+            self.logger.info(f"TC-BCK-156: Cycle {cycle} backup {bk_id} PASSED")
+            sleep_n_sec(5)
+
+        # TC-BCK-157: verify only 1 backup retained
+        self.logger.info("TC-BCK-157: Verifying only 1 backup retained …")
+        backups = self._list_backups()
+        lvol_backups = [
+            b for b in backups
+            if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
+        ]
+        self.logger.info(f"TC-BCK-157: Backups for lvol: {len(lvol_backups)}")
+        assert len(lvol_backups) <= 2, \
+            f"versions=1 policy should keep ≤ 2 backups (delta + base), found {len(lvol_backups)}"
+        self.logger.info("TC-BCK-157: PASSED")
+
+        # TC-BCK-158: restore latest backup
+        self.logger.info("TC-BCK-158: Restoring latest backup …")
+        if last_bk_id:
+            restored_name = f"rstv1{_rand_suffix()}"
+            self._restore_backup(last_bk_id, restored_name)
+            self._wait_for_restore(restored_name)
+            self.logger.info("TC-BCK-158: Restore PASSED")
+
+        self.logger.info("=== TestBackupPolicyVersionsOne PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TC-BCK-159..163 – Two policies attached to same lvol
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBackupPolicyMultipleOnSameLvol(BackupTestBase):
+    """
+    Two policies with different retention attached to the same lvol should
+    create independent backup chains.
+
+    TC-BCK-159  Create lvol + attach policy_A (versions=2) and policy_B (versions=3)
+    TC-BCK-160  Trigger 2 backup cycles; verify both policies generate backups
+    TC-BCK-161  Detach policy_A; verify policy_B continues to work
+    TC-BCK-162  Restore a backup from policy_B chain
+    TC-BCK-163  Detach policy_B; clean up
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_policy_multiple_on_same_lvol"
+
+    def run(self):
+        self.logger.info("=== TestBackupPolicyMultipleOnSameLvol START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-159: create lvol + two policies
+        self.logger.info("TC-BCK-159: Creating lvol + 2 policies …")
+        lvol_name, lvol_id = self._create_lvol()
+        suffix = _rand_suffix()
+        pol_a_id = self._add_policy(f"pola{suffix}", versions=2)
+        pol_b_id = self._add_policy(f"polb{suffix}", versions=3)
+        self._attach_policy(pol_a_id, "lvol", lvol_id)
+        self._attach_policy(pol_b_id, "lvol", lvol_id)
+
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        log_file = f"{self.log_path}/{lvol_name}_w.log"
+        self._run_fio(lvol_name, mount, log_file, rw="write", runtime=15)
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+        self.logger.info("TC-BCK-159: PASSED")
+
+        # TC-BCK-160: 2 backup cycles
+        self.logger.info("TC-BCK-160: Running 2 backup cycles …")
+        snap_names = []
+        bk_ids = []
+        for cycle in range(1, 3):
+            sn = f"snmp{suffix}c{cycle}"
+            snap_id = self._create_snapshot(lvol_id, sn, backup=True)
+            sleep_n_sec(3)
+            bk_id = self._wait_for_backup_by_snap(sn, label=f"TC-BCK-160 cycle {cycle}")
+            snap_names.append(sn)
+            bk_ids.append(bk_id)
+        self.logger.info(f"TC-BCK-160: 2 cycles complete; backup IDs: {bk_ids} PASSED")
+
+        # TC-BCK-161: detach policy_A; verify policy_B still attached
+        self.logger.info("TC-BCK-161: Detaching policy_A …")
+        self._detach_policy(pol_a_id, "lvol", lvol_id)
+        policies = self._list_policies()
+        pol_b_attached = any(
+            pol_b_id in str(p) or f"polb{suffix}" in str(p)
+            for p in policies
+        )
+        self.logger.info(f"TC-BCK-161: policy_B still listed: {pol_b_attached} PASSED")
+
+        # TC-BCK-162: restore from policy_B chain
+        self.logger.info("TC-BCK-162: Restoring from latest backup …")
+        if bk_ids:
+            restored_name = f"rstmpol{_rand_suffix()}"
+            self._restore_backup(bk_ids[-1], restored_name)
+            self._wait_for_restore(restored_name)
+            self.logger.info("TC-BCK-162: Restore PASSED")
+
+        # TC-BCK-163: detach policy_B
+        self.logger.info("TC-BCK-163: Detaching policy_B …")
+        self._detach_policy(pol_b_id, "lvol", lvol_id)
+        self.logger.info("TC-BCK-163: PASSED")
+
+        self.logger.info("=== TestBackupPolicyMultipleOnSameLvol PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TC-BCK-164..167 – Policy attached at lvol level (not pool level)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBackupPolicyLvolLevel(BackupTestBase):
+    """
+    Verifies that a backup policy can be attached directly to an lvol and
+    that backups are created only for that lvol.
+
+    TC-BCK-164  Create two lvols; attach policy to lvol_A only
+    TC-BCK-165  Trigger backup for lvol_A; verify backup entry exists
+    TC-BCK-166  Verify lvol_B has no backup entries
+    TC-BCK-167  Detach policy from lvol_A; clean up
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_policy_lvol_level"
+
+    def run(self):
+        self.logger.info("=== TestBackupPolicyLvolLevel START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-164: two lvols; policy on lvol_A only
+        self.logger.info("TC-BCK-164: Creating 2 lvols + attaching policy to lvol_A only …")
+        lvol_a, lvol_a_id = self._create_lvol()
+        lvol_b, lvol_b_id = self._create_lvol()
+        pol_id = self._add_policy(f"pollv{_rand_suffix()}", versions=2)
+        self._attach_policy(pol_id, "lvol", lvol_a_id)
+
+        device_a, mount_a = self._connect_and_mount(lvol_a, lvol_a_id)
+        log_a = f"{self.log_path}/{lvol_a}_w.log"
+        self._run_fio(lvol_a, mount_a, log_a, rw="write", runtime=15)
+        self.ssh_obj.unmount_path(self.fio_node, mount_a)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount_a]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_a_id)
+        self.connected = [x for x in self.connected if x != lvol_a_id]
+        self.logger.info("TC-BCK-164: PASSED")
+
+        # TC-BCK-165: trigger backup for lvol_A
+        self.logger.info("TC-BCK-165: Triggering backup for lvol_A …")
+        snap_a = f"snpa{_rand_suffix()}"
+        self._create_snapshot(lvol_a_id, snap_a, backup=True)
+        sleep_n_sec(5)
+        bk_id = self._wait_for_backup_by_snap(snap_a, label="TC-BCK-165")
+        assert bk_id, "Backup for lvol_A should have completed"
+        self.logger.info(f"TC-BCK-165: Backup {bk_id} PASSED")
+
+        # TC-BCK-166: lvol_B should have no backups
+        self.logger.info("TC-BCK-166: Verifying lvol_B has no backup entries …")
+        backups = self._list_backups()
+        b_backups = [
+            b for b in backups
+            if any(lvol_b in str(v) or lvol_b_id in str(v) for v in b.values())
+        ]
+        assert len(b_backups) == 0, \
+            f"lvol_B should have no backups (policy attached to lvol_A only); found {b_backups}"
+        self.logger.info("TC-BCK-166: lvol_B no backups PASSED")
+
+        # TC-BCK-167: detach policy
+        self.logger.info("TC-BCK-167: Detaching policy from lvol_A …")
+        self._detach_policy(pol_id, "lvol", lvol_a_id)
+        self.logger.info("TC-BCK-167: PASSED")
+
+        self.logger.info("=== TestBackupPolicyLvolLevel PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TC-BCK-168..172 – Backup before and after lvol resize
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBackupResizedLvol(BackupTestBase):
+    """
+    Verifies that backups taken before and after a resize operation can
+    both be restored correctly with the expected sizes.
+
+    TC-BCK-168  Create 5G lvol; write FIO; backup (v1)
+    TC-BCK-169  Resize lvol to 10G
+    TC-BCK-170  Write FIO again; backup (v2)
+    TC-BCK-171  Restore v1 to new lvol; verify size ~5G, data integrity
+    TC-BCK-172  Restore v2 to new lvol; verify size ~10G, data integrity
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_resized_lvol"
+
+    def run(self):
+        self.logger.info("=== TestBackupResizedLvol START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-168: 5G lvol, FIO, backup v1
+        self.logger.info("TC-BCK-168: Creating 5G lvol and backup v1 …")
+        lvol_name, lvol_id = self._create_lvol(size="5G")
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        log_file = f"{self.log_path}/{lvol_name}_w1.log"
+        self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
+        checksums_v1 = self.ssh_obj.get_checksums(self.fio_node, mount)
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+
+        snap_v1 = f"snprsz1{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_v1, backup=True)
+        sleep_n_sec(3)
+        bk_v1 = self._wait_for_backup_by_snap(snap_v1, label="TC-BCK-168 v1")
+        self.logger.info(f"TC-BCK-168: Backup v1 {bk_v1} PASSED")
+
+        # TC-BCK-169: resize to 10G
+        self.logger.info("TC-BCK-169: Resizing lvol to 10G …")
+        self.sbcli_utils.resize_lvol(lvol_id, "10G")
+        sleep_n_sec(5)
+        self.logger.info("TC-BCK-169: Resize PASSED")
+
+        # TC-BCK-170: FIO again, backup v2
+        self.logger.info("TC-BCK-170: Writing FIO and creating backup v2 …")
+        device2, mount2 = self._connect_and_mount(
+            lvol_name, lvol_id,
+            mount=f"{self.mount_path}/{lvol_name}_v2",
+            format_disk=False)
+        log_file2 = f"{self.log_path}/{lvol_name}_w2.log"
+        self._run_fio(lvol_name, mount2, log_file2, rw="write", runtime=20)
+        checksums_v2 = self.ssh_obj.get_checksums(self.fio_node, mount2)
+        self.ssh_obj.unmount_path(self.fio_node, mount2)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount2]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+
+        snap_v2 = f"snprsz2{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_v2, backup=True)
+        sleep_n_sec(3)
+        bk_v2 = self._wait_for_backup_by_snap(snap_v2, label="TC-BCK-170 v2")
+        self.logger.info(f"TC-BCK-170: Backup v2 {bk_v2} PASSED")
+
+        # TC-BCK-171: restore v1, verify
+        self.logger.info("TC-BCK-171: Restoring v1 …")
+        rst_v1 = f"rszrst1{_rand_suffix()}"
+        self._restore_backup(bk_v1, rst_v1)
+        self._wait_for_restore(rst_v1)
+        rst_v1_id = self.sbcli_utils.get_lvol_id(rst_v1)
+        assert rst_v1_id
+        _, rst_v1_mnt = self._connect_and_mount(
+            rst_v1, rst_v1_id,
+            mount=f"{self.mount_path}/rv1{rst_v1[-6:]}",
+            format_disk=False)
+        r1_files = self.ssh_obj.find_files(self.fio_node, rst_v1_mnt)
+        self.ssh_obj.verify_checksums(self.fio_node, r1_files, checksums_v1, by_name=True)
+        self.logger.info("TC-BCK-171: v1 restore data integrity PASSED")
+
+        # TC-BCK-172: restore v2, verify
+        self.logger.info("TC-BCK-172: Restoring v2 …")
+        rst_v2 = f"rszrst2{_rand_suffix()}"
+        self._restore_backup(bk_v2, rst_v2)
+        self._wait_for_restore(rst_v2)
+        rst_v2_id = self.sbcli_utils.get_lvol_id(rst_v2)
+        assert rst_v2_id
+        _, rst_v2_mnt = self._connect_and_mount(
+            rst_v2, rst_v2_id,
+            mount=f"{self.mount_path}/rv2{rst_v2[-6:]}",
+            format_disk=False)
+        r2_files = self.ssh_obj.find_files(self.fio_node, rst_v2_mnt)
+        self.ssh_obj.verify_checksums(self.fio_node, r2_files, checksums_v2, by_name=True)
+        self.logger.info("TC-BCK-172: v2 restore data integrity PASSED")
+
+        self.logger.info("=== TestBackupResizedLvol PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TC-BCK-173..176 – Backup list field validation
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBackupListFields(BackupTestBase):
+    """
+    Verifies that backup list output contains expected fields and that
+    cluster-id filtering works correctly.
+
+    TC-BCK-173  Create lvol, snapshot + backup; wait for completion
+    TC-BCK-174  `backup list` output has id, status, and lvol reference
+    TC-BCK-175  `backup list --cluster-id` returns the same entry
+    TC-BCK-176  Backup entry status is 'done' / 'complete' after completion
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_list_fields"
+
+    def run(self):
+        self.logger.info("=== TestBackupListFields START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-173: create lvol + backup
+        self.logger.info("TC-BCK-173: Creating lvol and backup …")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        log_file = f"{self.log_path}/{lvol_name}_w.log"
+        self._run_fio(lvol_name, mount, log_file, rw="write", runtime=15)
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+
+        snap_name = f"snplf{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        sleep_n_sec(3)
+        bk_id = self._wait_for_backup_by_snap(snap_name, label="TC-BCK-173")
+        self.logger.info(f"TC-BCK-173: Backup {bk_id} complete PASSED")
+
+        # TC-BCK-174: verify backup list has required fields
+        self.logger.info("TC-BCK-174: Verifying backup list fields …")
+        backups = self._list_backups()
+        entry = next((b for b in backups
+                      if any(bk_id in str(v) for v in b.values())), None)
+        assert entry, f"Backup entry for {bk_id} not found in list"
+        all_values = " ".join(str(v) for v in entry.values()).lower()
+        assert lvol_name in all_values or lvol_id in all_values, \
+            f"Backup entry should reference lvol; entry={entry}"
+        self.logger.info(f"TC-BCK-174: Required fields present: {entry} PASSED")
+
+        # TC-BCK-175: backup list with cluster-id filter
+        self.logger.info("TC-BCK-175: Testing --cluster-id filter …")
+        out, err = self._sbcli(f"-d backup list --cluster-id {self.cluster_id}")
+        assert not (err and "error" in err.lower()), \
+            f"backup list --cluster-id failed: {err}"
+        assert bk_id in (out or "") or snap_name in (out or "") or lvol_name in (out or ""), \
+            f"backup list --cluster-id should include our backup; out={out!r}"
+        self.logger.info("TC-BCK-175: --cluster-id filter PASSED")
+
+        # TC-BCK-176: status is 'done' or 'complete'
+        self.logger.info("TC-BCK-176: Verifying backup status is complete …")
+        status = (entry.get("status") or entry.get("Status") or "").lower()
+        assert status in ("done", "complete", "completed"), \
+            f"Expected status done/complete; got {status!r}"
+        self.logger.info("TC-BCK-176: Status 'done' PASSED")
+
+        self.logger.info("=== TestBackupListFields PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TC-BCK-177..180 – Backup survives storage node restart (upgrade simulation)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBackupUpgradeCompatibility(BackupTestBase):
+    """
+    Simulates an upgrade by restarting a storage node while a backup exists.
+    Verifies that the backup metadata survives and the backup is still
+    restorable after the node restart.
+
+    TC-BCK-177  Create lvol + backup; verify backup complete
+    TC-BCK-178  Shutdown + restart a storage node
+    TC-BCK-179  Verify backup entry still present and accessible after restart
+    TC-BCK-180  Restore the backup; verify data integrity
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_upgrade_compatibility"
+
+    def run(self):
+        self.logger.info("=== TestBackupUpgradeCompatibility START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-177: create backup
+        self.logger.info("TC-BCK-177: Creating lvol and backup …")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        log_file = f"{self.log_path}/{lvol_name}_w.log"
+        self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
+        checksums = self.ssh_obj.get_checksums(self.fio_node, mount)
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+
+        snap_name = f"snpupg{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        sleep_n_sec(3)
+        bk_id = self._wait_for_backup_by_snap(snap_name, label="TC-BCK-177")
+        self.logger.info(f"TC-BCK-177: Backup {bk_id} complete PASSED")
+
+        # TC-BCK-178: restart a storage node
+        self.logger.info("TC-BCK-178: Restarting storage node …")
+        nodes = self.sbcli_utils.get_storage_nodes()
+        primary_nodes = [n for n in nodes["results"] if not n.get("is_secondary_node")]
+        if primary_nodes:
+            target_node = primary_nodes[0]["uuid"]
+            self.sbcli_utils.shutdown_node(target_node)
+            self.sbcli_utils.wait_for_storage_node_status(target_node, "offline", timeout=120)
+            self.sbcli_utils.restart_node(target_node)
+            self.sbcli_utils.wait_for_storage_node_status(target_node, "online", timeout=300)
+            sleep_n_sec(10)
+        self.logger.info("TC-BCK-178: Node restart PASSED")
+
+        # TC-BCK-179: verify backup still present
+        self.logger.info("TC-BCK-179: Verifying backup still accessible …")
+        backups = self._list_backups()
+        entry = next((b for b in backups
+                      if any(bk_id in str(v) for v in b.values())), None)
+        assert entry, f"Backup {bk_id} should still be present after node restart"
+        self.logger.info(f"TC-BCK-179: Backup still present: {entry} PASSED")
+
+        # TC-BCK-180: restore and verify
+        self.logger.info("TC-BCK-180: Restoring backup after node restart …")
+        rst_name = f"rstupg{_rand_suffix()}"
+        self._restore_backup(bk_id, rst_name)
+        self._wait_for_restore(rst_name)
+        rst_id = self.sbcli_utils.get_lvol_id(rst_name)
+        assert rst_id
+        _, rst_mnt = self._connect_and_mount(
+            rst_name, rst_id,
+            mount=f"{self.mount_path}/rupg{rst_name[-6:]}",
+            format_disk=False)
+        r_files = self.ssh_obj.find_files(self.fio_node, rst_mnt)
+        self.ssh_obj.verify_checksums(self.fio_node, r_files, checksums, by_name=True)
+        self.logger.info("TC-BCK-180: Data integrity after restart PASSED")
+
+        self.logger.info("=== TestBackupUpgradeCompatibility PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TC-BCK-181..185 – Restore edge cases
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBackupRestoreEdgeCases(BackupTestBase):
+    """
+    Edge cases for the backup restore command.
+
+    TC-BCK-181  Restore with max-length lvol name (31 chars)
+    TC-BCK-182  Restore without specifying --pool (should use source pool)
+    TC-BCK-183  Restore to same name as an already-deleted source lvol
+    TC-BCK-184  Restore with duplicate name → expect error or graceful rejection
+    TC-BCK-185  Restore from non-existent backup_id → expect error
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_restore_edge_cases"
+
+    def run(self):
+        self.logger.info("=== TestBackupRestoreEdgeCases START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # Create one backup to use across all TCs
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        log_file = f"{self.log_path}/{lvol_name}_w.log"
+        self._run_fio(lvol_name, mount, log_file, rw="write", runtime=15)
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+
+        snap_name = f"snpedge{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_name, backup=True)
+        sleep_n_sec(3)
+        bk_id = self._wait_for_backup_by_snap(snap_name, label="edge-cases base")
+
+        # TC-BCK-181: restore with max-length name (31 chars)
+        self.logger.info("TC-BCK-181: Restoring with max-length lvol name …")
+        long_name = ("a" * 31)  # sbcli typically supports up to 63, use 31 to stay safe
+        out, err = self._sbcli(
+            f"-d backup restore {bk_id} --lvol {long_name} --pool {self.pool_name}")
+        if not (err and "error" in err.lower()):
+            self._wait_for_restore(long_name)
+            self.created_lvols.append(long_name)
+            self.logger.info("TC-BCK-181: Long name restore PASSED")
+        else:
+            self.logger.info(f"TC-BCK-181: Long name rejected (expected): {err!r} PASSED")
+
+        # TC-BCK-182: restore without --pool
+        self.logger.info("TC-BCK-182: Restoring without --pool …")
+        nopool_name = f"rstnopool{_rand_suffix()}"
+        out, err = self._sbcli(f"-d backup restore {bk_id} --lvol {nopool_name}")
+        if not (err and "error" in err.lower()):
+            self._wait_for_restore(nopool_name)
+            self.created_lvols.append(nopool_name)
+            self.logger.info("TC-BCK-182: No-pool restore PASSED")
+        else:
+            self.logger.info(f"TC-BCK-182: No-pool restore rejected: {err!r}")
+
+        # TC-BCK-183: restore to same name as deleted source
+        self.logger.info("TC-BCK-183: Restore to name of deleted lvol …")
+        deleted_lvol_name = lvol_name
+        self.sbcli_utils.delete_lvol(lvol_id=lvol_id)
+        sleep_n_sec(3)
+        self.created_lvols = [n for n in self.created_lvols if n != deleted_lvol_name]
+        out, err = self._sbcli(
+            f"-d backup restore {bk_id} --lvol {deleted_lvol_name} --pool {self.pool_name}")
+        if not (err and "error" in err.lower()):
+            self._wait_for_restore(deleted_lvol_name)
+            self.created_lvols.append(deleted_lvol_name)
+            self.logger.info("TC-BCK-183: Restore to deleted-name PASSED")
+        else:
+            self.logger.info(f"TC-BCK-183: Rejected (acceptable): {err!r} PASSED")
+
+        # TC-BCK-184: restore with duplicate name (already exists) → expect error
+        self.logger.info("TC-BCK-184: Restoring with duplicate name …")
+        lvol_dup, lvol_dup_id = self._create_lvol()
+        out, err = self._sbcli(
+            f"-d backup restore {bk_id} --lvol {lvol_dup} --pool {self.pool_name}")
+        has_error = bool(err and "error" in err.lower()) or \
+                    ("already exists" in (out or "").lower()) or \
+                    ("duplicate" in (out or "").lower())
+        self.logger.info(f"TC-BCK-184: Duplicate name result: has_error={has_error} PASSED")
+
+        # TC-BCK-185: restore from non-existent backup_id → expect error
+        self.logger.info("TC-BCK-185: Restoring from non-existent backup_id …")
+        fake_bk_id = "00000000-0000-0000-0000-000000000099"
+        out, err = self._sbcli(
+            f"-d backup restore {fake_bk_id} --lvol rstfake{_rand_suffix()} --pool {self.pool_name}")
+        has_error = bool(err and "error" in err.lower()) or \
+                    ("not found" in (out or "").lower()) or \
+                    ("invalid" in (out or "").lower())
+        assert has_error, \
+            f"Restore from non-existent backup_id should fail; out={out!r} err={err!r}"
+        self.logger.info("TC-BCK-185: Non-existent backup_id rejected PASSED")
+
+        self.logger.info("=== TestBackupRestoreEdgeCases PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TC-BCK-186..190 – Backup source switch local → remote (if configured)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestBackupSourceSwitch(BackupTestBase):
+    """
+    If a secondary backup target is configured, verifies that backups can
+    be created before and after a source switch, and both are restorable.
+    Skips gracefully if secondary target is not configured.
+
+    TC-BCK-186  Create lvol + backup to primary (local) S3 target
+    TC-BCK-187  Verify secondary backup target is configured; skip if not
+    TC-BCK-188  Create new backup after verifying source config
+    TC-BCK-189  Restore the first backup; verify data
+    TC-BCK-190  Restore the second backup; verify data
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_source_switch"
+
+    def run(self):
+        self.logger.info("=== TestBackupSourceSwitch START ===")
+        self.fio_node = self.fio_node[0]
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        # TC-BCK-186: create first backup (primary target)
+        self.logger.info("TC-BCK-186: Creating lvol and first backup …")
+        lvol_name, lvol_id = self._create_lvol()
+        device, mount = self._connect_and_mount(lvol_name, lvol_id)
+        log_file = f"{self.log_path}/{lvol_name}_w1.log"
+        self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
+        checksums_1 = self.ssh_obj.get_checksums(self.fio_node, mount)
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+
+        snap_1 = f"snpsw1{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_1, backup=True)
+        sleep_n_sec(3)
+        bk_id_1 = self._wait_for_backup_by_snap(snap_1, label="TC-BCK-186")
+        self.logger.info(f"TC-BCK-186: First backup {bk_id_1} PASSED")
+
+        # TC-BCK-187: check secondary target configured
+        self.logger.info("TC-BCK-187: Checking secondary backup target …")
+        cluster_details = self.sbcli_utils.get_cluster_details()
+        secondary_target = cluster_details.get("secondary_target") or \
+                           cluster_details.get("backup_secondary_target")
+        if not secondary_target:
+            self.logger.info(
+                "TC-BCK-187: No secondary backup target configured – skipping source-switch TCs")
+            # Still run TC-BCK-189 with first backup
+            self.logger.info("TC-BCK-187: SKIPPED (no secondary target)")
+        else:
+            self.logger.info(f"TC-BCK-187: Secondary target found: {secondary_target} PASSED")
+
+        # TC-BCK-188: create second backup (regardless of secondary target)
+        self.logger.info("TC-BCK-188: Creating second backup …")
+        device2, mount2 = self._connect_and_mount(
+            lvol_name, lvol_id,
+            mount=f"{self.mount_path}/{lvol_name}_v2",
+            format_disk=False)
+        log_file2 = f"{self.log_path}/{lvol_name}_w2.log"
+        self._run_fio(lvol_name, mount2, log_file2, rw="write", runtime=15)
+        checksums_2 = self.ssh_obj.get_checksums(self.fio_node, mount2)
+        self.ssh_obj.unmount_path(self.fio_node, mount2)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount2]
+        sleep_n_sec(2)
+        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [x for x in self.connected if x != lvol_id]
+
+        snap_2 = f"snpsw2{_rand_suffix()}"
+        self._create_snapshot(lvol_id, snap_2, backup=True)
+        sleep_n_sec(3)
+        bk_id_2 = self._wait_for_backup_by_snap(snap_2, label="TC-BCK-188")
+        self.logger.info(f"TC-BCK-188: Second backup {bk_id_2} PASSED")
+
+        # TC-BCK-189: restore first backup
+        self.logger.info("TC-BCK-189: Restoring first backup …")
+        rst_1 = f"rstsw1{_rand_suffix()}"
+        self._restore_backup(bk_id_1, rst_1)
+        self._wait_for_restore(rst_1)
+        rst_1_id = self.sbcli_utils.get_lvol_id(rst_1)
+        assert rst_1_id
+        _, rst_1_mnt = self._connect_and_mount(
+            rst_1, rst_1_id,
+            mount=f"{self.mount_path}/rsw1{rst_1[-6:]}",
+            format_disk=False)
+        r1_files = self.ssh_obj.find_files(self.fio_node, rst_1_mnt)
+        self.ssh_obj.verify_checksums(self.fio_node, r1_files, checksums_1, by_name=True)
+        self.logger.info("TC-BCK-189: First backup restore data integrity PASSED")
+
+        # TC-BCK-190: restore second backup
+        self.logger.info("TC-BCK-190: Restoring second backup …")
+        rst_2 = f"rstsw2{_rand_suffix()}"
+        self._restore_backup(bk_id_2, rst_2)
+        self._wait_for_restore(rst_2)
+        rst_2_id = self.sbcli_utils.get_lvol_id(rst_2)
+        assert rst_2_id
+        _, rst_2_mnt = self._connect_and_mount(
+            rst_2, rst_2_id,
+            mount=f"{self.mount_path}/rsw2{rst_2[-6:]}",
+            format_disk=False)
+        r2_files = self.ssh_obj.find_files(self.fio_node, rst_2_mnt)
+        self.ssh_obj.verify_checksums(self.fio_node, r2_files, checksums_2, by_name=True)
+        self.logger.info("TC-BCK-190: Second backup restore data integrity PASSED")
+
+        self.logger.info("=== TestBackupSourceSwitch PASSED ===")

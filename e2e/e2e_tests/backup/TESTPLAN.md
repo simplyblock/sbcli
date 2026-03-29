@@ -339,3 +339,93 @@ When per-backup-ID deletion is added, add test cases verifying:
 | FIO node with NVMe-oF support | Same as other E2E tests |
 | ≥ 2 storage nodes | For failover stress tests |
 | RDMA-capable fabric | For `BackupStressRdmaFailover` only |
+
+---
+
+## Extended Backup Test Cases (TC-BCK-150..190)
+
+### Security Lvol Backup
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-BCK-150 | DHCHAP+Crypto Lvol Created and FIO Written | 1. Create lvol with crypto=True 2. Connect + mount + FIO | Write succeeds | Yes | TestBackupSecurityLvol |
+| TC-BCK-151 | Snapshot With --backup Flag | 1. `snapshot add --backup` | Snapshot created, backup triggered | Yes | TestBackupSecurityLvol |
+| TC-BCK-152 | Backup Completes | 1. Poll backup list until 'done' | Backup status 'done' within 300s | Yes | TestBackupSecurityLvol |
+| TC-BCK-153 | Backup Restored to New Lvol | 1. `backup restore` to new name | Restored lvol appears in list | Yes | TestBackupSecurityLvol |
+| TC-BCK-154 | Restored Lvol Data Integrity | 1. Connect restored lvol 2. Verify checksums | Checksums match original | Yes | TestBackupSecurityLvol |
+
+### Policy Versions=1
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-BCK-155 | Lvol + Policy versions=1 Created | 1. Create lvol 2. Add policy with versions=1 3. Attach to lvol | Policy attached | Yes | TestBackupPolicyVersionsOne |
+| TC-BCK-156 | 3 Backup Cycles Triggered | 1. Snapshot+backup × 3 cycles | All 3 backups complete | Yes | TestBackupPolicyVersionsOne |
+| TC-BCK-157 | Only 1 Backup Retained | 1. List backups for lvol | ≤ 2 entries (delta + base chain) | Yes | TestBackupPolicyVersionsOne |
+| TC-BCK-158 | Latest Backup Restored | 1. Restore latest backup | Restore completes | Yes | TestBackupPolicyVersionsOne |
+
+### Multiple Policies on Same Lvol
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-BCK-159 | Two Policies Attached to Same Lvol | 1. Create lvol 2. Add policy_A (versions=2) + policy_B (versions=3) 3. Attach both | Both policies attached | Yes | TestBackupPolicyMultipleOnSameLvol |
+| TC-BCK-160 | 2 Backup Cycles With Both Policies | 1. Snapshot+backup × 2 | Backup entries exist | Yes | TestBackupPolicyMultipleOnSameLvol |
+| TC-BCK-161 | Detach Policy_A; Policy_B Continues | 1. policy-detach policy_A from lvol | Policy_B still listed | Yes | TestBackupPolicyMultipleOnSameLvol |
+| TC-BCK-162 | Restore From Policy_B Chain | 1. Restore latest backup | Restore completes | Yes | TestBackupPolicyMultipleOnSameLvol |
+| TC-BCK-163 | Detach Policy_B | 1. policy-detach policy_B | Policy removed | Yes | TestBackupPolicyMultipleOnSameLvol |
+
+### Lvol-Level Policy
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-BCK-164 | Policy Attached to Lvol_A Only (Not Pool) | 1. Create lvol_A + lvol_B 2. Attach policy only to lvol_A | Policy on lvol_A only | Yes | TestBackupPolicyLvolLevel |
+| TC-BCK-165 | Backup Created for Lvol_A | 1. Snapshot+backup for lvol_A | Backup entry exists | Yes | TestBackupPolicyLvolLevel |
+| TC-BCK-166 | Lvol_B Has No Backups | 1. List backups filtered by lvol_B | Zero entries | Yes | TestBackupPolicyLvolLevel |
+| TC-BCK-167 | Policy Detached From Lvol_A | 1. policy-detach lvol_A | Policy removed | Yes | TestBackupPolicyLvolLevel |
+
+### Resized Lvol Backup
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-BCK-168 | 5G Lvol FIO + Backup v1 | 1. Create 5G lvol 2. FIO 3. Snapshot+backup | Backup v1 complete | Yes | TestBackupResizedLvol |
+| TC-BCK-169 | Resize Lvol to 10G | 1. `resize_lvol(id, "10G")` | No error | Yes | TestBackupResizedLvol |
+| TC-BCK-170 | FIO + Backup v2 After Resize | 1. FIO on 10G lvol 2. Snapshot+backup | Backup v2 complete | Yes | TestBackupResizedLvol |
+| TC-BCK-171 | Restore v1 and Verify Data | 1. Restore v1 2. Connect + checksum verify | Data matches pre-resize content | Yes | TestBackupResizedLvol |
+| TC-BCK-172 | Restore v2 and Verify Data | 1. Restore v2 2. Connect + checksum verify | Data matches post-resize content | Yes | TestBackupResizedLvol |
+
+### Backup List Fields
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-BCK-173 | Backup Created and Complete | 1. Create lvol + snapshot+backup | backup_id returned | Yes | TestBackupListFields |
+| TC-BCK-174 | Backup List Has id + lvol Reference | 1. `backup list` output checked | Entry has id and lvol_name/id | Yes | TestBackupListFields |
+| TC-BCK-175 | --cluster-id Filter Works | 1. `backup list --cluster-id <id>` | Entry present in filtered output | Yes | TestBackupListFields |
+| TC-BCK-176 | Status Is 'done'/'complete' | 1. Check status field of entry | Status in (done, complete, completed) | Yes | TestBackupListFields |
+
+### Node Restart Compatibility
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-BCK-177 | Backup Created Before Node Restart | 1. Create lvol + complete backup | backup_id noted | Yes | TestBackupUpgradeCompatibility |
+| TC-BCK-178 | Storage Node Shutdown + Restart | 1. Shutdown node 2. Wait offline 3. Restart 4. Wait online | Node back online within 300s | Yes | TestBackupUpgradeCompatibility |
+| TC-BCK-179 | Backup Still Present After Restart | 1. List backups; find backup_id | Entry still present | Yes | TestBackupUpgradeCompatibility |
+| TC-BCK-180 | Restore Backup After Restart + Data Integrity | 1. Restore backup 2. Verify checksums | Data integrity preserved | Yes | TestBackupUpgradeCompatibility |
+
+### Restore Edge Cases
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-BCK-181 | Restore With Max-Length Lvol Name | 1. Restore with 31-char name | Restore succeeds or graceful error | Yes | TestBackupRestoreEdgeCases |
+| TC-BCK-182 | Restore Without --pool Flag | 1. `backup restore <id> --lvol <name>` (no pool) | Uses source pool; succeeds | Yes | TestBackupRestoreEdgeCases |
+| TC-BCK-183 | Restore to Name of Deleted Source Lvol | 1. Delete source lvol 2. Restore to same name | Restore succeeds | Yes | TestBackupRestoreEdgeCases |
+| TC-BCK-184 | Restore With Duplicate Lvol Name | 1. Create lvol with same target name 2. Restore with that name | Error or graceful rejection | Yes | TestBackupRestoreEdgeCases |
+| TC-BCK-185 | Restore From Non-Existent Backup ID | 1. `backup restore` with fake UUID | Error returned | Yes | TestBackupRestoreEdgeCases |
+
+### Backup Source Switch
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-BCK-186 | First Backup to Primary Target | 1. Create lvol + backup | First backup_id obtained | Yes | TestBackupSourceSwitch |
+| TC-BCK-187 | Secondary Target Availability Check | 1. Check cluster details for secondary_target | Test notes if secondary configured | Yes | TestBackupSourceSwitch |
+| TC-BCK-188 | Second Backup Created | 1. Additional FIO + snapshot+backup | Second backup_id obtained | Yes | TestBackupSourceSwitch |
+| TC-BCK-189 | First Backup Restorable | 1. Restore first backup 2. Checksum verify | Data integrity confirmed | Yes | TestBackupSourceSwitch |
+| TC-BCK-190 | Second Backup Restorable | 1. Restore second backup 2. Checksum verify | Data integrity confirmed | Yes | TestBackupSourceSwitch |

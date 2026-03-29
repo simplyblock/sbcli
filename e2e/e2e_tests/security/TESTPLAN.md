@@ -200,3 +200,130 @@ These require manual coordination: start FIO on one terminal, trigger `add-host`
 ## Not In Scope (TLS)
 
 TLS (`--tls` cluster-create parameter) is deferred to a separate test plan cycle. All TLS-related test cases will be added once the feature is available in the test environment.
+
+---
+
+## Extended Security Test Cases (TC-SEC-070..127)
+
+### Outage & Recovery
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-070 | DHCHAP Lvol Created and Connected | 1. Create DHCHAP (SEC_BOTH) lvol 2. Connect with host NQN 3. Mount and format | Device appears, mount succeeds | Yes | TestLvolSecurityOutageRecovery |
+| TC-SEC-071 | Storage Node Shutdown During DHCHAP Session | 1. Shutdown primary storage node 2. Wait for offline status | Node reaches offline state | Yes | TestLvolSecurityOutageRecovery |
+| TC-SEC-072 | Storage Node Restart + Online Wait | 1. Restart the offline node 2. Wait for online status | Node reaches online state within 300s | Yes | TestLvolSecurityOutageRecovery |
+| TC-SEC-073 | DHCHAP Reconnect After Node Restart | 1. Reconnect lvol with original host NQN after restart | Connect string returned; block device appears | Yes | TestLvolSecurityOutageRecovery |
+| TC-SEC-074 | FIO After Node Restart | 1. Mount reconnected lvol 2. Run randrw FIO | FIO completes without errors | Yes | TestLvolSecurityOutageRecovery |
+
+### Network Interrupt
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-075 | DHCHAP Lvol Connect Pre-Interrupt | 1. Create SEC_HOST_ONLY lvol 2. Connect + format | Device and mount succeed | Yes | TestLvolSecurityNetworkInterrupt |
+| TC-SEC-076 | 30-Second NIC Interrupt on Storage Node | 1. Get active interfaces 2. Disconnect for 30s | Network interrupt issued | Yes | TestLvolSecurityNetworkInterrupt |
+| TC-SEC-077 | Reconnect After Network Interrupt | 1. Wait 35s 2. Reconnect with DHCHAP creds | Connect string returned | Yes | TestLvolSecurityNetworkInterrupt |
+| TC-SEC-078 | FIO After Network Interrupt | 1. Mount reconnected device 2. Run FIO | FIO passes | Yes | TestLvolSecurityNetworkInterrupt |
+| TC-SEC-079 | get-secret After Network Interrupt | 1. Call get-secret for registered NQN | Returns non-empty credentials | Yes | TestLvolSecurityNetworkInterrupt |
+
+### HA Failover
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-080 | HA DHCHAP Lvol Created | 1. Create HA lvol (ndcs=1, npcs=1) with SEC_BOTH | Lvol created successfully | Yes | TestLvolSecurityHAFailover |
+| TC-SEC-081 | FIO on HA DHCHAP Lvol | 1. Connect + mount 2. Run FIO | FIO passes | Yes | TestLvolSecurityHAFailover |
+| TC-SEC-082 | Shutdown Primary Storage Node | 1. Shutdown node 2. Wait for offline | Node offline within 120s | Yes | TestLvolSecurityHAFailover |
+| TC-SEC-083 | HA Node Restart and Settle | 1. Restart node 2. Wait for online 3. Wait for HA settle | Node online; cluster stable | Yes | TestLvolSecurityHAFailover |
+| TC-SEC-084 | DHCHAP Reconnect + FIO After Failover | 1. Reconnect with original host NQN 2. Run FIO | Connection succeeds; FIO passes | Yes | TestLvolSecurityHAFailover |
+
+### Management Node Reboot
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-085 | DHCHAP Lvol Created + get-secret Baseline | 1. Create SEC_BOTH lvol 2. get-secret for registered NQN | Non-empty credential returned | Yes | TestLvolSecurityMgmtNodeReboot |
+| TC-SEC-086 | Management Node Rebooted | 1. `ssh reboot` on mgmt node 2. Wait for it to come back | Node back online within 300s | Yes | TestLvolSecurityMgmtNodeReboot |
+| TC-SEC-087 | get-secret After Mgmt Reboot | 1. get-secret for same NQN post-reboot | Credentials still present | Yes | TestLvolSecurityMgmtNodeReboot |
+| TC-SEC-088 | Connect + FIO After Mgmt Reboot | 1. Connect with DHCHAP creds 2. Run FIO | Connection and FIO succeed | Yes | TestLvolSecurityMgmtNodeReboot |
+
+### Dynamic Host Modification
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-089 | Remove Host NQN | 1. remove-host 2. Attempt get-connect-str | No connect string returned | Yes | TestLvolSecurityDynamicModification |
+| TC-SEC-090 | Re-Add Host NQN | 1. add-host 2. get-connect-str | Connect string returned | Yes | TestLvolSecurityDynamicModification |
+| TC-SEC-091 | Add Second NQN; Both Work | 1. add-host second NQN 2. get-connect-str both NQNs | Both return connect strings | Yes | TestLvolSecurityDynamicModification |
+| TC-SEC-092 | Remove First NQN; Second Still Works | 1. remove-host first NQN 2. verify second NQN connect string | Second NQN OK; first NQN fails | Yes | TestLvolSecurityDynamicModification |
+| TC-SEC-093 | Remove Second NQN | 1. remove-host second NQN 2. verify no connect string | Second NQN now fails | Yes | TestLvolSecurityDynamicModification |
+| TC-SEC-094 | Re-Add First NQN + FIO | 1. add-host first NQN 2. connect + FIO | FIO passes | Yes | TestLvolSecurityDynamicModification |
+| TC-SEC-095 | Teardown | 1. Cleanup resources | All lvols deleted | Yes | TestLvolSecurityDynamicModification |
+
+### Concurrent Clients
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-096 | DHCHAP Lvol With One Registered NQN | 1. Create SEC_BOTH lvol with NQN_A | Lvol created | Yes | TestLvolSecurityMultiClientConcurrent |
+| TC-SEC-097 | Concurrent Connect-String Requests | 1. Spawn two threads: correct NQN + wrong NQN simultaneously | Both requests complete | Yes | TestLvolSecurityMultiClientConcurrent |
+| TC-SEC-098 | Correct NQN Gets Connect String | 1. Verify correct NQN thread result has connect string | Non-empty connect_ls | Yes | TestLvolSecurityMultiClientConcurrent |
+| TC-SEC-099 | Wrong NQN Rejected | 1. Verify wrong NQN thread result has no connect string | Empty or error response | Yes | TestLvolSecurityMultiClientConcurrent |
+| TC-SEC-100 | Connect + FIO With Correct NQN | 1. Connect + mount + FIO | FIO passes | Yes | TestLvolSecurityMultiClientConcurrent |
+
+### Scale and Rapid Ops
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-101 | Create 10 DHCHAP Lvols With Unique NQNs | 1. Loop: create lvol with unique NQN each iteration | All 10 created without SPDK keyring collision | Yes | TestLvolSecurityScaleAndRapidOps |
+| TC-SEC-102 | Rapid remove-host From All Volumes | 1. Loop: remove-host from each volume | All removes succeed | Yes | TestLvolSecurityScaleAndRapidOps |
+| TC-SEC-103 | Rapid add-host To All Volumes | 1. Loop: add-host to each volume | All adds succeed | Yes | TestLvolSecurityScaleAndRapidOps |
+| TC-SEC-104 | All Volumes Have Valid Connect Strings | 1. Loop: get-connect-str for each NQN | All return non-empty connect strings | Yes | TestLvolSecurityScaleAndRapidOps |
+
+### Extended Negative
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-105 | get-secret After remove-host | 1. remove-host 2. get-secret same NQN | Error returned | Yes | TestLvolSecurityNegativeConnectExtended |
+| TC-SEC-106 | add-host With Empty NQN | 1. add-host with empty string NQN | Error returned | Yes | TestLvolSecurityNegativeConnectExtended |
+| TC-SEC-107 | add-host on Non-Existent Lvol | 1. add-host fake UUID | Error returned | Yes | TestLvolSecurityNegativeConnectExtended |
+| TC-SEC-108 | remove-host on Non-Existent Lvol | 1. remove-host fake UUID | Error returned | Yes | TestLvolSecurityNegativeConnectExtended |
+| TC-SEC-109 | SEC_CTRL_ONLY Lvol: Wrong NQN Rejected | 1. Create SEC_CTRL_ONLY lvol 2. get-connect-str unregistered NQN | No connect string | Yes | TestLvolSecurityNegativeConnectExtended |
+| TC-SEC-110 | get-secret With Unregistered NQN | 1. get-secret for NQN never added | Error returned | Yes | TestLvolSecurityNegativeConnectExtended |
+
+### Clone Security Independence
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-111 | Parent Lvol With SEC_HOST_ONLY | 1. Create parent with NQN_A | Parent accessible via NQN_A | Yes | TestLvolSecurityCloneOverride |
+| TC-SEC-112 | Snapshot and Clone Created | 1. Snapshot parent 2. Clone snapshot | Clone lvol exists | Yes | TestLvolSecurityCloneOverride |
+| TC-SEC-113 | Clone Gets Different NQN | 1. add-host NQN_B to clone 2. Verify NQN_A on parent, NQN_B on clone | Both independently accessible | Yes | TestLvolSecurityCloneOverride |
+| TC-SEC-114 | Parent Config Independent From Clone | 1. remove-host NQN_A from parent 2. Verify clone NQN_B still works | Clone unaffected by parent change | Yes | TestLvolSecurityCloneOverride |
+
+### Security + Backup Integration
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-115 | DHCHAP+Crypto Lvol Created and FIO Written | 1. Create lvol with SEC_BOTH + encrypt 2. Write FIO data | Write succeeds | Yes | TestLvolSecurityWithBackup |
+| TC-SEC-116 | Snapshot + Backup Created | 1. `snapshot add --backup` 2. Wait for backup | Backup completes | Yes | TestLvolSecurityWithBackup |
+| TC-SEC-117 | Backup Restored to New Lvol | 1. `backup restore` to new name | Lvol appears in list | Yes | TestLvolSecurityWithBackup |
+| TC-SEC-118 | Restored Lvol Accessible | 1. Connect restored lvol | Connect string returned | Yes | TestLvolSecurityWithBackup |
+
+### Resize With Security
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-119 | DHCHAP+Crypto Lvol 5G FIO | 1. Create 5G lvol with SEC_BOTH + encrypt 2. FIO write | FIO passes | Yes | TestLvolSecurityResize |
+| TC-SEC-120 | Resize to 10G | 1. `sbcli_utils.resize_lvol(id, "10G")` | No error; lvol size updated | Yes | TestLvolSecurityResize |
+| TC-SEC-121 | DHCHAP Config Unchanged After Resize | 1. get-secret for registered NQN 2. Reconnect + FIO | get-secret returns credentials; FIO passes | Yes | TestLvolSecurityResize |
+
+### Volume List Fields
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-122 | SEC_BOTH Lvol Has DHCHAP Fields in CLI Output | 1. Create SEC_BOTH lvol 2. `volume get <id>` | Output mentions dhchap fields | Yes | TestLvolSecurityVolumeListFields |
+| TC-SEC-123 | SEC_HOST_ONLY Lvol CLI Output | 1. Create SEC_HOST_ONLY lvol 2. `volume get` | Output shows dhchap/allowed_host fields | Yes | TestLvolSecurityVolumeListFields |
+| TC-SEC-124 | get-secret Returns Non-Empty Credential | 1. get-secret registered NQN | Non-empty credential string | Yes | TestLvolSecurityVolumeListFields |
+
+### RDMA Security
+
+| ID | Title | Steps | Expected Result | Automated | Class |
+|----|-------|-------|-----------------|-----------|-------|
+| TC-SEC-125 | Skip If RDMA Not Available | 1. Check `fabric_rdma` cluster field | Test skipped if False | Yes | TestLvolSecurityRDMA |
+| TC-SEC-126 | DHCHAP Lvol Created With RDMA Fabric | 1. Create SEC_BOTH lvol with `--fabric rdma` | Connect string returned | Yes | TestLvolSecurityRDMA |
+| TC-SEC-127 | RDMA DHCHAP FIO | 1. Connect via RDMA 2. Mount 3. Run FIO | FIO passes over RDMA transport | Yes | TestLvolSecurityRDMA |

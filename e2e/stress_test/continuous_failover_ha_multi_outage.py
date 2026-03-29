@@ -141,14 +141,6 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         """
         Select K outage nodes such that no two are in a primary/secondary
         relationship (in either direction). Candidates = keys of the map.
-
-        Two-phase approach:
-          Phase 1 (sequential): pick outage types + pre-dump logs for ALL nodes
-                                 before any outage is triggered.
-          Phase 2 (parallel):   trigger every node's outage simultaneously via
-                                 threads, eliminating the sequential delay that
-                                 previously allowed early-outage nodes to recover
-                                 before later-outage nodes were even taken down.
         """
         # Candidates are nodes that are primary *for someone* (map keys)
         primary_candidates = list(self.sn_primary_secondary_map.keys())
@@ -161,11 +153,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
         outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
         self.logger.info(f"Selected outage nodes: {outage_nodes}")
-
-        # ── Phase 1: pick types + pre-dump for ALL nodes (before any outage) ──
-        node_plans = []  # (node, outage_type, node_ip, node_rpc_port, position)
+        outage_combinations = []
         outage_num = 0
-        for i, node in enumerate(outage_nodes):
+        for node in outage_nodes:
             if outage_num == 0:
                 # When only 1 outage per cycle, use outage_types2 so that
                 # container_stop is also eligible (no second-node timing risk).
@@ -176,36 +166,25 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 outage_num = 1
             else:
                 outage_type = random.choice(self.outage_types2)
-
             node_details = self.sbcli_utils.get_storage_node_details(node)
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
 
-            if self.k8s_test:
-                k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
-                if k8s_obj:
-                    k8s_obj.dump_lvstore_k8s(storage_node_id=node, storage_node_ip=node_ip, logs_path=self.docker_logs_path)
-                    k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
-            else:
-                self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                          storage_node_id=node)
-                self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=node_ip,
-                    storage_node_id=node,
-                    logs_path=self.docker_logs_path,
-                    validate_async=True,
-                    error_sink=self.dump_validation_errors
-                )
+            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
+                                      storage_node_id=node)
 
-            node_plans.append((node, outage_type, node_ip, node_rpc_port, i))
+            status = self.ssh_obj.fetch_distrib_logs(
+                storage_node_ip=node_ip,
+                storage_node_id=node,
+                logs_path=self.docker_logs_path
+            )
+            if not status:
+                raise RuntimeError("Placement Dump Status incorrect!!!")
 
-        # ── Phase 2: trigger all outages simultaneously via threads ────────────
-        outage_results = {}  # node → (effective_type, outage_dur)
-
-        def _trigger(node, outage_type, node_ip, node_rpc_port, position):
             self.logger.info(f"Performing {outage_type} on primary node {node}.")
+            self.log_outage_event(node, outage_type, "Outage started")
+
             node_outage_dur = 0
-            effective_type = outage_type
             if outage_type == "container_stop":
                 self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             elif outage_type == "graceful_shutdown":
@@ -214,27 +193,82 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 self._disconnect_partial_interface(node, node_ip)
                 node_outage_dur = 300
             elif outage_type == "interface_full_network_interrupt":
-                node_outage_dur, effective_type = self._disconnect_full_interface(node, node_ip, position)
-            self.log_outage_event(node, effective_type, "Outage started")
-            outage_results[node] = (effective_type, node_outage_dur)
+                node_outage_dur = self._disconnect_full_interface(node, node_ip)
 
-        threads = [
-            threading.Thread(target=_trigger, args=(node, otype, nip, nrpc, pos))
-            for node, otype, nip, nrpc, pos in node_plans
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        outage_combinations = []
-        for node, _, _, _, _ in node_plans:
-            effective_type, node_outage_dur = outage_results[node]
-            outage_combinations.append((node, effective_type, node_outage_dur))
+            outage_combinations.append((node, outage_type, node_outage_dur))
             self.current_outage_nodes.append(node)
 
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
+
+    # [COMMENTED OUT — kept for future use]
+    # Two-phase parallel outage approach: pre-dump all nodes first, then trigger
+    # all outages simultaneously. Re-enable if sequential timing gap is a problem.
+    # def perform_n_plus_k_outages(self):
+    #     """Two-phase: Phase 1 pre-dumps all nodes, Phase 2 triggers outages in parallel."""
+    #     primary_candidates = list(self.sn_primary_secondary_map.keys())
+    #     self.current_outage_nodes = []
+    #     if len(primary_candidates) < self.npcs:
+    #         raise Exception(
+    #             f"Need {self.npcs} outage nodes, but only {len(primary_candidates)} primary-role nodes exist."
+    #         )
+    #     outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
+    #     self.logger.info(f"Selected outage nodes: {outage_nodes}")
+    #     node_plans = []  # (node, outage_type, node_ip, node_rpc_port, position)
+    #     outage_num = 0
+    #     for i, node in enumerate(outage_nodes):
+    #         if outage_num == 0:
+    #             if self.npcs == 1:
+    #                 outage_type = random.choice(self.outage_types2)
+    #             else:
+    #                 outage_type = random.choice(self.outage_types)
+    #             outage_num = 1
+    #         else:
+    #             outage_type = random.choice(self.outage_types2)
+    #         node_details = self.sbcli_utils.get_storage_node_details(node)
+    #         node_ip = node_details[0]["mgmt_ip"]
+    #         node_rpc_port = node_details[0]["rpc_port"]
+    #         if self.k8s_test:
+    #             k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
+    #             if k8s_obj:
+    #                 k8s_obj.dump_lvstore_k8s(storage_node_id=node, storage_node_ip=node_ip, logs_path=self.docker_logs_path)
+    #                 k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
+    #         else:
+    #             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0], storage_node_id=node)
+    #             self.ssh_obj.fetch_distrib_logs(
+    #                 storage_node_ip=node_ip, storage_node_id=node,
+    #                 logs_path=self.docker_logs_path,
+    #                 validate_async=True, error_sink=self.dump_validation_errors
+    #             )
+    #         node_plans.append((node, outage_type, node_ip, node_rpc_port, i))
+    #     outage_results = {}
+    #     def _trigger(node, outage_type, node_ip, node_rpc_port, position):
+    #         node_outage_dur = 0
+    #         effective_type = outage_type
+    #         if outage_type == "container_stop":
+    #             self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
+    #         elif outage_type == "graceful_shutdown":
+    #             self._graceful_shutdown_node(node)
+    #         elif outage_type == "interface_partial_network_interrupt":
+    #             self._disconnect_partial_interface(node, node_ip)
+    #             node_outage_dur = 300
+    #         elif outage_type == "interface_full_network_interrupt":
+    #             node_outage_dur, effective_type = self._disconnect_full_interface(node, node_ip, position)
+    #         self.log_outage_event(node, effective_type, "Outage started")
+    #         outage_results[node] = (effective_type, node_outage_dur)
+    #     threads = [
+    #         threading.Thread(target=_trigger, args=(node, otype, nip, nrpc, pos))
+    #         for node, otype, nip, nrpc, pos in node_plans
+    #     ]
+    #     for t in threads: t.start()
+    #     for t in threads: t.join()
+    #     outage_combinations = []
+    #     for node, _, _, _, _ in node_plans:
+    #         effective_type, node_outage_dur = outage_results[node]
+    #         outage_combinations.append((node, effective_type, node_outage_dur))
+    #         self.current_outage_nodes.append(node)
+    #     self.outage_start_time = int(datetime.now().timestamp())
+    #     return outage_combinations
 
     def _graceful_shutdown_node(self, node):
         """Shutdown node without --force; retry every 20 s for up to 5 minutes.
@@ -272,23 +306,35 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         )
         self.disconnect_thread.start()
 
-    def _disconnect_full_interface(self, node, node_ip, outage_position=0):
+    def _disconnect_full_interface(self, node, node_ip):
         self.logger.info("Handling full interface based network interruption...")
         active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-        # Force 300s for the first outage in a multi-outage scenario so the
-        # network is still down when subsequent outages are triggered.
-        if outage_position == 0 and self.npcs > 1:
-            outage_dur = 300
-        else:
-            outage_dur = random.choice([300, 30])
-        effective_name = f"interface_full_network_interrupt_{outage_dur}sec"
-        self.logger.info(f"[N/W Outage] duration={outage_dur}s → {effective_name}")
+        outage_dur = random.choice([300, 30])
+        self.logger.info(f"Selected Outage seconds for n/w outage: {outage_dur}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
             args=(node_ip, active_interfaces, outage_dur)
         )
         self.disconnect_thread.start()
-        return outage_dur, effective_name
+        return outage_dur
+    # [COMMENTED OUT — kept for future use] Two-phase version with outage_position param:
+    # def _disconnect_full_interface(self, node, node_ip, outage_position=0):
+    #     self.logger.info("Handling full interface based network interruption...")
+    #     active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
+    #     # Force 300s for the first outage in a multi-outage scenario so the
+    #     # network is still down when subsequent outages are triggered.
+    #     if outage_position == 0 and self.npcs > 1:
+    #         outage_dur = 300
+    #     else:
+    #         outage_dur = random.choice([300, 30])
+    #     effective_name = f"interface_full_network_interrupt_{outage_dur}sec"
+    #     self.logger.info(f"[N/W Outage] duration={outage_dur}s → {effective_name}")
+    #     self.disconnect_thread = threading.Thread(
+    #         target=self.ssh_obj.disconnect_all_active_interfaces,
+    #         args=(node_ip, active_interfaces, outage_dur)
+    #     )
+    #     self.disconnect_thread.start()
+    #     return outage_dur, effective_name
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage, skipping lvols on any outage node."""
@@ -497,17 +543,15 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
             self.logger.info(f"Created clone {clone_name}.")
 
-            # TEMP CHANGE 1 (remove in ~2 days): K8s — skip connect/mount/FIO when lvol's
-            # primary node is in outage (secondary-only connect fails on k8s).
-            # After outage resolves, _connect_pending_clones() handles connect/mount/FIO.
-            # TEMP CHANGE 2 (remove in ~2 days): K8s — defer ALL clone connects while any
-            # outage is active, not just clones whose own primary is down.
-            if self.k8s_test and self.current_outage_nodes:
-                self.clone_mount_details[clone_name]["pending_connect"] = True
-                self.logger.info(
-                    f"[pending_connect] Clone '{clone_name}' deferred — outage active on nodes {self.current_outage_nodes}."
-                )
-                continue
+            # [COMMENTED OUT — kept for future use]
+            # K8s temp change: defer clone connect/mount/FIO when any outage is active.
+            # Uncomment if K8s secondary-only connect failures return.
+            # if self.k8s_test and self.current_outage_nodes:
+            #     self.clone_mount_details[clone_name]["pending_connect"] = True
+            #     self.logger.info(
+            #         f"[pending_connect] Clone '{clone_name}' deferred — outage active on nodes {self.current_outage_nodes}."
+            #     )
+            #     continue
 
             sleep_n_sec(3)
 
@@ -613,77 +657,79 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                                              new_size=f"{self.int_lvol_size}G")
 
 
-    # TEMP CHANGE 1 (remove in ~2 days)
-    def _connect_pending_clones(self):
-        """K8s only: connect, mount, and run FIO for clones deferred during outage (runtime=300s)."""
-        pending = [(name, details) for name, details in self.clone_mount_details.items()
-                   if details.get("pending_connect")]
-        if not pending:
-            return
-        self.logger.info(f"[pending_connect] Processing {len(pending)} deferred clone(s).")
-        for clone_name, clone_details in pending:
-            self.logger.info(f"[pending_connect] Connecting clone '{clone_name}'.")
-            client = clone_details["Client"]
-            fs_type = clone_details["FS"]
-
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
-            clone_details["Command"] = connect_ls
-
-            initial_devices = self.ssh_obj.get_devices(node=client)
-            for connect_str in connect_ls:
-                _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
-                if error:
-                    self.record_failed_nvme_connect(clone_name, connect_str, client=client)
-
-            sleep_n_sec(3)
-            final_devices = self.ssh_obj.get_devices(node=client)
-            lvol_device = None
-            for device in final_devices:
-                if device not in initial_devices:
-                    lvol_device = f"/dev/{device.strip()}"
-                    break
-            if not lvol_device:
-                self.logger.warning(f"[pending_connect] Clone '{clone_name}' did not connect after outage; skipping.")
-                continue
-
-            clone_details["Device"] = lvol_device
-
-            if fs_type == "xfs":
-                self.ssh_obj.clone_mount_gen_uuid(client, lvol_device)
-            mount_point = f"{self.mount_path}/{clone_name}"
-            self.ssh_obj.mount_path(node=client, device=lvol_device, mount_path=mount_point)
-            clone_details["Mount"] = mount_point
-
-            sleep_n_sec(10)
-
-            self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
-            self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
-            self.ssh_obj.delete_files(client, [f"{self.log_path}/{clone_name}_fio_iolog*"])
-
-            sleep_n_sec(5)
-
-            fio_thread = threading.Thread(
-                target=self.ssh_obj.run_fio_test,
-                args=(client, None, clone_details["Mount"], clone_details["Log"]),
-                kwargs={
-                    "size": self.fio_size,
-                    "name": f"{clone_name}_fio",
-                    "rw": "randrw",
-                    "bs": f"{2 ** random.randint(2, 7)}K",
-                    "nrfiles": 16,
-                    "iodepth": 1,
-                    "numjobs": 5,
-                    "time_based": True,
-                    "runtime": 300,
-                    "log_avg_msec": 1000,
-                    "iolog_file": clone_details["iolog_base_path"],
-                },
-            )
-            fio_thread.start()
-            self.fio_threads.append(fio_thread)
-
-            clone_details["pending_connect"] = False
-            self.logger.info(f"[pending_connect] Clone '{clone_name}' connected and FIO started (runtime=300s).")
+    # [COMMENTED OUT — kept for future use]
+    # K8s temp method: connect/mount/FIO for clones deferred during outage.
+    # Uncomment together with the deferred-connect block above if needed.
+    # def _connect_pending_clones(self):
+    #     """K8s only: connect, mount, and run FIO for clones deferred during outage (runtime=300s)."""
+    #     pending = [(name, details) for name, details in self.clone_mount_details.items()
+    #                if details.get("pending_connect")]
+    #     if not pending:
+    #         return
+    #     self.logger.info(f"[pending_connect] Processing {len(pending)} deferred clone(s).")
+    #     for clone_name, clone_details in pending:
+    #         self.logger.info(f"[pending_connect] Connecting clone '{clone_name}'.")
+    #         client = clone_details["Client"]
+    #         fs_type = clone_details["FS"]
+    #
+    #         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+    #         clone_details["Command"] = connect_ls
+    #
+    #         initial_devices = self.ssh_obj.get_devices(node=client)
+    #         for connect_str in connect_ls:
+    #             _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
+    #             if error:
+    #                 self.record_failed_nvme_connect(clone_name, connect_str, client=client)
+    #
+    #         sleep_n_sec(3)
+    #         final_devices = self.ssh_obj.get_devices(node=client)
+    #         lvol_device = None
+    #         for device in final_devices:
+    #             if device not in initial_devices:
+    #                 lvol_device = f"/dev/{device.strip()}"
+    #                 break
+    #         if not lvol_device:
+    #             self.logger.warning(f"[pending_connect] Clone '{clone_name}' did not connect after outage; skipping.")
+    #             continue
+    #
+    #         clone_details["Device"] = lvol_device
+    #
+    #         if fs_type == "xfs":
+    #             self.ssh_obj.clone_mount_gen_uuid(client, lvol_device)
+    #         mount_point = f"{self.mount_path}/{clone_name}"
+    #         self.ssh_obj.mount_path(node=client, device=lvol_device, mount_path=mount_point)
+    #         clone_details["Mount"] = mount_point
+    #
+    #         sleep_n_sec(10)
+    #
+    #         self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
+    #         self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
+    #         self.ssh_obj.delete_files(client, [f"{self.log_path}/{clone_name}_fio_iolog*"])
+    #
+    #         sleep_n_sec(5)
+    #
+    #         fio_thread = threading.Thread(
+    #             target=self.ssh_obj.run_fio_test,
+    #             args=(client, None, clone_details["Mount"], clone_details["Log"]),
+    #             kwargs={
+    #                 "size": self.fio_size,
+    #                 "name": f"{clone_name}_fio",
+    #                 "rw": "randrw",
+    #                 "bs": f"{2 ** random.randint(2, 7)}K",
+    #                 "nrfiles": 16,
+    #                 "iodepth": 1,
+    #                 "numjobs": 5,
+    #                 "time_based": True,
+    #                 "runtime": 300,
+    #                 "log_avg_msec": 1000,
+    #                 "iolog_file": clone_details["iolog_base_path"],
+    #             },
+    #         )
+    #         fio_thread.start()
+    #         self.fio_threads.append(fio_thread)
+    #
+    #         clone_details["pending_connect"] = False
+    #         self.logger.info(f"[pending_connect] Clone '{clone_name}' connected and FIO started (runtime=300s).")
 
     def run(self):
         """Main N+K failover test loop. Performs lvol creation, fio, clone/snapshot, and multiple outages."""
@@ -732,7 +778,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             for node, outage_type, node_outage_dur in outage_events:
                 self.current_outage_node = node
                 self.outage_dur = node_outage_dur
-                if (outage_type == "container_stop" or "interface_full_network_interrupt" in outage_type) and self.npcs > 1:
+                if outage_type in ["container_stop", "interface_full_network_interrupt"] and self.npcs > 1:
+                # [COMMENTED OUT — kept for future use] substring match for two-phase named types:
+                # if (outage_type == "container_stop" or "interface_full_network_interrupt" in outage_type) and self.npcs > 1:
                     self.restart_nodes_after_failover(outage_type, True)
                 else:
                     self.restart_nodes_after_failover(outage_type)
@@ -767,8 +815,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             sleep_n_sec(300)
 
             self.retry_failed_nvme_connects()
-            if self.k8s_test:
-                self._connect_pending_clones()
+            # [COMMENTED OUT — kept for future use] K8s deferred-connect handler
+            # if self.k8s_test:
+            #     self._connect_pending_clones()
             self.validate_pending_deletions()
 
             self.check_core_dump()
