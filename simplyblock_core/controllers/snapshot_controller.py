@@ -291,6 +291,11 @@ def delete(snapshot_uuid, force_delete=False):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
+    if snap.status == SnapShot.STATUS_IN_DELETION:
+        logger.error(f"Snapshot is in deletion {snapshot_uuid}")
+        if not force_delete:
+            return True
+
     # Block deletion if the snapshot's parent volume is being migrated
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(
