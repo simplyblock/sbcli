@@ -1974,7 +1974,7 @@ def restart_storage_node(
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
-    # time.sleep(3)
+    time.sleep(5)
 
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
