@@ -293,15 +293,15 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
 
     def perform_n_plus_k_outages(self):
         """
-        K8s override of perform_n_plus_k_outages.
+        Two-phase K8s override of perform_n_plus_k_outages.
 
-        Identical to the parent except that ``container_stop`` outage type
-        calls ``_k8s_stop_spdk_pod`` (kubectl delete pod) instead of
-        ``ssh_obj.stop_spdk_process`` (docker stop).
+        Phase 1 (sequential): pick outage types + pre-dump logs for ALL nodes
+                               before any outage is triggered.
+        Phase 2 (parallel):   trigger every node's outage simultaneously via
+                               threads, eliminating the sequential delay.
         """
         from datetime import datetime
 
-        # Candidates are nodes that are primary *for someone* (map keys)
         primary_candidates = list(self.sn_primary_secondary_map.keys())
         self.current_outage_nodes = []
 
@@ -313,7 +313,9 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
 
         outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
         self.logger.info(f"Selected outage nodes: {outage_nodes}")
-        outage_combinations = []
+
+        # Phase 1: pick types + pre-dump for ALL nodes (before any outage)
+        node_plans = []  # (node, outage_type, node_ip, node_rpc_port)
         outage_num = 0
 
         for node in outage_nodes:
@@ -330,148 +332,111 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
 
-            self.ssh_obj.dump_lvstore(
-                node_ip=self.mgmt_nodes[0], storage_node_id=node
-            )
+            if self.k8s_test:
+                self.k8s_utils.dump_lvstore_k8s(
+                    sbcli_cmd=self.sbcli_utils.sbcli_cmd,
+                    storage_node_id=node,
+                    storage_node_ip=node_ip,
+                    logs_path=self.docker_logs_path,
+                )
+                self.k8s_utils.fetch_distrib_logs_k8s(
+                    storage_node_id=node,
+                    storage_node_ip=node_ip,
+                    logs_path=self.docker_logs_path,
+                )
+            else:
+                self.ssh_obj.dump_lvstore(
+                    node_ip=self.mgmt_nodes[0], storage_node_id=node
+                )
+                self.ssh_obj.fetch_distrib_logs(
+                    storage_node_ip=node_ip,
+                    storage_node_id=node,
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
+                )
 
-            status = self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=node_ip,
-                storage_node_id=node,
-                logs_path=self.docker_logs_path,
-            )
-            if not status:
-                raise RuntimeError("Placement Dump Status incorrect!!!")
+            node_plans.append((node, outage_type, node_ip, node_rpc_port))
 
+        # Phase 2: trigger all outages simultaneously via threads
+        outage_results = {}  # node -> (outage_type, outage_dur)
+
+        def _trigger_k8s(node, outage_type, node_ip, node_rpc_port):
             self.logger.info(
                 f"Performing {outage_type} on primary node {node} (K8s mode)."
             )
-            self.log_outage_event(node, outage_type, "Outage started")
-
             node_outage_dur = 0
             if outage_type == "container_stop":
-                # ── K8s: delete SPDK pod instead of docker stop ──────────────
                 if self.k8s_test and self.k8s_utils:
                     self._k8s_stop_spdk_pod(node_ip, node)
                 else:
-                    # Fall back to bare-metal docker stop (k8s_test=False)
                     self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             elif outage_type == "graceful_shutdown":
                 self._graceful_shutdown_node(node)
             elif outage_type == "interface_partial_network_interrupt":
-                # Network interface block goes directly to SN host via SSH
                 self._disconnect_partial_interface(node, node_ip)
                 node_outage_dur = 300
             elif outage_type == "interface_full_network_interrupt":
-                # Same — SSH to SN host, iptables block
                 node_outage_dur = self._disconnect_full_interface(node, node_ip)
+            self.log_outage_event(node, outage_type, "Outage started")
+            outage_results[node] = (outage_type, node_outage_dur)
 
-            outage_combinations.append((node, outage_type, node_outage_dur))
+        threads = [
+            threading.Thread(target=_trigger_k8s, args=(node, otype, nip, nrpc))
+            for node, otype, nip, nrpc in node_plans
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        outage_combinations = []
+        for node, _, _, _ in node_plans:
+            otype, odur = outage_results[node]
+            outage_combinations.append((node, otype, odur))
             self.current_outage_nodes.append(node)
 
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
 
-    # ── Two-phase parallel outage (commented out — kept for future use) ───────
+    # ── Sequential single-loop version (commented out — kept for reference) ───
     # def perform_n_plus_k_outages(self):
-    #     """
-    #     Two-phase K8s override of perform_n_plus_k_outages.
-    #
-    #     Phase 1 (sequential): pick outage types + pre-dump logs for ALL nodes
-    #                            before any outage is triggered.
-    #     Phase 2 (parallel):   trigger every node's outage simultaneously via
-    #                            threads, eliminating the sequential delay.
+    #     """Sequential K8s override — dump + trigger per node, one at a time.
+    #     NOTE: uses ssh_obj.dump_lvstore which requires SSH to mgmt nodes.
+    #     Not suitable for k8s environments. Use the two-phase version above.
     #     """
     #     from datetime import datetime
-    #
     #     primary_candidates = list(self.sn_primary_secondary_map.keys())
     #     self.current_outage_nodes = []
-    #
-    #     if len(primary_candidates) < self.npcs:
-    #         raise Exception(
-    #             f"Need {self.npcs} outage nodes, but only "
-    #             f"{len(primary_candidates)} primary-role nodes exist."
-    #         )
-    #
     #     outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
-    #     self.logger.info(f"Selected outage nodes: {outage_nodes}")
-    #
-    #     # Phase 1: pick types + pre-dump for ALL nodes (before any outage)
-    #     node_plans = []  # (node, outage_type, node_ip, node_rpc_port)
+    #     outage_combinations = []
     #     outage_num = 0
-    #
     #     for node in outage_nodes:
     #         if outage_num == 0:
-    #             if self.npcs == 1:
-    #                 outage_type = random.choice(self.outage_types2)
-    #             else:
-    #                 outage_type = random.choice(self.outage_types)
+    #             outage_type = random.choice(self.outage_types2 if self.npcs == 1 else self.outage_types)
     #             outage_num = 1
     #         else:
     #             outage_type = random.choice(self.outage_types2)
-    #
     #         node_details = self.sbcli_utils.get_storage_node_details(node)
     #         node_ip = node_details[0]["mgmt_ip"]
     #         node_rpc_port = node_details[0]["rpc_port"]
-    #
-    #         if self.k8s_test:
-    #             self.k8s_utils.dump_lvstore_k8s(
-    #                 sbcli_cmd=self.sbcli_utils.sbcli_cmd,
-    #                 storage_node_id=node,
-    #                 storage_node_ip=node_ip,
-    #                 logs_path=self.docker_logs_path,
-    #             )
-    #             self.k8s_utils.fetch_distrib_logs_k8s(
-    #                 storage_node_id=node,
-    #                 storage_node_ip=node_ip,
-    #                 logs_path=self.docker_logs_path,
-    #             )
-    #         else:
-    #             self.ssh_obj.dump_lvstore(
-    #                 node_ip=self.mgmt_nodes[0], storage_node_id=node
-    #             )
-    #             self.ssh_obj.fetch_distrib_logs(
-    #                 storage_node_ip=node_ip,
-    #                 storage_node_id=node,
-    #                 logs_path=self.docker_logs_path,
-    #                 validate_async=True,
-    #                 error_sink=self.dump_validation_errors
-    #             )
-    #
-    #         node_plans.append((node, outage_type, node_ip, node_rpc_port))
-    #
-    #     # Phase 2: trigger all outages simultaneously via threads
-    #     outage_results = {}  # node -> (outage_type, outage_dur)
-    #
-    #     def _trigger_k8s(node, outage_type, node_ip, node_rpc_port):
-    #         self.logger.info(
-    #             f"Performing {outage_type} on primary node {node} (K8s mode)."
-    #         )
+    #         self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0], storage_node_id=node)
+    #         status = self.ssh_obj.fetch_distrib_logs(
+    #             storage_node_ip=node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
+    #         if not status:
+    #             raise RuntimeError("Placement Dump Status incorrect!!!")
+    #         self.log_outage_event(node, outage_type, "Outage started")
     #         node_outage_dur = 0
     #         if outage_type == "container_stop":
-    #             if self.k8s_test and self.k8s_utils:
-    #                 self._k8s_stop_spdk_pod(node_ip, node)
-    #             else:
-    #                 self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
+    #             self._k8s_stop_spdk_pod(node_ip, node) if (self.k8s_test and self.k8s_utils) else self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
     #         elif outage_type == "graceful_shutdown":
     #             self._graceful_shutdown_node(node)
-    #         self.log_outage_event(node, outage_type, "Outage started")
-    #         outage_results[node] = (outage_type, node_outage_dur)
-    #
-    #     threads = [
-    #         threading.Thread(target=_trigger_k8s, args=(node, otype, nip, nrpc))
-    #         for node, otype, nip, nrpc in node_plans
-    #     ]
-    #     for t in threads:
-    #         t.start()
-    #     for t in threads:
-    #         t.join()
-    #
-    #     outage_combinations = []
-    #     for node, _, _, _ in node_plans:
-    #         otype, odur = outage_results[node]
-    #         outage_combinations.append((node, otype, odur))
+    #         elif outage_type == "interface_partial_network_interrupt":
+    #             self._disconnect_partial_interface(node, node_ip); node_outage_dur = 300
+    #         elif outage_type == "interface_full_network_interrupt":
+    #             node_outage_dur = self._disconnect_full_interface(node, node_ip)
+    #         outage_combinations.append((node, outage_type, node_outage_dur))
     #         self.current_outage_nodes.append(node)
-    #
     #     self.outage_start_time = int(datetime.now().timestamp())
     #     return outage_combinations
 
