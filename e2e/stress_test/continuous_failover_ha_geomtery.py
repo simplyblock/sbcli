@@ -316,7 +316,9 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
         self.outage_start_time = int(datetime.now().timestamp())
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
@@ -872,7 +874,9 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
         outage_type = self.perform_random_outage()
         
@@ -895,7 +899,9 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
             self.create_lvols_with_fio(3)
             if not self.k8s_test:
@@ -932,7 +938,9 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
         self.restart_nodes_after_failover(outage_type)
         
@@ -942,7 +950,9 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
 
         return outage_type
@@ -1099,6 +1109,10 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
         sleep_n_sec(30)
         
         while True:
+            if self.dump_validation_errors:
+                raise RuntimeError(
+                    f"Placement dump validation failed: {self.dump_validation_errors}"
+                )
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             if iteration > 1:
@@ -1123,7 +1137,9 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
                     self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node,
-                        logs_path=self.docker_logs_path
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
                     )
                 self.create_lvols_with_fio(5)
                 if not self.k8s_test:
@@ -1157,7 +1173,9 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
             self.restart_nodes_after_failover(outage_type)
             for node in self.sn_nodes_with_sec:
@@ -1166,7 +1184,9 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
             self.logger.info("Waiting for fallback.")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
@@ -1247,6 +1267,8 @@ class RandomMultiGeometryFailoverTest(TestLvolHACluster):
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
             iteration += 1

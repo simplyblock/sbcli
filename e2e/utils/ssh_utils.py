@@ -2441,27 +2441,37 @@ class SshUtils:
                 all_ok = False
         return all_ok
 
-    def _validate_distrib_dumps(self, base_path, distribs):
+    def _validate_distrib_dumps(self, base_path, distribs, timeout=60):
         """
         For each distrib, reads rpc_{distrib}.log to find the 'Response:' file path,
         then checks the corresponding map txt file in base_path has lpgi data.
-        Returns True if all distribs have valid data, False otherwise.
+
+        - Retries FileNotFoundError for up to `timeout` seconds (default 1 hour) to
+          handle NFS propagation delays.
+        - Raises ValueError immediately if a file exists but contains no lpgi data
+          (corrupt/invalid dump — fail fast, don't wait).
+        - Returns True if all distribs are valid, False if any file is still missing
+          after the timeout.
         """
         import time as _time
 
-        def _read_with_retry(path, retries=10, delay=3):
-            """Read a file with retries to handle NFS propagation delays."""
-            for attempt in range(retries):
+        def _read_with_retry(path):
+            deadline = _time.time() + timeout
+            attempt = 0
+            while True:
                 try:
                     with open(path, "r") as f:
                         return f.read()
                 except FileNotFoundError:
-                    if attempt < retries - 1:
-                        self.logger.warning(
-                            f"[PLACEMENT_DUMP] File not yet visible (attempt {attempt+1}/{retries}): {path}"
+                    if _time.time() >= deadline:
+                        raise FileNotFoundError(
+                            f"[PLACEMENT_DUMP] File not visible after {timeout}s: {path}"
                         )
-                        _time.sleep(delay)
-            raise FileNotFoundError(f"File not found after {retries} retries: {path}")
+                    attempt += 1
+                    self.logger.warning(
+                        f"[PLACEMENT_DUMP] File not yet visible (attempt {attempt}): {path}"
+                    )
+                    _time.sleep(5)
 
         all_ok = True
         for distrib in distribs:
@@ -2491,14 +2501,17 @@ class SshUtils:
             if not map_content.strip():
                 self.logger.warning(f"[PLACEMENT_DUMP] Map file is empty (skipping): {map_file_path}")
             elif "lpgi:" not in map_content:
-                self.logger.error(f"[PLACEMENT_DUMP] Map file has no lpgi data: {map_file_path}")
-                all_ok = False
+                # File exists but data is corrupt — raise immediately, do not retry
+                raise ValueError(
+                    f"[PLACEMENT_DUMP] Map file exists but contains no lpgi data (CORRUPT): {map_file_path}"
+                )
             else:
                 self.logger.info(f"[PLACEMENT_DUMP] Valid: {response_filename} (distrib={distrib})")
 
         return all_ok
 
-    def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path):
+    def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path,
+                           validate_async=False, error_sink=None):
         self.logger.info(f"Fetching distrib logs for Storage Node ID: {storage_node_id} on {storage_node_ip}")
 
         # 0) Find SPDK container name
@@ -2630,10 +2643,40 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 
         # ------------------------------
         # Validate placement dump files
-        # Validate placement dump files
         # ------------------------------
-        ok = self._validate_distrib_dumps(base_path, distribs)
+        if validate_async:
+            # Run validation in background — each file gets up to 1 hour to appear.
+            # Raises ValueError immediately if a file exists but has no lpgi data.
+            # Any failure is appended to error_sink for the caller to check later.
+            _sink = error_sink if error_sink is not None else []
+            _node_ip = storage_node_ip
 
+            def _bg_validate():
+                try:
+                    ok = self._validate_distrib_dumps(base_path, distribs, timeout=3600)
+                    if not ok:
+                        msg = (
+                            f"[PLACEMENT_DUMP] Validation FAILED for {_node_ip} "
+                            f"(file missing after 1 hour): {base_path}"
+                        )
+                        self.logger.error(msg)
+                        _sink.append(msg)
+                    else:
+                        self.logger.info(f"[{_node_ip}] Placement dump validation passed (async).")
+                except ValueError as e:
+                    # Corrupt data — fail immediately
+                    self.logger.error(str(e))
+                    _sink.append(str(e))
+                except Exception as e:
+                    msg = f"[PLACEMENT_DUMP] Unexpected error for {_node_ip}: {e}"
+                    self.logger.error(msg)
+                    _sink.append(msg)
+
+            t = threading.Thread(target=_bg_validate, daemon=True)
+            t.start()
+            return t
+
+        ok = self._validate_distrib_dumps(base_path, distribs)
         if not ok:
             self.logger.error(f"[{storage_node_ip}] Placement dump validation FAILED.")
             return False

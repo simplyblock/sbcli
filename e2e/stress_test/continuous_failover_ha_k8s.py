@@ -354,13 +354,13 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 self.ssh_obj.dump_lvstore(
                     node_ip=self.mgmt_nodes[0], storage_node_id=node
                 )
-                status = self.ssh_obj.fetch_distrib_logs(
+                self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=node_ip,
                     storage_node_id=node,
                     logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
-                if not status:
-                    raise RuntimeError("Placement Dump Status incorrect!!!")
 
             node_plans.append((node, outage_type, node_ip, node_rpc_port))
 

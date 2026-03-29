@@ -68,6 +68,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self._stop_spdk_mem_thread = False
         self.spdk_mem_thread = None
         self.blocked_ports = None
+        self.dump_validation_errors = []
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
 
@@ -188,13 +189,13 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             else:
                 self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                           storage_node_id=node)
-                status = self.ssh_obj.fetch_distrib_logs(
+                self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
-                if not status:
-                    raise RuntimeError("Placement Dump Status incorrect!!!")
 
             node_plans.append((node, outage_type, node_ip, node_rpc_port, i))
 
@@ -713,6 +714,11 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
 
+            if self.dump_validation_errors:
+                raise RuntimeError(
+                    f"Placement dump validation failed: {self.dump_validation_errors}"
+                )
+
             if iteration > 1:
                 self.restart_fio(iteration=iteration)
 
@@ -745,13 +751,13 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 else:
                     self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                               storage_node_id=node)
-                    status = self.ssh_obj.fetch_distrib_logs(
+                    self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node,
-                        logs_path=self.docker_logs_path
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
                     )
-                    if not status:
-                        raise RuntimeError("Placement Dump Status incorrect!!!")
 
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
@@ -807,12 +813,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 else:
                     self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                               storage_node_id=node)
-                    status = self.ssh_obj.fetch_distrib_logs(
+                    self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node,
-                        logs_path=self.docker_logs_path
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
                     )
-                    if not status:
-                        raise RuntimeError("Placement Dump Status incorrect!!!")
             iteration += 1
 

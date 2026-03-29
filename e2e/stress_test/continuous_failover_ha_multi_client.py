@@ -477,13 +477,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             else:
                 self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                          storage_node_id=node)
-                status = self.ssh_obj.fetch_distrib_logs(
+                self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
-                if not status:
-                    raise RuntimeError("Placement Dump Status incorrect!!!")
         self.outage_start_time = int(datetime.now().timestamp())
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
@@ -1262,13 +1262,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         for node in self.sn_nodes_with_sec:
             cur_node_details = self.sbcli_utils.get_storage_node_details(node)
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
-            status = self.ssh_obj.fetch_distrib_logs(
+            self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
-            if not status:
-                raise RuntimeError("Placement Dump Status incorrect!!!")
         outage_type = self.perform_random_outage()
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
@@ -1287,13 +1287,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             for node in self.sn_nodes_with_sec:
                 cur_node_details = self.sbcli_utils.get_storage_node_details(node)
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                status = self.ssh_obj.fetch_distrib_logs(
+                self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
-                if not status:
-                    raise RuntimeError("Placement Dump Status incorrect!!!")
             self.create_lvols_with_fio(5)
             if not self.k8s_test:
                 for node in self.storage_nodes:
@@ -1326,26 +1326,25 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         for node in self.sn_nodes_with_sec:
             cur_node_details = self.sbcli_utils.get_storage_node_details(node)
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
-            status = self.ssh_obj.fetch_distrib_logs(
+            self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
-            if not status:
-                raise RuntimeError("Placement Dump Status incorrect!!!")
         self.restart_nodes_after_failover(outage_type)
-        
+
         for node in self.sn_nodes_with_sec:
             cur_node_details = self.sbcli_utils.get_storage_node_details(node)
             cur_node_ip = cur_node_details[0]["mgmt_ip"]
-            
-            status = self.ssh_obj.fetch_distrib_logs(
+            self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
-            if not status:
-                raise RuntimeError("Placement Dump Status incorrect!!!")
 
         return outage_type
     
@@ -1509,6 +1508,10 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             self.spdk_mem_thread.start()
 
         while True:
+            if self.dump_validation_errors:
+                raise RuntimeError(
+                    f"Placement dump validation failed: {self.dump_validation_errors}"
+                )
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             if iteration > 1:
@@ -1530,13 +1533,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 for node in self.sn_nodes_with_sec:
                     cur_node_details = self.sbcli_utils.get_storage_node_details(node)
                     cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                    status = self.ssh_obj.fetch_distrib_logs(
+                    self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node,
-                        logs_path=self.docker_logs_path
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
                     )
-                    if not status:
-                        raise RuntimeError("Placement Dump Status incorrect!!!")
                 self.create_lvols_with_fio(3)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
@@ -1567,24 +1570,24 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 cur_node_details = self.sbcli_utils.get_storage_node_details(node)
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
 
-                status = self.ssh_obj.fetch_distrib_logs(
+                self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
-                if not status:
-                    raise RuntimeError("Placement Dump Status incorrect!!!")
             self.restart_nodes_after_failover(outage_type)
             for node in self.sn_nodes_with_sec:
                 cur_node_details = self.sbcli_utils.get_storage_node_details(node)
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                status = self.ssh_obj.fetch_distrib_logs(
+                self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
-                if not status:
-                    raise RuntimeError("Placement Dump Status incorrect!!!")
             self.logger.info("Waiting for fallback.")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
                 sleep_n_sec(15)
@@ -1666,11 +1669,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             for node in self.sn_nodes_with_sec:
                 cur_node_details = self.sbcli_utils.get_storage_node_details(node)
                 cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                status = self.ssh_obj.fetch_distrib_logs(
+                self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
-                if not status:
-                    raise RuntimeError("Placement Dump Status incorrect!!!")
             iteration += 1

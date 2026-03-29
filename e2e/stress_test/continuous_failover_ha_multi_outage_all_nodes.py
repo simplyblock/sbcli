@@ -1,5 +1,8 @@
-from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
 import random
+import threading
+from datetime import datetime
+
+from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
 
 
 class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverTest):
@@ -20,6 +23,10 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         Select K outage nodes randomly from ALL storage nodes (primary and
         secondary).  No primary/secondary exclusion constraint is applied
         because max_fault_tolerance > 1 guarantees the cluster can survive it.
+
+        Two-phase approach:
+          Phase 1: collect node info + pre-dump all nodes (sequential)
+          Phase 2: trigger all outages simultaneously (parallel threads)
         """
         all_nodes = list(self.sn_nodes_with_sec)
         self.current_outage_nodes = []
@@ -33,9 +40,10 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         outage_nodes = random.sample(all_nodes, k)
         self.logger.info(f"Selected outage nodes (all-nodes mode): {outage_nodes}")
 
-        outage_combinations = []
+        # ── Phase 1: pick types + pre-dump for ALL nodes ──────────────────────
+        node_plans = []  # (node, outage_type, node_ip, node_rpc_port, position)
         outage_num = 0
-        for node in outage_nodes:
+        for i, node in enumerate(outage_nodes):
             if outage_num == 0:
                 if self.npcs == 1:
                     outage_type = random.choice(self.outage_types2)
@@ -52,18 +60,23 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                       storage_node_id=node)
 
-            status = self.ssh_obj.fetch_distrib_logs(
+            self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
-            if not status:
-                raise RuntimeError("Placement Dump Status incorrect!!!")
 
+            node_plans.append((node, outage_type, node_ip, node_rpc_port, i))
+
+        # ── Phase 2: trigger all outages simultaneously via threads ────────────
+        outage_results = {}  # node → (effective_type, outage_dur)
+
+        def _trigger(node, outage_type, node_ip, node_rpc_port, position):
             self.logger.info(f"Performing {outage_type} on node {node}.")
-            self.log_outage_event(node, outage_type, "Outage started")
-
             node_outage_dur = 0
+            effective_type = outage_type
             if outage_type == "container_stop":
                 self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             elif outage_type == "graceful_shutdown":
@@ -72,12 +85,26 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                 self._disconnect_partial_interface(node, node_ip)
                 node_outage_dur = 300
             elif outage_type == "interface_full_network_interrupt":
-                node_outage_dur = self._disconnect_full_interface(node, node_ip)
+                node_outage_dur, effective_type = self._disconnect_full_interface(
+                    node, node_ip, position)
+            self.log_outage_event(node, effective_type, "Outage started")
+            outage_results[node] = (effective_type, node_outage_dur)
 
-            outage_combinations.append((node, outage_type, node_outage_dur))
+        threads = [
+            threading.Thread(target=_trigger, args=(node, otype, nip, nrpc, pos))
+            for node, otype, nip, nrpc, pos in node_plans
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        outage_combinations = []
+        for node, _, _, _, _ in node_plans:
+            effective_type, node_outage_dur = outage_results[node]
+            outage_combinations.append((node, effective_type, node_outage_dur))
             self.current_outage_nodes.append(node)
 
-        from datetime import datetime
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
 

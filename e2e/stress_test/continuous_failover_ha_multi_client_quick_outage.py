@@ -381,9 +381,11 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self.ssh_obj.fetch_distrib_logs(
             storage_node_ip=cur_node_ip,
             storage_node_id=self.current_outage_node,
-            logs_path=self.docker_logs_path
+            logs_path=self.docker_logs_path,
+            validate_async=True,
+            error_sink=self.dump_validation_errors
         )
-        
+
         # self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
         #                           storage_node_id=self.current_outage_node)
 
@@ -421,7 +423,9 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                     self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node,
-                        logs_path=self.docker_logs_path
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
                     )
             # Keep node strictly offline for 5 minutes
             sleep_n_sec(60)
@@ -436,7 +440,9 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                     self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node,
-                        logs_path=self.docker_logs_path
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
                     )
             
         elif outage_type == "interface_full_network_interrupt":
@@ -466,7 +472,9 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                     self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node,
-                        logs_path=self.docker_logs_path
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
                     )
             sleep_n_sec(200)
             try:
@@ -485,7 +493,9 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self.ssh_obj.fetch_distrib_logs(
             storage_node_ip=cur_node_ip,
             storage_node_id=self.sn_primary_secondary_map[self.current_outage_node],
-            logs_path=self.docker_logs_path
+            logs_path=self.docker_logs_path,
+            validate_async=True,
+            error_sink=self.dump_validation_errors
         )
 
         # Only wait for ONLINE (skip deep health)
@@ -515,7 +525,9 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self.ssh_obj.fetch_distrib_logs(
             storage_node_ip=cur_node_ip,
             storage_node_id=self.current_outage_node,
-            logs_path=self.docker_logs_path
+            logs_path=self.docker_logs_path,
+            validate_async=True,
+            error_sink=self.dump_validation_errors
         )
 
         # keep container log streaming going
@@ -542,6 +554,10 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
 
         iteration = 1
         while True:
+            if self.dump_validation_errors:
+                raise RuntimeError(
+                    f"Placement dump validation failed: {self.dump_validation_errors}"
+                )
             outage_type = self._perform_outage()
             self.restart_nodes_after_failover(outage_type)
 
@@ -562,7 +578,9 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                     self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node,
-                        logs_path=self.docker_logs_path
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
                     )
                 
                     self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
