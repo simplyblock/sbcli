@@ -398,15 +398,16 @@ def check_node(snode):
 
     logger.info(f"Checking node {snode.hostname}")
 
-    # If the node is offline, ensure ANA failover + auto-restart were processed.
-    # Another service may have set the node offline without triggering these
-    # (e.g. sbctl shutdown, or a race in status transitions).
+    # If the node is offline, ensure ANA failover was processed.
+    # Another service may have set the node offline without triggering it.
+    # Note: do NOT add auto-restart here — the node may have been
+    # intentionally shut down via sbctl.  Auto-restart is only added by
+    # set_node_offline() when the monitor itself detects a failure.
     if snode.status == StorageNode.STATUS_OFFLINE:
         try:
             storage_node_ops.trigger_ana_failover_for_node(snode)
         except Exception as e:
             logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
-        tasks_controller.add_node_to_auto_restart(snode)
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)
