@@ -1,6 +1,6 @@
 
 observability:
-  enabled: false
+  enabled: true
   secret: "sWbpOgba1bKnCfcPkVQi"
   deletionInterval: "3d"
   level: "DEBUG"
@@ -73,9 +73,12 @@ opensearch:
   antiAffinity: "hard"
   persistence:
     enabled: true
+    image: busybox
     storageClass: local-hostpath
     size: 20Gi
-
+  image:
+    repository: "opensearchproject/opensearch"
+    tag: ""
   resources:
     requests:
       cpu: "100m"
@@ -85,8 +88,8 @@ opensearch:
       memory: "3Gi"
 
   extraEnvs:
-    - name: OPENSEARCH_JAVA_OPTS
-      value: "-Xms1g -Xmx1g"
+    # - name: OPENSEARCH_JAVA_OPTS
+    #   value: "-Xms1g -Xmx1g"
     - name: bootstrap.memory_lock
       value: "true"
     - name: action.auto_create_index
