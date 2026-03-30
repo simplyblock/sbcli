@@ -231,6 +231,9 @@ ingress:
     hostNetwork: true  
     dnsPolicy: ClusterFirstWithHostNet
     replicaCount: 2
+    image:
+      image: ingress-nginx/controller
+      tag: "v1.10.1"
     service:
       type: ClusterIP
     extraArgs:
