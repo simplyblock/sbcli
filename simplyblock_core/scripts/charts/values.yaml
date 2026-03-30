@@ -17,9 +17,9 @@ grafana:
   contactPoint: "https://hooks.slack.com/services/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"
 
 image:
-  simplyblock: 
-    repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "R25.10-Hotfix"
+  simplyblock:
+    repository: "quay.io/simplyblock-io/simplyblock"
+    tag: "R25.10-Hotfix-quay"
     pullPolicy: "Always"
 
 tolerations:
@@ -27,17 +27,17 @@ tolerations:
   list:
   - operator: Exists
     effect:
-    key: 
+    key:
     value:
 nodeSelector:
   create: false
-  key: 
+  key:
   value:
-  
+
 ports:
   lvolNvmfPortStart:
 
-storageclass:  
+storageclass:
   allowedTopologyZones: []
 
 foundationdb:
@@ -53,6 +53,21 @@ mongodb:
     limits:
       cpu: 250m
       memory: 1Gi
+  community:
+    mongodb:
+      repo: quay.io/simplyblock-io
+      name: mongodb-community-server
+      imageType: ubi8
+    agent:
+      name: mongodb-agent
+      version: 108.0.2.8729-1
+    registry:
+      agent: quay.io/simplyblock-io
+  registry:
+    operator: quay.io/simplyblock-io
+    agent: quay.io/simplyblock-io
+    readinessProbe: quay.io/simplyblock-io
+    versionUpgradeHook: quay.io/simplyblock-io
   affinity:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -72,8 +87,12 @@ opensearch:
   antiAffinity: "hard"
   persistence:
     enabled: true
+    image: quay.io/simplyblock-io/busybox
     storageClass: local-hostpath
     size: 10Gi
+  image:
+    repository: "quay.io/simplyblock-io/opensearch"
+    tag: ""
 
   resources:
     requests:
@@ -84,8 +103,6 @@ opensearch:
       memory: "3Gi"
 
   extraEnvs:
-    - name: OPENSEARCH_JAVA_OPTS
-      value: "-Xms1g -Xmx1g"
     - name: bootstrap.memory_lock
       value: "true"
     - name: action.auto_create_index
@@ -101,7 +118,7 @@ opensearch:
 prometheus:
   simplyblock:
     prometheusURL: simplyblock-prometheus
-    prometheusPORT: 9090    
+    prometheusPORT: 9090
   server:
     fullnameOverride: simplyblock-prometheus
     enabled: true
@@ -109,6 +126,9 @@ prometheus:
       enabled: true
     name: simplyblock-prometheus
     replicaCount: 1
+    image:
+      repository: quay.io/simplyblock-io/prometheus
+      tag: ""
     podLabels:
       app: simplyblock-prometheus
     podAnnotations:
@@ -147,7 +167,7 @@ prometheus:
       storage.tsdb.max-block-duration: 2h
     sidecarContainers:
       thanos-sidecar:
-        image: thanosio/thanos:v0.31.0
+        image: quay.io/simplyblock-io/thanos:v0.31.0
         args:
           - sidecar
           - --tsdb.path=/prometheus
@@ -193,21 +213,54 @@ prometheus:
 
   kube-state-metrics:
     enabled: false
+  configmapReload:
+    prometheus:
+      image:
+        repository: quay.io/simplyblock-io/prometheus-config-reloader
+        tag: v0.72.0
 
+
+reloader:
+    nameOverride: simplyblock-reloader
+    fullnameOverride: simplyblock-reloader
+    reloader:
+      deployment:
+        image:
+          name: quay.io/simplyblock-io/reloader
+          tag: v1.3.0
 ingress:
   enabled: true
   ingressClassName: nginx
   useDNS: false
   host: ""
-  tlsSecret: 
+  tlsSecret:
   controller:
-    hostNetwork: true  
+    hostNetwork: true
     dnsPolicy: ClusterFirstWithHostNet
     replicaCount: 2
+    image:
+      registry: "quay.io/simplyblock-io"
+      image: ingress-nginx-controller
+      tag: "v1.10.1"
     service:
       type: ClusterIP
     extraArgs:
       tcp-services-configmap: "simplyblock/simplyblock-tcp-services"
+    opentelemetry:
+      enabled: false
+      name: opentelemetry
+      image:
+        registry: "quay.io/simplyblock-io"
+        image: opentelemetry
+        tag: "v20230721-3e2062ee5"
+    admissionWebhooks:
+      enabled: true
+      patch:
+        image:
+          registry: "quay.io/simplyblock-io"
+          image: kube-webhook-certgen
+          tag: "v1.4.1"
+          digest: ""
     affinity:
       podAntiAffinity:
         requiredDuringSchedulingIgnoredDuringExecution:
@@ -219,3 +272,11 @@ ingress:
                     - ingress
             topologyKey: "kubernetes.io/hostname"
     nodeSelector: {}
+  defaultBackend:
+    enabled: false
+    name: defaultbackend
+    image:
+      registry: "quay.io/simplyblock-io"
+      image: defaultbackend-amd64
+      tag: "1.5"
+

@@ -42,7 +42,7 @@ spec:
       {{- end }}    
       containers:
         - name: graylog
-          image: graylog/graylog:5.0
+          image: quay.io/simplyblock-io/graylog:5.0
           command: ["/usr/bin/tini", "--"]
           args: ["wait-for-it", "opensearch-cluster-master:9200", "--", "/docker-entrypoint.sh"]
           env:
@@ -157,7 +157,7 @@ spec:
       {{- end }}          
       containers:
         - name: thanos-store
-          image: thanosio/thanos:v0.31.0
+          image: quay.io/simplyblock-io/thanos:v0.31.0
           args:
             - store
             - --objstore.config-file=/etc/thanos/objstore.yml
@@ -219,7 +219,7 @@ spec:
       {{- end }}          
       containers:
         - name: thanos-query
-          image: thanosio/thanos:v0.31.0
+          image: quay.io/simplyblock-io/thanos:v0.31.0
           args:
             - query
             - --http-address=0.0.0.0:9091
@@ -270,7 +270,7 @@ spec:
       {{- end }}          
       containers:
         - name: thanos-compactor
-          image: thanosio/thanos:v0.31.0
+          image: quay.io/simplyblock-io/thanos:v0.31.0
           args:
             - compact
             - --data-dir=/data
@@ -335,7 +335,7 @@ spec:
       {{- end }}          
       containers:
         - name: node-exporter
-          image: prom/node-exporter:v1.7.0
+          image: quay.io/simplyblock-io/node-exporter:v1.7.0
           args:
             - '--path.procfs=/host/proc'
             - '--path.sysfs=/host/sys'
@@ -419,7 +419,7 @@ spec:
       {{- end }}    
       containers:
         - name: grafana
-          image: grafana/grafana:10.0.12
+          image: quay.io/simplyblock-io/grafana:10.0.12
           env:
             - name: GF_SECURITY_ADMIN_USER
               value: "admin"
