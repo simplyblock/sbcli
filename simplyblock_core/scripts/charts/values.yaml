@@ -1,6 +1,6 @@
 
 observability:
-  enabled: false
+  enabled: true
   secret: "sWbpOgba1bKnCfcPkVQi"
   deletionInterval: "3d"
   level: "DEBUG"
@@ -15,12 +15,12 @@ observability:
 
 image:
   simplyblock: 
-    repository: "simplyblock/simplyblock"
+    repository: "quay.io/simplyblock-io/simplyblock"
     tag: "main-snapshot-replication"
     pullPolicy: "Always"
   manager:
-    repository: "simplyblock/simplyblock-manager"
-    tag: "snapshot_replication"
+    repository: "quay.io/simplyblock-io/simplyblock-manager"
+    tag: "main"
     pullPolicy: "Always"
 
 tolerations:
@@ -54,6 +54,14 @@ mongodb:
     limits:
       cpu: 250m
       memory: 1Gi
+  community:
+    mongodb:
+      repo: quay.io/mongodb
+  registry:
+    operator: quay.io/mongodb
+    agent: quay.io/mongodb
+    readinessProbe: quay.io/mongodb
+
   affinity:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -73,9 +81,12 @@ opensearch:
   antiAffinity: "hard"
   persistence:
     enabled: true
+    image: busybox
     storageClass: local-hostpath
     size: 20Gi
-
+  image:
+    repository: "opensearchproject/opensearch"
+    tag: ""
   resources:
     requests:
       cpu: "100m"
@@ -85,8 +96,8 @@ opensearch:
       memory: "3Gi"
 
   extraEnvs:
-    - name: OPENSEARCH_JAVA_OPTS
-      value: "-Xms1g -Xmx1g"
+    # - name: OPENSEARCH_JAVA_OPTS
+    #   value: "-Xms1g -Xmx1g"
     - name: bootstrap.memory_lock
       value: "true"
     - name: action.auto_create_index
@@ -110,6 +121,9 @@ prometheus:
       enabled: true
     name: simplyblock-prometheus
     replicaCount: 1
+    image:
+      repository: quay.io/prometheus/prometheus
+      tag: ""    
     podLabels:
       app: simplyblock-prometheus
     podAnnotations:
@@ -148,7 +162,7 @@ prometheus:
       storage.tsdb.max-block-duration: 2h
     sidecarContainers:
       thanos-sidecar:
-        image: thanosio/thanos:v0.31.0
+        image: quay.io/simplyblock-io/thanos:v0.31.0
         args:
           - sidecar
           - --tsdb.path=/prometheus
@@ -194,6 +208,18 @@ prometheus:
 
   kube-state-metrics:
     enabled: false
+  configmapReload:
+    prometheus:
+      repository: quay.io/prometheus-operator/prometheus-config-reloader
+      tag: v0.72.0
+
+
+reloader:
+  nameOverride: simplyblock-reloader
+  fullnameOverride: simplyblock-reloader
+  image:
+    repository: ghcr.io/stakater/reloader
+    tag: v1.3.0
 
 ingress:
   enabled: false
@@ -244,7 +270,7 @@ simplyblock:
     
   storageNodes:
     name: simplyblock-node
-    clusterImage: simplyblock/simplyblock:main-snapshot-replication
+    clusterImage: quay.io/simplyblock-io/simplyblock:main-snapshot-replication
     mgmtIfc: eth0
     maxLVol: 10
     maxSize: 0

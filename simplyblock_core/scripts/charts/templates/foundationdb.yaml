@@ -31,7 +31,7 @@ spec:
       serviceAccountName: simplyblock-fdb-controller-manager
       initContainers:
         - name: foundationdb-kubernetes-init-7-3
-          image: foundationdb/fdb-kubernetes-monitor:7.3.63
+          image: quay.io/simplyblock-io/fdb-kubernetes-monitor:7.3.63
           args:
             - "--copy-library"
             - "7.3"
@@ -53,7 +53,7 @@ spec:
             - /manager
           args:
             - "--health-probe-bind-address=:9443"
-          image: foundationdb/fdb-kubernetes-operator:v2.18.0
+          image: quay.io/simplyblock-io/fdb-kubernetes-operator:v2.18.0
           name: manager
           env:
             - name: WATCH_NAMESPACE

@@ -191,7 +191,7 @@ spec:
             cpu: "500m"
             memory: "2Gi"
       - name: fluent-bit
-        image: fluent/fluent-bit:1.8.11
+        image: quay.io/simplyblock-io/fluent-bit:1.8.11
         volumeMounts:
           - name: varlog
             mountPath: /var/log
@@ -432,7 +432,7 @@ spec:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
         - name: fluent-bit
-          image: fluent/fluent-bit:1.8.11
+          image: quay.io/simplyblock-io/fluent-bit:1.8.11
           volumeMounts:
             - name: varlog
               mountPath: /var/log
@@ -675,7 +675,7 @@ spec:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
         - name: fluent-bit
-          image: fluent/fluent-bit:1.8.11
+          image: quay.io/simplyblock-io/fluent-bit:1.8.11
           volumeMounts:
             - name: varlog
               mountPath: /var/log
