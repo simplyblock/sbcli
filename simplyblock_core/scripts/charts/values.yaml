@@ -54,6 +54,14 @@ mongodb:
     limits:
       cpu: 250m
       memory: 1Gi
+  community:
+    mongodb:
+      repo: quay.io/mongodb
+  registry:
+    operator: quay.io/mongodb
+    agent: quay.io/mongodb
+    readinessProbe: quay.io/mongodb
+
   affinity:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
