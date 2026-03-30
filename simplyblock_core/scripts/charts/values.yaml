@@ -110,6 +110,9 @@ prometheus:
       enabled: true
     name: simplyblock-prometheus
     replicaCount: 1
+    image:
+      repository: quay.io/prometheus/prometheus
+      tag: ""    
     podLabels:
       app: simplyblock-prometheus
     podAnnotations:
@@ -194,6 +197,12 @@ prometheus:
 
   kube-state-metrics:
     enabled: false
+  configmapReload:
+    prometheus:
+      repository: quay.io/prometheus-operator/prometheus-config-reloader
+      tag: v0.72.0
+
+
 
 ingress:
   enabled: false
