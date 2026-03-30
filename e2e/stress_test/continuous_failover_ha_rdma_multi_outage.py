@@ -233,8 +233,9 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
           - All other cases: random.choice([600, 300, 30]).
 
         Returns:
-            (outage_dur, effective_name): duration in seconds and the canonical
-            outage-type string e.g. ``"interface_full_network_interrupt_30sec"``.
+            outage_dur (int): duration in seconds. Callers should compute the
+            canonical outage-type string as
+            ``f"interface_full_network_interrupt_{outage_dur}sec"``.
         """
         self.logger.info("Handling full interface network interruption (RDMA)...")
         active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
@@ -242,14 +243,13 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
             outage_dur = random.choice([600, 300])
         else:
             outage_dur = random.choice([600, 300, 30])
-        effective_name = f"interface_full_network_interrupt_{outage_dur}sec"
-        self.logger.info(f"[N/W Outage] duration={outage_dur}s → {effective_name}")
+        self.logger.info(f"[N/W Outage] duration={outage_dur}s → interface_full_network_interrupt_{outage_dur}sec")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
             args=(node_ip, active_interfaces, outage_dur),
         )
         self.disconnect_thread.start()
-        return outage_dur, effective_name
+        return outage_dur
 
     # ------------------------------------------------------------------
     # perform_n_plus_k_outages: node selection depends on fault tolerance
@@ -331,8 +331,8 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
                 self._disconnect_partial_interface(node, node_ip)
                 node_outage_dur = 300
             elif outage_type == "interface_full_network_interrupt":
-                node_outage_dur, effective_type = self._disconnect_full_interface(
-                    node, node_ip, position)
+                node_outage_dur = self._disconnect_full_interface(node, node_ip, position)
+                effective_type = f"interface_full_network_interrupt_{node_outage_dur}sec"
             self.log_outage_event(node, effective_type, "Outage started")
             outage_results[node] = (effective_type, node_outage_dur)
 

@@ -182,9 +182,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 raise RuntimeError("Placement Dump Status incorrect!!!")
 
             self.logger.info(f"Performing {outage_type} on primary node {node}.")
-            self.log_outage_event(node, outage_type, "Outage started")
 
             node_outage_dur = 0
+            effective_type = outage_type
             if outage_type == "container_stop":
                 self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             elif outage_type == "graceful_shutdown":
@@ -194,8 +194,10 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 node_outage_dur = 300
             elif outage_type == "interface_full_network_interrupt":
                 node_outage_dur = self._disconnect_full_interface(node, node_ip)
+                effective_type = f"interface_full_network_interrupt_{node_outage_dur}sec"
 
-            outage_combinations.append((node, outage_type, node_outage_dur))
+            self.log_outage_event(node, effective_type, "Outage started")
+            outage_combinations.append((node, effective_type, node_outage_dur))
             self.current_outage_nodes.append(node)
 
         self.outage_start_time = int(datetime.now().timestamp())
@@ -796,9 +798,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             for node, outage_type, node_outage_dur in outage_events:
                 self.current_outage_node = node
                 self.outage_dur = node_outage_dur
-                if outage_type in ["container_stop", "interface_full_network_interrupt"] and self.npcs > 1:
-                # [COMMENTED OUT — kept for future use] substring match for two-phase named types:
-                # if (outage_type == "container_stop" or "interface_full_network_interrupt" in outage_type) and self.npcs > 1:
+                if (outage_type == "container_stop" or "interface_full_network_interrupt" in outage_type) and self.npcs > 1:
+                # [COMMENTED OUT — exact match (before duration suffix was added to outage log names)]:
+                # if outage_type in ["container_stop", "interface_full_network_interrupt"] and self.npcs > 1:
                     self.restart_nodes_after_failover(outage_type, True)
                 else:
                     self.restart_nodes_after_failover(outage_type)

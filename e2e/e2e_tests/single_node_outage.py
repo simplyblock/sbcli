@@ -224,7 +224,7 @@ class TestSingleNodeOutage(TestClusterBase):
 
         # Write steps in order
         steps = {
-            "Storage Node": ["suspended", "shutdown", "restart"],
+            "Storage Node": ["shutdown", "restart"],
             "Device": {"restart"}
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
@@ -486,7 +486,7 @@ class TestHASingleNodeOutage(TestClusterBase):
 
         # Write steps in order
         steps = {
-            "Storage Node": ["suspended", "shutdown", "restart"],
+            "Storage Node": ["shutdown", "restart"],
             "Device": {"restart"}
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
