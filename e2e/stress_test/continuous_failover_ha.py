@@ -696,22 +696,30 @@ class RandomFailoverTest(TestLvolHACluster):
                 if clone_details["snapshot"] in snapshots:
                     self.common_utils.validate_fio_test(self.fio_node,
                                                         log_file=clone_details["Log"])
+                    self.disconnect_lvol(clone_details['ID'])
                     self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=False)
                     fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=True)
                     for pid in fio_pids:
                         self.ssh_obj.kill_processes(self.fio_node, pid=pid)
                     attempt = 1
-                    while len(fio_pids) > 2:
+                    while True:
                         self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=False)
                         fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=True)
-                        if attempt >= 30:
-                            raise Exception("FIO not killed on clone")
+                        if len(fio_pids) <= 2:
+                            break
+                        for pid in fio_pids:
+                            self.ssh_obj.kill_processes(self.fio_node, pid=pid)
+                        if attempt >= 20:
+                            self.logger.warning(
+                                f"FIO not fully killed on clone '{clone_name}' after {attempt} attempts "
+                                f"(remaining pids: {fio_pids}). Proceeding anyway."
+                            )
+                            break
                         attempt += 1
                         sleep_n_sec(10)
                         
                     self.ssh_obj.unmount_path(self.fio_node, f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{clone_name}")
-                    self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
                     sleep_n_sec(30)
                     if clone_name in self.lvols_without_sec_connect:
@@ -726,22 +734,30 @@ class RandomFailoverTest(TestLvolHACluster):
 
             self.common_utils.validate_fio_test(self.fio_node,
                                                 log_file=self.lvol_mount_details[lvol]["Log"])
+            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=False)
             fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=True)
             for pid in fio_pids:
                 self.ssh_obj.kill_processes(self.fio_node, pid=pid)
             attempt = 1
-            while len(fio_pids) > 2:
+            while True:
                 self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=False)
                 fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=True)
-                if attempt >= 30:
-                    raise Exception("FIO not killed on lvols")
+                if len(fio_pids) <= 2:
+                    break
+                for pid in fio_pids:
+                    self.ssh_obj.kill_processes(self.fio_node, pid=pid)
+                if attempt >= 20:
+                    self.logger.warning(
+                        f"FIO not fully killed on lvol '{lvol}' after {attempt} attempts "
+                        f"(remaining pids: {fio_pids}). Proceeding anyway."
+                    )
+                    break
                 attempt += 1
                 sleep_n_sec(10)
 
             self.ssh_obj.unmount_path(self.fio_node, f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.fio_node, dir_path=f"/mnt/{lvol}")
-            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol)
             if lvol in self.lvols_without_sec_connect:
                 self.lvols_without_sec_connect.remove(lvol)

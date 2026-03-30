@@ -3696,7 +3696,9 @@ class RunnerK8sLog:
                         if current_id != prev_id:
                             self._pod_container_map[key] = current_id
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            log_file = f"{self.log_dir}/{pod}_{container}_{self.test_name}_{timestamp}_restart.log"
+                            pod_log_dir = os.path.join(self.log_dir, pod)
+                            os.makedirs(pod_log_dir, exist_ok=True)
+                            log_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_restart.log"
                             session_name = f"{pod}_{container}_restart_{self.generate_random_string()}"
 
                             cmd = [
