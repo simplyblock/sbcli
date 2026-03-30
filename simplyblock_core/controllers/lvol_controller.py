@@ -797,8 +797,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
 
         if is_primary or lvol.node_id == snode.get_id():
             ana_state = "optimized"
-        elif secondary_index >= 1:
-            ana_state = "inaccessible"
         else:
             ana_state = "non_optimized"
 
