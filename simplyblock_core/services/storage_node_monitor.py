@@ -349,7 +349,8 @@ def node_port_check_fun(snode):
         ports = [snode.nvmf_port]
         if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
-                if n.lvstore_status == "ready":
+                if n.lvstore_status == "ready" and n.status not in [
+                        StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
                     ports.append(n.get_lvol_subsys_port(n.lvstore))
         if not snode.is_secondary_node:
             ports.append(snode.get_lvol_subsys_port(snode.lvstore))
