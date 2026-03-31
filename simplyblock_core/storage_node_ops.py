@@ -3619,44 +3619,41 @@ def recreate_lvstore_on_sec(secondary_node):
 
             nodes_to_unblock.append(primary_node)
 
-        elif not is_second_sec:
-            ### 3b- Primary is offline, this is the first secondary.
-            # The other secondary may be the active leader for this group.
-            # Drop leadership on all other online secondaries before examine,
-            # to prevent writer conflicts when this node's JC connects to remote JMs.
-            other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.secondary_node_id_2]
-                            if sid and sid != secondary_node.get_id()]
-            for other_sec_id in other_sec_ids:
-                other_sec = db_controller.get_storage_node_by_id(other_sec_id)
-                if other_sec and other_sec.status == StorageNode.STATUS_ONLINE:
-                    logger.info(f"Primary offline: dropping leadership for jm_vuid {primary_node.jm_vuid} "
-                                f"on other secondary {other_sec.get_id()}")
-                    other_fw_api = FirewallClient(other_sec, timeout=5, retry=2)
-                    other_sec_port_type = "udp" if other_sec.active_rdma else "tcp"
-                    other_fw_api.firewall_set_port(
-                        primary_lvs_port, other_sec_port_type, "block", other_sec.rpc_port)
-                    tcp_ports_events.port_deny(other_sec, primary_lvs_port)
+        # Block the other secondary/tertiary for this LVS (regardless of primary status).
+        # When secondary restarts, block tertiary. When tertiary restarts, block secondary.
+        other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.secondary_node_id_2]
+                        if sid and sid != secondary_node.get_id()]
+        for other_sec_id in other_sec_ids:
+            other_sec = db_controller.get_storage_node_by_id(other_sec_id)
+            if other_sec and other_sec.status == StorageNode.STATUS_ONLINE:
+                logger.info(f"Blocking port and dropping leadership for jm_vuid {primary_node.jm_vuid} "
+                            f"on sibling secondary {other_sec.get_id()}")
+                other_fw_api = FirewallClient(other_sec, timeout=5, retry=2)
+                other_sec_port_type = "udp" if other_sec.active_rdma else "tcp"
+                other_fw_api.firewall_set_port(
+                    primary_lvs_port, other_sec_port_type, "block", other_sec.rpc_port)
+                tcp_ports_events.port_deny(other_sec, primary_lvs_port)
 
-                    time.sleep(0.5)
+                time.sleep(0.5)
 
-                    other_rpc = RPCClient(other_sec.mgmt_ip, other_sec.rpc_port,
-                                          other_sec.rpc_username, other_sec.rpc_password)
-                    other_rpc.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
-                    other_rpc.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
-                    logger.info(f"Checking for inflight IO from node: {other_sec.get_id()}")
-                    for i in range(100):
-                        is_inflight = other_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
-                        if is_inflight:
-                            logger.info("Inflight IO found, retry in 100ms")
-                            time.sleep(0.1)
-                        else:
-                            logger.info("Inflight IO NOT found, continuing")
-                            break
+                other_rpc = RPCClient(other_sec.mgmt_ip, other_sec.rpc_port,
+                                      other_sec.rpc_username, other_sec.rpc_password)
+                other_rpc.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
+                other_rpc.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+                logger.info(f"Checking for inflight IO from node: {other_sec.get_id()}")
+                for i in range(100):
+                    is_inflight = other_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
+                    if is_inflight:
+                        logger.info("Inflight IO found, retry in 100ms")
+                        time.sleep(0.1)
                     else:
-                        logger.error(
-                            f"Timeout while checking for inflight IO after 10 seconds on node {other_sec.get_id()}")
+                        logger.info("Inflight IO NOT found, continuing")
+                        break
+                else:
+                    logger.error(
+                        f"Timeout while checking for inflight IO after 10 seconds on node {other_sec.get_id()}")
 
-                    nodes_to_unblock.append(other_sec)
+                nodes_to_unblock.append(other_sec)
 
         ### 5- examine
         ret = secondary_rpc_client.bdev_examine(primary_node.raid)
