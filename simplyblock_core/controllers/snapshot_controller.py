@@ -21,7 +21,28 @@ logger = lg.getLogger()
 db_controller = DBController()
 
 
-def add(lvol_id, snapshot_name, backup=False):
+def _acquire_lvol_mutation_lock(node):
+    """Block concurrent lvstore mutations while HA registration is in flight."""
+    had_lock = node.lvol_sync_del()
+    if not had_lock:
+        node.lvol_del_sync_lock()
+    return had_lock
+
+
+def _release_lvol_mutation_lock(node, had_lock):
+    if not had_lock:
+        node.lvol_del_sync_lock_reset()
+
+
+def _rollback_lvol_creation(lvol, node_ids):
+    for node_id in dict.fromkeys(node_ids):
+        try:
+            lvol_controller.delete_lvol_from_node(lvol.get_id(), node_id)
+        except Exception as e:
+            logger.error(f"Failed to rollback lvol {lvol.get_id()} from node {node_id}: {e}")
+
+
+def add(lvol_id, snapshot_name, backup=False, lock=True):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
@@ -53,7 +74,7 @@ def add(lvol_id, snapshot_name, backup=False):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    if snode.lvol_sync_del():
+    if snode.lvol_sync_del() and lock:
         logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
         return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
@@ -120,6 +141,8 @@ def add(lvol_id, snapshot_name, backup=False):
         secondary_nodes = []
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+        if lock:
+            had_lock = _acquire_lvol_mutation_lock(host_node)
 
         # Build nodes list with all secondaries
         secondary_ids = [host_node.secondary_node_id]
@@ -189,22 +212,30 @@ def add(lvol_id, snapshot_name, backup=False):
             else:
                 return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
-        for sec in secondary_nodes:
-            sec_rpc_client = RPCClient(
-                sec.mgmt_ip, sec.rpc_port, sec.rpc_username, sec.rpc_password)
-
-            ret = sec_rpc_client.bdev_lvol_snapshot_register(
-                f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
-            if not ret:
-                msg = f"Failed to register snapshot on node: {sec.get_id()}"
-                logger.error(msg)
-                logger.info(f"Removing snapshot from {primary_node.get_id()}")
-                rpc_client = RPCClient(
-                    primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
-                ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
-                if not ret:
-                    logger.error(f"Failed to delete snap from node: {snode.get_id()}")
-                return False, msg
+        # for sec in secondary_nodes:
+        #     sec_rpc_client = RPCClient(
+        #         sec.mgmt_ip, sec.rpc_port, sec.rpc_username, sec.rpc_password)
+        #
+        #     ret = sec_rpc_client.bdev_lvol_snapshot_register(
+        #         f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
+        #     if not ret:
+        #         msg = f"Failed to register snapshot on node: {sec.get_id()}"
+        #         logger.error(msg)
+        #         logger.info(f"Removing snapshot from {primary_node.get_id()}")
+        #         for registered_sec in registered_secs:
+        #             ret, _ = registered_sec.rpc_client().delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
+        #             if not ret:
+        #                 logger.error(f"Failed to delete snap from secondary node: {registered_sec.get_id()}")
+        #         rpc_client = RPCClient(
+        #             primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
+        #         ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
+        #         if not ret:
+        #             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+        #         return False, msg
+        #     registered_secs.append(sec)
+        # finally:
+        #     if lock:
+        #         _release_lvol_mutation_lock(host_node, had_lock)
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
@@ -280,6 +311,7 @@ def list(node_id=None):
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
             "Base Snapshot": snap.snap_ref_id,
             "Clones": clones,
+            "Status": snap.status,
         })
     return utils.print_table(data)
 
@@ -431,7 +463,7 @@ def delete(snapshot_uuid, force_delete=False):
     return True
 
 
-def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False):
+def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False, lock=True):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
@@ -457,7 +489,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.exception(msg)
         return False, msg
 
-    if snode.lvol_sync_del():
+    if snode.lvol_sync_del() and lock:
         logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
         return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
@@ -476,11 +508,14 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, msg
 
     for lvol in db_controller.get_lvols():
-        if lvol.pool_uuid == pool.get_id():
-            if lvol.lvol_name == clone_name:
-                msg=f"LVol name must be unique: {clone_name}"
-                logger.error(msg)
-                return False, msg
+        if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
+            continue
+        if lvol.cloned_from_snap == snapshot_id and lvol.status != LVol.STATUS_IN_DELETION:
+            logger.info(f"Clone already exists, reusing lvol: {lvol.get_id()}")
+            return lvol.get_id(), False
+        msg=f"LVol name must be unique: {clone_name}"
+        logger.error(msg)
+        return False, msg
 
     size = snap.size
     if 0 < pool.lvol_max_size < size:
@@ -627,73 +662,84 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         if host_node.secondary_node_id_2:
             secondary_ids.append(host_node.secondary_node_id_2)
         lvol.nodes = [host_node.get_id()] + secondary_ids
+        if lock:
+            had_lock = _acquire_lvol_mutation_lock(host_node)
 
-        primary_node = None
-        secondary_nodes = []
-        sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        if host_node.status == StorageNode.STATUS_ONLINE:
+        try:
+            primary_node = None
+            secondary_nodes = []
+            sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+            if host_node.status == StorageNode.STATUS_ONLINE:
 
-            if lvol_controller.is_node_leader(host_node, lvol.lvs_name):
-                primary_node = host_node
-                if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = "Secondary node is in down status, can not clone snapshot"
-                    logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
-                    return False, msg
+                if lvol_controller.is_node_leader(host_node, lvol.lvs_name):
+                    primary_node = host_node
+                    if sec_node.status == StorageNode.STATUS_DOWN:
+                        msg = "Secondary node is in down status, can not clone snapshot"
+                        logger.error(msg)
+                        lvol.remove(db_controller.kv_store)
+                        return False, msg
 
-                if sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_nodes.append(sec_node)
+                    if sec_node.status == StorageNode.STATUS_ONLINE:
+                        secondary_nodes.append(sec_node)
+
+                elif sec_node.status == StorageNode.STATUS_ONLINE:
+                    if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
+                        primary_node = sec_node
+                        if host_node.status == StorageNode.STATUS_ONLINE:
+                            secondary_nodes.append(host_node)
+                    else:
+                        # both nodes are non leaders and online, set primary as leader
+                        primary_node = host_node
+                        secondary_nodes.append(sec_node)
+
+                else:
+                    # sec node is not online, set primary as leader
+                    primary_node = host_node
 
             elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
-                    primary_node = sec_node
-                    if host_node.status == StorageNode.STATUS_ONLINE:
-                        secondary_nodes.append(host_node)
-                else:
-                    # both nodes are non leaders and online, set primary as leader
-                    primary_node = host_node
-                    secondary_nodes.append(sec_node)
+                # create on secondary and set leader if needed,
+                primary_node = sec_node
 
             else:
-                # sec node is not online, set primary as leader
-                primary_node = host_node
-
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            # create on secondary and set leader if needed,
-            primary_node = sec_node
-
-        else:
-            # both primary and secondary are not online
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            lvol.remove(db_controller.kv_store)
-            return False, msg
-
-        # Add additional secondaries if online
-        for extra_sec_id in secondary_ids[1:]:
-            try:
-                extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
-                if extra_sec.status == StorageNode.STATUS_ONLINE and extra_sec.get_id() != (primary_node.get_id() if primary_node else None):
-                    secondary_nodes.append(extra_sec)
-            except KeyError:
-                pass
-
-        if primary_node:
-            lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
-            if error:
-                logger.error(error)
+                # both primary and secondary are not online
+                msg = "Host nodes are not online"
+                logger.error(msg)
                 lvol.remove(db_controller.kv_store)
-                return False, error
+                return False, msg
 
-            lvol.lvol_uuid = lvol_bdev['uuid']
-            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+            # Add additional secondaries if online
+            for extra_sec_id in secondary_ids[1:]:
+                try:
+                    extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
+                    if extra_sec.status == StorageNode.STATUS_ONLINE and extra_sec.get_id() != (primary_node.get_id() if primary_node else None):
+                        secondary_nodes.append(extra_sec)
+                except KeyError:
+                    pass
 
-        for sec in secondary_nodes:
-            lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, sec, is_primary=False)
-            if error:
-                logger.error(error)
-                lvol.remove(db_controller.kv_store)
-                return False, error
+            created_nodes = []
+            if primary_node:
+                lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
+                if error:
+                    logger.error(error)
+                    lvol.remove(db_controller.kv_store)
+                    return False, error
+
+                created_nodes.append(primary_node.get_id())
+                lvol.lvol_uuid = lvol_bdev['uuid']
+                lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+            for sec in secondary_nodes:
+                lvol_bdev, error = lvol_controller.add_lvol_on_node(
+                    lvol, sec, is_primary=False)
+                if error:
+                    logger.error(error)
+                    _rollback_lvol_creation(lvol, created_nodes)
+                    lvol.remove(db_controller.kv_store)
+                    return False, error
+                created_nodes.append(sec.get_id())
+        finally:
+            if lock:
+                _release_lvol_mutation_lock(host_node, had_lock)
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
