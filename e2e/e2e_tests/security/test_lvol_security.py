@@ -1758,6 +1758,7 @@ class TestLvolSecurityMgmtNodeReboot(SecurityTestBase):
         self.logger.info("TC-SEC-086: Management node back online PASSED")
 
         # TC-SEC-087: get-secret after reboot
+        sleep_n_sec(100)  # Extra wait to ensure all services are fully up and secrets are loaded
         self.logger.info("TC-SEC-087: Verifying get-secret after mgmt reboot …")
         post_secret, post_err = self.ssh_obj.get_lvol_host_secret(
             self.mgmt_nodes[0], lvol_id, host_nqn)

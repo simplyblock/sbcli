@@ -1962,14 +1962,42 @@ class SshUtils:
                     f"{local_log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_local_outage.txt"
                 )
                 session = f"{container}_local_{generate_random_string()}"
-                cmd = (
-                    f"sudo tmux new-session -d -s {session} "
-                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
+
+                # Resolve the Docker JSON log file path once.  Docker reuses the same
+                # path when a container restarts, so `tail -F` on that file survives
+                # container crashes/restarts — unlike `docker logs --follow` which exits
+                # the moment the container dies and captures ALL historical logs first.
+                log_path_out, _ = self.exec_command(
+                    node_ip,
+                    "sudo docker inspect --format '{{.LogPath}}' " + container,
+                    supress_logs=True,
                 )
+                docker_log_path = log_path_out.strip()
+
+                if docker_log_path:
+                    # tail -F  : follow by file name; retries when removed/recreated
+                    # -n 0     : start from the current end (no historical replay)
+                    #            → local file contains ONLY outage-window log lines
+                    cmd = (
+                        f"sudo tmux new-session -d -s {session} "
+                        f"\"tail -F -n 0 '{docker_log_path}' > '{log_file}' 2>&1\""
+                    )
+                    self.logger.info(
+                        f"[local-log] Local logging started for '{container}' on {node_ip} "
+                        f"(tail -F {docker_log_path}) → {log_file}"
+                    )
+                else:
+                    # Fallback: container not yet inspectable — use docker logs --follow
+                    self.logger.warning(
+                        f"[local-log] Could not resolve log path for '{container}' on "
+                        f"{node_ip}; falling back to docker logs --follow"
+                    )
+                    cmd = (
+                        f"sudo tmux new-session -d -s {session} "
+                        f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                    )
+
                 self.exec_command(node_ip, cmd)
-                self.logger.info(
-                    f"[local-log] Local logging started for '{container}' on {node_ip} → {log_file}"
-                )
         except Exception as e:
             self.logger.warning(
                 f"[local-log] start_local_docker_logging error on {node_ip}: {e}"

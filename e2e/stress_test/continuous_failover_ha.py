@@ -696,7 +696,6 @@ class RandomFailoverTest(TestLvolHACluster):
                 if clone_details["snapshot"] in snapshots:
                     self.common_utils.validate_fio_test(self.fio_node,
                                                         log_file=clone_details["Log"])
-                    self.disconnect_lvol(clone_details['ID'])
                     self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=False)
                     fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{clone_name}_fio", return_pid=True)
                     for pid in fio_pids:
@@ -709,11 +708,12 @@ class RandomFailoverTest(TestLvolHACluster):
                             break
                         for pid in fio_pids:
                             self.ssh_obj.kill_processes(self.fio_node, pid=pid)
-                        if attempt >= 20:
+                        if attempt >= 30:  # 5 minutes (30 × 10 s)
                             self.logger.warning(
-                                f"FIO not fully killed on clone '{clone_name}' after {attempt} attempts "
-                                f"(remaining pids: {fio_pids}). Proceeding anyway."
+                                f"FIO still running on clone '{clone_name}' after 5 min; "
+                                f"disconnecting lvol to force exit (remaining pids: {fio_pids})."
                             )
+                            self.disconnect_lvol(clone_details['ID'])
                             break
                         attempt += 1
                         sleep_n_sec(10)
@@ -734,7 +734,6 @@ class RandomFailoverTest(TestLvolHACluster):
 
             self.common_utils.validate_fio_test(self.fio_node,
                                                 log_file=self.lvol_mount_details[lvol]["Log"])
-            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=False)
             fio_pids = self.ssh_obj.find_process_name(self.fio_node, f"{lvol}_fio", return_pid=True)
             for pid in fio_pids:
@@ -747,11 +746,12 @@ class RandomFailoverTest(TestLvolHACluster):
                     break
                 for pid in fio_pids:
                     self.ssh_obj.kill_processes(self.fio_node, pid=pid)
-                if attempt >= 20:
+                if attempt >= 30:  # 5 minutes (30 × 10 s)
                     self.logger.warning(
-                        f"FIO not fully killed on lvol '{lvol}' after {attempt} attempts "
-                        f"(remaining pids: {fio_pids}). Proceeding anyway."
+                        f"FIO still running on lvol '{lvol}' after 5 min; "
+                        f"disconnecting lvol to force exit (remaining pids: {fio_pids})."
                     )
+                    self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
                     break
                 attempt += 1
                 sleep_n_sec(10)
