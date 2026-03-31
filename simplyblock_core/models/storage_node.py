@@ -373,7 +373,7 @@ class StorageNode(BaseNodeObject):
                         continue
                     ret = rpc_client.bdev_nvme_attach_controller(
                         primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                        iface.ip4_address, failover_node.hublvol.nvmf_port if failover_node.hublvol else primary_node.hublvol.nvmf_port,
+                        iface.ip4_address, primary_node.hublvol.nvmf_port,
                         tr_type, multipath="multipath")
                     if not ret:
                         logger.warning(f'Failed to connect failover hublvol path on {iface.ip4_address}')
