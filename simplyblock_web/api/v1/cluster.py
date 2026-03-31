@@ -56,12 +56,18 @@ def add_cluster():
     strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
     is_single_node = cl_data.get('is_single_node', False)
     client_data_nic = cl_data.get('client_data_nic', "")
+    max_fault_tolerance = cl_data.get('max_fault_tolerance', 1)
+    nvmf_base_port = cl_data.get('nvmf_base_port', 4420)
+    rpc_base_port = cl_data.get('rpc_base_port', 8080)
+    snode_api_port = cl_data.get('snode_api_port', 50001)
 
     return utils.get_response(cluster_ops.add_cluster(
         blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
         distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
         qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name,
-        cr_name, cr_namespace, cr_plural, fabric, client_data_nic
+        cr_name, cr_namespace, cr_plural, fabric, client_data_nic=client_data_nic,
+        max_fault_tolerance=max_fault_tolerance,
+        nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port
     ))
 
 
@@ -101,13 +107,20 @@ def create_first_cluster():
     cr_plural = cl_data.get('cr_plural', None)
     cluster_ip = cl_data.get('cluster_ip', None)
     grafana_secret = cl_data.get('grafana_secret', None)
+    client_data_nic = cl_data.get('client_data_nic', "")
+    max_fault_tolerance = cl_data.get('max_fault_tolerance', 1)
+    nvmf_base_port = cl_data.get('nvmf_base_port', 4420)
+    rpc_base_port = cl_data.get('rpc_base_port', 8080)
+    snode_api_port = cl_data.get('snode_api_port', 50001)
 
     try:
         cluster_id = cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name,
-            cr_name, cr_namespace, cr_plural, fabric, cluster_ip=cluster_ip, grafana_secret=grafana_secret)
+            cr_name, cr_namespace, cr_plural, fabric, cluster_ip=cluster_ip, grafana_secret=grafana_secret,
+            client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance,
+            nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port)
         if cluster_id:
             return utils.get_response(db.get_cluster_by_id(cluster_id).to_dict())
         else:
