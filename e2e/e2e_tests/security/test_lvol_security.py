@@ -2,10 +2,10 @@
 E2E security tests for lvol DH-HMAC-CHAP, allowed-hosts, and dynamic host management.
 
 Security feature summary:
-  --sec-options <file>    JSON with {dhchap_key: bool, dhchap_ctrlr_key: bool}
+  pool add --sec-options <file>   JSON {dhchap_key: bool, dhchap_ctrlr_key: bool}; applied at pool level.
   --allowed-hosts <file>  JSON list of host NQNs that can access the lvol
   volume connect <id> --host-nqn <nqn>   returns connect string with embedded DHCHAP keys
-  volume add-host <id> <nqn> [--sec-options]   add host to existing lvol
+  volume add-host <id> <nqn>   add host to existing lvol
   volume remove-host <id> <nqn>                remove host from existing lvol
   volume get-secret <id> <nqn>                 retrieve DHCHAP credentials for a host
 
@@ -278,18 +278,19 @@ class TestLvolSecurityCombinations(SecurityTestBase):
         self.logger.info("=== TestLvolSecurityCombinations START ===")
         self._log_cluster_security_config()
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name + "_auth", self.cluster_id, sec_options=SEC_BOTH)
 
-        # (label, encrypt, sec_options)
+        # (label, encrypt, sec_opts, pool)
         combinations = [
-            ("plain",       False, None),
-            ("crypto",      True,  None),
-            ("auth",        False, SEC_BOTH),
-            ("crypto_auth", True,  SEC_BOTH),
+            ("plain",       False, None,     self.pool_name),
+            ("crypto",      True,  None,     self.pool_name),
+            ("auth",        False, SEC_BOTH, self.pool_name + "_auth"),
+            ("crypto_auth", True,  SEC_BOTH, self.pool_name + "_auth"),
         ]
 
         fio_threads = []
-        for sec_type, encrypt, sec_opts in combinations:
+        for sec_type, encrypt, sec_opts, pool in combinations:
             suffix = _rand_suffix()
             lvol_name = f"sec{sec_type}{suffix}"
             self.logger.info(f"--- Creating lvol {lvol_name!r} (sec_type={sec_type}) ---")
@@ -300,8 +301,8 @@ class TestLvolSecurityCombinations(SecurityTestBase):
                 self._client_host_nqn = None
                 host_nqn = self._get_client_host_nqn()
                 _, err = self.ssh_obj.create_sec_lvol(
-                    self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-                    sec_options=sec_opts, encrypt=encrypt,
+                    self.mgmt_nodes[0], lvol_name, self.lvol_size, pool,
+                    encrypt=encrypt,
                     allowed_hosts=[host_nqn],
                     key1=self.lvol_crypt_keys[0] if encrypt else None,
                     key2=self.lvol_crypt_keys[1] if encrypt else None)
@@ -311,7 +312,7 @@ class TestLvolSecurityCombinations(SecurityTestBase):
                 host_nqn = None
                 self.sbcli_utils.add_lvol(
                     lvol_name=lvol_name,
-                    pool_name=self.pool_name,
+                    pool_name=pool,
                     size=self.lvol_size,
                     crypto=encrypt,
                     key1=self.lvol_crypt_keys[0] if encrypt else None,
@@ -388,7 +389,7 @@ class TestLvolAllowedHostsPositive(SecurityTestBase):
         self.logger.info("=== TestLvolAllowedHostsPositive START ===")
         self._log_cluster_security_config()
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         lvol_name = f"secallowed{_rand_suffix()}"
@@ -396,7 +397,7 @@ class TestLvolAllowedHostsPositive(SecurityTestBase):
         # Create lvol with both sec-options and allowed-hosts
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower(), \
             f"lvol creation with allowed-hosts failed: {err}"
@@ -469,7 +470,7 @@ class TestLvolAllowedHostsNegative(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolAllowedHostsNegative START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         allowed_nqn = self._get_client_host_nqn()
         wrong_nqn = "nqn.2024-01.io.simplyblock:test:wrong-host-" + _rand_suffix()
@@ -477,7 +478,7 @@ class TestLvolAllowedHostsNegative(SecurityTestBase):
 
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[allowed_nqn],
+            allowed_hosts=[allowed_nqn],
         )
         assert not err or "error" not in err.lower(), \
             f"lvol creation failed: {err}"
@@ -526,7 +527,7 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolDynamicHostManagement START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         lvol_name = f"secdyn{_rand_suffix()}"
         host_nqn = self._get_client_host_nqn()
@@ -545,7 +546,7 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         # ── Step 2: Add host with DHCHAP via CLI ──────────────────────────
         self.logger.info(f"Adding host {host_nqn!r} with sec-options …")
         out, err = self.ssh_obj.add_host_to_lvol(
-            self.mgmt_nodes[0], lvol_id, host_nqn, sec_options=SEC_BOTH)
+            self.mgmt_nodes[0], lvol_id, host_nqn)
         assert not err or "error" not in err.lower(), \
             f"add-host failed: {err}"
 
@@ -623,14 +624,14 @@ class TestLvolCryptoWithAllowedHosts(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolCryptoWithAllowedHosts START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         lvol_name = f"seccryauth{_rand_suffix()}"
 
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn], encrypt=True,
+            allowed_hosts=[host_nqn], encrypt=True,
             key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
         )
         assert not err or "error" not in err.lower(), \
@@ -692,15 +693,19 @@ class TestLvolDhcapDirections(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolDhcapDirections START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name + "_host", self.cluster_id, sec_options=SEC_HOST_ONLY)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name + "_ctrl", self.cluster_id, sec_options=SEC_CTRL_ONLY)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
+        pool_host = self.pool_name + "_host"
+        pool_ctrl = self.pool_name + "_ctrl"
         directions = [
-            ("host_only", SEC_HOST_ONLY),
-            ("ctrl_only", SEC_CTRL_ONLY),
-            ("bidir",     SEC_BOTH),
+            ("host_only", pool_host),
+            ("ctrl_only", pool_ctrl),
+            ("bidir",     self.pool_name),
         ]
 
-        for label, sec_opts in directions:
+        for label, pool in directions:
             # Each volume needs its own unique NQN to avoid SPDK keyring
             # key-name collisions when multiple DHCHAP volumes are created.
             self._client_host_nqn = None
@@ -710,8 +715,7 @@ class TestLvolDhcapDirections(SecurityTestBase):
             self.logger.info(f"--- Testing direction: {label} ---")
 
             out, err = self.ssh_obj.create_sec_lvol(
-                self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-                sec_options=sec_opts,
+                self.mgmt_nodes[0], lvol_name, self.lvol_size, pool,
             )
             assert not err or "error" not in err.lower(), \
                 f"lvol creation failed for {label}: {err}"
@@ -764,7 +768,7 @@ class TestLvolMultipleAllowedHosts(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolMultipleAllowedHosts START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         real_nqn = self._get_client_host_nqn()
         fake_nqn = f"nqn.2024-01.io.simplyblock:test:fake-{_rand_suffix()}"
@@ -773,7 +777,7 @@ class TestLvolMultipleAllowedHosts(SecurityTestBase):
         # Create with both NQNs in allowed list
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[real_nqn, fake_nqn],
+            allowed_hosts=[real_nqn, fake_nqn],
         )
         assert not err or "error" not in err.lower(), \
             f"Multi-host lvol creation failed: {err}"
@@ -853,7 +857,7 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityNegativeHostOps START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         absent_nqn = f"nqn.2024-01.io.simplyblock:test:absent-{_rand_suffix()}"
@@ -862,7 +866,7 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
         # Create a lvol with one allowed host
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower(), \
             f"lvol creation failed: {err}"
@@ -886,7 +890,7 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
         # ── TC-SEC-027: add duplicate NQN ─────────────────────────────────
         self.logger.info("TC-SEC-027: add-host with duplicate NQN …")
         out1, err1 = self.ssh_obj.add_host_to_lvol(
-            self.mgmt_nodes[0], lvol_id, host_nqn, sec_options=SEC_BOTH)
+            self.mgmt_nodes[0], lvol_id, host_nqn)
         self.logger.info(f"First add-host (already present): out={out1!r}, err={err1!r}")
         # Should either succeed idempotently or return a meaningful error;
         # the system must not crash or corrupt state.
@@ -918,7 +922,7 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
         sleep_n_sec(2)
 
         out, err = self.ssh_obj.add_host_to_lvol(
-            self.mgmt_nodes[0], lvol_id, host_nqn, sec_options=SEC_BOTH)
+            self.mgmt_nodes[0], lvol_id, host_nqn)
         assert not err or "error" not in err.lower(), f"re-add-host failed: {err}"
         sleep_n_sec(2)
 
@@ -966,7 +970,7 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityNegativeCreation START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id)
 
         # ── TC-SEC-050: non-existent sec-options file ─────────────────────
         self.logger.info("TC-SEC-050: --sec-options with non-existent file path …")
@@ -1060,7 +1064,7 @@ class TestLvolSecurityNegativeConnect(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityNegativeConnect START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
 
@@ -1070,7 +1074,6 @@ class TestLvolSecurityNegativeConnect(SecurityTestBase):
         lvol_name_009 = f"secneg009{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name_009, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH,  # no allowed_hosts
         )
         assert not err or "error" not in err.lower()
         sleep_n_sec(3)
@@ -1100,7 +1103,7 @@ class TestLvolSecurityNegativeConnect(SecurityTestBase):
         lvol_name_013 = f"secneg013{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name_013, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower()
         sleep_n_sec(3)
@@ -1189,7 +1192,7 @@ class TestLvolAllowedHostsNoDhchap(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolAllowedHostsNoDhchap START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id)
 
         host_nqn = self._get_client_host_nqn()
         wrong_nqn = f"nqn.2024-01.io.simplyblock:test:wrong-{_rand_suffix()}"
@@ -1331,7 +1334,7 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
         self.logger.info("=== TestLvolSecuritySnapshotClone START ===")
         self._log_cluster_security_config()
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         wrong_nqn = f"nqn.2024-01.io.simplyblock:test:wrong-{_rand_suffix()}"
@@ -1342,7 +1345,7 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
 
         _, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], auth_parent, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn])
+            allowed_hosts=[host_nqn])
         assert not err or "error" not in err.lower(), \
             f"auth parent creation failed: {err}"
         sleep_n_sec(3)
@@ -1393,7 +1396,7 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
 
         _, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], ca_parent, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
             encrypt=True,
             key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
         assert not err or "error" not in err.lower(), \
@@ -1456,7 +1459,7 @@ class TestLvolSecurityOutageRecovery(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityOutageRecovery START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         lvol_name = f"secout{_rand_suffix()}"
@@ -1465,7 +1468,7 @@ class TestLvolSecurityOutageRecovery(SecurityTestBase):
         self.logger.info("TC-SEC-070: Creating DHCHAP lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
@@ -1544,7 +1547,7 @@ class TestLvolSecurityNetworkInterrupt(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityNetworkInterrupt START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_HOST_ONLY)
 
         host_nqn = self._get_client_host_nqn()
         lvol_name = f"secnwi{_rand_suffix()}"
@@ -1553,7 +1556,7 @@ class TestLvolSecurityNetworkInterrupt(SecurityTestBase):
         self.logger.info("TC-SEC-075: Creating DHCHAP lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_HOST_ONLY, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
@@ -1636,7 +1639,7 @@ class TestLvolSecurityHAFailover(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityHAFailover START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         lvol_name = f"secha{_rand_suffix()}"
@@ -1645,7 +1648,7 @@ class TestLvolSecurityHAFailover(SecurityTestBase):
         self.logger.info("TC-SEC-080: Creating HA DHCHAP lvol (ndcs=1, npcs=1) …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
             distr_ndcs=1, distr_npcs=1,
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
@@ -1725,7 +1728,7 @@ class TestLvolSecurityMgmtNodeReboot(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityMgmtNodeReboot START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         lvol_name = f"secmgmt{_rand_suffix()}"
@@ -1734,7 +1737,7 @@ class TestLvolSecurityMgmtNodeReboot(SecurityTestBase):
         self.logger.info("TC-SEC-085: Creating DHCHAP lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
@@ -1800,7 +1803,7 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityDynamicModification START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_HOST_ONLY)
 
         host_nqn = self._get_client_host_nqn()
         second_nqn = f"nqn.2024-01.io.simplyblock:test:second-{_rand_suffix()}"
@@ -1808,7 +1811,7 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
 
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_HOST_ONLY, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
@@ -1829,7 +1832,7 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
         # TC-SEC-090: re-add host → connect string available
         self.logger.info("TC-SEC-090: Re-adding host NQN …")
         out, err = self.ssh_obj.add_host_to_lvol(
-            self.mgmt_nodes[0], lvol_id, host_nqn, sec_options=SEC_HOST_ONLY)
+            self.mgmt_nodes[0], lvol_id, host_nqn)
         assert not err or "error" not in err.lower(), f"add-host failed: {err}"
         sleep_n_sec(2)
         connect_ls2, err3 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
@@ -1840,7 +1843,7 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
         # TC-SEC-091: add second NQN, verify both get connect strings
         self.logger.info("TC-SEC-091: Adding second NQN …")
         out, err = self.ssh_obj.add_host_to_lvol(
-            self.mgmt_nodes[0], lvol_id, second_nqn, sec_options=SEC_HOST_ONLY)
+            self.mgmt_nodes[0], lvol_id, second_nqn)
         assert not err or "error" not in err.lower(), f"add second NQN failed: {err}"
         sleep_n_sec(2)
         cs1, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
@@ -1874,7 +1877,7 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
         # TC-SEC-094: re-add first NQN, connect + FIO
         self.logger.info("TC-SEC-094: Re-adding first NQN and running FIO …")
         out, err = self.ssh_obj.add_host_to_lvol(
-            self.mgmt_nodes[0], lvol_id, host_nqn, sec_options=SEC_HOST_ONLY)
+            self.mgmt_nodes[0], lvol_id, host_nqn)
         assert not err or "error" not in err.lower()
         sleep_n_sec(3)
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
@@ -1913,7 +1916,7 @@ class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityMultiClientConcurrent START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         wrong_nqn = f"nqn.2024-01.io.simplyblock:test:wrong-{_rand_suffix()}"
@@ -1923,7 +1926,7 @@ class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
         self.logger.info("TC-SEC-096: Creating DHCHAP lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
@@ -2003,7 +2006,7 @@ class TestLvolSecurityScaleAndRapidOps(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityScaleAndRapidOps START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_HOST_ONLY)
 
         # TC-SEC-101: create 10 volumes each with unique NQN
         self.logger.info(f"TC-SEC-101: Creating {self.VOLUME_COUNT} DHCHAP lvols …")
@@ -2018,7 +2021,7 @@ class TestLvolSecurityScaleAndRapidOps(SecurityTestBase):
             # Write hostnqn only for the last volume (we only connect one)
             out, err = self.ssh_obj.create_sec_lvol(
                 self.mgmt_nodes[0], lvol_name, "1G", self.pool_name,
-                sec_options=SEC_HOST_ONLY, allowed_hosts=[nqn],
+                allowed_hosts=[nqn],
             )
             assert not err or "error" not in err.lower(), \
                 f"lvol {lvol_name} creation failed: {err}"
@@ -2042,7 +2045,7 @@ class TestLvolSecurityScaleAndRapidOps(SecurityTestBase):
         self.logger.info("TC-SEC-103: Rapidly re-adding all host NQNs …")
         for lvol_name, lvol_id, nqn in volumes:
             out, err = self.ssh_obj.add_host_to_lvol(
-                self.mgmt_nodes[0], lvol_id, nqn, sec_options=SEC_HOST_ONLY)
+                self.mgmt_nodes[0], lvol_id, nqn)
             assert not err or "error" not in err.lower(), \
                 f"add-host failed for {lvol_name}: {err}"
         sleep_n_sec(3)
@@ -2082,7 +2085,8 @@ class TestLvolSecurityNegativeConnectExtended(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityNegativeConnectExtended START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name + "_ctrl", self.cluster_id, sec_options=SEC_CTRL_ONLY)
 
         host_nqn = self._get_client_host_nqn()
         absent_nqn = f"nqn.2024-01.io.simplyblock:test:absent-{_rand_suffix()}"
@@ -2091,7 +2095,7 @@ class TestLvolSecurityNegativeConnectExtended(SecurityTestBase):
         lvol_name = f"secnex{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
@@ -2110,13 +2114,13 @@ class TestLvolSecurityNegativeConnectExtended(SecurityTestBase):
         self.logger.info("TC-SEC-105: PASSED")
 
         # Restore host for subsequent tests
-        self.ssh_obj.add_host_to_lvol(self.mgmt_nodes[0], lvol_id, host_nqn, sec_options=SEC_BOTH)
+        self.ssh_obj.add_host_to_lvol(self.mgmt_nodes[0], lvol_id, host_nqn)
         sleep_n_sec(2)
 
         # TC-SEC-106: add-host with empty NQN
         self.logger.info("TC-SEC-106: add-host with empty NQN …")
         out, err = self.ssh_obj.add_host_to_lvol(
-            self.mgmt_nodes[0], lvol_id, "", sec_options=SEC_BOTH)
+            self.mgmt_nodes[0], lvol_id, "")
         has_error = bool(err) or ("error" in (out or "").lower())
         assert has_error, f"add-host with empty NQN should fail; out={out!r} err={err!r}"
         self.logger.info("TC-SEC-106: PASSED")
@@ -2124,7 +2128,7 @@ class TestLvolSecurityNegativeConnectExtended(SecurityTestBase):
         # TC-SEC-107: add-host on non-existent lvol
         self.logger.info("TC-SEC-107: add-host on non-existent lvol …")
         out, err = self.ssh_obj.add_host_to_lvol(
-            self.mgmt_nodes[0], fake_lvol_id, host_nqn, sec_options=SEC_BOTH)
+            self.mgmt_nodes[0], fake_lvol_id, host_nqn)
         has_error = bool(err) or ("error" in (out or "").lower()) \
                     or ("not found" in (out or "").lower())
         assert has_error, \
@@ -2145,8 +2149,8 @@ class TestLvolSecurityNegativeConnectExtended(SecurityTestBase):
         self.logger.info("TC-SEC-109: SEC_CTRL_ONLY lvol with wrong NQN …")
         lvol_ctrl = f"secctrl{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_ctrl, self.lvol_size, self.pool_name,
-            sec_options=SEC_CTRL_ONLY, allowed_hosts=[host_nqn],
+            self.mgmt_nodes[0], lvol_ctrl, self.lvol_size, self.pool_name + "_ctrl",
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower()
         sleep_n_sec(3)
@@ -2195,7 +2199,7 @@ class TestLvolSecurityCloneOverride(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityCloneOverride START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_HOST_ONLY)
 
         nqn_a = self._get_client_host_nqn()
         uuid_out, _ = self.ssh_obj.exec_command(self.fio_node, "uuidgen")
@@ -2208,7 +2212,7 @@ class TestLvolSecurityCloneOverride(SecurityTestBase):
         self.logger.info("TC-SEC-111: Creating parent DHCHAP lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], parent_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_HOST_ONLY, allowed_hosts=[nqn_a],
+            allowed_hosts=[nqn_a],
         )
         assert not err or "error" not in err.lower()
         sleep_n_sec(3)
@@ -2255,7 +2259,7 @@ class TestLvolSecurityCloneOverride(SecurityTestBase):
         # TC-SEC-113: add NQN_B to clone; verify NQN_A on parent, NQN_B on clone
         self.logger.info("TC-SEC-113: Adding NQN_B to clone …")
         out, err = self.ssh_obj.add_host_to_lvol(
-            self.mgmt_nodes[0], clone_id, nqn_b, sec_options=SEC_HOST_ONLY)
+            self.mgmt_nodes[0], clone_id, nqn_b)
         assert not err or "error" not in err.lower(), f"add NQN_B to clone failed: {err}"
         sleep_n_sec(2)
         cs_parent_a, _ = self._get_connect_str_cli(parent_id, host_nqn=nqn_a)
@@ -2311,7 +2315,7 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
             return
 
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         lvol_name = f"secbck{_rand_suffix()}"
@@ -2320,7 +2324,7 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
         self.logger.info("TC-SEC-115: Creating DHCHAP+crypto lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
             encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
@@ -2431,7 +2435,7 @@ class TestLvolSecurityResize(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityResize START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         host_nqn = self._get_client_host_nqn()
         lvol_name = f"secrsz{_rand_suffix()}"
@@ -2440,7 +2444,7 @@ class TestLvolSecurityResize(SecurityTestBase):
         self.logger.info("TC-SEC-119: Creating DHCHAP+crypto 5G lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, "5G", self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
             encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
@@ -2510,7 +2514,8 @@ class TestLvolSecurityVolumeListFields(SecurityTestBase):
     def run(self):
         self.logger.info("=== TestLvolSecurityVolumeListFields START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name + "_host", self.cluster_id, sec_options=SEC_HOST_ONLY)
 
         host_nqn = self._get_client_host_nqn()
 
@@ -2519,7 +2524,7 @@ class TestLvolSecurityVolumeListFields(SecurityTestBase):
         lvol_both = f"secvlb{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_both, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
         )
         assert not err or "error" not in err.lower()
         sleep_n_sec(3)
@@ -2541,8 +2546,8 @@ class TestLvolSecurityVolumeListFields(SecurityTestBase):
 
         lvol_host = f"secvlh{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
-            self.mgmt_nodes[0], lvol_host, self.lvol_size, self.pool_name,
-            sec_options=SEC_HOST_ONLY, allowed_hosts=[nqn_h],
+            self.mgmt_nodes[0], lvol_host, self.lvol_size, self.pool_name + "_host",
+            allowed_hosts=[nqn_h],
         )
         assert not err or "error" not in err.lower()
         sleep_n_sec(3)
@@ -2600,7 +2605,7 @@ class TestLvolSecurityRDMA(SecurityTestBase):
             return
         self.logger.info("TC-SEC-125: RDMA available – proceeding")
 
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
         host_nqn = self._get_client_host_nqn()
         lvol_name = f"secrdma{_rand_suffix()}"
 
@@ -2608,7 +2613,7 @@ class TestLvolSecurityRDMA(SecurityTestBase):
         self.logger.info("TC-SEC-126: Creating DHCHAP lvol with RDMA fabric …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            sec_options=SEC_BOTH, allowed_hosts=[host_nqn],
+            allowed_hosts=[host_nqn],
             fabric="rdma",
         )
         assert not err or "error" not in err.lower(), f"RDMA lvol creation failed: {err}"
