@@ -260,15 +260,13 @@ def set_node_unreachable(node):
         logger.error("Data-plane check for unreachable node %s failed: %s", node.get_id(), e)
 
 
-def _check_data_plane_and_escalate(unreachable_node):
-    """Query surviving nodes' jc_get_jm_status for the unreachable node.
+def is_node_data_plane_disconnected(node):
+    """Return True if all online primary peers report *node*'s remote JM as disconnected.
 
-    If every online primary node reports the remote JM of the unreachable
-    node as disconnected (False), the data plane is down and we escalate
-    the node to offline (which triggers ANA failover + auto-restart).
+    Returns False if no peers are available to check (conservative).
     """
-    node_id = unreachable_node.get_id()
-    cluster_nodes = db.get_storage_nodes_by_cluster_id(unreachable_node.cluster_id)
+    node_id = node.get_id()
+    cluster_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
 
     online_primaries = [
         n for n in cluster_nodes
@@ -280,10 +278,9 @@ def _check_data_plane_and_escalate(unreachable_node):
 
     if not online_primaries:
         logger.debug("No online primary peers to verify data plane for %s", node_id)
-        return
+        return False
 
     remote_jm_key = f"remote_jm_{node_id}n1"
-    all_disconnected = True
 
     for peer in online_primaries:
         try:
@@ -291,17 +288,24 @@ def _check_data_plane_and_escalate(unreachable_node):
             if ret and ret.get(remote_jm_key) is True:
                 logger.info("Data-plane check: peer %s still sees %s JM as connected",
                             peer.get_id(), node_id)
-                all_disconnected = False
-                break
+                return False
         except Exception as e:
             logger.debug("jc_get_jm_status on peer %s failed: %s", peer.get_id(), e)
-            # Can't confirm disconnection from this peer, skip it
             continue
 
-    if all_disconnected:
+    return True
+
+
+def _check_data_plane_and_escalate(unreachable_node):
+    """Escalate to offline if data plane is confirmed down."""
+    node = db.get_storage_node_by_id(unreachable_node.get_id())
+    if node.status == StorageNode.STATUS_RESTARTING:
+        logger.debug("Node %s is restarting, skipping data-plane escalation", node.get_id())
+        return
+    if is_node_data_plane_disconnected(node):
         logger.info("Data-plane check: all peers report %s JM disconnected, escalating to offline",
-                    node_id)
-        set_node_offline(unreachable_node)
+                    node.get_id())
+        set_node_offline(node)
 
 
 def set_node_schedulable(node):
