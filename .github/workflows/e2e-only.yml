@@ -537,7 +537,9 @@ jobs:
               continue
             fi
 
+            set +e
             while IFS= read -r C; do
+              C="${C%%$'\r'}"
               [[ -z "${C}" ]] && continue
               echo "    dumping: ${C}"
               ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
@@ -547,6 +549,7 @@ jobs:
                 "docker inspect '${C}' 2>&1 || true" \
                 > "${LOCAL_NODE_DIR}/${C}_inspect.json" || true
             done <<< "${CONTAINERS}"
+            set -e
           done
 
       - name: Collect distrib debug dumps into RUN_BASE_DIR (always)

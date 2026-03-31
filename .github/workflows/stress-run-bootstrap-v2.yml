@@ -952,7 +952,9 @@ jobs:
               continue
             fi
 
+            set +e
             while IFS= read -r C; do
+              C="${C%%$'\r'}"
               [[ -z "${C}" ]] && continue
               echo "    dumping: ${C}"
               LOG_FILE="${REMOTE_DIR}/${C}.txt"
@@ -961,6 +963,7 @@ jobs:
               ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps --details '${C}' > '${LOG_FILE}' 2>&1 || true\"" || true
               ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker inspect '${C}' > '${INSPECT_FILE}' 2>&1 || true\"" || true
             done <<< "${CONTAINERS}"
+            set -e
           done
 
 
