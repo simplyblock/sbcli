@@ -4334,8 +4334,9 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
     # Create hublvol on primary after all secondaries have their stacks
     if secondary_ids:
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         try:
-            snode.create_hublvol()
+            snode.create_hublvol(cluster_nqn=cluster.nqn)
         except RPCException as e:
             logger.error("Error establishing hublvol: %s", e.message)
             # return False
