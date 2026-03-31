@@ -409,6 +409,7 @@ def check_node(snode):
         except Exception as e:
             logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
         tasks_controller.add_node_to_auto_restart(snode)
+        return True
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)
