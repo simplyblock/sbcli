@@ -57,10 +57,18 @@ mongodb:
   community:
     mongodb:
       repo: quay.io/mongodb
+      imageType: ubi8
+    agent:
+      name: mongodb-agent
+      version: 108.0.2.8729-1
+    registry:
+      agent: quay.io/mongodb
+
   registry:
     operator: quay.io/mongodb
     agent: quay.io/mongodb
     readinessProbe: quay.io/mongodb
+    versionUpgradeHook: quay.io/mongodb
 
   affinity:
     podAntiAffinity:
@@ -234,7 +242,8 @@ ingress:
     dnsPolicy: ClusterFirstWithHostNet
     replicaCount: 2
     image:
-      image: ingress-nginx/controller
+      registry: "quay.io/simplyblock-io"
+      image: ingress-nginx-controller
       tag: "v1.10.1"
     service:
       type: ClusterIP
