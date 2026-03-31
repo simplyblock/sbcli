@@ -326,7 +326,7 @@ class StorageNode(BaseNodeObject):
 
         return self.hublvol
 
-    def connect_to_hublvol(self, primary_node, failover_node=None):
+    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary"):
         """Connect to a primary node's hublvol, optionally with multipath failover.
 
         If failover_node is provided (typically sec_1), sets up NVMe ANA
@@ -382,7 +382,7 @@ class StorageNode(BaseNodeObject):
                 primary_node.lvstore,
                 groupid=primary_node.jm_vuid,
                 subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
-                secondary=True,
+                role=role,
         ):
             pass
             # raise RPCException('Failed to set secondary lvstore options')

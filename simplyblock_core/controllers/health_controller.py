@@ -311,7 +311,8 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                             failover_node = sec1
                     except KeyError:
                         pass
-                node.connect_to_hublvol(primary_node, failover_node=failover_node)
+                sec_role = "tertiary" if is_sec2 else "secondary"
+                node.connect_to_hublvol(primary_node, failover_node=failover_node, role=sec_role)
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
             ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)

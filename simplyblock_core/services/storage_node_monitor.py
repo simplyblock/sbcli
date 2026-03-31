@@ -349,7 +349,19 @@ def node_port_check_fun(snode):
         ports = [snode.nvmf_port]
         if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
-                if n.lvstore_status == "ready":
+                if n.lvstore_status != "ready":
+                    continue
+                # Skip port check during failback: if the primary or the
+                # other secondary (sec_1) for this lvstore is online/restarting,
+                # the port on this node may be intentionally blocked.
+                skip = False
+                if n.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+                    skip = True
+                elif n.secondary_node_id and n.secondary_node_id != snode.get_id():
+                    sec1 = db.get_storage_node_by_id(n.secondary_node_id)
+                    if sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+                        skip = True
+                if not skip:
                     ports.append(n.get_lvol_subsys_port(n.lvstore))
         if not snode.is_secondary_node:
             ports.append(snode.get_lvol_subsys_port(snode.lvstore))

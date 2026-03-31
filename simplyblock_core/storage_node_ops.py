@@ -3474,14 +3474,14 @@ def set_node_status(node_id, status, reconnect_on_online=True):
 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+            for sec_id, sec_role in [(snode.secondary_node_id, "secondary"), (snode.secondary_node_id_2, "tertiary")]:
                 if not sec_id:
                     continue
                 sec_node = db_controller.get_storage_node_by_id(sec_id)
                 if sec_node and snode.lvstore_status == "ready":
                     if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                         try:
-                            sec_node.connect_to_hublvol(snode)
+                            sec_node.connect_to_hublvol(snode, role=sec_role)
                         except Exception as e:
                             logger.error("Error establishing hublvol: %s", e)
 
@@ -3502,7 +3502,8 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                                         failover_node = sec1
                                 except KeyError:
                                     pass
-                            snode.connect_to_hublvol(primary_node, failover_node=failover_node)
+                            sec_role = "tertiary" if sec_attr == 'lvstore_stack_secondary_2' else "secondary"
+                            snode.connect_to_hublvol(primary_node, failover_node=failover_node, role=sec_role)
                         except Exception as e:
                             logger.error("Error establishing hublvol: %s", e)
 
@@ -3671,7 +3672,8 @@ def recreate_lvstore_on_sec(secondary_node):
                     except KeyError:
                         pass
 
-                secondary_node.connect_to_hublvol(primary_node, failover_node=failover_node)
+                sec_role = "tertiary" if is_second_sec else "secondary"
+                secondary_node.connect_to_hublvol(primary_node, failover_node=failover_node, role=sec_role)
 
             except Exception as e:
                 logger.error("Error connecting to hublvol: %s", e)
@@ -3884,7 +3886,7 @@ def recreate_lvstore(snode, force=False):
         snode.lvstore,
         groupid=snode.jm_vuid,
         subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
-        primary=True
+        role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
@@ -3915,7 +3917,8 @@ def recreate_lvstore(snode, force=False):
             # sec_2 gets multipath failover to sec_1
             failover_node = sec1 if i >= 1 and sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN] else None
             try:
-                sec_node.connect_to_hublvol(snode, failover_node=failover_node)
+                sec_role = "tertiary" if i >= 1 else "secondary"
+                sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
@@ -4239,7 +4242,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.lvstore,
         groupid=snode.jm_vuid,
         subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
-        primary=True
+        role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
@@ -4286,12 +4289,13 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             logger.error("Error establishing hublvol: %s", e.message)
             # return False
 
-        for sec_node_id in secondary_ids:
+        for i, sec_node_id in enumerate(secondary_ids):
             sec_node = db_controller.get_storage_node_by_id(sec_node_id)
             if sec_node.status == StorageNode.STATUS_ONLINE:
                 try:
                     time.sleep(1)
-                    sec_node.connect_to_hublvol(snode)
+                    sec_role = "tertiary" if i >= 1 else "secondary"
+                    sec_node.connect_to_hublvol(snode, role=sec_role)
                 except Exception as e:
                     logger.error("Error establishing hublvol: %s", e)
                     # return False
