@@ -217,9 +217,11 @@ prometheus:
 reloader:
   nameOverride: simplyblock-reloader
   fullnameOverride: simplyblock-reloader
-  image:
-    repository: ghcr.io/stakater/reloader
-    tag: v1.3.0
+  reloader:
+    deployment:
+      image:
+        name: ghcr.io/stakater/reloader
+        tag: v1.3.0
 
 ingress:
   enabled: false
