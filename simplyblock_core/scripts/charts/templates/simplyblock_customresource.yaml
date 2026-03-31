@@ -118,6 +118,14 @@ spec:
   coreIsolation: {{ .Values.simplyblock.storageNodes.coreIsolation }}
   {{- end }}
 
+  {{- if hasKey .Values.simplyblock.storageNodes "skipKubeletConfiguration" }}
+  skipKubeletConfiguration: {{ .Values.simplyblock.storageNodes.skipKubeletConfiguration }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.storageNodes "enableCpuTopology" }}
+  enableCpuTopology: {{ .Values.simplyblock.storageNodes.enableCpuTopology }}
+  {{- end }}
+
   {{- if .Values.simplyblock.storageNodes.workerNodes }}
   workerNodes:
   {{- range .Values.simplyblock.storageNodes.workerNodes }}

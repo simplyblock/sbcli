@@ -293,6 +293,8 @@ simplyblock:
     spdkDebug: false
     spdkImage:
     coreIsolation: false
+    skipKubeletConfiguration: false
+    enableCpuTopology: false
     workerNodes:
 
 
