@@ -236,7 +236,7 @@ jobs:
   bootstrap-and-e2e:
     name: Pre-clean -> Bootstrap -> E2E
     runs-on: [self-hosted]
-    timeout-minutes: 240
+    timeout-minutes: 800
 
     env:
       # Cluster/lab env
