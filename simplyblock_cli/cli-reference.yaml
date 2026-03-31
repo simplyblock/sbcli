@@ -1744,6 +1744,17 @@ commands:
             help: "Logical volume id"
             dest: volume_id
             type: str
+      - name: clone-lvol
+        help: "Create logical volume clone by taking a snapshot and then cloning it."
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+          - name: "clone_name"
+            help: "New lvol clone name"
+            dest: clone_name
+            type: str
   - name: "control-plane"
     help: "Control plane commands"
     aliases:

@@ -42,7 +42,7 @@ def _rollback_lvol_creation(lvol, node_ids):
             logger.error(f"Failed to rollback lvol {lvol.get_id()} from node {node_id}: {e}")
 
 
-def add(lvol_id, snapshot_name, backup=False):
+def add(lvol_id, snapshot_name, backup=False, lock=True):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
@@ -74,7 +74,7 @@ def add(lvol_id, snapshot_name, backup=False):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    if snode.lvol_sync_del():
+    if snode.lvol_sync_del() and lock:
         logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
         return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
@@ -141,7 +141,8 @@ def add(lvol_id, snapshot_name, backup=False):
         secondary_nodes = []
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
         sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        had_lock = _acquire_lvol_mutation_lock(host_node)
+        if lock:
+            had_lock = _acquire_lvol_mutation_lock(host_node)
 
         try:
             # Build nodes list with all secondaries
@@ -236,7 +237,8 @@ def add(lvol_id, snapshot_name, backup=False):
                     return False, msg
                 registered_secs.append(sec)
         finally:
-            _release_lvol_mutation_lock(host_node, had_lock)
+            if lock:
+                _release_lvol_mutation_lock(host_node, had_lock)
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
@@ -297,6 +299,7 @@ def list(node_id=None):
             "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
             "Base Snapshot": snap.snap_ref_id,
             "Clones": clones,
+            "Status": snap.status,
         })
     return utils.print_table(data)
 
@@ -307,6 +310,11 @@ def delete(snapshot_uuid, force_delete=False):
     except KeyError:
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
+
+    if snap.status == SnapShot.STATUS_IN_DELETION:
+        logger.error(f"Snapshot is in deletion {snapshot_uuid}")
+        if not force_delete:
+            return True
 
     try:
         snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
@@ -413,7 +421,7 @@ def delete(snapshot_uuid, force_delete=False):
     return True
 
 
-def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False):
+def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False, lock=True):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
@@ -439,7 +447,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.exception(msg)
         return False, msg
 
-    if snode.lvol_sync_del():
+    if snode.lvol_sync_del() and lock:
         logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
         return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
@@ -516,6 +524,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.subsys_port = snap.lvol.subsys_port
     lvol.fabric = snap.fabric
     lvol.delete_snap_on_lvol_delete = bool(delete_snap_on_lvol_delete)
+    lvol.ndcs = snap.lvol.ndcs
+    lvol.npcs = snap.lvol.npcs
 
     # Inherit namespace sharing from the source lvol.  Find the master
     # lvol that owns the subsystem (either the source itself or its master
@@ -611,7 +621,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         if second_secondary_id:
             secondary_ids.append(second_secondary_id)
         lvol.nodes = [host_node.get_id()] + secondary_ids
-        had_lock = _acquire_lvol_mutation_lock(host_node)
+        if lock:
+            had_lock = _acquire_lvol_mutation_lock(host_node)
 
         try:
             primary_node = None
@@ -686,7 +697,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     return False, error
                 created_nodes.append(sec.get_id())
         finally:
-            _release_lvol_mutation_lock(host_node, had_lock)
+            if lock:
+                _release_lvol_mutation_lock(host_node, had_lock)
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
