@@ -1761,6 +1761,14 @@ def restart_storage_node(
         logger.error("Cluster is in activation status, can not restart node")
         return False
 
+    # Guard: only one node may restart at a time per cluster
+    for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if peer.get_id() != node_id and peer.status == StorageNode.STATUS_RESTARTING:
+            logger.error(
+                f"Node {peer.get_id()} is already restarting in this cluster, "
+                f"cannot restart {node_id} concurrently")
+            return False
+
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not restart storage node")
