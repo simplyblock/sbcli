@@ -420,6 +420,7 @@ def check_node(snode):
             storage_node_ops.trigger_ana_failover_for_node(snode)
         except Exception as e:
             logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
+        return True
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)
