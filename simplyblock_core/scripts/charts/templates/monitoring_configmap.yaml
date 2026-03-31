@@ -49,7 +49,7 @@ data:
     type: FILESYSTEM
     config:
       directory: /mnt/thanos
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -833,7 +833,7 @@ data:
             type: slack
             settings:
               username: grafana_bot
-              url: '{{ .Values.grafana.contactPoint }}'
+              url: '{{ .Values.observability.grafana.contactPoint }}'
               title: |
                 '{{ "{{" }} template "slack.title" . {{ "}}" }}'
               text: |

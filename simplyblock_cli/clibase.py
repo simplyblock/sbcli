@@ -512,6 +512,9 @@ class CLIWrapperBase:
         cluster_ops.cluster_expand(args.cluster_id)
         return True
 
+    def cluster__add_replication(self, sub_command, args):
+        return cluster_ops.add_replication(args.cluster_id, args.target_cluster_id, args.timeout, args.target_pool)
+
     def volume__add(self, sub_command, args):
         import json as _json
         name = args.name
@@ -550,7 +553,7 @@ class CLIWrapperBase:
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace,
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
-            allowed_hosts=allowed_hosts)
+            allowed_hosts=allowed_hosts, do_replicate=args.replicate)
         if results:
             return results
         else:
@@ -661,6 +664,24 @@ class CLIWrapperBase:
     def volume__inflate(self, sub_command, args):
         return lvol_controller.inflate_lvol(args.volume_id)
 
+    def volume__replication_start(self, sub_command, args):
+        return lvol_controller.replication_start(args.lvol_id, args.replication_cluster_id)
+
+    def volume__replication_stop(self, sub_command, args):
+        return lvol_controller.replication_stop(args.lvol_id)
+
+    def volume__replication_status(self, sub_command, args):
+        return snapshot_controller.list_replication_tasks(args.cluster_id)
+
+    def volume__replication_trigger(self, sub_command, args):
+        return lvol_controller.replication_trigger(args.lvol_id)
+
+    def volume__suspend(self, sub_command, args):
+        return lvol_controller.suspend_lvol(args.lvol_id)
+
+    def volume__resume(self, sub_command, args):
+        return lvol_controller.resume_lvol(args.lvol_id)
+
     def volume__migrate(self, sub_command, args):
         migration_id, error = migration_controller.start_migration(
             args.volume_id,
@@ -768,16 +789,31 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return snapshot_controller.list(args.all)
+        return snapshot_controller.list(args.all, args.cluster_id, args.with_details)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)
 
+    def snapshot__check(self, sub_command, args):
+        return health_controller.check_snap(args.snapshot_id)
+
     def snapshot__clone(self, sub_command, args):
         new_size = args.resize
 
-        success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
-        return details
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+        return clone_id if not error else error
+
+    def snapshot__replication_status(self, sub_command, args):
+        return snapshot_controller.list_replication_tasks(args.cluster_id)
+
+    def snapshot__delete_replication_only(self, sub_command, args):
+        return snapshot_controller.delete_replicated(args.snapshot_id)
+
+    def snapshot__get(self, sub_command, args):
+        return snapshot_controller.get(args.snapshot_id)
+
+    def snapshot__set(self, sub_command, args):
+        return snapshot_controller.set(args.snapshot_id, args.attr_name, args.attr_value)
 
     def qos__add(self, sub_command, args):
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)

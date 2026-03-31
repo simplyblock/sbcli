@@ -9,6 +9,7 @@ class SnapShot(BaseModel):
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
+    STATUS_IN_REPLICATION = 'in_replication'
 
     base_bdev: str = ""
     blobid: int = 0
@@ -29,3 +30,8 @@ class SnapShot(BaseModel):
     deletion_status: str = ""
     status: str = ""
     fabric: str = "tcp"
+    target_replicated_snap_uuid: str = ""
+    source_replicated_snap_uuid: str = ""
+    next_snap_uuid: str = ""
+    prev_snap_uuid: str = ""
+    instances: list = []

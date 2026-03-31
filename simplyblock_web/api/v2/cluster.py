@@ -17,6 +17,11 @@ api = APIRouter(prefix='/clusters')
 db = DBController()
 
 
+class _ReplicationParams(BaseModel):
+    snapshot_replication_target_cluster: str
+    snapshot_replication_timeout: int = 0
+    target_pool: Optional[str] = None
+
 class _UpdateParams(BaseModel):
     management_image: Optional[str]
     spdk_image: Optional[str]
@@ -35,23 +40,32 @@ class ClusterParams(BaseModel):
     distr_npcs: int = 1
     distr_bs: int = 4096
     distr_chunk_bs: int = 4096
-    ha_type: Literal['single', 'ha'] = 'single'
+    ha_type: Literal['single', 'ha'] = 'ha'
     qpair_count: int = 256
     max_queue_size: int = 128
     inflight_io_threshold: int = 4
     enable_node_affinity: bool = False
     strict_node_anti_affinity: bool = False
+    is_single_node: bool = False
+    fabric: str = "tcp"
+    cr_name: str = ""
+    cr_namespace: str = ""
+    cr_plural: str = ""
+    cluster_ip: str = ""
+    grafana_secret: str = ""
     client_data_nic: str = ""
 
 
 @api.get('/', name='clusters:list')
 def list() -> List[ClusterDTO]:
-    return [
-        ClusterDTO.from_model(cluster)
-        for cluster
-        in db.get_clusters()
-    ]
-
+    data = []
+    for cluster in db.get_clusters():
+        stat_obj = None
+        ret = db.get_cluster_capacity(cluster, 1)
+        if ret:
+            stat_obj = ret[0]
+        data.append(ClusterDTO.from_model(cluster, stat_obj))
+    return data
 
 @api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
 def add(request: Request, parameters: ClusterParams):
@@ -59,8 +73,8 @@ def add(request: Request, parameters: ClusterParams):
     if not cluster_id_or_false:
         raise ValueError('Failed to create cluster')
 
-    entity_url = request.app.url_path_for('get', cluster_id=cluster_id_or_false)
-    return Response(status_code=201, headers={'Location': entity_url})
+    cluster = db.get_cluster_by_id(cluster_id_or_false)
+    return ClusterDTO.from_model(cluster)
 
 
 instance_api = APIRouter(prefix='/{cluster_id}')
@@ -78,7 +92,11 @@ Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
 
 @instance_api.get('/', name='clusters:detail')
 def get(cluster: Cluster) -> ClusterDTO:
-    return ClusterDTO.from_model(cluster)
+    stat_obj = None
+    ret = db.get_cluster_capacity(cluster, 1)
+    if ret:
+        stat_obj = ret[0]
+    return ClusterDTO.from_model(cluster, stat_obj)
 
 
 class UpdatableClusterParameters(BaseModel):
@@ -155,6 +173,23 @@ def activate(cluster: Cluster) -> Response:
     ).start()
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
+@instance_api.post('/addreplication', name='clusters:addreplication', status_code=202, responses={202: {"content": None}})
+def cluster_add_replication(cluster: Cluster, parameters: _ReplicationParams) -> Response:
+    cluster_ops.add_replication(
+        source_cl_id=cluster.get_id(),
+        target_cl_id=parameters.snapshot_replication_target_cluster,
+        timeout=parameters.snapshot_replication_timeout,
+        target_pool=parameters.target_pool
+    )
+    return Response(status_code=202)
+
+@instance_api.post('/expand', name='clusters:expand', status_code=202, responses={202: {"content": None}})
+def expand(cluster: Cluster) -> Response:
+    Thread(
+        target=cluster_ops.cluster_expand,
+        args=(cluster.get_id(),),
+    ).start()
+    return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 @instance_api.post('/update', name='clusters:upgrade', status_code=204, responses={204: {"content": None}})
 def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:

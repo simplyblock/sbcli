@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
 ---
 apiVersion: v1
 kind: Service
