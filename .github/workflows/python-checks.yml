@@ -52,7 +52,7 @@ jobs:
       run: pip install -r requirements.txt
 
     - name: Install package
-      run: pip install .
+      run: pip install -e .
 
     - name: Run tests
       run: pytest --import-mode=importlib -v
