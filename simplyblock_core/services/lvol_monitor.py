@@ -131,8 +131,6 @@ def process_lvol_delete_finish(lvol):
                 non_leader_nodes.append(db.get_storage_node_by_id(node_id))
             except KeyError:
                 pass
-    sec_node: StorageNode | None = non_leader_nodes[0] if non_leader_nodes else None
-
     # 3-1 async delete lvol bdev from primary
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
