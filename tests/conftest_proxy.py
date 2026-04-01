@@ -43,7 +43,8 @@ def import_proxy_module():
     with patch("socket.socket", return_value=mock_sock):
         with patch("http.server.HTTPServer", return_value=mock_httpd):
             with patch("http.server.ThreadingHTTPServer", return_value=mock_httpd):
-                import simplyblock_core.services.spdk_http_proxy_server as mod
+                with patch("simplyblock_core.services.spdk_http_proxy_server.print_stats"):
+                    import simplyblock_core.services.spdk_http_proxy_server as mod
 
     # Reinitialize for testing
     mod.spdk_semaphore = threading.Semaphore(4)
