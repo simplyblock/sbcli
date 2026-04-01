@@ -383,10 +383,6 @@ class TestBuildHostEntries(unittest.TestCase):
 
 def _mock_db_for_host_ops(lvol, node, cluster, pool=None):
     """Build a mock DBController for add/remove host tests."""
-    # Clear Singleton cache so the patch takes effect
-    from simplyblock_core.db_controller import Singleton
-    Singleton._instances.clear()
-
     mock_db = MagicMock()
     mock_db.get_lvol_by_id.return_value = lvol
     mock_db.get_storage_node_by_id.return_value = node
