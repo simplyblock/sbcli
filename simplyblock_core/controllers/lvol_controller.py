@@ -2487,9 +2487,13 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         logger.error(e)
         return False
 
-    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    source_node = None
     new_source_cluster = None
-    if cluster_id and source_node.cluster_id == cluster_id:
+    try:
+        source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    except KeyError:
+        pass
+    if cluster_id and (source_node is None or source_node.cluster_id != cluster_id):
         new_source_cluster = db_controller.get_cluster_by_id(cluster_id)
         if new_source_cluster.status != Cluster.STATUS_ACTIVE:
             logger.error(f"Cluster is not active: {cluster_id}")
