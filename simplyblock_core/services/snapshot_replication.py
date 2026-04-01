@@ -96,10 +96,10 @@ def process_snap_replicate_start(task, snapshot):
         offset = task.function_params["offset"]
     # 3 start replication
     snode.rpc_client().bdev_lvol_transfer(
-        lvol_name=snapshot.snap_bdev,
+        name=snapshot.snap_bdev,
         offset=offset,
-        cluster_batch=16,
-        gateway=f"{remote_lv.top_bdev}n1",
+        batch_size=16,
+        bdev_name=f"{remote_lv.top_bdev}n1",
         operation="replicate"
     )
     task.status = JobSchedule.STATUS_RUNNING
