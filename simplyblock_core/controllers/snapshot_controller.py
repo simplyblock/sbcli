@@ -488,9 +488,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             logger.error(msg)
             return False, msg
 
-    lvol_count = len(db_controller.get_lvols_by_node_id(snode.get_id()))
-    if lvol_count >= snode.max_lvol:
-        error = f"Too many lvols on node: {snode.get_id()}, max lvols reached: {lvol_count}"
+    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(snode.get_id())))
+    if subsys_count >= snode.max_lvol:
+        error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {subsys_count}"
         logger.error(error)
         return False, error
 

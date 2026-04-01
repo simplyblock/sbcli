@@ -141,15 +141,15 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
         if node.is_secondary_node:  # pass
             continue
         if node.status == node.STATUS_ONLINE:
-            lvol_count = len(db_controller.get_lvols_by_node_id(node.get_id()))
-            if lvol_count >= node.max_lvol:
+            subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(node.get_id())))
+            if subsys_count >= node.max_lvol:
                 continue
             if node.lvol_sync_del():
                 logger.warning(f"LVol sync delete task found on node: {node.get_id()}, skipping")
                 continue
             online_nodes.append(node)
             node_st = {
-                "lvol": lvol_count+1
+                "lvol": subsys_count+1
             }
             node_stats[node.get_id()] = node_st
 
@@ -468,9 +468,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.npcs = cl.distr_npcs
         lvol.ndcs = cl.distr_ndcs
 
-    lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
-    if lvol_count > host_node.max_lvol:
-        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(host_node.get_id())))
+    if subsys_count > host_node.max_lvol:
+        error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {subsys_count}"
         logger.error(error)
         return False, error
 
