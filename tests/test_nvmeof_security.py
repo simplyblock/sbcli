@@ -401,13 +401,6 @@ class TestAddHostToLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_success(self, MockDBCtrl, MockRPC, mock_register):
-        import simplyblock_core.controllers.lvol_controller as _lc
-        print(f"[DEBUG-INSIDE] MockDBCtrl={MockDBCtrl}")
-        print(f"[DEBUG-INSIDE] _lc.DBController={_lc.DBController}")
-        print(f"[DEBUG-INSIDE] same? {_lc.DBController is MockDBCtrl}")
-        print(f"[DEBUG-INSIDE] lvol_ctl.DBController={lvol_ctl.DBController}")
-        print(f"[DEBUG-INSIDE] lvol_ctl is _lc? {lvol_ctl is _lc}")
-
         cl = _cluster(tls=True)
         node = _node()
         node.cluster_id = cl.uuid
