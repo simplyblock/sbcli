@@ -84,7 +84,6 @@ from e2e_tests.security.test_lvol_security import (
     TestLvolAllowedHostsNoDhchap,
     # Extended security tests (TC-SEC-070..127)
     TestLvolSecurityOutageRecovery,
-    TestLvolSecurityNetworkInterrupt,
     TestLvolSecurityHAFailover,
     TestLvolSecurityMgmtNodeReboot,
     TestLvolSecurityDynamicModification,
@@ -96,6 +95,7 @@ from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityResize,
     TestLvolSecurityVolumeListFields,
     TestLvolSecurityRDMA,
+    TestLvolSecurityNetworkInterrupt,  # last: may trigger core dump / node abort
 )
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
@@ -189,7 +189,6 @@ ALL_TESTS = [
     TestLvolSecurityNegativeConnect,
     # Extended security E2E tests (TC-SEC-070..127)
     TestLvolSecurityOutageRecovery,
-    TestLvolSecurityNetworkInterrupt,
     TestLvolSecurityHAFailover,
     TestLvolSecurityMgmtNodeReboot,
     TestLvolSecurityDynamicModification,
@@ -201,6 +200,7 @@ ALL_TESTS = [
     TestLvolSecurityResize,
     TestLvolSecurityVolumeListFields,
     TestLvolSecurityRDMA,
+    TestLvolSecurityNetworkInterrupt,  # last: may trigger core dump / node abort
     # Security stress tests
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
@@ -325,7 +325,6 @@ def get_security_tests():
         TestLvolSecurityNegativeConnect,
         # Extended security tests (TC-SEC-070..127)
         TestLvolSecurityOutageRecovery,
-        TestLvolSecurityNetworkInterrupt,
         TestLvolSecurityHAFailover,
         TestLvolSecurityMgmtNodeReboot,
         TestLvolSecurityDynamicModification,
@@ -337,6 +336,7 @@ def get_security_tests():
         TestLvolSecurityResize,
         TestLvolSecurityVolumeListFields,
         TestLvolSecurityRDMA,
+        TestLvolSecurityNetworkInterrupt,  # last: may trigger core dump / node abort
     ]
 
 

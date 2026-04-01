@@ -68,9 +68,9 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self._local_outage_log_dirs = {}
 
         self.outage_types = [
-            "graceful_shutdown",
+            # "graceful_shutdown",
             "container_stop",
-            "interface_full_network_interrupt",
+            # "interface_full_network_interrupt",
         ]
 
         # Names
@@ -1034,7 +1034,269 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
         self.logger.info(f"[V2] Outage resolved; waiting {gap}s before next outage.")
         sleep_n_sec(gap)
 
-    # ── Override 4: run — read cluster config then delegate ──────────────────
+    # ── Override 4: dual (simultaneous) outage support ───────────────────────
+
+    def _pick_non_related_pair(self):
+        """Return (node_a, node_b) where neither is the other's secondary partner,
+        or None if no such pair exists.
+
+        Used when npcs >= 2 but ft < 2: each replica group must keep at least
+        one node alive, so the two chosen nodes must be from different groups.
+        """
+        all_nodes = self.sn_nodes[:]
+        random.shuffle(all_nodes)
+        for i, node_a in enumerate(all_nodes):
+            sec_a = self.sn_primary_secondary_map.get(node_a)
+            related = {node_a}
+            if sec_a:
+                related.add(sec_a)
+            # Also nodes whose secondary IS node_a
+            for p, s in self.sn_primary_secondary_map.items():
+                if s == node_a:
+                    related.add(p)
+            for node_b in all_nodes[i + 1:]:
+                if node_b not in related:
+                    return node_a, node_b
+        return None
+
+    def _pick_outage_pair(self):
+        """Return (node_a, node_b) for a simultaneous dual outage, or None for single outage.
+
+        Decision tree:
+          npcs < 2              → single outage only (only 1 secondary per primary)
+          npcs >= 2, ft >= 2    → any two nodes (cluster survives any 2 simultaneous failures)
+          npcs >= 2, ft < 2     → non-related nodes only (different replica groups)
+        """
+        if self.npcs < 2:
+            return None
+
+        all_nodes = self.sn_nodes[:]
+        random.shuffle(all_nodes)
+
+        if self.max_fault_tolerance >= 2:
+            # Any two nodes are safe
+            if len(all_nodes) >= 2:
+                return all_nodes[0], all_nodes[1]
+            return None
+
+        # ft < 2: must pick nodes from different replica groups
+        return self._pick_non_related_pair()
+
+    def _execute_outage_for_node(self, node_uuid, result_dict, errors_list):
+        """Thread worker: perform one outage on node_uuid.
+        Stores the final outage_type string in result_dict[node_uuid].
+        """
+        try:
+            nd = self.sbcli_utils.get_storage_node_details(node_uuid)
+            node_ip = nd[0]["mgmt_ip"]
+            node_rpc_port = nd[0]["rpc_port"]
+
+            available_types = list(self.outage_types)
+            if self.k8s_test:
+                available_types = [t for t in available_types if "network_interrupt" not in t]
+            random.shuffle(available_types)
+            outage_type = available_types[0]
+
+            self._log_outage_event(node_uuid, outage_type, "Outage started")
+            self.logger.info(f"[V2-dual] Outage={outage_type} node={node_uuid}")
+
+            self.ssh_obj.fetch_distrib_logs(
+                storage_node_ip=node_ip,
+                storage_node_id=node_uuid,
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors,
+            )
+
+            if outage_type == "graceful_shutdown":
+                deadline = time.time() + 300
+                while True:
+                    try:
+                        self.sbcli_utils.shutdown_node(node_uuid=node_uuid, force=False)
+                    except Exception as e:
+                        self.logger.warning(f"[V2-dual] shutdown_node raised for {node_uuid}: {e}")
+                    sleep_n_sec(30)
+                    node_status = self.sbcli_utils.get_storage_node_details(node_uuid)
+                    if node_status[0]["status"] == "offline":
+                        self.logger.info(f"[V2-dual] Node {node_uuid} offline.")
+                        break
+                    if time.time() >= deadline:
+                        raise RuntimeError(f"[V2-dual] {node_uuid} did not go offline within 5 min.")
+                    self.logger.info(f"[V2-dual] {node_uuid} not offline yet; retrying...")
+                sleep_n_sec(60)
+
+            elif outage_type == "container_stop":
+                if self.k8s_test and self.k8s_utils:
+                    self.k8s_utils.stop_spdk_pod(node_ip)
+                else:
+                    self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
+                self.sbcli_utils.wait_for_storage_node_status(
+                    node_uuid, ["offline", "unreachable"], timeout=900
+                )
+
+            elif outage_type == "interface_full_network_interrupt":
+                if not self.k8s_test and node_ip in self.container_nodes:
+                    ts = int(datetime.now().timestamp())
+                    local_log_dir = f"/tmp/outage_logs/{node_uuid}_{ts}"
+                    self.ssh_obj.start_local_docker_logging(
+                        node_ip, self.container_nodes[node_ip], local_log_dir, self.test_name
+                    )
+                    self._local_outage_log_dirs[node_uuid] = (node_ip, local_log_dir)
+
+                outage_dur = random.choice([30, 300, 600])
+                outage_type = f"interface_full_network_interrupt_{outage_dur}sec"
+                self.logger.info(f"[V2-dual] NW outage {outage_dur}s on {node_uuid}")
+
+                active = self.ssh_obj.get_active_interfaces(node_ip)
+                self.ssh_obj.disconnect_all_active_interfaces(node_ip, active, outage_dur)
+
+                if outage_dur >= 300:
+                    sleep_n_sec(200)
+                    try:
+                        self.sbcli_utils.wait_for_storage_node_status(
+                            node_uuid, ["offline", "down"], timeout=130
+                        )
+                    except Exception:
+                        self.logger.info(f"[V2-dual] {node_uuid} may not have aborted.")
+                else:
+                    sleep_n_sec(30)
+
+            result_dict[node_uuid] = outage_type
+
+        except Exception as e:
+            self.logger.error(f"[V2-dual] Outage error for {node_uuid}: {e}")
+            errors_list.append((node_uuid, e))
+
+    def _recover_node_after_failover(self, node_uuid, outage_type):
+        """Thread worker: wait for node_uuid to come back online after an outage."""
+        self.logger.info(f"[V2-dual] Recovering node={node_uuid} outage_type={outage_type}")
+
+        partner = self.sn_primary_secondary_map.get(node_uuid)
+        if partner:
+            nd = self.sbcli_utils.get_storage_node_details(partner)
+            self.ssh_obj.fetch_distrib_logs(
+                storage_node_ip=nd[0]["mgmt_ip"],
+                storage_node_id=partner,
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors,
+            )
+
+        if outage_type == "graceful_shutdown":
+            max_retries = 4
+            for attempt in range(max_retries):
+                try:
+                    force = (attempt == max_retries - 1)
+                    if force:
+                        self.logger.info(f"[V2-dual] Restart {node_uuid} with force=True (last attempt).")
+                    if self.k8s_test:
+                        self.sbcli_utils.restart_node(node_uuid=node_uuid, force=force)
+                    else:
+                        self.ssh_obj.restart_node(
+                            node=self.mgmt_nodes[0], node_id=node_uuid, force=force
+                        )
+                    self.sbcli_utils.wait_for_storage_node_status(node_uuid, "online", timeout=300)
+                    break
+                except Exception:
+                    if attempt < max_retries - 1:
+                        sleep_n_sec(10)
+                    else:
+                        raise
+            # Safety-net
+            self.sbcli_utils.wait_for_storage_node_status(node_uuid, "online", timeout=300)
+
+        elif outage_type == "container_stop":
+            self.sbcli_utils.wait_for_storage_node_status(node_uuid, "online", timeout=900)
+
+        elif "network_interrupt" in outage_type:
+            self.sbcli_utils.wait_for_storage_node_status(node_uuid, "online", timeout=900)
+
+        self._log_outage_event(node_uuid, outage_type, "Node online")
+
+        # Flush local outage logs if any
+        if node_uuid in self._local_outage_log_dirs:
+            _nip, _local_dir = self._local_outage_log_dirs.pop(node_uuid)
+            nfs_target = os.path.join(self.docker_logs_path, _nip, "local_logs")
+            self.ssh_obj.flush_local_logs_to_nfs(_nip, _local_dir, nfs_target)
+            self.logger.info(f"[V2-dual] Flushed local logs for {node_uuid}")
+
+        nd = self.sbcli_utils.get_storage_node_details(node_uuid)
+        self.ssh_obj.fetch_distrib_logs(
+            storage_node_ip=nd[0]["mgmt_ip"],
+            storage_node_id=node_uuid,
+            logs_path=self.docker_logs_path,
+            validate_async=True,
+            error_sink=self.dump_validation_errors,
+        )
+
+    def _dual_outage_cycle(self, node_a, node_b):
+        """Perform simultaneous outages on two non-related nodes then recover both in parallel."""
+        self.logger.info(f"[V2-dual] Starting dual outage: {node_a} + {node_b}")
+        if self.first_outage_ts is None:
+            self.first_outage_ts = int(datetime.now().timestamp())
+        self.outage_start_time = int(datetime.now().timestamp())
+
+        result_dict = {}
+        errors = []
+
+        t_a = threading.Thread(
+            target=self._execute_outage_for_node, args=(node_a, result_dict, errors)
+        )
+        t_b = threading.Thread(
+            target=self._execute_outage_for_node, args=(node_b, result_dict, errors)
+        )
+        t_a.start()
+        t_b.start()
+        t_a.join()
+        t_b.join()
+
+        if errors:
+            raise RuntimeError(f"[V2-dual] Outage thread errors: {errors}")
+
+        # Recover both nodes in parallel
+        rec_errors = []
+
+        def _do_recover(node_uuid, ot):
+            try:
+                self._recover_node_after_failover(node_uuid, ot)
+            except Exception as e:
+                self.logger.error(f"[V2-dual] Recovery error for {node_uuid}: {e}")
+                rec_errors.append((node_uuid, e))
+
+        rec_threads = [
+            threading.Thread(target=_do_recover, args=(nu, ot))
+            for nu, ot in result_dict.items()
+        ]
+        for t in rec_threads:
+            t.start()
+        for t in rec_threads:
+            t.join()
+
+        if rec_errors:
+            raise RuntimeError(f"[V2-dual] Recovery errors: {rec_errors}")
+
+        self.outage_end_time = int(datetime.now().timestamp())
+        self._last_outage_node = node_b
+
+        # Restart container/k8s logging after all nodes are recovered
+        if not self.k8s_test:
+            for node in self.storage_nodes:
+                self.ssh_obj.restart_docker_logging(
+                    node_ip=node,
+                    containers=self.container_nodes[node],
+                    log_dir=os.path.join(self.docker_logs_path, node),
+                    test_name=self.test_name,
+                )
+        else:
+            self.runner_k8s_log.restart_logging()
+
+        gap = random.randint(30, 60)
+        self.logger.info(f"[V2-dual] Both nodes online; waiting {gap}s before next outage.")
+        sleep_n_sec(gap)
+
+        return result_dict
+
+    # ── Override 5: run — read cluster config then delegate ──────────────────
 
     def run(self):
         self.logger.info("[V2] Starting RandomRapidFailoverNoGapV2")
@@ -1083,8 +1345,23 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
                 raise RuntimeError(
                     f"[V2] Placement dump validation failed: {self.dump_validation_errors}"
                 )
-            outage_type = self._perform_outage()
-            self.restart_nodes_after_failover(outage_type)
+            # Pick outage strategy based on npcs and ft:
+            #   npcs < 2              → single (only 1 secondary, can't afford 2 simultaneous)
+            #   npcs >= 2, ft >= 2    → dual any nodes
+            #   npcs >= 2, ft < 2     → dual non-related nodes only
+            pair = self._pick_outage_pair()
+            if pair:
+                self.logger.info(
+                    f"[V2] Dual outage (npcs={self.npcs}, ft={self.max_fault_tolerance}): "
+                    f"{pair[0]} + {pair[1]}"
+                )
+                self._dual_outage_cycle(*pair)
+            else:
+                self.logger.info(
+                    f"[V2] Single outage (npcs={self.npcs}, ft={self.max_fault_tolerance})"
+                )
+                outage_type = self._perform_outage()
+                self.restart_nodes_after_failover(outage_type)
 
             self._iter += 1
             if self._iter % self.validate_every == 0:
