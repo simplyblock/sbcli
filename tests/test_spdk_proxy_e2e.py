@@ -18,7 +18,6 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
 
 import requests
 
@@ -105,8 +104,8 @@ def _start_proxy(sock_path, http_port, max_concurrent=4, timeout=5):
     We import and configure the module, then run the server.
     Returns a thread + a stop event.
     """
-    with patch("simplyblock_core.services.spdk_http_proxy_server.print_stats"):
-        import simplyblock_core.services.spdk_http_proxy_server as mod
+    os.environ.setdefault("PRINT_STATS", "False")
+    import simplyblock_core.services.spdk_http_proxy_server as mod
 
     # Reconfigure module globals
     mod.rpc_sock = sock_path

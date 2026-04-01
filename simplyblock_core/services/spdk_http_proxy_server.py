@@ -243,11 +243,12 @@ class ServerHandler(BaseHTTPRequestHandler):
         self.server_session.remove(req_time)
 
 
-def run_server(host, port, user, password, is_threading_enabled=False):
+def run_server(host, port, user, password, is_threading_enabled=False, do_print_stats=True):
     # encoding user and password
     key = base64.b64encode((user+':'+password).encode(encoding='ascii')).decode('ascii')
-    print_stats_thread = threading.Thread(target=print_stats)
-    print_stats_thread.start()
+    if do_print_stats:
+        print_stats_thread = threading.Thread(target=print_stats)
+        print_stats_thread.start()
     wait_for_spdk_ready()
     try:
         ServerHandler.key = key
@@ -267,6 +268,7 @@ server_ip = get_env_var("SERVER_IP", is_required=True, default="")
 rpc_port = get_env_var("RPC_PORT", is_required=True)
 rpc_username = get_env_var("RPC_USERNAME", is_required=True)
 rpc_password = get_env_var("RPC_PASSWORD", is_required=True)
+do_print_stats = bool(get_env_var("PRINT_STATS", is_required=False, default=True))
 
 try:
     rpc_port = int(rpc_port)
@@ -278,4 +280,4 @@ spdk_semaphore = threading.Semaphore(MAX_CONCURRENT_SPDK)
 logger.info(f"SPDK concurrency limit: {MAX_CONCURRENT_SPDK}")
 
 is_threading_enabled = bool(is_threading_enabled)
-run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)
+run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled, do_print_stats=do_print_stats)
