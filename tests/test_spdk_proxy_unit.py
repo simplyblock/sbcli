@@ -10,7 +10,8 @@ import time
 import unittest
 from unittest.mock import patch, MagicMock
 
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.dirname(__file__))
 from conftest_proxy import import_proxy_module
 

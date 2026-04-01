@@ -53,6 +53,12 @@ def escape_python_string(text):
     return text.replace('%', '%%')
 
 
+def choice_value(value):
+    if isinstance(value, int):
+        return str(value)
+    return "'%s'" % value
+
+
 def escape_strings(text):
     text = re.sub("'", "\\'", text)
     text = re.sub("\n", "", text)
@@ -151,6 +157,7 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment.filters["bool_value"] = bool_value
         environment.filters["escape_python_string"] = escape_python_string
         environment.filters["nargs"] = nargs
+        environment.filters["choice_value"] = choice_value
 
         template = environment.get_template("cli-wrapper.jinja2")
         output = template.render({"commands": reference["commands"]})

@@ -2235,7 +2235,7 @@ def remove_host_from_lvol(lvol_id, host_nqn):
 def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     db_controller = DBController()
     try:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
+        db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
         return False

@@ -421,7 +421,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--client-qpair-count', help='default NVMe/TCP transport qpair count per logical volume for client', type=range_type(0, 128), default=3, dest='client_qpair_count')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
         argument = subcommand.add_argument('--host-sec', help='Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)', type=str, dest='host_sec')
-        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1', type=int, default=1, dest='max_fault_tolerance', choices=[1, 2])
+        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1', type=int, default=1, dest='max_fault_tolerance', choices=[1,2,])
         argument = subcommand.add_argument('--use-backup', help='Path to JSON file with S3/MinIO backup configuration', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420', type=int, default=4420, dest='nvmf_base_port')
         argument = subcommand.add_argument('--rpc-base-port', help='Base port for SPDK JSON-RPC. Default: 8080', type=int, default=8080, dest='rpc_base_port')
@@ -454,7 +454,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for LVol connection.', type=str, dest='client_data_nic')
-        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1', type=int, default=1, dest='max_fault_tolerance', choices=[1, 2])
+        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1', type=int, default=1, dest='max_fault_tolerance', choices=[1,2,])
         argument = subcommand.add_argument('--use-backup', help='Path to JSON file with S3/MinIO backup configuration', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420', type=int, default=4420, dest='nvmf_base_port')
         argument = subcommand.add_argument('--rpc-base-port', help='Base port for SPDK JSON-RPC. Default: 8080', type=int, default=8080, dest='rpc_base_port')
@@ -594,9 +594,12 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
-        self.init_volume__migrate(subparser)
-        self.init_volume__migrate_list(subparser)
-        self.init_volume__migrate_cancel(subparser)
+        if self.developer_mode:
+            self.init_volume__migrate(subparser)
+        if self.developer_mode:
+            self.init_volume__migrate_list(subparser)
+        if self.developer_mode:
+            self.init_volume__migrate_cancel(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -677,7 +680,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'connect', 'Gets the logical volume\'s NVMe/TCP connection string(s)')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         argument = subcommand.add_argument('--ctrl-loss-tmo', help='Control loss timeout for this volume', type=int, dest='ctrl_loss_tmo')
-        subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts with secrets)', type=str, dest='host_nqn')
+        argument = subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts with secrets)', type=str, dest='host_nqn')
 
     def init_volume__resize(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resize', 'Resizes a logical volume')
@@ -688,8 +691,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'create-snapshot', 'Creates a snapshot from a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('name', help='Snapshot name', type=str)
-        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot',
-                                dest='backup', action='store_true')
+        argument = subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot', dest='backup', action='store_true')
 
     def init_volume__clone(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a logical volumes from an existing snapshot')
@@ -726,13 +728,13 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'migrate', 'Migrate a logical volume to a different storage node')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('target_node_id', help='Target storage node id', type=str)
-        subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting (default: 10)', type=int, default=10, dest='max_retries')
-        subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline, default: 14400)', type=int, default=14400, dest='deadline_seconds')
+        argument = subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting (default: 10)', type=int, default=10, dest='max_retries')
+        argument = subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline, default: 14400)', type=int, default=14400, dest='deadline_seconds')
 
     def init_volume__migrate_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations')
-        subcommand.add_argument('--cluster-id', help='Filter by cluster id', type=str, dest='cluster_id')
-        subcommand.add_argument('--json', help='Print output in json format', dest='json', action='store_true')
+        argument = subcommand.add_argument('--cluster-id', help='Filter by cluster id', type=str, dest='cluster_id')
+        argument = subcommand.add_argument('--json', help='Print output in json format', dest='json', action='store_true')
 
     def init_volume__migrate_cancel(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancel an active volume migration')
@@ -846,12 +848,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'add', 'Creates a new snapshot')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
         subcommand.add_argument('name', help='New snapshot name', type=str)
-        subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot',
-                                dest='backup', action='store_true')
-
-    def init_snapshot__backup(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'backup', 'Create an S3 backup of an existing snapshot')
-        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
+        argument = subcommand.add_argument('--backup', help='Also create an S3 backup of this snapshot', dest='backup', action='store_true')
 
     def init_snapshot__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all snapshots')
@@ -867,6 +864,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
+
+    def init_snapshot__backup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'backup', 'Create an S3 backup of an existing snapshot')
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
 
 
     def init_backup(self):
@@ -884,9 +885,10 @@ class CLIWrapper(CLIWrapperBase):
         self.init_backup__source_list(subparser)
         self.init_backup__source_switch(subparser)
 
+
     def init_backup__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'List all backups')
-        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+        argument = subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, dest='cluster_id')
 
     def init_backup__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Delete all backups for a logical volume')
@@ -895,31 +897,29 @@ class CLIWrapper(CLIWrapperBase):
     def init_backup__restore(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restore', 'Restore a backup to a new logical volume')
         subcommand.add_argument('backup_id', help='Backup id', type=str)
-        subcommand.add_argument('--lvol', help='New logical volume name', type=str, required=True, dest='lvol_name')
-        subcommand.add_argument('--pool', help='Target pool name or UUID', type=str, required=True, dest='pool')
-        subcommand.add_argument('--node', help='Target storage node ID (default: original backup node)', type=str, default=None, dest='node')
-        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+        argument = subcommand.add_argument('--lvol', help='New logical volume name', type=str, dest='lvol_name', required=True)
+        argument = subcommand.add_argument('--pool', help='Target pool name or UUID', type=str, dest='pool', required=True)
+        argument = subcommand.add_argument('--node', help='Target storage node ID (default: original backup node)', type=str, dest='node')
+        argument = subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, dest='cluster_id')
 
     def init_backup__export(self, subparser):
         subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore')
-        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
-        subcommand.add_argument('--lvol', help='Filter exports to a specific lvol name', type=str, default=None, dest='lvol_name')
-        subcommand.add_argument('-o', '--output', help='Output file path (default: stdout)', type=str, default=None, dest='output')
+        argument = subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, dest='cluster_id')
+        argument = subcommand.add_argument('--lvol', help='Filter exports to a specific lvol name', type=str, dest='lvol_name')
+        argument = subcommand.add_argument('-o', '--output', help='Output file path (default: stdout)', type=str, dest='output')
 
     def init_backup__import(self, subparser):
         subcommand = self.add_sub_command(subparser, 'import', 'Import backup metadata from a JSON file')
         subcommand.add_argument('metadata_file', help='Path to JSON metadata file', type=str)
-        subcommand.add_argument('--cluster-id', help='Target cluster to import into (required for cross-cluster restore)',
-                                type=str, default=None, dest='cluster_id')
+        argument = subcommand.add_argument('--cluster-id', help='Target cluster to import into (required for cross-cluster restore)', type=str, dest='cluster_id')
 
     def init_backup__policy_add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-add', 'Create a new backup policy')
         subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
         subcommand.add_argument('name', help='Policy name', type=str)
-        subcommand.add_argument('--versions', help='Maximum number of backup versions', type=int, default=None, dest='versions')
-        subcommand.add_argument('--age', help='Maximum backup age (e.g. 2d, 12h, 1w)', type=str, default=None, dest='age')
-        subcommand.add_argument('--schedule', help='Auto-backup schedule as space-separated tiers: "15m,4 60m,11 24h,7" '
-                                '(interval,keep_count per tier)', type=str, default=None, dest='schedule')
+        argument = subcommand.add_argument('--versions', help='Maximum number of backup versions', type=int, dest='versions')
+        argument = subcommand.add_argument('--age', help='Maximum backup age (e.g. 2d, 12h, 1w)', type=str, dest='age')
+        argument = subcommand.add_argument('--schedule', help='Auto-backup schedule as space-separated tiers: "15m,4 60m,11 24h,7" (interval,keep_count per tier)', type=str, dest='schedule')
 
     def init_backup__policy_remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-remove', 'Remove a backup policy')
@@ -927,30 +927,29 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_backup__policy_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-list', 'List all backup policies')
-        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+        argument = subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, dest='cluster_id')
 
     def init_backup__policy_attach(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-attach', 'Attach a backup policy to a pool or lvol')
         subcommand.add_argument('policy_id', help='Policy id', type=str)
-        subcommand.add_argument('target_type', help='Target type', type=str, choices=['pool', 'lvol'])
+        subcommand.add_argument('target_type', help='Target type', type=str, choices=['pool','lvol',])
         subcommand.add_argument('target_id', help='Target id (pool or lvol UUID)', type=str)
 
     def init_backup__policy_detach(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-detach', 'Detach a backup policy from a pool or lvol')
         subcommand.add_argument('policy_id', help='Policy id', type=str)
-        subcommand.add_argument('target_type', help='Target type', type=str, choices=['pool', 'lvol'])
+        subcommand.add_argument('target_type', help='Target type', type=str, choices=['pool','lvol',])
         subcommand.add_argument('target_id', help='Target id (pool or lvol UUID)', type=str)
 
     def init_backup__source_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'source-list', 'List backup sources (local and imported clusters)')
-        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+        argument = subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, dest='cluster_id')
 
     def init_backup__source_switch(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'source-switch',
-            'Switch the active S3 backup source to a different cluster. '
-            'Use "local" or the local cluster UUID to switch back.')
-        subcommand.add_argument('source_cluster_id', help='Source cluster UUID or "local"', type=str)
-        subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, default=None, dest='cluster_id')
+        subcommand = self.add_sub_command(subparser, 'source-switch', 'Switch the active S3 backup source to a different cluster. Use \'local\' or the local cluster UUID to switch back.')
+        subcommand.add_argument('source_cluster_id', help='Source cluster UUID or \'local\'', type=str)
+        argument = subcommand.add_argument('--cluster-id', help='Cluster UUID', type=str, dest='cluster_id')
+
 
     def init_qos(self):
         subparser = self.add_command('qos', 'qos commands')
@@ -1229,6 +1228,12 @@ class CLIWrapper(CLIWrapperBase):
                         args.distr_vuid = None
                         args.uid = None
                     ret = self.volume__add(sub_command, args)
+                elif sub_command in ['add-host']:
+                    ret = self.volume__add_host(sub_command, args)
+                elif sub_command in ['remove-host']:
+                    ret = self.volume__remove_host(sub_command, args)
+                elif sub_command in ['get-secret']:
+                    ret = self.volume__get_secret(sub_command, args)
                 elif sub_command in ['qos-set']:
                     ret = self.volume__qos_set(sub_command, args)
                 elif sub_command in ['list']:
@@ -1265,18 +1270,24 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
-                elif sub_command in ['add-host']:
-                    ret = self.volume__add_host(sub_command, args)
-                elif sub_command in ['remove-host']:
-                    ret = self.volume__remove_host(sub_command, args)
-                elif sub_command in ['get-secret']:
-                    ret = self.volume__get_secret(sub_command, args)
                 elif sub_command in ['migrate']:
-                    ret = self.volume__migrate(sub_command, args)
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.volume__migrate(sub_command, args)
                 elif sub_command in ['migrate-list']:
-                    ret = self.volume__migrate_list(sub_command, args)
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.volume__migrate_list(sub_command, args)
                 elif sub_command in ['migrate-cancel']:
-                    ret = self.volume__migrate_cancel(sub_command, args)
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.volume__migrate_cancel(sub_command, args)
                 else:
                     self.parser.print_help()
 
