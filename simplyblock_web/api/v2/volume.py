@@ -174,6 +174,9 @@ def update(cluster: Cluster, pool: StoragePool, volume: Volume, body: UpdatableL
 
 @instance_api.delete('/', name='clusters:storage-pools:volumes:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    if volume.status == LVol.STATUS_DELETED:
+        return Response(status_code=404)
+
     if not lvol_controller.delete_lvol(volume.get_id()):
         raise ValueError('Failed to delete volume')
 

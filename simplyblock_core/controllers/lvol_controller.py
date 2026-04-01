@@ -1046,16 +1046,14 @@ def delete_lvol(id_or_name, force_delete=False):
     if lvol.status == LVol.STATUS_RESTORING and not force_delete:
         logger.error(f"Cannot delete lvol {lvol.uuid}: backup restore in progress")
         return False
+    if lvol.status == LVol.STATUS_DELETED:
+        logger.error(f"lvol {lvol.uuid}: deleted already")
+        return False
 
     if lvol.status == LVol.STATUS_IN_DELETION:
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
             return True
-
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    if pool.status == Pool.STATUS_INACTIVE:
-        logger.error("Pool is disabled")
-        return False
 
     logger.debug(lvol)
     try:
@@ -1083,6 +1081,11 @@ def delete_lvol(id_or_name, force_delete=False):
 
         logger.info("Done")
         return True
+
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.status == Pool.STATUS_INACTIVE:
+        logger.error("Pool is disabled")
+        return False
 
     if lvol.ha_type == 'single':
         if snode.status  != StorageNode.STATUS_ONLINE:
