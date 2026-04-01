@@ -19,7 +19,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
-import simplyblock_core.controllers.lvol_controller as lvol_ctl
 import simplyblock_core.storage_node_ops as snode_ops
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
@@ -401,6 +400,7 @@ class TestAddHostToLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_success(self, MockDBCtrl, MockRPC, mock_register):
+        from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
         cl = _cluster(tls=True)
         node = _node()
         node.cluster_id = cl.uuid
@@ -416,7 +416,7 @@ class TestAddHostToLvol(unittest.TestCase):
         mock_register.return_value = {"psk": "psk_key_name"}
 
         with patch.object(lvol, "write_to_db") as mock_write:
-            result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:new-host")
+            result, err = add_host_to_lvol("lvol-1", "nqn:new-host")
             self.assertIsNone(err)
             self.assertEqual(result["nqn"], "nqn:new-host")
             self.assertIn("psk", result)
@@ -434,6 +434,7 @@ class TestAddHostToLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_without_tls_succeeds(self, MockDBCtrl, MockRPC):
         """Adding a host without TLS is allowed (TLS and DHCHAP are independent)."""
+        from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
         cl = _cluster(tls=False)
         node = _node()
         node.cluster_id = cl.uuid
@@ -446,7 +447,7 @@ class TestAddHostToLvol(unittest.TestCase):
         mock_rpc_inst.subsystem_add_host.return_value = True
         MockRPC.return_value = mock_rpc_inst
 
-        result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:host")
+        result, err = add_host_to_lvol("lvol-1", "nqn:host")
         self.assertIsNone(err)
         self.assertEqual(result["nqn"], "nqn:host")
 
@@ -454,6 +455,7 @@ class TestAddHostToLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_duplicate_host_rejected(self, MockDBCtrl, MockRPC):
         cl = _cluster(tls=True)
+        from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
         node = _node()
         node.cluster_id = cl.uuid
         lvol = _lvol(allowed_hosts=[{"nqn": "nqn:existing"}], nodes=[node.uuid])
@@ -461,7 +463,7 @@ class TestAddHostToLvol(unittest.TestCase):
         mock_db = _mock_db_for_host_ops(lvol, node, cl)
         MockDBCtrl.return_value = mock_db
 
-        result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:existing")
+        result, err = add_host_to_lvol("lvol-1", "nqn:existing")
         self.assertFalse(result)
         self.assertIn("already allowed", err)
 
@@ -470,6 +472,7 @@ class TestAddHostToLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_rpc_failure(self, MockDBCtrl, MockRPC, mock_register):
         cl = _cluster(tls=True)
+        from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
         node = _node()
         node.cluster_id = cl.uuid
         pool = _pool(sec_options={"dhchap_key": True})
@@ -483,7 +486,7 @@ class TestAddHostToLvol(unittest.TestCase):
         MockRPC.return_value = mock_rpc_inst
         mock_register.return_value = {"dhchap_key": "kn"}
 
-        result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:host")
+        result, err = add_host_to_lvol("lvol-1", "nqn:host")
         self.assertFalse(result)
         self.assertIn("Failed to add host", err)
 
@@ -492,6 +495,7 @@ class TestAddHostToLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_with_dhchap_keys(self, MockDBCtrl, MockRPC, mock_register):
         cl = _cluster(tls=True)
+        from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
         node = _node()
         node.cluster_id = cl.uuid
         pool = _pool(sec_options={"dhchap_key": True, "dhchap_ctrlr_key": True})
@@ -508,7 +512,7 @@ class TestAddHostToLvol(unittest.TestCase):
             "dhchap_ctrlr_key": "kn_ctrlr",
         }
 
-        result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:host")
+        result, err = add_host_to_lvol("lvol-1", "nqn:host")
         self.assertIsNone(err)
         self.assertIn("dhchap_key", result)
         self.assertIn("dhchap_ctrlr_key", result)
@@ -521,6 +525,7 @@ class TestAddHostToLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_multi_node(self, MockDBCtrl, MockRPC):
         """Host ACL applied to all online nodes."""
+        from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
         cl = _cluster(tls=True)
         node1 = _node("node-1")
         node1.cluster_id = cl.uuid
@@ -542,7 +547,7 @@ class TestAddHostToLvol(unittest.TestCase):
         mock_rpc_inst.subsystem_add_host.return_value = True
         MockRPC.return_value = mock_rpc_inst
 
-        result, err = lvol_ctl.add_host_to_lvol("lvol-1", "nqn:host")
+        result, err = add_host_to_lvol("lvol-1", "nqn:host")
         self.assertIsNone(err)
         self.assertEqual(mock_rpc_inst.subsystem_add_host.call_count, 2)
 
@@ -553,6 +558,7 @@ class TestRemoveHostFromLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_remove_host_success(self, MockDBCtrl, MockRPC):
         node = _node()
+        from simplyblock_core.controllers.lvol_controller import remove_host_from_lvol
         lvol = _lvol(
             allowed_hosts=[{"nqn": "nqn:host1"}, {"nqn": "nqn:host2"}],
             nodes=[node.uuid],
@@ -569,7 +575,7 @@ class TestRemoveHostFromLvol(unittest.TestCase):
         MockRPC.return_value = mock_rpc_inst
 
         with patch.object(lvol, "write_to_db") as mock_write:
-            result, err = lvol_ctl.remove_host_from_lvol("lvol-1", "nqn:host1")
+            result, err = remove_host_from_lvol("lvol-1", "nqn:host1")
             self.assertIsNone(err)
             self.assertTrue(result)
 
@@ -581,12 +587,13 @@ class TestRemoveHostFromLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_remove_nonexistent_host_rejected(self, MockDBCtrl):
         lvol = _lvol(allowed_hosts=[{"nqn": "nqn:host1"}])
+        from simplyblock_core.controllers.lvol_controller import remove_host_from_lvol
 
         mock_db = MagicMock()
         mock_db.get_lvol_by_id.return_value = lvol
         MockDBCtrl.return_value = mock_db
 
-        result, err = lvol_ctl.remove_host_from_lvol("lvol-1", "nqn:not-there")
+        result, err = remove_host_from_lvol("lvol-1", "nqn:not-there")
         self.assertFalse(result)
         self.assertIn("not in the allowed list", err)
 
@@ -594,6 +601,7 @@ class TestRemoveHostFromLvol(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_remove_host_rpc_failure(self, MockDBCtrl, MockRPC):
         node = _node()
+        from simplyblock_core.controllers.lvol_controller import remove_host_from_lvol
         lvol = _lvol(
             allowed_hosts=[{"nqn": "nqn:host1"}],
             nodes=[node.uuid],
@@ -609,7 +617,7 @@ class TestRemoveHostFromLvol(unittest.TestCase):
         mock_rpc_inst.subsystem_remove_host.return_value = False
         MockRPC.return_value = mock_rpc_inst
 
-        result, err = lvol_ctl.remove_host_from_lvol("lvol-1", "nqn:host1")
+        result, err = remove_host_from_lvol("lvol-1", "nqn:host1")
         # DB is still updated even on SPDK failure (host may already be gone)
         self.assertTrue(result)
         self.assertIn("Warning", err)
@@ -626,6 +634,7 @@ class TestConnectLvolTls(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_connect_with_psk_includes_tls_flag(self, MockDBCtrl):
         """TLS flag in connect output is driven by PSK in host entry, not cluster.tls."""
+        from simplyblock_core.controllers.lvol_controller import connect_lvol
         cl = _cluster(tls=False)
         node = _node()
         node.cluster_id = cl.uuid
@@ -646,7 +655,7 @@ class TestConnectLvolTls(unittest.TestCase):
         mock_db.get_cluster_by_id.return_value = cl
         MockDBCtrl.return_value = mock_db
 
-        result = lvol_ctl.connect_lvol("lvol-1", host_nqn="nqn:host1")
+        result = connect_lvol("lvol-1", host_nqn="nqn:host1")
         self.assertTrue(len(result) > 0)
         entry = result[0]
         self.assertIn("--tls", entry["connect"])
@@ -654,6 +663,7 @@ class TestConnectLvolTls(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_connect_without_tls_no_flag(self, MockDBCtrl):
         cl = _cluster(tls=False)
+        from simplyblock_core.controllers.lvol_controller import connect_lvol
         node = _node()
         node.cluster_id = cl.uuid
         nic = MagicMock()
@@ -670,7 +680,7 @@ class TestConnectLvolTls(unittest.TestCase):
         mock_db.get_cluster_by_id.return_value = cl
         MockDBCtrl.return_value = mock_db
 
-        result = lvol_ctl.connect_lvol("lvol-1")
+        result = connect_lvol("lvol-1")
         self.assertTrue(len(result) > 0)
         entry = result[0]
         self.assertNotIn("tls", entry)
@@ -1075,6 +1085,7 @@ class TestRemoveHostKeyringCleanup(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_remove_host_cleans_keyring(self, MockDBCtrl, MockRPC):
         node = _node()
+        from simplyblock_core.controllers.lvol_controller import remove_host_from_lvol
         lvol = _lvol(
             allowed_hosts=[{
                 "nqn": "nqn:host1",
@@ -1095,7 +1106,7 @@ class TestRemoveHostKeyringCleanup(unittest.TestCase):
         mock_rpc_inst.keyring_file_remove_key.return_value = True
         MockRPC.return_value = mock_rpc_inst
 
-        result, err = lvol_ctl.remove_host_from_lvol("lvol-1", "nqn:host1")
+        result, err = remove_host_from_lvol("lvol-1", "nqn:host1")
         self.assertTrue(result)
 
         # Verify keyring cleanup was called for both key types
@@ -1109,6 +1120,7 @@ class TestRemoveHostKeyringCleanup(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_remove_host_succeeds_even_if_spdk_fails(self, MockDBCtrl, MockRPC):
         """DB is updated even if SPDK remove_host returns error (host already gone)."""
+        from simplyblock_core.controllers.lvol_controller import remove_host_from_lvol
         node = _node()
         lvol = _lvol(
             allowed_hosts=[{"nqn": "nqn:host1"}],
@@ -1125,7 +1137,7 @@ class TestRemoveHostKeyringCleanup(unittest.TestCase):
         mock_rpc_inst.subsystem_remove_host.return_value = False  # SPDK error
         MockRPC.return_value = mock_rpc_inst
 
-        result, err = lvol_ctl.remove_host_from_lvol("lvol-1", "nqn:host1")
+        result, err = remove_host_from_lvol("lvol-1", "nqn:host1")
         # Should still succeed (DB updated) but with a warning
         self.assertTrue(result)
         self.assertIn("Warning", err)
