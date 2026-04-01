@@ -2794,4 +2794,5 @@ def recalculate_cores_distribution(cores, number_of_alcemls):
         "alceml_cpu_cores": get_core_indexes(core_to_index, distribution[3]),
         "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
         "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
-        "jc_singleton_core": get_core_indexes(core_to_index, distribution[6])}
+        "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
+        "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
