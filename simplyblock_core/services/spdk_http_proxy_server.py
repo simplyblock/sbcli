@@ -268,7 +268,7 @@ server_ip = get_env_var("SERVER_IP", is_required=True, default="")
 rpc_port = get_env_var("RPC_PORT", is_required=True)
 rpc_username = get_env_var("RPC_USERNAME", is_required=True)
 rpc_password = get_env_var("RPC_PASSWORD", is_required=True)
-do_print_stats = bool(get_env_var("PRINT_STATS", is_required=False, default=True))
+do_print_stats = get_env_var("PRINT_STATS", is_required=False, default="True") == "True"
 
 try:
     rpc_port = int(rpc_port)
