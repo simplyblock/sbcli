@@ -725,6 +725,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
 
+    def init_volume__clone_lvol(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clone-lvol', 'Create logical volume clone by taking a snapshot and then cloning it.')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('clone_name', help='New lvol clone name', type=str)
+
     def init_volume__migrate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate', 'Migrate a logical volume to a different storage node')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
@@ -740,11 +745,6 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__migrate_cancel(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancel an active volume migration')
         subcommand.add_argument('migration_id', help='Migration id', type=str)
-
-    def init_volume__clone_lvol(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'clone-lvol', 'Create logical volume clone by taking a snapshot and then cloning it.')
-        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
-        subcommand.add_argument('clone_name', help='New lvol clone name', type=str)
 
 
     def init_control_plane(self):
