@@ -45,6 +45,7 @@ def is_new_migrated_node(cluster_id, node):
 
 
 def get_next_cluster_status(cluster_id):
+    logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
         return Cluster.STATUS_UNREADY
@@ -71,17 +72,17 @@ def get_next_cluster_status(cluster_id):
             if is_new_migrated_node(cluster_id, node):
                 continue
             online_nodes += 1
-            # check for jm rep tasks:
-            if node.rpc_client().bdev_lvol_get_lvstores(node.lvstore):
-                try:
+            try:
+                # check for jm rep tasks:
+                if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
                     ret = node.rpc_client().jc_get_jm_status(node.jm_vuid)
                     for jm in ret:
                         if ret[jm] is False: # jm is not ready (has active replication task)
                             jm_replication_tasks = True
                             logger.warning("Replication task found!")
                             break
-                except Exception:
-                    logger.warning("Failed to get replication task!")
+            except Exception:
+                logger.warning("Failed to get replication task!")
         elif node.status == StorageNode.STATUS_REMOVED:
             pass
         else:
@@ -231,11 +232,13 @@ def set_node_offline(node):
 
             # ANA failover: update subsystem states on surviving nodes
             try:
+                logger.info(f"Triggering ANA failover for node {node.get_id()}")
                 storage_node_ops.trigger_ana_failover_for_node(node)
             except Exception as ana_e:
                 logger.error("ANA failover for node %s failed: %s", node.get_id(), ana_e)
 
             # initiate restart
+            logger.info(f"Node {node.get_id()} set to OFFLINE, adding to auto-restart")
             tasks_controller.add_node_to_auto_restart(node)
         except Exception as e:
             logger.debug("Setting node to OFFLINE state failed")
