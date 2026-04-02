@@ -69,7 +69,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
 
         self.outage_types = [
             "graceful_shutdown",
-            # "container_stop",
+            "container_stop",
             # "interface_full_network_interrupt",
         ]
         self.available_fabrics = ["tcp"]   # overwritten in run() via fabric detection
