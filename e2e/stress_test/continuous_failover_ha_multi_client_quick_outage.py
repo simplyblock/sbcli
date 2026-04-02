@@ -68,10 +68,12 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self._local_outage_log_dirs = {}
 
         self.outage_types = [
-            # "graceful_shutdown",
-            "container_stop",
+            "graceful_shutdown",
+            # "container_stop",
             # "interface_full_network_interrupt",
         ]
+        self.available_fabrics = ["tcp"]   # overwritten in run() via fabric detection
+        self.k8s_utils = None              # initialised in run() when k8s_test=True
 
         # Names
         self.lvol_base = f"lvl{_rand_id(12)}"
@@ -164,6 +166,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         for _ in range(count):
             fs_type = random.choice(["ext4", "xfs"])
             is_crypto = random.choice([True, False])
+            fabric = random.choice(self.available_fabrics)
             name_core = f"{self.lvol_base}_{_rand_id(6, first_alpha=False)}"
             lvol_name = name_core if not is_crypto else f"c{name_core}"
 
@@ -174,6 +177,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                 crypto=is_crypto,
                 key1=self.lvol_crypt_keys[0],
                 key2=self.lvol_crypt_keys[1],
+                fabric=fabric,
             )
 
             # Avoid outage node & partner during initial placement
@@ -431,7 +435,10 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             sleep_n_sec(60)
 
         elif outage_type == "container_stop":
-            self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
+            if self.k8s_test and self.k8s_utils:
+                self.k8s_utils.stop_spdk_pod(node_ip)
+            else:
+                self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, ["offline", "unreachable"], timeout=900)
             for node in self.sn_nodes_with_sec:
                 if node != self.current_outage_node:
@@ -501,7 +508,10 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         # Only wait for ONLINE (skip deep health)
         if outage_type == 'graceful_shutdown':
             try:
-                self.ssh_obj.restart_node(self.mgmt_nodes[0], node_id=self.current_outage_node, force=True)
+                if self.k8s_test:
+                    self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, force=True)
+                else:
+                    self.ssh_obj.restart_node(self.mgmt_nodes[0], node_id=self.current_outage_node, force=True)
             except Exception:
                 pass
             self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=900)
@@ -543,12 +553,36 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             self.runner_k8s_log.restart_logging()
 
         # small cool-down before next outage to reduce SSH churn
-        sleep_n_sec(random.randint(18, 30))
+        sleep_n_sec(random.randint(30, 60))
 
     # ---------- main ----------
 
     def run(self):
         self.logger.info("[LFNG] Starting RandomRapidFailoverNoGap")
+
+        # Fabric detection
+        cluster_details = self.sbcli_utils.get_cluster_details()
+        fabric_rdma = cluster_details.get("fabric_rdma", False)
+        fabric_tcp = cluster_details.get("fabric_tcp", True)
+        if fabric_rdma and fabric_tcp:
+            self.available_fabrics = ["tcp", "rdma"]
+        elif fabric_rdma:
+            self.available_fabrics = ["rdma"]
+        else:
+            self.available_fabrics = ["tcp"]
+
+        # K8s: initialise pod-management utils + restrict outage types
+        if self.k8s_test:
+            from utils.k8s_utils import K8sUtils
+            self.k8s_utils = K8sUtils(
+                ssh_obj=self.ssh_obj,
+                mgmt_node=self.mgmt_nodes[0],
+            )
+            self.outage_types = [t for t in self.outage_types if "network_interrupt" not in t]
+            self.logger.info(f"[LFNG] K8s mode — outage types: {self.outage_types}")
+
+        self.logger.info(f"[LFNG] fabrics={self.available_fabrics}")
+
         self._bootstrap_cluster()
         sleep_n_sec(5)
 
