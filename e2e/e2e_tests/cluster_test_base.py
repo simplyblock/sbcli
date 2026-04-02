@@ -356,6 +356,25 @@ class TestClusterBase:
             except Exception as e:
                 self.logger.warning(f"[k8s collect_mgmt] {cmd}: {e}")
 
+        # Collect subtasks for all master tasks (mirrors docker path behaviour)
+        if self.cluster_id:
+            try:
+                tasks = k8s.get_cluster_tasks(self.cluster_id)
+                for task in tasks:
+                    tid = task["id"]
+                    try:
+                        out, _ = k8s.exec_sbcli(
+                            f"{self.base_cmd} cluster get-subtasks {tid}"
+                        )
+                        if out and out.strip():
+                            fname = f"subtask_{tid}{suffix}.txt"
+                            with open(os.path.join(base_path, fname), "w") as fh:
+                                fh.write(out)
+                    except Exception as e:
+                        self.logger.warning(f"[k8s collect_mgmt] get-subtasks {tid}: {e}")
+            except Exception as e:
+                self.logger.warning(f"[k8s collect_mgmt] subtask collection: {e}")
+
         try:
             storage_nodes = self.sbcli_utils.get_storage_nodes()
             for i, result in enumerate(storage_nodes["results"], 1):
