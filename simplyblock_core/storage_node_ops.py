@@ -1033,12 +1033,31 @@ def ifc_is_roce(nic):
     return False
 
 
+def get_required_ha_jm_count(cluster) -> int:
+    return 4 if cluster.max_fault_tolerance >= 2 else 3
+
+
+def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
+    required_ha_jm_count = get_required_ha_jm_count(cluster)
+
+    if ha_jm_count is None:
+        return required_ha_jm_count
+
+    if ha_jm_count < required_ha_jm_count:
+        raise ValueError(
+            f"ha_jm_count={ha_jm_count} is too low for max_fault_tolerance="
+            f"{cluster.max_fault_tolerance}; minimum required is {required_ha_jm_count}"
+        )
+
+    return ha_jm_count
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, format_4k=False, spdk_proxy_image=None):
+             partition_size="", ha_jm_count=None, format_4k=False, spdk_proxy_image=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1059,6 +1078,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         except KeyError:
             logger.error("Cluster not found: %s", cluster_id)
             return False
+
+        ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
 
         logger.info(f"Adding Storage node: {node_addr}")
 
@@ -3581,15 +3602,20 @@ def recreate_lvstore_on_sec(secondary_node):
         primary_lvs_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
 
         is_second_sec = (primary_node.secondary_node_id_2 == secondary_node.get_id())
+        logger.info(f"[RESTART-DEBUG] Processing primary {primary_node.get_id()[:8]} lvstore={primary_node.lvstore} "
+                     f"jm_vuid={primary_node.jm_vuid} status={primary_node.status} is_second_sec={is_second_sec}")
 
         # If primary is unreachable/down, check data plane and escalate to offline if confirmed
         if primary_node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN]:
+            logger.info(f"[RESTART-DEBUG] Primary {primary_node.get_id()[:8]} is {primary_node.status}, checking data plane")
             from simplyblock_core.services.storage_node_monitor import _check_data_plane_and_escalate
             _check_data_plane_and_escalate(primary_node)
             primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
+            logger.info(f"[RESTART-DEBUG] After data plane check, primary status={primary_node.status}")
 
         # Collect nodes that need port block/unblock during this failback
         nodes_to_unblock = []
+        logger.info(f"[RESTART-DEBUG] About to check primary status for port blocking: {primary_node.status}")
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
@@ -3623,6 +3649,7 @@ def recreate_lvstore_on_sec(secondary_node):
         # When secondary restarts, block tertiary. When tertiary restarts, block secondary.
         other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.secondary_node_id_2]
                         if sid and sid != secondary_node.get_id()]
+        logger.info(f"[RESTART-DEBUG] Sibling blocking: other_sec_ids={[s[:8] for s in other_sec_ids]}")
         for other_sec_id in other_sec_ids:
             other_sec = db_controller.get_storage_node_by_id(other_sec_id)
             if other_sec and other_sec.status == StorageNode.STATUS_ONLINE:
@@ -3655,6 +3682,7 @@ def recreate_lvstore_on_sec(secondary_node):
 
                 nodes_to_unblock.append(other_sec)
 
+        logger.info(f"[RESTART-DEBUG] Sibling blocking done, proceeding to examine {primary_node.raid}")
         ### 5- examine
         ret = secondary_rpc_client.bdev_examine(primary_node.raid)
 
