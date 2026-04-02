@@ -2057,6 +2057,52 @@ def list_by_node(node_id=None, is_json=False):
     return utils.print_table(data)
 
 
+def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    host_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    lvol_count = len(db_controller.get_lvols_by_node_id(lvol.node_id))
+    if lvol_count >= host_node.max_lvol:
+        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+        logger.error(error)
+        return False, error
+
+    had_lock = None
+    snapshot_uuid = None
+    for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
+        if snap.snap_name == clone_name:
+            logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
+            snapshot_uuid = snap.uuid
+            break
+
+    if not snapshot_uuid:
+        had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
+        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False)
+        if err:
+            snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
+            logger.error(err)
+            return False, str(err)
+    if not had_lock:
+        had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
+    new_lvol_uuid, err = snapshot_controller.clone(
+        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False)
+    if err:
+        logger.error(err)
+        if snapshot_uuid:
+                snapshot_controller.delete(snapshot_uuid)
+        snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
+        return False, str(err)
+
+    snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
+    return new_lvol_uuid, False
+
+
+
 def _build_host_entries(allowed_hosts, sec_options=None):
     """Build the allowed_hosts list with auto-generated keys.
 
@@ -2230,50 +2276,3 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     if errors:
         return True, f"Warning: SPDK remove_host failed on nodes: {', '.join(errors)}"
     return True, None
-
-
-def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
-    db_controller = DBController()
-    try:
-        db_controller.get_lvol_by_id(lvol_id)
-    except KeyError as e:
-        logger.error(e)
-        return False
-
-    try:
-        snapshot_uuid = None
-        for snap in db_controller.get_snapshots_by_lvol_id(lvol_id):
-            if snap.snap_name == clone_name:
-                logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.snap_uuid}, using it for cloning")
-                snapshot_uuid = snap.snap_uuid
-                break
-        if not snapshot_uuid:
-            for i in range(10):
-                snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
-                if err:
-                    logger.error(err)
-                    time.sleep(1)
-                    continue
-            else:
-                if not snapshot_uuid:
-                    logger.error("Failed to create snapshot for clone after 10 attempts")
-                    return False
-        new_lvol_uuid = None
-        for i in range(10):
-            new_lvol_uuid, err = snapshot_controller.clone(
-                snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True)
-            if err:
-                logger.error(err)
-                time.sleep(1)
-                continue
-        else:
-            if not new_lvol_uuid:
-                logger.error("Failed to clone lvol after 10 attempts")
-                if snapshot_uuid:
-                    snapshot_controller.delete(snapshot_uuid)
-                return False
-
-        return new_lvol_uuid
-    except Exception as e:
-        logger.error(e)
-        return False

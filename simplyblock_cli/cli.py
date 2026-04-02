@@ -594,6 +594,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
+        self.init_volume__clone_lvol(subparser)
         if self.developer_mode:
             self.init_volume__migrate(subparser)
         if self.developer_mode:
@@ -723,6 +724,11 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__inflate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+
+    def init_volume__clone_lvol(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clone-lvol', 'Create logical volume clone by taking a snapshot and then cloning it.')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('clone_name', help='New lvol clone name', type=str)
 
     def init_volume__migrate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate', 'Migrate a logical volume to a different storage node')
@@ -1270,6 +1276,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
+                elif sub_command in ['clone-lvol']:
+                    ret = self.volume__clone_lvol(sub_command, args)
                 elif sub_command in ['migrate']:
                     if not self.developer_mode:
                         print("This command is private.")
