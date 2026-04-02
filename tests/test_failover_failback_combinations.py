@@ -62,6 +62,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.secondary_node_id = secondary_node_id
     n.secondary_node_id_2 = secondary_node_id_2
     n.mgmt_ip = mgmt_ip or f"10.0.0.{hash(uuid) % 254 + 1}"
+    n.api_endpoint = f"http://{mgmt_ip or f'10.0.0.{hash(uuid) % 254 + 1}'}:5000"
     n.rpc_port = rpc_port
     n.rpc_username = "user"
     n.rpc_password = "pass"
@@ -261,8 +262,6 @@ class TestAnaFailover(unittest.TestCase):
 
         # First secondary should be set to optimized
         ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
-        # optimized_calls = [c for c in ana_calls if c[1].get('ana_state') == 'optimized'
-        #                    or (len(c[0]) > 0 and 'optimized' in str(c))]
         self.assertTrue(len(ana_calls) > 0, "Should have ANA state change calls")
 
     def test_ftt2_failover_primary_to_first_sec(self):
@@ -342,9 +341,8 @@ class TestAnaFailback(unittest.TestCase):
         nodes = _build_ftt1_nodes()
         lvols = [_lvol("lv1", "node-1")]
 
-        _ = self._run_failback(nodes, "node-1", lvols)
+        self._run_failback(nodes, "node-1", lvols)
 
-        # ana_calls = rpc.nvmf_subsystem_listener_set_ana_state.call_args_list
         # With FTT=1, no secondary_node_id_2, so _failback_primary_ana not called
         # (it requires secondary_node_id_2). No-op for FTT=1 via this path.
         # The actual failback for FTT=1 happens inside recreate_lvstore.
@@ -382,7 +380,7 @@ class TestAnaFailback(unittest.TestCase):
         lvols = [_lvol("lv1", "node-1")]
         nodes["node-3"].status = StorageNode.STATUS_OFFLINE
 
-        _ = self._run_failback(nodes, "node-2", lvols)
+        self._run_failback(nodes, "node-2", lvols)
 
         # With second sec offline, failback for first sec role doesn't demote anyone
         # (second sec is not online so it's skipped)
@@ -615,15 +613,17 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
+    @patch("simplyblock_core.storage_node_ops.health_controller")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
     def test_primary_offline_first_sec_restarts_drops_leadership_on_second_sec(
-            self, mock_db_cls, mock_create_bdev,
+            self, mock_snode_client, mock_health, mock_db_cls, mock_create_bdev,
             mock_rpc_cls, mock_fw_cls, mock_tasks, mock_tcp_events, mock_storage_events):
         """Primary offline, first sec restarts → must drop leadership on second sec
         to prevent writer conflict when JC connects to remote JMs."""
         nodes = _build_ftt2_nodes()
         nodes["node-1"].status = StorageNode.STATUS_OFFLINE  # primary offline
         secondary = nodes["node-2"]  # first secondary, restarting
-        # second_sec = nodes["node-3"]  # second secondary, online
+        # node-3 is the second secondary, online
 
         lvols = [_lvol("lv1", "node-1")]
         db = _make_db_mock(nodes, lvols)
@@ -632,6 +632,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
         rpc = _mock_rpc()
         mock_rpc_cls.return_value = rpc
         mock_create_bdev.return_value = (True, None)
+        mock_health.check_bdev.return_value = True
 
         make_fw, fw_instances = _mock_fw_factory()
         mock_fw_cls.side_effect = make_fw
@@ -669,8 +670,10 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
+    @patch("simplyblock_core.storage_node_ops.health_controller")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
     def test_primary_offline_second_sec_also_offline_no_failback_for_that_group(
-            self, mock_db_cls, mock_create_bdev,
+            self, mock_snode_client, mock_health, mock_db_cls, mock_create_bdev,
             mock_rpc_cls, mock_fw_cls, mock_tasks, mock_tcp_events, mock_storage_events):
         """Primary offline, second sec also offline → no port block for THAT group.
         (Node may still get failback calls for other groups it's secondary for.)"""
@@ -700,6 +703,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
         rpc = _mock_rpc()
         mock_rpc_cls.return_value = rpc
         mock_create_bdev.return_value = (True, None)
+        mock_health.check_bdev.return_value = True
 
         make_fw, fw_instances = _mock_fw_factory()
         mock_fw_cls.side_effect = make_fw
@@ -726,8 +730,8 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     def test_second_sec_restarts_primary_offline_no_failback_on_first_sec_for_that_group(
             self, mock_db_cls, mock_create_bdev,
             mock_rpc_cls, mock_fw_cls, mock_tasks, mock_tcp_events, mock_storage_events):
-        """Second secondary restarts, primary offline → no failback on first sec for THIS group.
-        Uses minimal topology where node-3 is ONLY secondary for node-1."""
+        """Second secondary restarts, primary offline → sibling (first sec) gets port blocked
+        unconditionally. Uses minimal topology where node-3 is ONLY secondary for node-1."""
         nodes = {
             "node-1": _node("node-1", lvstore="LVS_100", jm_vuid=100,
                              status=StorageNode.STATUS_OFFLINE,
@@ -762,13 +766,13 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
         result = recreate_lvstore_on_sec(secondary)
         self.assertTrue(result)
 
-        # is_second_sec=True for node-1's group, so no failback on first sec
+        # Sibling secondary (node-2) gets port blocked unconditionally
         all_fw_calls = []
         for fw in fw_instances:
             all_fw_calls.extend(fw.firewall_set_port.call_args_list)
         block_calls = [c for c in all_fw_calls if c[0][2] == "block"]
-        self.assertEqual(len(block_calls), 0,
-                         "Second sec restarting should not trigger failback on first sec")
+        self.assertEqual(len(block_calls), 1,
+                         "Sibling secondary should get port blocked unconditionally")
 
 
 class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
@@ -781,8 +785,10 @@ class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
+    @patch("simplyblock_core.storage_node_ops.health_controller")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
     def test_no_ana_failback_on_sec2_when_primary_offline(
-            self, mock_db_cls, mock_create_bdev,
+            self, mock_snode_client, mock_health, mock_db_cls, mock_create_bdev,
             mock_rpc_cls, mock_fw_cls, mock_tasks, mock_tcp_events, mock_storage_events):
         """sec_2 is always non_optimized — no ANA failback to inaccessible needed."""
         nodes = _build_ftt2_nodes()
@@ -796,6 +802,7 @@ class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
         rpc = _mock_rpc()
         mock_rpc_cls.return_value = rpc
         mock_create_bdev.return_value = (True, None)
+        mock_health.check_bdev.return_value = True
 
         make_fw, fw_instances = _mock_fw_factory()
         mock_fw_cls.side_effect = make_fw
@@ -888,7 +895,7 @@ class TestPortAllowTask(unittest.TestCase):
     @classmethod
     def _import_exec(cls):
         """Import exec_port_allow_task safely by pre-patching module globals."""
-        import importlib, sys
+        import sys
         mod_name = "simplyblock_core.services.tasks_runner_port_allow"
         # Remove cached module so patches take effect on re-import
         sys.modules.pop(mod_name, None)

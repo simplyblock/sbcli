@@ -330,7 +330,7 @@ class StorageNode(BaseNodeObject):
 
         return self.hublvol
 
-    def connect_to_hublvol(self, primary_node, failover_node=None):
+    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary"):
         """Connect to a primary node's hublvol, optionally with multipath failover.
 
         If failover_node is provided (typically sec_1), sets up NVMe ANA
@@ -377,7 +377,7 @@ class StorageNode(BaseNodeObject):
                         continue
                     ret = rpc_client.bdev_nvme_attach_controller(
                         primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                        iface.ip4_address, failover_node.hublvol.nvmf_port if failover_node.hublvol else primary_node.hublvol.nvmf_port,
+                        iface.ip4_address, primary_node.hublvol.nvmf_port,
                         tr_type, multipath="multipath")
                     if not ret:
                         logger.warning(f'Failed to connect failover hublvol path on {iface.ip4_address}')
@@ -386,7 +386,7 @@ class StorageNode(BaseNodeObject):
                 primary_node.lvstore,
                 groupid=primary_node.jm_vuid,
                 subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
-                secondary=True,
+                role=role,
         ):
             pass
             # raise RPCException('Failed to set secondary lvstore options')

@@ -13,3 +13,4 @@ exclude = ['simplyblock_web/test']
 [tool.pytest.ini_options]
 pythonpath = "."
 testpaths = ['simplyblock_core/test', 'simplyblock_web/test', 'tests']
+norecursedirs = ['tests/perf']

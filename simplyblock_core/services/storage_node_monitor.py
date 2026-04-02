@@ -47,6 +47,7 @@ def is_new_migrated_node(cluster_id, node):
 
 
 def get_next_cluster_status(cluster_id):
+    logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
         return Cluster.STATUS_UNREADY
@@ -73,17 +74,17 @@ def get_next_cluster_status(cluster_id):
             if is_new_migrated_node(cluster_id, node):
                 continue
             online_nodes += 1
-            # check for jm rep tasks:
-            if node.rpc_client().bdev_lvol_get_lvstores(node.lvstore):
-                try:
+            try:
+                # check for jm rep tasks:
+                if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
                     ret = node.rpc_client(timeout=5).jc_get_jm_status(node.jm_vuid)
                     for jm in ret:
                         if ret[jm] is False: # jm is not ready (has active replication task)
                             jm_replication_tasks = True
                             logger.warning("Replication task found!")
                             break
-                except Exception:
-                    logger.warning("Failed to get replication task!")
+            except Exception:
+                logger.warning("Failed to get replication task!")
         elif node.status == StorageNode.STATUS_REMOVED:
             pass
         else:
@@ -233,11 +234,13 @@ def set_node_offline(node):
 
             # ANA failover: update subsystem states on surviving nodes
             try:
+                logger.info(f"Triggering ANA failover for node {node.get_id()}")
                 storage_node_ops.trigger_ana_failover_for_node(node)
             except Exception as ana_e:
                 logger.error("ANA failover for node %s failed: %s", node.get_id(), ana_e)
 
             # initiate restart
+            logger.info(f"Node {node.get_id()} set to OFFLINE, adding to auto-restart")
             tasks_controller.add_node_to_auto_restart(node)
         except Exception as e:
             logger.debug("Setting node to OFFLINE state failed")
@@ -262,15 +265,13 @@ def set_node_unreachable(node):
         logger.error("Data-plane check for unreachable node %s failed: %s", node.get_id(), e)
 
 
-def _check_data_plane_and_escalate(unreachable_node):
-    """Query surviving nodes' jc_get_jm_status for the unreachable node.
+def is_node_data_plane_disconnected(node):
+    """Return True if all online primary peers report *node*'s remote JM as disconnected.
 
-    If every online primary node reports the remote JM of the unreachable
-    node as disconnected (False), the data plane is down and we escalate
-    the node to offline (which triggers ANA failover + auto-restart).
+    Returns False if no peers are available to check (conservative).
     """
-    node_id = unreachable_node.get_id()
-    cluster_nodes = db.get_storage_nodes_by_cluster_id(unreachable_node.cluster_id)
+    node_id = node.get_id()
+    cluster_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
 
     online_primaries = [
         n for n in cluster_nodes
@@ -282,10 +283,9 @@ def _check_data_plane_and_escalate(unreachable_node):
 
     if not online_primaries:
         logger.debug("No online primary peers to verify data plane for %s", node_id)
-        return
+        return False
 
     remote_jm_key = f"remote_jm_{node_id}n1"
-    all_disconnected = True
 
     for peer in online_primaries:
         try:
@@ -293,17 +293,24 @@ def _check_data_plane_and_escalate(unreachable_node):
             if ret and ret.get(remote_jm_key) is True:
                 logger.info("Data-plane check: peer %s still sees %s JM as connected",
                             peer.get_id(), node_id)
-                all_disconnected = False
-                break
+                return False
         except Exception as e:
             logger.debug("jc_get_jm_status on peer %s failed: %s", peer.get_id(), e)
-            # Can't confirm disconnection from this peer, skip it
             continue
 
-    if all_disconnected:
+    return True
+
+
+def _check_data_plane_and_escalate(unreachable_node):
+    """Escalate to offline if data plane is confirmed down."""
+    node = db.get_storage_node_by_id(unreachable_node.get_id())
+    if node.status == StorageNode.STATUS_RESTARTING:
+        logger.debug("Node %s is restarting, skipping data-plane escalation", node.get_id())
+        return
+    if is_node_data_plane_disconnected(node):
         logger.info("Data-plane check: all peers report %s JM disconnected, escalating to offline",
-                    node_id)
-        set_node_offline(unreachable_node)
+                    node.get_id())
+        set_node_offline(node)
 
 
 def set_node_schedulable(node):
@@ -351,7 +358,19 @@ def node_port_check_fun(snode):
         ports = [snode.nvmf_port]
         if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
-                if n.lvstore_status == "ready":
+                if n.lvstore_status != "ready":
+                    continue
+                # Skip port check during failback: if the primary or the
+                # other secondary (sec_1) for this lvstore is online/restarting,
+                # the port on this node may be intentionally blocked.
+                skip = False
+                if n.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+                    skip = True
+                elif n.secondary_node_id and n.secondary_node_id != snode.get_id():
+                    sec1 = db.get_storage_node_by_id(n.secondary_node_id)
+                    if sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+                        skip = True
+                if not skip:
                     ports.append(n.get_lvol_subsys_port(n.lvstore))
         if not snode.is_secondary_node:
             ports.append(snode.get_lvol_subsys_port(snode.lvstore))
@@ -400,15 +419,16 @@ def check_node(snode):
 
     logger.info(f"Checking node {snode.hostname}")
 
-    # If the node is offline, ensure ANA failover + auto-restart were processed.
-    # Another service may have set the node offline without triggering these
-    # (e.g. sbctl shutdown, or a race in status transitions).
+    # If the node is offline, ensure ANA failover was processed.
+    # Another service may have set the node offline without triggering it.
+    # Note: do NOT add auto-restart here — the node may have been
+    # intentionally shut down via sbctl.  Auto-restart is only added by
+    # set_node_offline() when the monitor itself detects a failure.
     if snode.status == StorageNode.STATUS_OFFLINE:
         try:
             storage_node_ops.trigger_ana_failover_for_node(snode)
         except Exception as e:
             logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
-        tasks_controller.add_node_to_auto_restart(snode)
         return True
 
     # 1- check node ping

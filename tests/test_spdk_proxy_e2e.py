@@ -263,7 +263,6 @@ class TestProxyReadinessGate(unittest.TestCase):
 
     def test_proxy_waits_for_spdk(self):
         """Proxy should not accept HTTP requests until SPDK responds."""
-
         tmpdir = tempfile.mkdtemp()
         sock_path = os.path.join(tmpdir, "spdk_delayed.sock")
         http_port = 18200
@@ -280,7 +279,6 @@ class TestProxyReadinessGate(unittest.TestCase):
         spdk_thread = threading.Thread(target=delayed_spdk, daemon=True)
         spdk_thread.start()
 
-        _ = time.monotonic()
         _, stop_event, mod_ref = _start_proxy(sock_path, http_port, max_concurrent=4, timeout=5)
 
         # Wait for proxy to come up

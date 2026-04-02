@@ -478,8 +478,15 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
-    logger.info("Adding new cluster")
+    if max_fault_tolerance > 1:
+        if ha_type != "ha":
+            raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
+        if distr_npcs < 2:
+            raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    
+    logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name

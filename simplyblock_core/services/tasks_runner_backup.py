@@ -185,7 +185,7 @@ def _run_restore(task):
         try:
             from simplyblock_core.models.lvol_model import LVol
             lvol = db.get_lvol_by_id(lvol_id)
-            if lvol.status in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED):
+            if lvol.status == LVol.STATUS_IN_DELETION:
                 task.function_result = f"Restore target {lvol_id} has been deleted"
                 task.status = JobSchedule.STATUS_DONE
                 task.write_to_db(db.kv_store)

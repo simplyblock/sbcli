@@ -997,6 +997,37 @@ commands:
               Network interface name from client to use for LVol connection.
             dest: client_data_nic
             type: str
+          - name: "--host-sec"
+            help: "Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)"
+            dest: host_sec
+            type: str
+          - name: "--max-fault-tolerance"
+            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1"
+            dest: max_fault_tolerance
+            type: int
+            default: 1
+            choices:
+              - 1
+              - 2
+          - name: "--use-backup"
+            help: "Path to JSON file with S3/MinIO backup configuration"
+            dest: use_backup
+            type: str
+          - name: "--nvmf-base-port"
+            help: "Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420"
+            dest: nvmf_base_port
+            type: int
+            default: 4420
+          - name: "--rpc-base-port"
+            help: "Base port for SPDK JSON-RPC. Default: 8080"
+            dest: rpc_base_port
+            type: int
+            default: 8080
+          - name: "--snode-api-port"
+            help: "SNodeAPI/firewall port (one per host IP). Default: 50001"
+            dest: snode_api_port
+            type: int
+            default: 50001
       - name: add
         help: "Adds a new cluster"
         arguments:
@@ -1129,6 +1160,33 @@ commands:
               Network interface name from client to use for LVol connection.
             dest: client_data_nic
             type: str
+          - name: "--max-fault-tolerance"
+            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1"
+            dest: max_fault_tolerance
+            type: int
+            default: 1
+            choices:
+              - 1
+              - 2
+          - name: "--use-backup"
+            help: "Path to JSON file with S3/MinIO backup configuration"
+            dest: use_backup
+            type: str
+          - name: "--nvmf-base-port"
+            help: "Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420"
+            dest: nvmf_base_port
+            type: int
+            default: 4420
+          - name: "--rpc-base-port"
+            help: "Base port for SPDK JSON-RPC. Default: 8080"
+            dest: rpc_base_port
+            type: int
+            default: 8080
+          - name: "--snode-api-port"
+            help: "SNodeAPI/firewall port (one per host IP). Default: 50001"
+            dest: snode_api_port
+            type: int
+            default: 50001
       - name: activate
         help: >
           Activates a cluster.
@@ -1574,6 +1632,39 @@ commands:
             help: "Path to JSON file with host NQNs allowed to access this volume's subsystem"
             dest: allowed_hosts
             type: str
+      - name: add-host
+        help: "Add an allowed host NQN to a volume's subsystem"
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+          - name: "host_nqn"
+            help: "Host NQN to allow access"
+            dest: host_nqn
+            type: str
+      - name: remove-host
+        help: "Remove an allowed host NQN from a volume's subsystem"
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+          - name: "host_nqn"
+            help: "Host NQN to remove"
+            dest: host_nqn
+            type: str
+      - name: get-secret
+        help: "Get security credentials for a host on a volume"
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+          - name: "host_nqn"
+            help: "Host NQN to get credentials for"
+            dest: host_nqn
+            type: str
       - name: qos-set
         help: "Changes QoS settings for an active logical volume"
         arguments:
@@ -1673,6 +1764,10 @@ commands:
             dest: "ctrl_loss_tmo"
             help: "Control loss timeout for this volume"
             type: int
+          - name: "--host-nqn"
+            help: "Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts with secrets)"
+            dest: host_nqn
+            type: str
       - name: resize
         help: "Resizes a logical volume"
         usage: >
@@ -1697,6 +1792,12 @@ commands:
           - name: "name"
             help: "Snapshot name"
             dest: name
+            type: str
+          - name: "--backup"
+            help: "Also create an S3 backup of this snapshot"
+            dest: backup
+            type: bool
+            action: store_true
             type: str
       - name: clone
         help: "Provisions a logical volumes from an existing snapshot"
@@ -1820,6 +1921,49 @@ commands:
           - name: "lvol_id"
             help: "Logical volume id"
             dest: lvol_id
+            type: str
+      - name: migrate
+        help: "Migrate a logical volume to a different storage node"
+        private: true
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+          - name: "target_node_id"
+            help: "Target storage node id"
+            dest: target_node_id
+            type: str
+          - name: "--max-retries"
+            help: "Maximum retry attempts before aborting (default: 10)"
+            dest: max_retries
+            type: int
+            default: 10
+          - name: "--deadline"
+            help: "Migration deadline in seconds (0 = no deadline, default: 14400)"
+            dest: deadline_seconds
+            type: int
+            default: 14400
+      - name: migrate-list
+        help: "List volume migrations"
+        private: true
+        arguments:
+          - name: "--cluster-id"
+            help: "Filter by cluster id"
+            dest: cluster_id
+            type: str
+          - name: "--json"
+            help: "Print output in json format"
+            dest: json
+            type: bool
+            action: store_true
+      - name: migrate-cancel
+        help: "Cancel an active volume migration"
+        private: true
+        arguments:
+          - name: "migration_id"
+            help: "Migration id"
+            dest: migration_id
             type: str
   - name: "control-plane"
     help: "Control plane commands"
@@ -2041,6 +2185,11 @@ commands:
             help: "New snapshot name"
             dest: name
             type: str
+          - name: "--backup"
+            help: "Also create an S3 backup of this snapshot"
+            dest: backup
+            type: bool
+            action: store_true
       - name: list
         help: "Lists all snapshots"
         arguments:
@@ -2130,6 +2279,175 @@ commands:
           - name: "attr_value"
             help: "attr_value"
             dest: attr_value
+            type: str
+      - name: backup
+        help: "Create an S3 backup of an existing snapshot"
+        arguments:
+          - name: "snapshot_id"
+            help: "Snapshot id"
+            dest: snapshot_id
+            type: str
+  - name: "backup"
+    help: "Backup commands"
+    weight: 650
+    subcommands:
+      - name: list
+        help: "List all backups"
+        arguments:
+          - name: "--cluster-id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+      - name: delete
+        help: "Delete all backups for a logical volume"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
+      - name: restore
+        help: "Restore a backup to a new logical volume"
+        arguments:
+          - name: "backup_id"
+            help: "Backup id"
+            dest: backup_id
+            type: str
+          - name: "--lvol"
+            help: "New logical volume name"
+            dest: lvol_name
+            type: str
+            required: true
+          - name: "--pool"
+            help: "Target pool name or UUID"
+            dest: pool
+            type: str
+            required: true
+          - name: "--node"
+            help: "Target storage node ID (default: original backup node)"
+            dest: node
+            type: str
+          - name: "--cluster-id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+      - name: export
+        help: "Export backup metadata to a JSON file for cross-cluster restore"
+        arguments:
+          - name: "--cluster-id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+          - name: "--lvol"
+            help: "Filter exports to a specific lvol name"
+            dest: lvol_name
+            type: str
+          - name: "-o"
+            aliases:
+              - "--output"
+            help: "Output file path (default: stdout)"
+            dest: output
+            type: str
+      - name: import
+        help: "Import backup metadata from a JSON file"
+        arguments:
+          - name: "metadata_file"
+            help: "Path to JSON metadata file"
+            dest: metadata_file
+            type: str
+          - name: "--cluster-id"
+            help: "Target cluster to import into (required for cross-cluster restore)"
+            dest: cluster_id
+            type: str
+      - name: policy-add
+        help: "Create a new backup policy"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+          - name: "name"
+            help: "Policy name"
+            dest: name
+            type: str
+          - name: "--versions"
+            help: "Maximum number of backup versions"
+            dest: versions
+            type: int
+          - name: "--age"
+            help: "Maximum backup age (e.g. 2d, 12h, 1w)"
+            dest: age
+            type: str
+          - name: "--schedule"
+            help: "Auto-backup schedule as space-separated tiers: \"15m,4 60m,11 24h,7\" (interval,keep_count per tier)"
+            dest: schedule
+            type: str
+      - name: policy-remove
+        help: "Remove a backup policy"
+        arguments:
+          - name: "policy_id"
+            help: "Policy id"
+            dest: policy_id
+            type: str
+      - name: policy-list
+        help: "List all backup policies"
+        arguments:
+          - name: "--cluster-id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+      - name: policy-attach
+        help: "Attach a backup policy to a pool or lvol"
+        arguments:
+          - name: "policy_id"
+            help: "Policy id"
+            dest: policy_id
+            type: str
+          - name: "target_type"
+            help: "Target type"
+            dest: target_type
+            type: str
+            choices:
+              - pool
+              - lvol
+          - name: "target_id"
+            help: "Target id (pool or lvol UUID)"
+            dest: target_id
+            type: str
+      - name: policy-detach
+        help: "Detach a backup policy from a pool or lvol"
+        arguments:
+          - name: "policy_id"
+            help: "Policy id"
+            dest: policy_id
+            type: str
+          - name: "target_type"
+            help: "Target type"
+            dest: target_type
+            type: str
+            choices:
+              - pool
+              - lvol
+          - name: "target_id"
+            help: "Target id (pool or lvol UUID)"
+            dest: target_id
+            type: str
+      - name: source-list
+        help: "List backup sources (local and imported clusters)"
+        arguments:
+          - name: "--cluster-id"
+            help: "Cluster UUID"
+            dest: cluster_id
+            type: str
+      - name: source-switch
+        help: "Switch the active S3 backup source to a different cluster. Use 'local' or the local cluster UUID to switch back."
+        arguments:
+          - name: "source_cluster_id"
+            help: "Source cluster UUID or 'local'"
+            dest: source_cluster_id
+            type: str
+          - name: "--cluster-id"
+            help: "Cluster UUID"
+            dest: cluster_id
             type: str
   - name: "qos"
     help: "qos commands"

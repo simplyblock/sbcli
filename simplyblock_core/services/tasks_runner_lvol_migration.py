@@ -1547,6 +1547,7 @@ def task_runner(task):
             # Advance to next phase and continue immediately in the same invocation.
             # This avoids the 3-second sleep between phase transitions (e.g. the gap
             # between the last snapshot completing and LVOL_MIGRATE starting).
+            assert next_phase is not None
             migration.phase = next_phase
             migration.current_job_id = ""
             migration.write_to_db(db.kv_store)

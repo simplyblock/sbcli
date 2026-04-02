@@ -248,7 +248,7 @@ class ServerHandler(BaseHTTPRequestHandler):
 def run_server(host, port, user, password, is_threading_enabled=False):
     # encoding user and password
     key = base64.b64encode((user+':'+password).encode(encoding='ascii')).decode('ascii')
-    print_stats_thread = threading.Thread(target=print_stats, )
+    print_stats_thread = threading.Thread(target=print_stats, daemon=True)
     print_stats_thread.start()
     wait_for_spdk_ready()
     try:

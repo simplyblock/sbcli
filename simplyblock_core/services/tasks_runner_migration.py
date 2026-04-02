@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, utils, constants
-from simplyblock_core.controllers import tasks_events, tasks_controller
+from simplyblock_core.controllers import tasks_events, tasks_controller, lvol_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -82,6 +82,19 @@ def task_runner(task):
 
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
+
+    # Only start migration on a node that is the leader for its primary LVS.
+    # Migration IO triggers auto-leader promotion in the data plane, so
+    # starting migration on a non-leader causes a split-brain write conflict.
+    if not snode.is_secondary_node and not lvol_controller.is_node_leader(snode, snode.lvstore):
+        msg = f"Node {snode.get_id()} is not the leader for {snode.lvstore}, deferring migration"
+        logger.warning(msg)
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db(db.kv_store)
+        return False
+
     if "migration" not in task.function_params:
         current_online_devices = 0
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
