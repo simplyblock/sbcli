@@ -530,7 +530,7 @@ def add_backup_merge_task(cluster_id, node_id, keep_backup_id, old_backup_id):
 def _check_snap_instance_on_node(snapshot_id: str , node_id: str):
     snapshot = db.get_snapshot_by_id(snapshot_id)
     for sn_inst in snapshot.instances:
-        if sn_inst.lvol.node_id == node_id:
+        if sn_inst["lvol"]["node_id"] == node_id:
             logger.info("Snapshot instance found on node, skip adding replication task")
             return
 

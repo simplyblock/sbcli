@@ -158,7 +158,7 @@ def process_snap_replicate_finish(task, snapshot):
             try:
                 prev_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
                 for sn_inst in prev_snap.instances:
-                    if sn_inst.lvol.node_id == remote_snode.get_id():
+                    if sn_inst["lvol"]["node_id"] == remote_snode.get_id():
                         target_prev_snap = sn_inst
                         break
             except KeyError as e:
