@@ -4074,7 +4074,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             return False, msg
 
     logger.info("Add BDev to subsystem "+f"{lvol.vuid:016X}")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id, eui64=f"{lvol.vuid:016X}")
+    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
     # Use per-lvstore port for this lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     for iface in snode.data_nics:
