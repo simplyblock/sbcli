@@ -1265,23 +1265,37 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             )
 
         if outage_type == "graceful_shutdown":
-            max_retries = 4
+            max_retries = 8
             for attempt in range(max_retries):
                 try:
                     force = (attempt == max_retries - 1)
                     if force:
                         self.logger.info(f"[V2-dual] Restart {node_uuid} with force=True (last attempt).")
+                    else:
+                        self.logger.info(f"[V2-dual] Restart {node_uuid} attempt {attempt + 1}/{max_retries}.")
                     if self.k8s_test:
                         self.sbcli_utils.restart_node(node_uuid=node_uuid, force=force)
+                        restart_out = ""
                     else:
-                        self.ssh_obj.restart_node(
-                            node=self.mgmt_nodes[0], node_id=node_uuid, force=force
+                        restart_out = " ".join(
+                            self.ssh_obj.restart_node(
+                                node=self.mgmt_nodes[0], node_id=node_uuid, force=force
+                            )
                         )
+                    self.logger.info(f"[V2-dual] restart_node output for {node_uuid}: {restart_out!r}")
+                    if "already restarting" in restart_out or "ERROR" in restart_out:
+                        # Another node is still restarting; wait for it to finish then retry
+                        self.logger.info(
+                            f"[V2-dual] Concurrent restart rejected for {node_uuid}; "
+                            f"waiting 60s before retry (attempt {attempt + 1})"
+                        )
+                        sleep_n_sec(60)
+                        continue
                     self.sbcli_utils.wait_for_storage_node_status(node_uuid, "online", timeout=300)
                     break
                 except Exception:
                     if attempt < max_retries - 1:
-                        sleep_n_sec(10)
+                        sleep_n_sec(15)
                     else:
                         raise
             # Safety-net
@@ -1329,8 +1343,11 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
         )
         t_a.start()
         t_b.start()
-        t_a.join()
-        t_b.join()
+        for _t in (t_a, t_b):
+            _t.join(timeout=1200)
+            if _t.is_alive():
+                self.logger.error("[V2-dual] An outage thread did not finish within 1200s")
+                errors.append(("unknown", RuntimeError("Outage thread timed out after 1200s")))
 
         if errors:
             raise RuntimeError(f"[V2-dual] Outage thread errors: {errors}")
@@ -1352,7 +1369,13 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
         for t in rec_threads:
             t.start()
         for t in rec_threads:
-            t.join()
+            t.join(timeout=1200)  # 20 min max; avoid blocking forever on a hung recovery
+            if t.is_alive():
+                self.logger.error(
+                    "[V2-dual] A recovery thread did not finish within 1200s; "
+                    "treating as recovery failure"
+                )
+                rec_errors.append(("unknown", RuntimeError("Recovery thread timed out after 1200s")))
 
         if rec_errors:
             raise RuntimeError(f"[V2-dual] Recovery errors: {rec_errors}")
