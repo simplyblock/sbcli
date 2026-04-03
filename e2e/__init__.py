@@ -61,6 +61,7 @@ from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverT
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGap,
     RandomRapidFailoverNoGapV2,
+    RandomRapidFailoverNoGapV2NoMigration,
 )
 from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvolSnapshotCloneAPI
 from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
@@ -360,6 +361,7 @@ def get_stress_tests():
         RandomK8sMultiOutageFailoverTest,
         RandomRapidFailoverNoGap,
         RandomRapidFailoverNoGapV2,
+        RandomRapidFailoverNoGapV2NoMigration,
         TestParallelLvolSnapshotCloneAPI,
         RandomMultiClientFailoverNamespaceTest,
         RandomMultiClientSingleNodeTest,

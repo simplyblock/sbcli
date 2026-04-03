@@ -30,6 +30,7 @@ Usage (K8s):
 
 from __future__ import annotations
 
+import re
 import random
 import threading
 
@@ -235,6 +236,20 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                     f"LVOL {lvol_name!r} (ndcs={ndcs}, npcs={npcs}) did not connect")
 
             self.lvol_mount_details[lvol_name]["Device"] = lvol_device
+            _m = re.match(r'nvme(\d+)n(\d+)', lvol_device.split("/")[-1])
+            if _m:
+                _sub, _ns = _m.group(1), _m.group(2)
+                self.logger.info(
+                    f"[block_size after_connect] {lvol_name} ({lvol_device})"
+                    f" — /sys/block/nvme{_sub}c*n{_ns}/size"
+                )
+                self.ssh_obj.exec_command(
+                    node=client_node,
+                    command=(
+                        f"for d in /sys/block/nvme{_sub}c*n{_ns}; do "
+                        f"echo \"$d: $(cat $d/size 2>/dev/null)\"; done"
+                    ),
+                )
             self.ssh_obj.format_disk(node=client_node, device=lvol_device,
                                      fs_type=fs_type)
             mount_point = f"{self.mount_path}/{lvol_name}"
@@ -290,6 +305,45 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
         self.logger.info(
             f"[K8s] container_stop: deleted SPDK pod {pod_name!r} for node {node_ip}"
         )
+
+    # ── Block-size logging ───────────────────────────────────────────────────
+
+    def _log_block_sizes(self, label: str = "") -> None:
+        """
+        For every connected lvol/clone, print the size of each per-controller
+        sysfs path (nvme<S>c<C>n<N>/size).
+
+        The device stored is the multipath namespace, e.g. /dev/nvme0n1.
+        From that we derive the subsystem (0) and namespace (1) numbers and
+        glob /sys/block/nvme0c*n1 to reach the individual controller entries —
+        the same paths the user reads with ``cat /sys/block/nvme0c0n1/size``.
+        """
+        tag = f"[block_size{' ' + label if label else ''}]"
+        all_details = {
+            **self.lvol_mount_details,
+            **self.clone_mount_details,
+        }
+        for lvol_name, details in all_details.items():
+            device = details.get("Device")
+            client = details.get("Client")
+            if not device or not client:
+                continue
+            dev_name = device.split("/")[-1]   # e.g. nvme0n1
+            m = re.match(r'nvme(\d+)n(\d+)', dev_name)
+            if not m:
+                continue
+            sub, ns = m.group(1), m.group(2)   # "0", "1"
+            self.logger.info(
+                f"{tag} {lvol_name} ({device}) — /sys/block/nvme{sub}c*n{ns}/size"
+            )
+            # List all per-controller paths for this subsystem+namespace
+            self.ssh_obj.exec_command(
+                node=client,
+                command=(
+                    f"for d in /sys/block/nvme{sub}c*n{ns}; do "
+                    f"echo \"$d: $(cat $d/size 2>/dev/null)\"; done"
+                ),
+            )
 
     def perform_n_plus_k_outages(self):
         """
@@ -357,6 +411,9 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 )
 
             node_plans.append((node, outage_type, node_ip, node_rpc_port))
+
+        # Log block device sizes for all lvols before any outage is triggered
+        self._log_block_sizes("before_outage")
 
         # Phase 2: trigger all outages simultaneously via threads
         outage_results = {}  # node -> (outage_type, outage_dur)
@@ -439,6 +496,18 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
     #         self.current_outage_nodes.append(node)
     #     self.outage_start_time = int(datetime.now().timestamp())
     #     return outage_combinations
+
+    # ── Resize + recovery hooks ───────────────────────────────────────────────
+
+    def create_snapshots_and_clones(self):
+        """Delegate to parent then log block sizes for all lvols after resize."""
+        super().create_snapshots_and_clones()
+        self._log_block_sizes("after_resize")
+
+    def restart_nodes_after_failover(self, outage_type, restart=False):
+        """Delegate to parent then log block sizes for all lvols after recovery."""
+        super().restart_nodes_after_failover(outage_type, restart)
+        self._log_block_sizes("post_recovery")
 
     # ── run ──────────────────────────────────────────────────────────────────
 

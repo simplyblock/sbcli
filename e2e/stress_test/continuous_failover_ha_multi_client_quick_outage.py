@@ -1482,3 +1482,125 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
 
             self.logger.info(f"[V2] Iter {iteration} complete → starting next outage")
             iteration += 1
+
+
+class RandomRapidFailoverNoGapV2NoMigration(RandomRapidFailoverNoGapV2):
+    """
+    Identical to RandomRapidFailoverNoGapV2 but with migration disabled.
+
+    Before any test activity the Docker Swarm service
+    ``app_TasksRunnerMigration`` is scaled to 0 replicas so that migration
+    tasks are never processed.  Because tasks will be created but never
+    completed, the migration-window pause after FIO validation is skipped.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "longfio_nochurn_rapid_outages_v2_no_migration"
+
+    def _disable_migration_service(self):
+        """Scale the migration task-runner service to 0 (Docker Swarm only)."""
+        if self.k8s_test:
+            self.logger.info("[V2-NM] K8s mode — skipping Docker migration service disable")
+            return
+        self.logger.info("[V2-NM] Disabling migration service (replicas → 0)")
+        out, err = self.ssh_obj.exec_command(
+            self.mgmt_nodes[0],
+            "docker service update app_TasksRunnerMigration --force --replicas 0",
+        )
+        self.logger.info(f"[V2-NM] Migration service update: out={out!r} err={err!r}")
+
+    def run(self):
+        self.logger.info("[V2-NM] Starting RandomRapidFailoverNoGapV2NoMigration")
+
+        cluster_details = self.sbcli_utils.get_cluster_details()
+
+        fabric_rdma = cluster_details.get("fabric_rdma", False)
+        fabric_tcp = cluster_details.get("fabric_tcp", True)
+        if fabric_rdma and fabric_tcp:
+            self.available_fabrics = ["tcp", "rdma"]
+        elif fabric_rdma:
+            self.available_fabrics = ["rdma"]
+        else:
+            self.available_fabrics = ["tcp"]
+
+        self.max_fault_tolerance = cluster_details.get("max_fault_tolerance", 1)
+        self.logger.info(
+            f"[V2-NM] fabrics={self.available_fabrics}, "
+            f"ft={self.max_fault_tolerance}, npcs_cli={self.npcs}"
+        )
+
+        if self.k8s_test:
+            from utils.k8s_utils import K8sUtils
+            self.k8s_utils = K8sUtils(
+                ssh_obj=self.ssh_obj,
+                mgmt_node=self.mgmt_nodes[0],
+            )
+            self.outage_types = [
+                t for t in self.outage_types if "network_interrupt" not in t
+            ]
+            self.logger.info(f"[V2-NM] K8s mode — outage types: {self.outage_types}")
+
+        # Disable migration before any test activity
+        self._disable_migration_service()
+
+        self._bootstrap_cluster()
+        sleep_n_sec(5)
+
+        iteration = 1
+        while True:
+            if self.dump_validation_errors:
+                raise RuntimeError(
+                    f"[V2-NM] Placement dump validation failed: {self.dump_validation_errors}"
+                )
+            pair = self._pick_outage_pair()
+            if pair:
+                self.logger.info(
+                    f"[V2-NM] Dual outage (npcs={self.npcs}, ft={self.max_fault_tolerance}): "
+                    f"{pair[0]} + {pair[1]}"
+                )
+                self._dual_outage_cycle(*pair)
+            else:
+                self.logger.info(
+                    f"[V2-NM] Single outage (npcs={self.npcs}, ft={self.max_fault_tolerance})"
+                )
+                outage_type = self._perform_outage()
+                self.restart_nodes_after_failover(outage_type)
+
+            self._iter += 1
+            if self._iter % self.validate_every == 0:
+                self.logger.info(f"[V2-NM] {self._iter} outages → wait & validate all FIO")
+                for t in self.fio_threads:
+                    t.join(timeout=10)
+                self.fio_threads = []
+
+                self.common_utils.manage_fio_threads(
+                    self.fio_node, [], timeout=self._fio_wait_timeout
+                )
+
+                for node in self.sn_nodes_with_sec:
+                    nd = self.sbcli_utils.get_storage_node_details(node)
+                    self.ssh_obj.fetch_distrib_logs(
+                        storage_node_ip=nd[0]["mgmt_ip"],
+                        storage_node_id=node,
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors,
+                    )
+                    self.ssh_obj.dump_lvstore(
+                        node_ip=self.mgmt_nodes[0], storage_node_id=node
+                    )
+
+                for lvol, det in self.lvol_mount_details.items():
+                    self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
+                for cname, det in self.clone_mount_details.items():
+                    self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
+
+                # Migration disabled — skip migration window pause
+                self.logger.info("[V2-NM] FIO validated; migration disabled, skipping migration window")
+
+                self._kick_fio_for_all(runtime=self._per_wave_fio_runtime)
+                self.logger.info("[V2-NM] Next FIO wave started")
+
+            self.logger.info(f"[V2-NM] Iter {iteration} complete → starting next outage")
+            iteration += 1
