@@ -349,17 +349,31 @@ class TestLvolSecurityCombinations(SecurityTestBase):
                 "host_nqn": host_nqn,
             }
 
-            # Start FIO in background
-            t = threading.Thread(
-                target=self._run_fio_and_validate,
-                args=(lvol_name, mount_point, log_file),
-                kwargs={"runtime": 120},
-            )
-            t.start()
-            fio_threads.append((sec_type, t))
-            sleep_n_sec(5)
+            if sec_opts is not None:
+                # DHCHAP volumes run synchronously: FIO → unmount → disconnect before
+                # the next iteration can reset _client_host_nqn and get a new hostnqn.
+                # Running them in background would leave the NVMe connection active when
+                # the next DHCHAP iteration resets the hostnqn, causing the kernel to
+                # reject the new connect with "found same hostid but different hostnqn".
+                self._run_fio_and_validate(lvol_name, mount_point, log_file, runtime=120)
+                self.logger.info(f"FIO validated for {sec_type} ✓")
+                self.ssh_obj.unmount_path(self.fio_node, mount_point)
+                sleep_n_sec(2)
+                self._disconnect_lvol(lvol_id)
+                sleep_n_sec(2)
+                self.lvol_mount_details[lvol_name]["Mount"] = None
+            else:
+                # Non-DHCHAP volumes run FIO in background (unchanged behaviour)
+                t = threading.Thread(
+                    target=self._run_fio_and_validate,
+                    args=(lvol_name, mount_point, log_file),
+                    kwargs={"runtime": 120},
+                )
+                t.start()
+                fio_threads.append((sec_type, t))
+                sleep_n_sec(5)
 
-        # Wait for all FIO jobs
+        # Wait for non-DHCHAP background FIO jobs
         for sec_type, t in fio_threads:
             self.logger.info(f"Waiting for FIO on {sec_type} lvol …")
             t.join(timeout=600)
@@ -742,6 +756,14 @@ class TestLvolDhcapDirections(SecurityTestBase):
             }
 
             self._run_fio_and_validate(lvol_name, mount_point, log_file, runtime=60)
+            # Disconnect before the next iteration resets _client_host_nqn.
+            # The kernel binds hostid→hostnqn on the first connect; leaving the
+            # connection active causes "found same hostid but different hostnqn".
+            self.ssh_obj.unmount_path(self.fio_node, mount_point)
+            sleep_n_sec(2)
+            self._disconnect_lvol(lvol_id)
+            sleep_n_sec(2)
+            self.lvol_mount_details[lvol_name]["Mount"] = None
             self.logger.info(f"[{label}] FIO validated ✓")
 
         self.logger.info("=== TestLvolDhcapDirections PASSED ===")
@@ -1388,6 +1410,21 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
 
         # ── Scenario B: crypto_auth (DHCHAP + encryption) ────────────────────
         self.logger.info("--- Scenario B: crypto_auth parent (DHCHAP + crypto) ---")
+        # Disconnect Scenario A volumes before generating a fresh hostnqn for Scenario B.
+        # auth_parent was unmounted above but its NVMe connection is still active.
+        # auth_clone was mounted and connected by _verify_clone_security and never cleaned up.
+        # The kernel binds hostid→hostnqn on the first connect; the new hostnqn for Scenario B
+        # would be rejected with "found same hostid but different hostnqn" if any Scenario A
+        # connection remains active.
+        mount_auth_clone = f"{self.mount_path}/{auth_clone_name}"
+        self.ssh_obj.unmount_path(self.fio_node, mount_auth_clone)
+        sleep_n_sec(2)
+        self._disconnect_lvol(auth_clone_id)
+        sleep_n_sec(2)
+        self._disconnect_lvol(auth_parent_id)
+        sleep_n_sec(2)
+        self.lvol_mount_details[auth_clone_name]["Mount"] = None
+
         # Fresh NQN for Scenario B to avoid SPDK keyring key-name collision
         # with Scenario A's volumes (same host_nqn → same key_name → re-
         # registration rejected → Scenario B auth would fail).
