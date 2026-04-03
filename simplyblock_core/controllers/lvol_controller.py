@@ -2181,8 +2181,11 @@ def replication_start(lvol_id, replication_cluster_id=None):
         if lvol.cloned_from_snap:
             lvol_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
             if lvol_snap.source_replicated_snap_uuid:
-                org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
-                excluded_nodes.append(org_snap.lvol.node_id)
+                try:
+                    org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
+                    excluded_nodes.append(org_snap.lvol.node_id)
+                except KeyError:
+                    pass
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         if not replication_cluster_id:
