@@ -390,8 +390,12 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             error_sink=self.dump_validation_errors
         )
 
-        # self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-        #                           storage_node_id=self.current_outage_node)
+        threading.Thread(
+            target=self.ssh_obj.dump_lvstore,
+            kwargs={"node_ip": self.mgmt_nodes[0],
+                    "storage_node_id": self.current_outage_node},
+            daemon=True,
+        ).start()
 
         self.outage_start_time = int(datetime.now().timestamp())
         self._log_outage_event(self.current_outage_node, outage_type, "Outage started")
@@ -431,8 +435,13 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                         validate_async=True,
                         error_sink=self.dump_validation_errors
                     )
+                    threading.Thread(
+                        target=self.ssh_obj.dump_lvstore,
+                        kwargs={"node_ip": self.mgmt_nodes[0], "storage_node_id": node},
+                        daemon=True,
+                    ).start()
             # Keep node strictly offline for 5 minutes
-            sleep_n_sec(60)
+            # sleep_n_sec(60)
 
         elif outage_type == "container_stop":
             if self.k8s_test and self.k8s_utils:
@@ -451,7 +460,12 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                         validate_async=True,
                         error_sink=self.dump_validation_errors
                     )
-            
+                    threading.Thread(
+                        target=self.ssh_obj.dump_lvstore,
+                        kwargs={"node_ip": self.mgmt_nodes[0], "storage_node_id": node},
+                        daemon=True,
+                    ).start()
+
         elif outage_type == "interface_full_network_interrupt":
             # Before cutting the network: start local-tmp logging alongside NFS logging
             # so logs are preserved even when the NFS mount becomes unreachable.
@@ -504,6 +518,12 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             validate_async=True,
             error_sink=self.dump_validation_errors
         )
+        threading.Thread(
+            target=self.ssh_obj.dump_lvstore,
+            kwargs={"node_ip": self.mgmt_nodes[0],
+                    "storage_node_id": self.sn_primary_secondary_map[self.current_outage_node]},
+            daemon=True,
+        ).start()
 
         # Only wait for ONLINE (skip deep health)
         if outage_type == 'graceful_shutdown':
@@ -539,6 +559,12 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             validate_async=True,
             error_sink=self.dump_validation_errors
         )
+        threading.Thread(
+            target=self.ssh_obj.dump_lvstore,
+            kwargs={"node_ip": self.mgmt_nodes[0],
+                    "storage_node_id": self.current_outage_node},
+            daemon=True,
+        ).start()
 
         # keep container log streaming going
         if not self.k8s_test:
@@ -553,7 +579,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             self.runner_k8s_log.restart_logging()
 
         # small cool-down before next outage to reduce SSH churn
-        sleep_n_sec(random.randint(30, 60))
+        # sleep_n_sec(random.randint(30, 60))
 
     # ---------- main ----------
 
@@ -851,6 +877,12 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             validate_async=True,
             error_sink=self.dump_validation_errors,
         )
+        threading.Thread(
+            target=self.ssh_obj.dump_lvstore,
+            kwargs={"node_ip": self.mgmt_nodes[0],
+                    "storage_node_id": self.current_outage_node},
+            daemon=True,
+        ).start()
 
         self.outage_start_time = int(datetime.now().timestamp())
         self._log_outage_event(self.current_outage_node, outage_type, "Outage started")
@@ -875,6 +907,11 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
                     validate_async=True,
                     error_sink=self.dump_validation_errors,
                 )
+                threading.Thread(
+                    target=self.ssh_obj.dump_lvstore,
+                    kwargs={"node_ip": self.mgmt_nodes[0], "storage_node_id": node},
+                    daemon=True,
+                ).start()
 
         if outage_type == "graceful_shutdown":
             deadline = time.time() + 300
@@ -894,7 +931,7 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
                     )
                 self.logger.info(f"[V2] Node {self.current_outage_node} not yet offline; retrying...")
             _fetch_others()
-            sleep_n_sec(60)
+            # sleep_n_sec(60)
 
         elif outage_type == "container_stop":
             if self.k8s_test and self.k8s_utils:
@@ -961,6 +998,11 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
                 validate_async=True,
                 error_sink=self.dump_validation_errors,
             )
+            threading.Thread(
+                target=self.ssh_obj.dump_lvstore,
+                kwargs={"node_ip": self.mgmt_nodes[0], "storage_node_id": partner},
+                daemon=True,
+            ).start()
 
         if outage_type == "graceful_shutdown":
             max_retries = 4
@@ -1050,6 +1092,12 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             validate_async=True,
             error_sink=self.dump_validation_errors,
         )
+        threading.Thread(
+            target=self.ssh_obj.dump_lvstore,
+            kwargs={"node_ip": self.mgmt_nodes[0],
+                    "storage_node_id": self.current_outage_node},
+            daemon=True,
+        ).start()
 
         # Restart container log streaming
         if not self.k8s_test:
@@ -1064,9 +1112,9 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             self.runner_k8s_log.restart_logging()
 
         # 30–60 s gap: more than V1’s 18–30 s, less than 1 minute
-        gap = random.randint(30, 60)
-        self.logger.info(f"[V2] Outage resolved; waiting {gap}s before next outage.")
-        sleep_n_sec(gap)
+        # gap = random.randint(30, 60)
+        # self.logger.info(f"[V2] Outage resolved; waiting {gap}s before next outage.")
+        # sleep_n_sec(gap)
 
     # ── Override 4: dual (simultaneous) outage support ───────────────────────
 

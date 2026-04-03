@@ -125,6 +125,8 @@ class SecurityTestBase(TestClusterBase):
         nqn = f"nqn.2014-08.org.nvmexpress:uuid:{uuid}"
         self.ssh_obj.exec_command(
             target, f"echo '{nqn}' | sudo tee /etc/nvme/hostnqn")
+        self.ssh_obj.exec_command(
+            target, f"echo '{uuid}' | sudo tee /etc/nvme/hostid")
         self.logger.info(f"[_get_client_host_nqn] NQN on {target}: {nqn!r}")
         self._client_host_nqn = nqn
         return nqn
