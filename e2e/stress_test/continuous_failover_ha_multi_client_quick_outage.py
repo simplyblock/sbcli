@@ -68,7 +68,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self._local_outage_log_dirs = {}
 
         self.outage_types = [
-            # "graceful_shutdown",
+            "graceful_shutdown",
             "container_stop",
             # "interface_full_network_interrupt",
         ]
