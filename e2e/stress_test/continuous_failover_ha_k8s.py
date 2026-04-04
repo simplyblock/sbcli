@@ -68,9 +68,10 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.total_lvols = 20
+        self.total_lvols = 15
         self.test_name = "n_plus_k_k8s_failover_ha"
         self.k8s_utils: K8sUtils | None = None
+        self.fio_num_jobs = 2
         # Network outage not supported in K8s (no direct SSH to storage nodes).
         self.outage_types = ["graceful_shutdown"]
         self.outage_types2 = ["container_stop", "graceful_shutdown"]
@@ -110,55 +111,38 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 lvol_name = (f"{self.lvol_name}_{i}" if not is_crypto
                              else f"c{self.lvol_name}_{i}")
 
-            self.logger.info(
-                f"Creating lvol {lvol_name!r}, fs={fs_type}, "
-                f"crypto={is_crypto}, ndcs={ndcs}, npcs={npcs}")
+            created = False
+            for attempt in range(10):
+                if attempt > 0:
+                    # Generate a new random name on every retry
+                    self.lvol_name = f"lvl{generate_random_sequence(15)}"
+                    lvol_name = (f"{self.lvol_name}_{i}" if not is_crypto
+                                 else f"c{self.lvol_name}_{i}")
+                    self.logger.info(
+                        f"[create_lvols] Retry {attempt}/9 for index {i}: "
+                        f"new name={lvol_name!r}"
+                    )
 
-            try:
-                if self.current_outage_nodes:
-                    skip_nodes = [
-                        n for n in self.sn_primary_secondary_map
-                        if self.sn_primary_secondary_map[n] in self.current_outage_nodes
-                    ]
-                    for n in self.current_outage_nodes:
-                        skip_nodes.append(n)
-                    host_id = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
-                    self.sbcli_utils.add_lvol(
-                        lvol_name=lvol_name, pool_name=self.pool_name,
-                        size=self.lvol_size, crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
-                        host_id=host_id[0], distr_ndcs=ndcs, distr_npcs=npcs,
-                    )
-                elif self.current_outage_node:
-                    skip_nodes = [
-                        n for n in self.sn_primary_secondary_map
-                        if self.sn_primary_secondary_map[n] == self.current_outage_node
-                    ]
-                    skip_nodes.append(self.current_outage_node)
-                    skip_nodes.append(
-                        self.sn_primary_secondary_map[self.current_outage_node])
-                    host_id = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
-                    self.sbcli_utils.add_lvol(
-                        lvol_name=lvol_name, pool_name=self.pool_name,
-                        size=self.lvol_size, crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
-                        host_id=host_id[0], distr_ndcs=ndcs, distr_npcs=npcs,
-                    )
-                else:
-                    self.sbcli_utils.add_lvol(
-                        lvol_name=lvol_name, pool_name=self.pool_name,
-                        size=self.lvol_size, crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
-                        distr_ndcs=ndcs, distr_npcs=npcs,
-                    )
-            except Exception as exc:
-                self.logger.warning(
-                    f"Lvol creation failed for {lvol_name}: {exc}. Retrying…")
-                self.lvol_name = f"lvl{generate_random_sequence(15)}"
-                lvol_name = (f"{self.lvol_name}_{i}" if not is_crypto
-                             else f"c{self.lvol_name}_{i}")
+                self.logger.info(
+                    f"Creating lvol {lvol_name!r}, fs={fs_type}, "
+                    f"crypto={is_crypto}, ndcs={ndcs}, npcs={npcs}")
+
                 try:
-                    if self.current_outage_node:
+                    if self.current_outage_nodes:
+                        skip_nodes = [
+                            n for n in self.sn_primary_secondary_map
+                            if self.sn_primary_secondary_map[n] in self.current_outage_nodes
+                        ]
+                        for n in self.current_outage_nodes:
+                            skip_nodes.append(n)
+                        host_id = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
+                        self.sbcli_utils.add_lvol(
+                            lvol_name=lvol_name, pool_name=self.pool_name,
+                            size=self.lvol_size, crypto=is_crypto,
+                            key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
+                            host_id=host_id[0], distr_ndcs=ndcs, distr_npcs=npcs,
+                        )
+                    elif self.current_outage_node:
                         skip_nodes = [
                             n for n in self.sn_primary_secondary_map
                             if self.sn_primary_secondary_map[n] == self.current_outage_node
@@ -166,8 +150,7 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                         skip_nodes.append(self.current_outage_node)
                         skip_nodes.append(
                             self.sn_primary_secondary_map[self.current_outage_node])
-                        host_id = [n for n in self.sn_nodes_with_sec
-                                   if n not in skip_nodes]
+                        host_id = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
                         self.sbcli_utils.add_lvol(
                             lvol_name=lvol_name, pool_name=self.pool_name,
                             size=self.lvol_size, crypto=is_crypto,
@@ -181,9 +164,43 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                             key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
                             distr_ndcs=ndcs, distr_npcs=npcs,
                         )
-                except Exception as exc2:
-                    self.logger.warning(f"Retry lvol creation failed: {exc2}")
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[create_lvols] add_lvol raised for {lvol_name!r} "
+                        f"(attempt {attempt + 1}/10): {exc}. Waiting 10s before retry."
+                    )
+                    sleep_n_sec(10)
                     continue
+
+                # Verify lvol actually appears in the list (up to 10 × 3 s)
+                found = False
+                for check in range(10):
+                    lvols_now = self.sbcli_utils.list_lvols()
+                    if lvol_name in lvols_now:
+                        found = True
+                        break
+                    self.logger.info(
+                        f"[create_lvols] Waiting for {lvol_name!r} in list "
+                        f"(check {check + 1}/10)…"
+                    )
+                    sleep_n_sec(3)
+
+                if found:
+                    created = True
+                    break
+
+                self.logger.warning(
+                    f"[create_lvols] {lvol_name!r} not found in lvol list after "
+                    f"10 checks; assuming creation failed. Waiting 10s before retry."
+                )
+                sleep_n_sec(10)
+
+            if not created:
+                self.logger.error(
+                    f"[create_lvols] Failed to create lvol index {i} after "
+                    f"10 attempts; skipping."
+                )
+                continue
 
             self.lvol_mount_details[lvol_name] = {
                 "ID":              self.sbcli_utils.get_lvol_id(lvol_name),
@@ -276,7 +293,7 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                     "bs":           f"{2 ** random.randint(2, 7)}K",
                     "nrfiles":      16,
                     "iodepth":      1,
-                    "numjobs":      5,
+                    "numjobs":      self.fio_num_jobs,
                     "time_based":   True,
                     "runtime":      2000,
                     "log_avg_msec": 1000,

@@ -41,6 +41,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.lvol_size = "10G"
         self.int_lvol_size = 10
         self.fio_size = "1G"
+        self.fio_num_jobs = 5
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -517,32 +518,67 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 lvol_id=self.lvol_mount_details[lvol]["ID"])[0]["node_id"]
             self.snap_vs_node[snapshot_name] = lvol_node_id
             self.lvol_mount_details[lvol]["snapshots"].append(snapshot_name)
-            clone_name = f"clone_{generate_random_sequence(15)}"
-            if clone_name in list(self.clone_mount_details):
-                clone_name = f"{clone_name}_{temp_name}"
             sleep_n_sec(30)
             if self.k8s_test:
                 snapshot_id = self.sbcli_utils.get_snapshot_id(snapshot_name)
             else:
                 snapshot_id = self.ssh_obj.get_snapshot_id(self.mgmt_nodes[0], snapshot_name)
-            try:
-                if self.k8s_test:
-                    self.sbcli_utils.add_clone(snapshot_id, clone_name)
-                else:
-                    self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
-            except Exception as e:
-                self.logger.warning(f"Clone creation fails with {str(e)}. Retrying with different name.")
-                try:
+
+            clone_name = f"clone_{generate_random_sequence(15)}"
+            if clone_name in list(self.clone_mount_details):
+                clone_name = f"clone_{generate_random_sequence(15)}"
+
+            clone_created = False
+            for clone_attempt in range(10):
+                if clone_attempt > 0:
                     clone_name = f"clone_{generate_random_sequence(15)}"
-                    temp_name = generate_random_sequence(5)
-                    clone_name = f"{clone_name}_{temp_name}"
+                    self.logger.info(
+                        f"[create_clones] Retry {clone_attempt}/9 for snapshot "
+                        f"{snapshot_name!r}: new name={clone_name!r}"
+                    )
+
+                try:
                     if self.k8s_test:
                         self.sbcli_utils.add_clone(snapshot_id, clone_name)
                     else:
                         self.ssh_obj.add_clone(self.mgmt_nodes[0], snapshot_id, clone_name)
-                except Exception as exp:
-                    self.logger.warning(f"Retry Clone creation fails with {str(exp)}.")
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[create_clones] add_clone raised for {clone_name!r} "
+                        f"(attempt {clone_attempt + 1}/10): {exc}. Waiting 10s before retry."
+                    )
+                    sleep_n_sec(10)
                     continue
+
+                # Verify clone actually appears in the lvol list (up to 10 × 3 s)
+                found = False
+                for check in range(10):
+                    lvols_now = self.sbcli_utils.list_lvols()
+                    if clone_name in lvols_now:
+                        found = True
+                        break
+                    self.logger.info(
+                        f"[create_clones] Waiting for {clone_name!r} in list "
+                        f"(check {check + 1}/10)…"
+                    )
+                    sleep_n_sec(3)
+
+                if found:
+                    clone_created = True
+                    break
+
+                self.logger.warning(
+                    f"[create_clones] {clone_name!r} not found in lvol list after "
+                    f"10 checks; assuming creation failed. Waiting 10s before retry."
+                )
+                sleep_n_sec(10)
+
+            if not clone_created:
+                self.logger.error(
+                    f"[create_clones] Failed to create clone for snapshot "
+                    f"{snapshot_name!r} after 10 attempts; skipping."
+                )
+                continue
             fs_type = self.lvol_mount_details[lvol]["FS"]
             client = self.lvol_mount_details[lvol]["Client"]
             self.clone_mount_details[clone_name] = {
@@ -655,7 +691,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 5,
+                    "numjobs": self.fio_num_jobs,
                     "time_based": True,
                     "runtime": 2000,
                     "log_avg_msec": 1000,
