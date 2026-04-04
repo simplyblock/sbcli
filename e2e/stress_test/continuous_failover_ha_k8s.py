@@ -68,7 +68,7 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.total_lvols = 10
+        self.total_lvols = 20
         self.test_name = "n_plus_k_k8s_failover_ha"
         self.k8s_utils: K8sUtils | None = None
         # Network outage not supported in K8s (no direct SSH to storage nodes).

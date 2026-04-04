@@ -870,16 +870,16 @@ class K8sSbcliUtils:
     def list_snapshots(self):
         """Parse snapshot list table output → ``{snap_name: snap_uuid}``.
 
-        Table columns: | UUID | Name | Size | ProvSize | BDev | LVol ID | Created At | Health | Status |
+        Table columns: | UUID | BDdev UUID | BlobID | Name | Size | BDev | Node ID | LVol ID | ...
         """
         out = self._run(f"{self.sbcli_cmd} snapshot list")
         result = {}
         for line in out.splitlines():
             parts = [p.strip() for p in line.split("|")]
-            # parts[0]='' parts[1]=UUID parts[2]=Name ...
-            if len(parts) > 2:
+            # parts[0]='' parts[1]=UUID parts[2]=BDdev UUID parts[3]=BlobID parts[4]=Name ...
+            if len(parts) > 4:
                 uuid_candidate = parts[1]
-                name_candidate = parts[2]
+                name_candidate = parts[4]
                 # UUID is a 36-char hyphenated string
                 if (
                     len(uuid_candidate) == 36
