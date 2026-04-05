@@ -21,7 +21,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.x'
+        python-version: '3.12'
         cache: 'pip'
 
     - name: Checking cli.py status
@@ -45,17 +45,14 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.x'
+        python-version: '3.12'
         cache: 'pip'
 
     - name: Install test dependencies
       run: pip install -r requirements.txt
 
-    - name: Install package
-      run: pip install .
-
     - name: Run tests
-      run: pytest --import-mode=importlib -v
+      run: pytest -v
 
 
   lint:
@@ -68,7 +65,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.x'
+        python-version: '3.12'
         cache: 'pip'
 
     - name: Install linter
@@ -88,7 +85,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.x'
+        python-version: '3.12'
         cache: 'pip'
 
     - name: Install type checker

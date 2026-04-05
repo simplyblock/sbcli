@@ -807,5 +807,6 @@ def recalculate_cores_distribution(body: CoresParams):
         "alceml_cpu_cores": distribution["alceml_cpu_cores"],
         "alceml_worker_cpu_cores": distribution["alceml_worker_cpu_cores"],
         "distrib_cpu_cores": distribution["distrib_cpu_cores"],
-        "jc_singleton_core": distribution["jc_singleton_core"]})
+        "jc_singleton_core": distribution["jc_singleton_core"],
+        "lvol_poller_core": distribution["lvol_poller_core"]})
     return resp

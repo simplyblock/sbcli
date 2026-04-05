@@ -49,7 +49,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('{{ argument.name }}', help='{{ argument.help | escape_strings | escape_python_string }}', type={{ argument.type | argument_type }}
 {%- if argument.default is defined and argument.action is undefined %}, default={{ argument | default_value }}{% endif %}
 {%- if argument.nargs is defined %}, nargs={{ argument | nargs }}{% endif %}
-{%- if argument.choices %}, choices=[{% for choice in argument.choices %}'{{ choice }}',{% endfor %}]{% endif %}
+{%- if argument.choices %}, choices=[{% for choice in argument.choices %}{{ choice | choice_value }},{% endfor %}]{% endif %}
 {%- if argument.action is defined %}, dest='{{ argument.action }}'{% endif %})
 {%- if argument.completer is defined %}.completer = self.{{ argument.completer }}{% endif %}
 {%- endfor -%}
@@ -68,7 +68,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
 {%- if parameter.required is defined %}, required={{ parameter.required }}{% endif %}
 {%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
-{%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
+{%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}{{ choice | choice_value }},{% endfor %}]{% endif %}
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
 {%- else %}
@@ -84,7 +84,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
 {%- if parameter.required is defined %}, required={{ parameter.required }}{% endif %}
 {%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
-{%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}'{{ choice }}',{% endfor %}]{% endif %}
+{%- if parameter.choices %}, choices=[{% for choice in parameter.choices %}{{ choice | choice_value }},{% endfor %}]{% endif %}
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
 {%- endif %}

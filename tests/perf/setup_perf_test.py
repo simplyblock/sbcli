@@ -13,14 +13,14 @@ KEY_NAME = "mtes01"
 KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
 AZ = "us-east-1a"
 SG_NAME = "default"
-BRANCH = "feature-lvol-migration"
+BRANCH = "main"
 MAX_LVOL = "50"
 # --- Manual Network Config ---
 # Replace this with your actual Subnet ID (e.g., "subnet-0593459d6b931ee4c")
 SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 SN_TYPE = "i3en.2xlarge"
-SN_COUNT = 6
+SN_COUNT = 4
 MGMT_TYPE = "m6i.2xlarge"
 # --- Selectable Client Specification ---
 CLIENT_COUNT = 1            # How many separate EC2 instances to launch
