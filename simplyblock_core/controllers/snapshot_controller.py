@@ -833,7 +833,7 @@ def get(snapshot_uuid):
     return json.dumps(snap.get_clean_dict(), indent=2)
 
 
-def set(snapshot_uuid, attr, value) -> bool:
+def set_value(snapshot_uuid, attr, value) -> bool:
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
     except KeyError:

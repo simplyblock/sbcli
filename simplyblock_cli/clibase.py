@@ -814,7 +814,7 @@ class CLIWrapperBase:
         return snapshot_controller.get(args.snapshot_id)
 
     def snapshot__set(self, sub_command, args):
-        return snapshot_controller.set(args.snapshot_id, args.attr_name, args.attr_value)
+        return snapshot_controller.set_value(args.snapshot_id, args.attr_name, args.attr_value)
 
     def qos__add(self, sub_command, args):
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)
