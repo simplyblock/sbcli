@@ -2072,7 +2072,6 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
         logger.error(error)
         return False, error
 
-    had_lock = None
     snapshot_uuid = None
     for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
         if snap.snap_name == clone_name:
