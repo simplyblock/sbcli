@@ -2421,18 +2421,58 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
         self.logger.info(f"TC-SEC-117: Restore of {restored_name} PASSED")
         self.lvol_mount_details[restored_name] = {"ID": None, "Mount": None}
 
-        # TC-SEC-118: get connect string for restored lvol
-        self.logger.info("TC-SEC-118: Checking connect string for restored lvol …")
+        # TC-SEC-118: verify unauthenticated connect is rejected (security enforced)
+        self.logger.info("TC-SEC-118: Verifying unauthenticated connect is rejected …")
         restored_id = self.sbcli_utils.get_lvol_id(restored_name)
-        if restored_id:
-            connect_ls, err = self._get_connect_str_cli(restored_id)
-            # Restored lvol inherits security; can be connected (possibly without DHCHAP
-            # depending on restore behaviour), just verify it's accessible
-            self.logger.info(
-                f"TC-SEC-118: Restored lvol connect_ls={bool(connect_ls)} err={err!r}")
-        else:
-            self.logger.warning("TC-SEC-118: Could not find ID for restored lvol; skipping connect check")
-        self.logger.info("TC-SEC-118: PASSED")
+        assert restored_id, f"Could not find ID for restored lvol {restored_name}"
+        self.lvol_mount_details[restored_name]["ID"] = restored_id
+        connect_ls, err = self._get_connect_str_cli(restored_id)
+        # Restored lvol inherits allowed_hosts — connect without host_nqn must fail
+        assert not connect_ls or ("host-nqn" in (err or "").lower() or "allowed" in (err or "").lower()), \
+            f"TC-SEC-118: Expected rejection without host-nqn, got connect_ls={connect_ls!r} err={err!r}"
+        self.logger.info(f"TC-SEC-118: Unauthenticated connect correctly rejected PASSED")
+
+        # TC-SEC-119: Connect restored lvol with source host NQN (security must be preserved)
+        self.logger.info("TC-SEC-119: Connecting restored lvol with source host NQN …")
+        restored_device, _ = self._connect_and_get_device(
+            restored_name, restored_id, host_nqn=host_nqn)
+        assert restored_device, \
+            f"TC-SEC-119: Restored lvol did not connect with source host_nqn={host_nqn}"
+        mount_restored = f"{self.mount_path}/{restored_name}"
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=restored_device, mount_path=mount_restored)
+        self.lvol_mount_details[restored_name]["Mount"] = mount_restored
+        self.logger.info(
+            f"TC-SEC-119: Restored lvol connected at {restored_device}, "
+            f"mounted at {mount_restored} PASSED")
+
+        # TC-SEC-120: Data integrity — restored files must match source lvol
+        self.logger.info("TC-SEC-120: Verifying data integrity: source vs restored …")
+
+        # Reconnect source lvol to generate checksums
+        source_device, _ = self._connect_and_get_device(
+            lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_source = f"{self.mount_path}/{lvol_name}_verify"
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=source_device, mount_path=mount_source)
+        source_files = self.ssh_obj.find_files(self.fio_node, mount_source)
+        source_checksums = self.ssh_obj.generate_checksums(self.fio_node, source_files)
+        self.ssh_obj.unmount_path(self.fio_node, mount_source)
+        self._disconnect_lvol(lvol_id)
+
+        # Compare restored files against source checksums
+        restored_files = self.ssh_obj.find_files(self.fio_node, mount_restored)
+        self.ssh_obj.verify_checksums(
+            self.fio_node, restored_files, source_checksums,
+            by_name=True,
+            message="Restored lvol data does not match source lvol data")
+        self.logger.info("TC-SEC-120: Data integrity verified PASSED")
+
+        # Cleanup restored lvol
+        self.ssh_obj.unmount_path(self.fio_node, mount_restored)
+        sleep_n_sec(2)
+        self._disconnect_lvol(restored_id)
+        self.lvol_mount_details[restored_name]["Mount"] = None
 
         self.logger.info("=== TestLvolSecurityWithBackup PASSED ===")
 
