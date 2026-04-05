@@ -529,11 +529,11 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 clone_name = f"clone_{generate_random_sequence(15)}"
 
             clone_created = False
-            for clone_attempt in range(10):
+            for clone_attempt in range(5):
                 if clone_attempt > 0:
                     clone_name = f"clone_{generate_random_sequence(15)}"
                     self.logger.info(
-                        f"[create_clones] Retry {clone_attempt}/9 for snapshot "
+                        f"[create_clones] Retry {clone_attempt}/4 for snapshot "
                         f"{snapshot_name!r}: new name={clone_name!r}"
                     )
 
@@ -545,7 +545,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 except Exception as exc:
                     self.logger.warning(
                         f"[create_clones] add_clone raised for {clone_name!r} "
-                        f"(attempt {clone_attempt + 1}/10): {exc}. Waiting 10s before retry."
+                        f"(attempt {clone_attempt + 1}/5): {exc}. Waiting 10s before retry."
                     )
                     sleep_n_sec(10)
                     continue
@@ -574,11 +574,10 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 sleep_n_sec(10)
 
             if not clone_created:
-                self.logger.error(
+                raise RuntimeError(
                     f"[create_clones] Failed to create clone for snapshot "
-                    f"{snapshot_name!r} after 10 attempts; skipping."
+                    f"{snapshot_name!r} ({clone_name!r}) after 5 attempts."
                 )
-                continue
             fs_type = self.lvol_mount_details[lvol]["FS"]
             client = self.lvol_mount_details[lvol]["Client"]
             self.clone_mount_details[clone_name] = {

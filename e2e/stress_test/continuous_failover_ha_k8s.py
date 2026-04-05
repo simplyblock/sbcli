@@ -112,14 +112,14 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                              else f"c{self.lvol_name}_{i}")
 
             created = False
-            for attempt in range(10):
+            for attempt in range(5):
                 if attempt > 0:
                     # Generate a new random name on every retry
                     self.lvol_name = f"lvl{generate_random_sequence(15)}"
                     lvol_name = (f"{self.lvol_name}_{i}" if not is_crypto
                                  else f"c{self.lvol_name}_{i}")
                     self.logger.info(
-                        f"[create_lvols] Retry {attempt}/9 for index {i}: "
+                        f"[create_lvols] Retry {attempt}/4 for index {i}: "
                         f"new name={lvol_name!r}"
                     )
 
@@ -167,7 +167,7 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 except Exception as exc:
                     self.logger.warning(
                         f"[create_lvols] add_lvol raised for {lvol_name!r} "
-                        f"(attempt {attempt + 1}/10): {exc}. Waiting 10s before retry."
+                        f"(attempt {attempt + 1}/5): {exc}. Waiting 10s before retry."
                     )
                     sleep_n_sec(10)
                     continue
@@ -196,11 +196,10 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 sleep_n_sec(10)
 
             if not created:
-                self.logger.error(
-                    f"[create_lvols] Failed to create lvol index {i} after "
-                    f"10 attempts; skipping."
+                raise RuntimeError(
+                    f"[create_lvols] Failed to create lvol index {i} "
+                    f"({lvol_name!r}) after 5 attempts."
                 )
-                continue
 
             self.lvol_mount_details[lvol_name] = {
                 "ID":              self.sbcli_utils.get_lvol_id(lvol_name),
