@@ -146,19 +146,32 @@ def process_event(event, logger):
 
 
 def start_event_collector_on_node(node_id):
-    snode = db.get_storage_node_by_id(node_id)
-
     logger.info(f"Starting Distr event collector on node: {node_id}")
-
-    client = rpc_client.RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password,
-        timeout=2, retry=2)
 
     try:
         while True:
+            try:
+                snode = db.get_storage_node_by_id(node_id)
+            except KeyError:
+                logger.info(f"Stopping Distr event collector for deleted node: {node_id}")
+                return
+
+            # Polling nodes that are still being created or already removed creates
+            # stale collector threads and bad RPC/auth traffic during node recreation.
+            if snode.status == StorageNode.STATUS_REMOVED:
+                logger.info(f"Stopping Distr event collector for removed node: {node_id}")
+                return
+            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+                time.sleep(constants.DISTR_EVENT_COLLECTOR_INTERVAL_SEC)
+                continue
+
+            client = rpc_client.RPCClient(
+                snode.mgmt_ip,
+                snode.rpc_port,
+                snode.rpc_username,
+                snode.rpc_password,
+                timeout=2, retry=2)
+
             page = 1
             events_groups = {}
             events_list = []
@@ -230,6 +243,8 @@ while True:
 
         nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
         for snode in nodes:
+            if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+                continue
             node_id = snode.get_id()
             # logger.info(f"Checking node {snode.hostname}")
             if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:

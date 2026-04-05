@@ -15,6 +15,22 @@ spec:
   fabric: {{ .Values.simplyblock.cluster.fabric }}
   {{- end }}
 
+  {{- if hasKey .Values.simplyblock.cluster "stripeWdata" }}
+  stripeWdata: {{ .Values.simplyblock.cluster.stripeWdata }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.cluster "stripeWparity" }}
+  stripeWparity: {{ .Values.simplyblock.cluster.stripeWparity }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.cluster.haType }}
+  haType: {{ .Values.simplyblock.cluster.haType }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.cluster.clientDataNic }}
+  clientDataNic: {{ .Values.simplyblock.cluster.clientDataNic }}
+  {{- end }}
+
   {{- if hasKey .Values.simplyblock.cluster "isSingleNode" }}
   isSingleNode: {{ .Values.simplyblock.cluster.isSingleNode }}
   {{- end }}
@@ -90,6 +106,10 @@ spec:
   action: {{ $storageNodes.action }}
   {{- end }}
 
+  {{- if $storageNodes.nodeUUID }}
+  nodeUUID: {{ $storageNodes.nodeUUID | quote }}
+  {{- end }}
+
   {{- if $storageNodes.clusterImage }}
   clusterImage: {{ $storageNodes.clusterImage }}
   {{- end }}
@@ -118,8 +138,12 @@ spec:
   nodesPerSocket: {{ $storageNodes.nodesPerSocket }}
   {{- end }}
 
-  {{- if hasKey $storageNodes "socketsToUse" }}
-  socketsToUse: {{ $storageNodes.socketsToUse }}
+  {{- $socketsToUse := default (list) $storageNodes.socketsToUse }}
+  {{- if gt (len $socketsToUse) 0 }}
+  socketsToUse:
+  {{- range $socketsToUse }}
+    - {{ . | quote }}
+  {{- end }}
   {{- end }}
 
   {{- if hasKey $storageNodes "partitions" }}
@@ -170,6 +194,14 @@ spec:
   force: {{ $storageNodes.force }}
   {{- end }}
 
+  {{- if $storageNodes.nodeAddr }}
+  nodeAddr: {{ $storageNodes.nodeAddr | quote }}
+  {{- end }}
+
+  {{- if $storageNodes.workerNode }}
+  workerNode: {{ $storageNodes.workerNode | quote }}
+  {{- end }}
+
   {{- if hasKey $storageNodes "coreIsolation" }}
   coreIsolation: {{ $storageNodes.coreIsolation }}
   {{- end }}
@@ -186,8 +218,20 @@ spec:
   openShiftCluster: {{ $storageNodes.openShiftCluster }}
   {{- end }}
 
+  {{- if hasKey $storageNodes "ubuntuHost" }}
+  ubuntuHost: {{ $storageNodes.ubuntuHost }}
+  {{- end }}
+
   {{- if $storageNodes.reservedSystemCPU }}
   reservedSystemCPU: {{ $storageNodes.reservedSystemCPU | quote }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "useSeparateJournalDevice" }}
+  useSeparateJournalDevice: {{ $storageNodes.useSeparateJournalDevice }}
+  {{- end }}
+
+  {{- if $storageNodes.coreMask }}
+  coreMask: {{ $storageNodes.coreMask | quote }}
   {{- end }}
 
   {{- $deviceNames := default (list) $storageNodes.deviceNames }}

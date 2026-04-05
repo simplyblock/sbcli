@@ -10,7 +10,7 @@ observability:
     maxNumberIndex: "3"
     retentionPeriod: "7d"
   grafana:
-    endpoint: ""
+    endpoint: "http://192.168.10.61/grafana"
     contactPoint: "https://hooks.slack.com/services/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"
 
 image:
@@ -19,8 +19,8 @@ image:
     tag: "main-snapshot-replication"
     pullPolicy: "Always"
   manager:
-    repository: "simplyblock/simplyblock-manager"
-    tag: "snapshot_replication"
+    repository: "manoharbrm/sbclicontroller"
+    tag: "latest"
     pullPolicy: "Always"
 
 tolerations:
@@ -267,6 +267,9 @@ simplyblock:
     clusterName: simplyblock-cluster
     mgmtIfc: eth0
     fabric: tcp
+    stripeWdata: 1
+    stripeWparity: 1
+    haType: ha
     isSingleNode: false
     enableNodeAffinity: false
     strictNodeAntiAffinity: false
@@ -286,7 +289,7 @@ simplyblock:
     name: simplyblock-node
     clusterImage: simplyblock/simplyblock:main-snapshot-replication
     mgmtIfc: eth0
-    maxLVol: 10
+    maxLVol: 1
     maxSize: 0
     partitions: 0
     corePercentage: 65
@@ -302,7 +305,8 @@ simplyblock:
     # jmPercent: 3
     # haJM: true
     # nodesPerSocket: 1
-    # socketsToUse: 0
+    # socketsToUse:
+    #   - "0"
     # deviceNames:
     #   - nvme0n1
     #   - nvme1n1
@@ -318,10 +322,14 @@ simplyblock:
     # force: false
     # idDeviceByNQN: false
     # openShiftCluster: false
+    # ubuntuHost: false
+    # useSeparateJournalDevice: false
+    # coreMask: ""
+    # nodeUUID: ""
+    # workerNode: ""
+    # nodeAddr: ""
     workerNodes:
       - vm12.simplyblock2.localdomain
-      - vm13.simplyblock2.localdomain
-      - vm14.simplyblock2.localdomain
 
 
   devices:

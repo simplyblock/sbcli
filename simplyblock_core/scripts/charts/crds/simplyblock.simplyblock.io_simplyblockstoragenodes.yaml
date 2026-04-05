@@ -124,8 +124,9 @@ spec:
               skipKubeletConfiguration:
                 type: boolean
               socketsToUse:
-                format: int32
-                type: integer
+                items:
+                  type: string
+                type: array
               spdkDebug:
                 type: boolean
               spdkImage:
