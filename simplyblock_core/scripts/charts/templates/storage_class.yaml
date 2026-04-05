@@ -3,6 +3,8 @@ apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: local-hostpath
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     app.kubernetes.io/instance: hostpath.csi.k8s.io
     app.kubernetes.io/part-of: csi-driver-host-path
