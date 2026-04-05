@@ -233,12 +233,25 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             client_node = random.choice(self.fio_node)
             self.lvol_mount_details[lvol_name]["Client"] = client_node
 
+            lvol_nqn = None
+            for _cs in connect_ls:
+                if '--nqn=' in _cs:
+                    lvol_nqn = _cs.split('--nqn=')[1].split()[0]
+                    break
+
             initial_devices = self.ssh_obj.get_devices(node=client_node)
+            already_connected = False
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client_node,
                                                      command=connect_str)
                 if error:
-                    self.record_failed_nvme_connect(lvol_name, connect_str, client=client_node)
+                    if "already connected" in error.lower():
+                        already_connected = True
+                        self.logger.info(
+                            f"[lvol_connect] {lvol_name} already connected on"
+                            f" {client_node} — treating as success")
+                    else:
+                        self.record_failed_nvme_connect(lvol_name, connect_str, client=client_node)
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client_node)
@@ -247,6 +260,14 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 if device not in initial_devices:
                     lvol_device = f"/dev/{device.strip()}"
                     break
+
+            if not lvol_device and already_connected and lvol_nqn:
+                lvol_device = self.ssh_obj.get_nvme_device_for_nqn(client_node, lvol_nqn)
+                if lvol_device:
+                    self.logger.info(
+                        f"[lvol_connect] Located already-connected device"
+                        f" {lvol_device} for {lvol_name} via NQN lookup")
+
             if not lvol_device:
                 raise LvolNotConnectException(
                     f"LVOL {lvol_name!r} (ndcs={ndcs}, npcs={npcs}) did not connect")

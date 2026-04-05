@@ -1227,6 +1227,25 @@ class SshUtils:
             return output, error
         return None, None
 
+    def get_nvme_device_for_nqn(self, node, nqn):
+        """Return the block-device path (e.g. /dev/nvme2n2) already connected for *nqn*.
+
+        Uses ``nvme list -o json`` so it works even when the device was connected
+        before the caller captured its initial device list.
+        Returns the path string, or None if not found.
+        """
+        cmd = (
+            "sudo nvme list -o json 2>/dev/null | "
+            "python3 -c \""
+            "import sys,json; "
+            "d=json.load(sys.stdin); "
+            "[print(x['DevicePath']) for x in d.get('Devices',[]) "
+            f"if x.get('SubsystemNQN','').strip()=='{nqn}']\""
+        )
+        out, _ = self.exec_command(node=node, command=cmd)
+        lines = [l.strip() for l in out.strip().split('\n') if l.strip()]
+        return lines[0] if lines else None
+
     def disconnect_nvme(self, node, nqn_grep):
         """Disconnect NVMe device on the node."""
         cmd = f"sudo nvme disconnect -n {nqn_grep}"

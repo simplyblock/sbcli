@@ -525,11 +525,22 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
 
     def run(self):
         self.logger.info("=== TestLvolDynamicHostManagement START ===")
-        self.fio_node = self.fio_node[0]
+        fio_nodes = self.fio_node          # full list before reassignment
+        self.fio_node = fio_nodes[0]
+        two_clients = len(fio_nodes) >= 2
+        self.logger.info(f"two_clients={two_clients} (fio_nodes={fio_nodes})")
         self.ssh_obj.add_storage_pool(self.mgmt_nodes[0], self.pool_name, self.cluster_id, sec_options=SEC_BOTH)
 
         lvol_name = f"secdyn{_rand_suffix()}"
-        host_nqn = self._get_client_host_nqn()
+        host_nqn = self._get_client_host_nqn()        # NQN from fio_nodes[0]
+
+        # Get second client NQN when available (read directly, bypass cache)
+        second_host_nqn = None
+        if two_clients:
+            nqn_out, _ = self.ssh_obj.exec_command(fio_nodes[1], "cat /etc/nvme/hostnqn")
+            second_host_nqn = nqn_out.strip().split('\n')[0].strip()
+            assert second_host_nqn, f"Could not read hostnqn from {fio_nodes[1]}"
+            self.logger.info(f"Second client NQN: {second_host_nqn!r}")
 
         # ── Step 1: Create plain lvol via API ──────────────────────────────
         self.sbcli_utils.add_lvol(
@@ -542,14 +553,21 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         assert lvol_id, "Could not find lvol ID"
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # ── Step 2: Add host with DHCHAP via CLI ──────────────────────────
-        self.logger.info(f"Adding host {host_nqn!r} with sec-options …")
+        # ── Step 2: Add host(s) with DHCHAP via CLI ──────────────────────────
+        self.logger.info(f"Adding host {host_nqn!r} …")
         out, err = self.ssh_obj.add_host_to_lvol(
             self.mgmt_nodes[0], lvol_id, host_nqn)
         assert not err or "error" not in err.lower(), \
             f"add-host failed: {err}"
 
-        # ── Step 3: Verify host appears in lvol details ───────────────────
+        if two_clients:
+            self.logger.info(f"Adding second host {second_host_nqn!r} …")
+            out, err = self.ssh_obj.add_host_to_lvol(
+                self.mgmt_nodes[0], lvol_id, second_host_nqn)
+            assert not err or "error" not in err.lower(), \
+                f"add-host (second client) failed: {err}"
+
+        # ── Step 3: Verify host(s) appear in lvol details ───────────────────
         # Use the API (structured data) rather than the CLI table output,
         # because the table wraps long NQN strings across multiple lines.
         lvol_api = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
@@ -557,8 +575,11 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         self.logger.info(f"allowed_hosts NQNs after add-host: {allowed_nqns}")
         assert host_nqn in allowed_nqns, \
             f"Expected {host_nqn!r} in allowed_hosts, got: {allowed_nqns}"
+        if two_clients:
+            assert second_host_nqn in allowed_nqns, \
+                f"Expected second {second_host_nqn!r} in allowed_hosts, got: {allowed_nqns}"
 
-        # ── Step 4: Connect with the new host NQN and run FIO ─────────────
+        # ── Step 4: Connect with the first host NQN and run FIO ─────────────
         lvol_device, connect_ls = self._connect_and_get_device(
             lvol_name, lvol_id, host_nqn=host_nqn)
         self.logger.info(f"Connected via added host NQN → {lvol_device}")
@@ -579,7 +600,7 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         sleep_n_sec(2)
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
-        # ── Step 5: Remove the host ───────────────────────────────────────
+        # ── Step 5: Remove the first host ────────────────────────────────────
         self.logger.info(f"Removing host {host_nqn!r} …")
         out, err = self.ssh_obj.remove_host_from_lvol(
             self.mgmt_nodes[0], lvol_id, host_nqn)
@@ -587,18 +608,33 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
             f"remove-host failed: {err}"
 
         # ── Step 6: Verify removed host is rejected ───────────────────────────
-        # After removing the host, any connect request for that NQN must be
-        # rejected — the backend returns an error when host_nqn is passed but
-        # is not found in allowed_hosts (bug fix: no longer falls back to a
-        # plain connect string).
         sleep_n_sec(3)
-        connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        rejected = bool(err) or not connect_ls
-        self.logger.info(
-            f"Connect after remove-host → connect_ls={connect_ls}, err={err!r}, "
-            f"rejected={rejected}")
-        assert rejected, \
-            "Expected rejection after remove-host but still got a connect string"
+        if two_clients:
+            # allowed_hosts still has second_host_nqn → backend must reject removed NQN
+            connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+            rejected = bool(err) or not connect_ls
+            self.logger.info(
+                f"[2-client] Connect after remove-host → connect_ls={connect_ls}, "
+                f"err={err!r}, rejected={rejected}")
+            assert rejected, \
+                "Expected rejection after remove-host (2-client) but still got a connect string"
+            self.logger.info("[2-client] Removed host correctly rejected PASSED")
+        else:
+            # allowed_hosts is now empty → backend falls back to "no security".
+            # Verify allowed_hosts is empty and the connect string has no DHCHAP keys.
+            lvol_api_after = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+            allowed_after = [h.get("nqn") for h in lvol_api_after[0].get("allowed_hosts", [])]
+            self.logger.info(f"[1-client] allowed_hosts after remove: {allowed_after}")
+            assert len(allowed_after) == 0, \
+                f"Expected empty allowed_hosts after remove (1-client), got: {allowed_after}"
+            connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+            self.logger.info(
+                f"[1-client] Connect after remove-host → connect_ls={connect_ls}, err={err!r}")
+            assert connect_ls, "Expected a plain connect string in 1-client fallback"
+            combined = " ".join(connect_ls)
+            assert "dhchap" not in combined.lower(), \
+                f"Expected no DHCHAP keys in 1-client fallback connect string, got: {combined!r}"
+            self.logger.info("[1-client] allowed_hosts empty, connect string has no DHCHAP keys PASSED")
 
         self.logger.info("=== TestLvolDynamicHostManagement PASSED ===")
 
@@ -1842,7 +1878,13 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
         assert lvol_id
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # TC-SEC-089: remove host while connected → verify connect string unavailable
+        # Pre-add second_nqn so that removing host_nqn in TC-089/TC-092 never leaves
+        # allowed_hosts empty (empty list → backend assumes no security → no rejection).
+        out, err = self.ssh_obj.add_host_to_lvol(self.mgmt_nodes[0], lvol_id, second_nqn)
+        assert not err or "error" not in err.lower(), f"pre-add second NQN failed: {err}"
+        self.logger.info(f"Pre-added {second_nqn!r} to keep allowed_hosts non-empty during removals")
+
+        # TC-SEC-089: remove host_nqn → second_nqn still in list → backend rejects host_nqn
         self.logger.info("TC-SEC-089: Removing host NQN …")
         out, err = self.ssh_obj.remove_host_from_lvol(
             self.mgmt_nodes[0], lvol_id, host_nqn)
@@ -1887,7 +1929,12 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
         assert not cs1b or err1b, "First NQN should not work after removal"
         self.logger.info("TC-SEC-092: PASSED")
 
-        # TC-SEC-093: remove second NQN
+        # Re-add host_nqn so that removing second_nqn in TC-093 doesn't leave
+        # allowed_hosts empty (same empty-list bug as TC-089).
+        out, err = self.ssh_obj.add_host_to_lvol(self.mgmt_nodes[0], lvol_id, host_nqn)
+        assert not err or "error" not in err.lower(), f"re-add host_nqn before TC-093 failed: {err}"
+
+        # TC-SEC-093: remove second NQN → host_nqn still in list → backend rejects second_nqn
         self.logger.info("TC-SEC-093: Removing second NQN …")
         out, err = self.ssh_obj.remove_host_from_lvol(
             self.mgmt_nodes[0], lvol_id, second_nqn)
@@ -2291,7 +2338,11 @@ class TestLvolSecurityCloneOverride(SecurityTestBase):
         assert cs_clone_b,  "Clone: NQN_B should get connect string"
         self.logger.info("TC-SEC-113: Independent NQNs PASSED")
 
-        # TC-SEC-114: remove NQN_A from parent; clone NQN_B still works
+        # TC-SEC-114: remove NQN_A from parent; clone NQN_B still works.
+        # Pre-add nqn_b to parent so that after removing nqn_a the parent's
+        # allowed_hosts is non-empty (empty list → backend assumes no security → no rejection).
+        out, err = self.ssh_obj.add_host_to_lvol(self.mgmt_nodes[0], parent_id, nqn_b)
+        assert not err or "error" not in err.lower(), f"pre-add nqn_b to parent failed: {err}"
         self.logger.info("TC-SEC-114: Removing NQN_A from parent …")
         out, err = self.ssh_obj.remove_host_from_lvol(
             self.mgmt_nodes[0], parent_id, nqn_a)

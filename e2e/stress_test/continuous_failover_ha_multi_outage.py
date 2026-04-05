@@ -619,16 +619,27 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             #     connect_ls = [connect_ls[0]]
             #     self.lvols_without_sec_connect.append(clone_name)
 
+            # Extract NQN from connect string for later "already connected" recovery
+            clone_nqn = None
+            for _cs in connect_ls:
+                if '--nqn=' in _cs:
+                    clone_nqn = _cs.split('--nqn=')[1].split()[0]
+                    break
+
             initial_devices = self.ssh_obj.get_devices(node=client)
+            already_connected = False
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
                 if error:
-                    # lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=self.clone_mount_details[clone_name]["ID"])
-                    # nqn = lvol_details[0]["nqn"]
-                    # self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
-                    # self.logger.info(f"Connecting clone {clone_name} has error: {error}. Disconnect all connections for that clone!!")
-                    # self.sbcli_utils.delete_lvol(lvol_name=clone_name, max_attempt=20, skip_error=True)
-                    self.record_failed_nvme_connect(clone_name, connect_str, client=client)
+                    if "already connected" in error.lower():
+                        # Device is already connected from a previous cycle — not an error
+                        already_connected = True
+                        self.logger.info(
+                            f"[clone_connect] {clone_name} already connected on {client}"
+                            f" (NQN={clone_nqn}); will locate existing device."
+                        )
+                    else:
+                        self.record_failed_nvme_connect(clone_name, connect_str, client=client)
 
             sleep_n_sec(3)
             final_devices = self.ssh_obj.get_devices(node=client)
@@ -637,6 +648,16 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 if device not in initial_devices:
                     lvol_device = f"/dev/{device.strip()}"
                     break
+
+            if not lvol_device and already_connected and clone_nqn:
+                # Device existed before initial_devices snapshot; find it by NQN
+                lvol_device = self.ssh_obj.get_nvme_device_for_nqn(client, clone_nqn)
+                if lvol_device:
+                    self.logger.info(
+                        f"[clone_connect] Located already-connected device "
+                        f"for {clone_name}: {lvol_device}"
+                    )
+
             if not lvol_device:
                 raise LvolNotConnectException("LVOL did not connect")
             self.clone_mount_details[clone_name]["Device"] = lvol_device
