@@ -295,7 +295,33 @@ simplyblock:
     coreIsolation: false
     skipKubeletConfiguration: false
     enableCpuTopology: false
+    # Optional storage-node tuning knobs for matching manual sbctl flows:
+    # dataNIC:
+    #   - eth0
+    # haJmCount: 3
+    # jmPercent: 3
+    # haJM: true
+    # nodesPerSocket: 1
+    # socketsToUse: 0
+    # deviceNames:
+    #   - nvme0n1
+    #   - nvme1n1
+    # pcieAllowList:
+    #   - "0000:00:02.0"
+    #   - "0000:00:03.0"
+    # pcieDenyList:
+    #   - "0000:00:04.0"
+    # driveSizeRange: "100G-1T"
+    # pcieModel: "PM9A3"
+    # reservedSystemCPU: "0,1"
+    # format4k: false
+    # force: false
+    # idDeviceByNQN: false
+    # openShiftCluster: false
     workerNodes:
+      - vm12.simplyblock2.localdomain
+      - vm13.simplyblock2.localdomain
+      - vm14.simplyblock2.localdomain
 
 
   devices:

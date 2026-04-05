@@ -73,62 +73,156 @@ spec:
 {{- end }}
 
 ---
-{{- if .Values.simplyblock.storageNodes }}
+{{- $storageNodes := .Values.simplyblock.storageNodes }}
+{{- $workerNodes := default (list) $storageNodes.workerNodes }}
+{{- $hasStorageNodeAction := and (hasKey $storageNodes "action") (ne (default "" $storageNodes.action) "") }}
+{{- $canRenderStorageNode := and $storageNodes (or $hasStorageNodeAction (and $storageNodes.clusterImage (hasKey $storageNodes "maxLVol") (gt (len $workerNodes) 0))) }}
+{{- if $canRenderStorageNode }}
 apiVersion: simplyblock.simplyblock.io/v1alpha1
 kind: SimplyBlockStorageNode
 metadata:
-  name: {{ .Values.simplyblock.storageNodes.name }}
+  name: {{ $storageNodes.name }}
   namespace: {{ .Release.Namespace }}
 spec:
   clusterName: {{ .Values.simplyblock.cluster.clusterName }}
 
-  {{- if .Values.simplyblock.storageNodes.clusterImage }}
-  clusterImage: {{ .Values.simplyblock.storageNodes.clusterImage }}
+  {{- if $hasStorageNodeAction }}
+  action: {{ $storageNodes.action }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.mgmtIfc }}
-  mgmtIfc: {{ .Values.simplyblock.storageNodes.mgmtIfc }}
+  {{- if $storageNodes.clusterImage }}
+  clusterImage: {{ $storageNodes.clusterImage }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.maxLVol }}
-  maxLVol: {{ .Values.simplyblock.storageNodes.maxLVol }}
+  {{- if $storageNodes.mgmtIfc }}
+  mgmtIfc: {{ $storageNodes.mgmtIfc }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.maxSize }}
-  maxSize: {{ .Values.simplyblock.storageNodes.maxSize | quote }}
+  {{- $dataNIC := default (list) $storageNodes.dataNIC }}
+  {{- if gt (len $dataNIC) 0 }}
+  dataNIC:
+  {{- range $dataNIC }}
+    - {{ . }}
+  {{- end }}
   {{- end }}
 
-  {{- if hasKey .Values.simplyblock.storageNodes "partitions" }}
-  partitions: {{ .Values.simplyblock.storageNodes.partitions }}
+  {{- if hasKey $storageNodes "maxLVol" }}
+  maxLVol: {{ $storageNodes.maxLVol }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.corePercentage }}
-  corePercentage: {{ .Values.simplyblock.storageNodes.corePercentage }}
+  {{- if $storageNodes.maxSize }}
+  maxSize: {{ $storageNodes.maxSize | quote }}
   {{- end }}
 
-  {{- if hasKey .Values.simplyblock.storageNodes "spdkDebug" }}
-  spdkDebug: {{ .Values.simplyblock.storageNodes.spdkDebug }}
+  {{- if hasKey $storageNodes "nodesPerSocket" }}
+  nodesPerSocket: {{ $storageNodes.nodesPerSocket }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.spdkImage }}
-  spdkImage: {{ .Values.simplyblock.storageNodes.spdkImage }}
+  {{- if hasKey $storageNodes "socketsToUse" }}
+  socketsToUse: {{ $storageNodes.socketsToUse }}
   {{- end }}
 
-  {{- if hasKey .Values.simplyblock.storageNodes "coreIsolation" }}
-  coreIsolation: {{ .Values.simplyblock.storageNodes.coreIsolation }}
+  {{- if hasKey $storageNodes "partitions" }}
+  partitions: {{ $storageNodes.partitions }}
   {{- end }}
 
-  {{- if hasKey .Values.simplyblock.storageNodes "skipKubeletConfiguration" }}
-  skipKubeletConfiguration: {{ .Values.simplyblock.storageNodes.skipKubeletConfiguration }}
+  {{- if hasKey $storageNodes "jmPercent" }}
+  jmPercent: {{ $storageNodes.jmPercent }}
   {{- end }}
 
-  {{- if hasKey .Values.simplyblock.storageNodes "enableCpuTopology" }}
-  enableCpuTopology: {{ .Values.simplyblock.storageNodes.enableCpuTopology }}
+  {{- if hasKey $storageNodes "haJmCount" }}
+  haJmCount: {{ $storageNodes.haJmCount }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.workerNodes }}
+  {{- if $storageNodes.corePercentage }}
+  corePercentage: {{ $storageNodes.corePercentage }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "spdkDebug" }}
+  spdkDebug: {{ $storageNodes.spdkDebug }}
+  {{- end }}
+
+  {{- if $storageNodes.spdkImage }}
+  spdkImage: {{ $storageNodes.spdkImage }}
+  {{- end }}
+
+  {{- if $storageNodes.driveSizeRange }}
+  driveSizeRange: {{ $storageNodes.driveSizeRange | quote }}
+  {{- end }}
+
+  {{- if $storageNodes.pcieModel }}
+  pcieModel: {{ $storageNodes.pcieModel | quote }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "format4k" }}
+  format4k: {{ $storageNodes.format4k }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "haJM" }}
+  haJM: {{ $storageNodes.haJM }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "idDeviceByNQN" }}
+  idDeviceByNQN: {{ $storageNodes.idDeviceByNQN }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "force" }}
+  force: {{ $storageNodes.force }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "coreIsolation" }}
+  coreIsolation: {{ $storageNodes.coreIsolation }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "skipKubeletConfiguration" }}
+  skipKubeletConfiguration: {{ $storageNodes.skipKubeletConfiguration }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "enableCpuTopology" }}
+  enableCpuTopology: {{ $storageNodes.enableCpuTopology }}
+  {{- end }}
+
+  {{- if hasKey $storageNodes "openShiftCluster" }}
+  openShiftCluster: {{ $storageNodes.openShiftCluster }}
+  {{- end }}
+
+  {{- if $storageNodes.reservedSystemCPU }}
+  reservedSystemCPU: {{ $storageNodes.reservedSystemCPU | quote }}
+  {{- end }}
+
+  {{- $deviceNames := default (list) $storageNodes.deviceNames }}
+  {{- if gt (len $deviceNames) 0 }}
+  deviceNames:
+  {{- range $deviceNames }}
+    - {{ . }}
+  {{- end }}
+  {{- end }}
+
+  {{- $pcieAllowList := default (list) $storageNodes.pcieAllowList }}
+  {{- if gt (len $pcieAllowList) 0 }}
+  pcieAllowList:
+  {{- range $pcieAllowList }}
+    - {{ . }}
+  {{- end }}
+  {{- end }}
+
+  {{- $pcieDenyList := default (list) $storageNodes.pcieDenyList }}
+  {{- if gt (len $pcieDenyList) 0 }}
+  pcieDenyList:
+  {{- range $pcieDenyList }}
+    - {{ . }}
+  {{- end }}
+  {{- end }}
+
+  {{- $tolerations := default (list) $storageNodes.tolerations }}
+  {{- if gt (len $tolerations) 0 }}
+  tolerations:
+{{ toYaml $tolerations | nindent 4 }}
+  {{- end }}
+
+  {{- if gt (len $workerNodes) 0 }}
   workerNodes:
-  {{- range .Values.simplyblock.storageNodes.workerNodes }}
+  {{- range $workerNodes }}
     - {{ . }}
   {{- end }}
   {{- end }}
