@@ -22,7 +22,10 @@ def _lvol_event(lvol, message, caused_by, event):
         node_id=lvol.get_id())
     if cluster.mode == "kubernetes":
         pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-
+        
+        if not pool.lvols_cr_name:
+            return
+        
         if event == ec.EVENT_OBJ_CREATED:
             crypto_key=(
                 (lvol.crypto_key1, lvol.crypto_key2)
