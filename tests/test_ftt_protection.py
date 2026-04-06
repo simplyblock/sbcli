@@ -43,7 +43,7 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.status = status
     n.cluster_id = cluster_id
     n.secondary_node_id = secondary_id
-    n.secondary_node_id_2 = secondary_id_2
+    n.tertiary_node_id = secondary_id_2
     n.jm_vuid = jm_vuid
     n.lvstore = lvstore
     n.mgmt_ip = f"10.0.0.{hash(node_id) % 256}"
@@ -256,7 +256,7 @@ class TestNpcs2Ft1(unittest.TestCase):
         self.assertIn("n1", reason)
 
     def test_secondary_id_2_offline_blocks(self):
-        """Also works for secondary_node_id_2."""
+        """Also works for tertiary_node_id."""
         cl = _cluster(npcs=2, ft=1)
         nodes = [_node("n1", secondary_id="n2", secondary_id_2="n3"),
                  _node("n2"), _node("n3", status=StorageNode.STATUS_OFFLINE), _node("n4")]

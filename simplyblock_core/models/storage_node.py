@@ -16,6 +16,12 @@ logger = utils.get_logger(__name__)
 
 class StorageNode(BaseNodeObject):
 
+    # Restart phase constants (per-LVS)
+    RESTART_PHASE_PRE_BLOCK = "pre_block"
+    RESTART_PHASE_BLOCKED = "blocked"
+    RESTART_PHASE_POST_UNBLOCK = "post_unblock"
+
+
     alceml_cpu_cores: List[int] = []
     alceml_cpu_index: int = 0
     alceml_worker_cpu_cores: List[int] = []
@@ -58,8 +64,8 @@ class StorageNode(BaseNodeObject):
     lvols: int = 0
     lvstore: str = ""
     lvstore_stack: List[dict] = []
-    lvstore_stack_secondary_1: List[dict] = []
-    lvstore_stack_secondary_2: List[dict] = []
+    lvstore_stack_secondary: List[dict] = []
+    lvstore_stack_tertiary: List[dict] = []
     lvol_subsys_port: int = 9090
     lvstore_ports: dict = {}  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M}}
     max_lvol: int = 0
@@ -87,7 +93,7 @@ class StorageNode(BaseNodeObject):
     rpc_port: int = -1
     rpc_username: str = ""
     secondary_node_id: str = ""
-    secondary_node_id_2: str = ""
+    tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
     jm_ids: List[str] = []
     spdk_cpu_mask: str = ""
@@ -100,6 +106,10 @@ class StorageNode(BaseNodeObject):
     subsystem: str = ""
     system_uuid: str = ""
     lvstore_status: str = ""
+    # Per-LVS restart phase tracking: {lvs_name: phase_string}
+    # Phases: "pre_block", "blocked", "post_unblock", "" (not in restart)
+    # Used by other services to gate sync deletes and create/clone/resize registrations.
+    restart_phases: dict = {}
     nvmf_port: int = 4420
     physical_label: int = 0
     hublvol: HubLVol = None  # type: ignore[assignment]
@@ -257,7 +267,7 @@ class StorageNode(BaseNodeObject):
         """Create and expose a hublvol on this node for a LVStore where this node is sec_1.
 
         Uses the same shared NQN as the primary's hublvol so that downstream
-        nodes (sec_2) can use NVMe multipath to failover from primary to sec_1.
+        nodes (tertiary) can use NVMe multipath to failover from primary to sec_1.
         The listener ANA state is non_optimized.
         """
         lvstore_name = primary_node.lvstore
@@ -345,9 +355,14 @@ class StorageNode(BaseNodeObject):
         remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
 
         if not rpc_client.get_bdevs(remote_bdev):
-            use_multipath = "multipath" if failover_node else False
+            # Per design: multipathing is defined by the number of data NICs.
+            # Enable multipath when there are multiple data NICs or a failover node.
+            multiple_nics = len([n for n in primary_node.data_nics
+                                 if (primary_node.active_rdma and n.trtype == "RDMA")
+                                 or (primary_node.active_tcp and n.trtype == "TCP")]) > 1
+            use_multipath = "multipath" if (failover_node or multiple_nics) else False
 
-            # Attach primary path(s)
+            # Attach primary path(s) — one per data NIC
             for iface in primary_node.data_nics:
                 if primary_node.active_rdma and iface.trtype == "RDMA":
                     tr_type = "RDMA"
@@ -456,8 +471,8 @@ class StorageNode(BaseNodeObject):
         db_controller = DBController()
         task_found = False
         sec_ids = [self.secondary_node_id]
-        if self.secondary_node_id_2:
-            sec_ids.append(self.secondary_node_id_2)
+        if self.tertiary_node_id:
+            sec_ids.append(self.tertiary_node_id)
         tasks = db_controller.get_job_tasks(self.cluster_id)
         for task in tasks:
             if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL and task.node_id in sec_ids:

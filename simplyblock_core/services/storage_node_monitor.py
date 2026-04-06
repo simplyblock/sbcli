@@ -272,13 +272,65 @@ def is_node_data_plane_disconnected(node):
     return total > 0 and disconnected == total
 
 
-def is_node_data_plane_disconnected_quorum(node):
-    """Return True if a majority of online primary peers report *node*'s remote JM as disconnected.
+def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None):
+    """Return True if a majority of peers report *node*'s remote JM as disconnected.
+
+    Args:
+        node: the node whose data-plane connectivity is being checked.
+        lvs_peer_ids: optional list of specific peer node UUIDs to query
+            (the LVS peers for the LVS being processed).  When provided,
+            only these peers vote — giving a per-LVS quorum check as
+            required by the design.  When None, falls back to querying
+            all online primary nodes globally (legacy behavior).
 
     Returns False if no peers are available to check (conservative).
     """
-    disconnected, total = _count_data_plane_votes(node)
+    if lvs_peer_ids is not None:
+        disconnected, total = _count_data_plane_votes_from_peers(node, lvs_peer_ids)
+    else:
+        disconnected, total = _count_data_plane_votes(node)
     return total > 0 and disconnected > total // 2
+
+
+def _count_data_plane_votes_from_peers(node, peer_ids):
+    """Query specific LVS peer nodes for *node*'s JM connectivity.
+
+    Only peers that are online and reachable participate in the vote.
+    Returns (disconnected_count, total_peers_checked).
+    """
+    node_id = node.get_id()
+    remote_jm_key = f"remote_jm_{node_id}n1"
+    disconnected = 0
+    total = 0
+
+    for peer_id in peer_ids:
+        if peer_id == node_id:
+            continue
+        try:
+            peer = db.get_storage_node_by_id(peer_id)
+        except (KeyError, Exception):
+            continue
+
+        if peer.status != StorageNode.STATUS_ONLINE:
+            continue
+        if not peer.jm_vuid:
+            continue
+
+        try:
+            ret = peer.rpc_client(timeout=5, retry=1).jc_get_jm_status(peer.jm_vuid)
+            total += 1
+            if ret and ret.get(remote_jm_key) is True:
+                logger.info("Per-LVS data-plane check: peer %s still sees %s JM as connected",
+                            peer.get_id(), node_id)
+            else:
+                disconnected += 1
+        except Exception as e:
+            logger.debug("jc_get_jm_status on peer %s failed: %s", peer.get_id(), e)
+            continue
+
+    logger.info("Per-LVS data-plane check for %s: %d/%d peers report disconnected",
+                node_id, disconnected, total)
+    return disconnected, total
 
 
 def _count_data_plane_votes(node):
@@ -377,7 +429,7 @@ def node_port_check_fun(snode):
     node_port_check = True
     if snode.lvstore_status == "ready":
         ports = [snode.nvmf_port]
-        if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
+        if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                 if n.lvstore_status != "ready":
                     continue
@@ -535,7 +587,7 @@ def loop_for_node(snode):
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     logger.info("Starting node monitor")
     threads_maps: dict[str, threading.Thread] = {}
 

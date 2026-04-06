@@ -220,8 +220,8 @@ def check_node(snode):
             sec_ids_to_check = []
             if snode.secondary_node_id:
                 sec_ids_to_check.append(snode.secondary_node_id)
-            if snode.secondary_node_id_2:
-                sec_ids_to_check.append(snode.secondary_node_id_2)
+            if snode.tertiary_node_id:
+                sec_ids_to_check.append(snode.tertiary_node_id)
 
             if sec_ids_to_check:
 
@@ -251,7 +251,7 @@ def check_node(snode):
             # if node_api_check:
             ports = [snode.get_lvol_subsys_port(snode.lvstore)]
 
-            for sec_stack_ref in [snode.lvstore_stack_secondary_1, snode.lvstore_stack_secondary_2]:
+            for sec_stack_ref in [snode.lvstore_stack_secondary, snode.lvstore_stack_tertiary]:
                 if sec_stack_ref:
                     try:
                         sec_ref_node = db.get_storage_node_by_id(sec_stack_ref)
