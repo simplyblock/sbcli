@@ -255,7 +255,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
     db_controller = DBController()
     # If a specific primary is given, use it; otherwise resolve from back-references
     if not primary_node_id:
-        primary_node_id = node.lvstore_stack_secondary_1 or node.lvstore_stack_secondary_2
+        primary_node_id = node.lvstore_stack_secondary or node.lvstore_stack_tertiary
     if not primary_node_id:
         logger.error(f"No primary node reference found on secondary node {node.get_id()}")
         return False
@@ -301,9 +301,9 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
         if not passed and auto_fix and primary_node.lvstore_status == "ready" \
                 and primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
-                # If this node is sec_2 for this primary, set up multipath to sec_1
+                # If this node is tertiary for this primary, set up multipath to sec_1
                 failover_node = None
-                is_sec2 = (node.lvstore_stack_secondary_2 == primary_node.get_id())
+                is_sec2 = (node.lvstore_stack_tertiary == primary_node.get_id())
                 if is_sec2 and primary_node.secondary_node_id:
                     try:
                         sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
@@ -576,7 +576,7 @@ def check_node(node_id, with_devices=True):
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 
-    for sec_attr in ['lvstore_stack_secondary_1', 'lvstore_stack_secondary_2']:
+    for sec_attr in ['lvstore_stack_secondary', 'lvstore_stack_tertiary']:
         primary_id = getattr(snode, sec_attr, None)
         if primary_id:
             try:

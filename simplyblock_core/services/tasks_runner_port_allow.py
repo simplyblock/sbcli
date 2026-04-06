@@ -149,8 +149,8 @@ def exec_port_allow_task(task):
     sec_ids = []
     if node.secondary_node_id:
         sec_ids.append(node.secondary_node_id)
-    if node.secondary_node_id_2:
-        sec_ids.append(node.secondary_node_id_2)
+    if node.tertiary_node_id:
+        sec_ids.append(node.tertiary_node_id)
     for sec_id in sec_ids:
         sec_node = db.get_storage_node_by_id(sec_id)
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
@@ -188,8 +188,8 @@ def exec_port_allow_task(task):
         sec_ids = []
         if node.secondary_node_id:
             sec_ids.append(node.secondary_node_id)
-        if node.secondary_node_id_2:
-            sec_ids.append(node.secondary_node_id_2)
+        if node.tertiary_node_id:
+            sec_ids.append(node.tertiary_node_id)
         if sec_ids:
             primary_hublvol_check = health_controller._check_node_hublvol(node)
             if not primary_hublvol_check:

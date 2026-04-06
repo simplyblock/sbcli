@@ -314,7 +314,7 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for node in ret:
-            if (node.secondary_node_id == node_id or node.secondary_node_id_2 == node_id) and node.lvstore:
+            if (node.secondary_node_id == node_id or node.tertiary_node_id == node_id) and node.lvstore:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
 
@@ -408,6 +408,54 @@ class DBController(metaclass=Singleton):
         ordered_snapshot_ids = sorted(set(snapshot_ids))
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
+
+    # ---- Pre-Restart Guard (Single FDB Transaction) ----
+
+    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id):
+        """Pre-restart check as a single FDB transaction.
+
+        Opens transaction, queries status of all nodes in the cluster.
+        If any node is in restart or shutdown, returns False.
+        Otherwise sets this node to in_restart and commits.
+
+        Returns (True, None) on success, or (False, reason) if blocked.
+        """
+        all_nodes = StorageNode().read_from_db(tr)
+        for n in all_nodes:
+            if n.cluster_id != cluster_id:
+                continue
+            if n.get_id() == node_id:
+                continue
+            if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
+                return False, f"Node {n.get_id()} is {n.status}"
+
+        # Set this node to in_restart atomically within the same transaction
+        target = None
+        for n in all_nodes:
+            if n.get_id() == node_id:
+                target = n
+                break
+        if target:
+            target.status = StorageNode.STATUS_RESTARTING
+            prefix = target.get_db_id()
+            data = json.dumps(target.get_clean_dict())
+            tr[prefix.encode()] = data.encode()
+
+        return True, None
+
+    def try_set_node_restarting(self, cluster_id, node_id):
+        """Pre-restart check: single FDB transaction.
+
+        Opens FDB transaction, queries status of all nodes.
+        If any node is in restart or shutdown, returns False.
+        Sets node to in_restart and commits transaction.
+
+        Returns (True, None) on success, or (False, reason) if blocked.
+        """
+        if not self.kv_store:
+            return False, "No DB connection"
+        transactional = fdb.transactional(DBController._try_set_node_restarting_tx)
+        return transactional(self, self.kv_store, cluster_id, node_id)
 
     # ---- S3 Backup ----
 

@@ -22,12 +22,43 @@ logger = lg.getLogger()
 db_controller = DBController()
 
 
+def _acquire_lvol_mutation_lock(node):
+    """Block concurrent lvstore mutations while HA registration is in flight."""
+    had_lock = node.lvol_sync_del()
+    if not had_lock:
+        node.lvol_del_sync_lock()
+    return had_lock
+
+
+def _release_lvol_mutation_lock(node, had_lock):
+    if not had_lock:
+        node.lvol_del_sync_lock_reset()
+
+
+def _rollback_lvol_creation(lvol, node_ids):
+    for node_id in dict.fromkeys(node_ids):
+        try:
+            lvol_controller.delete_lvol_from_node(lvol.get_id(), node_id)
+        except Exception as e:
+            logger.error(f"Failed to rollback lvol {lvol.get_id()} from node {node_id}: {e}")
+
+
 def add(lvol_id, snapshot_name, backup=False, lock=True):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
         return False, str(e)
+
+    # Block during restart Phase 5
+    try:
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        if snode.lvstore_status == "in_creation":
+            msg = f"Cannot create snapshot: node LVStore restart in progress"
+            logger.error(msg)
+            return False, msg
+    except KeyError:
+        pass
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
@@ -120,59 +151,53 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
             return False, msg
 
     if lvol.ha_type == "ha":
-        primary_node = None
-        secondary_nodes = []
+        from simplyblock_core.storage_node_ops import check_non_leader_for_operation
+
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
-        sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
 
         # Build nodes list with all secondaries
         secondary_ids = [host_node.secondary_node_id]
-        if host_node.secondary_node_id_2:
-            secondary_ids.append(host_node.secondary_node_id_2)
+        if host_node.tertiary_node_id:
+            secondary_ids.append(host_node.tertiary_node_id)
         lvol.nodes = [host_node.get_id()] + secondary_ids
 
-        if host_node.status == StorageNode.STATUS_ONLINE:
-            if lvol_controller.is_node_leader(host_node, lvol.lvs_name):
-                primary_node = host_node
-                if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = "Secondary node is in down status, can not create snapshot"
-                    logger.error(msg)
-                    return False, msg
-                elif sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_nodes.append(sec_node)
-
-            elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
-                    primary_node = sec_node
-                    if host_node.status == StorageNode.STATUS_ONLINE:
-                        secondary_nodes.append(host_node)
-                else:
-                    # both nodes are non leaders and online, set primary as leader
-                    primary_node = host_node
-                    secondary_nodes.append(sec_node)
-
-            else:
-                # sec node is not online, set primary as leader
-                primary_node = host_node
-
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            # create on secondary and set leader if needed,
-            primary_node = sec_node
-
-        else:
-            # both primary and secondary are not online
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            return False, msg
-
-        # Add additional secondaries if online
-        for extra_sec_id in secondary_ids[1:]:
+        # Detect leader via RPC (no status checks)
+        all_nodes = [host_node]
+        for sid in secondary_ids:
             try:
-                extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
-                if extra_sec.status == StorageNode.STATUS_ONLINE and extra_sec.get_id() != (primary_node.get_id() if primary_node else None):
-                    secondary_nodes.append(extra_sec)
+                all_nodes.append(db_controller.get_storage_node_by_id(sid))
             except KeyError:
                 pass
+
+        primary_node = None
+        secondary_nodes = []
+        for candidate in all_nodes:
+            try:
+                if lvol_controller.is_node_leader(candidate, lvol.lvs_name):
+                    primary_node = candidate
+                    break
+            except Exception:
+                continue
+        if not primary_node:
+            primary_node = host_node
+
+        # Check non-leader nodes (no status checks)
+        for candidate in all_nodes:
+            if candidate.get_id() == primary_node.get_id():
+                continue
+            action = check_non_leader_for_operation(
+                candidate.get_id(), lvol.lvs_name, operation_type="create")
+            if action == "reject":
+                msg = f"Cannot create snapshot: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
+                logger.error(msg)
+                return False, msg
+            elif action == "proceed":
+                secondary_nodes.append(candidate)
+            # "skip", "queue" — handled by the registration gate below
+
+        had_lock = False
+        if lock:
+            had_lock = _acquire_lvol_mutation_lock(host_node)
 
         if primary_node:
             rpc_client = RPCClient(
@@ -194,6 +219,18 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
                 return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
         for sec in secondary_nodes:
+            # Per design: gate snapshot registration around restart port block.
+            from simplyblock_core.storage_node_ops import wait_or_delay_for_restart_gate, queue_for_restart_drain
+            gate = wait_or_delay_for_restart_gate(sec.get_id(), lvol.lvs_name)
+            if gate == "delay":
+                queue_for_restart_drain(
+                    sec.get_id(), lvol.lvs_name,
+                    lambda s=sec: RPCClient(s.mgmt_ip, s.rpc_port, s.rpc_username,
+                                            s.rpc_password).bdev_lvol_snapshot_register(
+                        f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid),
+                    f"register snapshot {snap_bdev_name} on {sec.get_id()[:8]}")
+                continue
+
             sec_rpc_client = RPCClient(
                 sec.mgmt_ip, sec.rpc_port, sec.rpc_username, sec.rpc_password)
 
@@ -210,6 +247,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
                     logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 return False, msg
 
+        if lock:
+            _release_lvol_mutation_lock(host_node, had_lock)
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
@@ -330,6 +369,15 @@ def delete(snapshot_uuid, force_delete=False):
         if not force_delete:
             return True
 
+    # Block during restart Phase 5
+    try:
+        snode = db_controller.get_storage_node_by_id(snap.node_id)
+        if snode.lvstore_status == "in_creation" and not force_delete:
+            logger.error(f"Cannot delete snapshot {snapshot_uuid}: node LVStore restart in progress")
+            return False
+    except KeyError:
+        pass
+
     # Block deletion if the snapshot's parent volume is being migrated
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(
@@ -403,50 +451,30 @@ def delete(snapshot_uuid, force_delete=False):
 
     else:
 
-        primary_node = None
+        # Detect leader via RPC (no status checks)
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
-        sec_nodes = []
+        all_nodes = [host_node]
         if snode.secondary_node_id:
-            sec_nodes.append(db_controller.get_storage_node_by_id(snode.secondary_node_id))
-        if snode.secondary_node_id_2:
-            sec_nodes.append(db_controller.get_storage_node_by_id(snode.secondary_node_id_2))
+            try:
+                all_nodes.append(db_controller.get_storage_node_by_id(snode.secondary_node_id))
+            except KeyError:
+                pass
+        if snode.tertiary_node_id:
+            try:
+                all_nodes.append(db_controller.get_storage_node_by_id(snode.tertiary_node_id))
+            except KeyError:
+                pass
 
-        if host_node.status == StorageNode.STATUS_ONLINE:
-            if lvol_controller.is_node_leader(host_node, snap.lvol.lvs_name):
-                primary_node = host_node
-                # Check if any secondary is in DOWN status
-                for sec_node in sec_nodes:
-                    if sec_node.status == StorageNode.STATUS_DOWN:
-                        msg = "Secondary node is in down status, can not delete snapshot"
-                        logger.error(msg)
-                        return False
-            else:
-                # Check if any secondary is the leader
-                for sec_node in sec_nodes:
-                    if sec_node.status == StorageNode.STATUS_ONLINE and \
-                            lvol_controller.is_node_leader(sec_node, snap.lvol.lvs_name):
-                        primary_node = sec_node
-                        break
-                if not primary_node:
-                    # no secondary is leader, use host as leader
-                    primary_node = host_node
-
-        else:
-            # host is not online, find an online secondary
-            for sec_node in sec_nodes:
-                if sec_node.status == StorageNode.STATUS_ONLINE:
-                    primary_node = sec_node
+        primary_node = None
+        for candidate in all_nodes:
+            try:
+                if lvol_controller.is_node_leader(candidate, snap.lvol.lvs_name):
+                    primary_node = candidate
                     break
-
+            except Exception:
+                continue
         if not primary_node:
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            return False
-
-        if not primary_node:
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            return False
+            primary_node = host_node
 
         rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
                                    primary_node.rpc_password)
@@ -499,6 +527,12 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     except KeyError:
         msg = 'Storage node not found'
         logger.exception(msg)
+        return False, msg
+
+    # Block during restart Phase 5
+    if snode.lvstore_status == "in_creation":
+        msg = f"Cannot clone: node LVStore restart in progress on {snode.get_id()}"
+        logger.error(msg)
         return False, msg
 
     if snode.lvol_sync_del() and lock:
@@ -668,62 +702,57 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
     if lvol.ha_type == "ha":
+        from simplyblock_core.storage_node_ops import check_non_leader_for_operation, queue_for_restart_drain
+
         host_node = snode
-        # Build nodes list with all secondaries
         secondary_ids = [host_node.secondary_node_id]
-        if host_node.secondary_node_id_2:
-            secondary_ids.append(host_node.secondary_node_id_2)
+        if host_node.tertiary_node_id:
+            secondary_ids.append(host_node.tertiary_node_id)
         lvol.nodes = [host_node.get_id()] + secondary_ids
+
+        # Detect leader via RPC (no status checks)
+        all_nodes = [host_node]
+        for sid in secondary_ids:
+            try:
+                all_nodes.append(db_controller.get_storage_node_by_id(sid))
+            except KeyError:
+                pass
 
         primary_node = None
         secondary_nodes = []
-        sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        if host_node.status == StorageNode.STATUS_ONLINE:
-
-            if lvol_controller.is_node_leader(host_node, lvol.lvs_name):
-                primary_node = host_node
-                if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = "Secondary node is in down status, can not clone snapshot"
-                    logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
-                    return False, msg
-
-                if sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_nodes.append(sec_node)
-
-            elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if lvol_controller.is_node_leader(sec_node, lvol.lvs_name):
-                    primary_node = sec_node
-                    if host_node.status == StorageNode.STATUS_ONLINE:
-                        secondary_nodes.append(host_node)
-                else:
-                    # both nodes are non leaders and online, set primary as leader
-                    primary_node = host_node
-                    secondary_nodes.append(sec_node)
-
-            else:
-                # sec node is not online, set primary as leader
-                primary_node = host_node
-
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            # create on secondary and set leader if needed,
-            primary_node = sec_node
-
-        else:
-            # both primary and secondary are not online
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            lvol.remove(db_controller.kv_store)
-            return False, msg
-
-        # Add additional secondaries if online
-        for extra_sec_id in secondary_ids[1:]:
+        for candidate in all_nodes:
             try:
-                extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
-                if extra_sec.status == StorageNode.STATUS_ONLINE and extra_sec.get_id() != (primary_node.get_id() if primary_node else None):
-                    secondary_nodes.append(extra_sec)
-            except KeyError:
-                pass
+                if lvol_controller.is_node_leader(candidate, lvol.lvs_name):
+                    primary_node = candidate
+                    break
+            except Exception:
+                continue
+        if not primary_node:
+            primary_node = host_node
+
+        # Check non-leader nodes (no status checks)
+        for candidate in all_nodes:
+            if candidate.get_id() == primary_node.get_id():
+                continue
+            action = check_non_leader_for_operation(
+                candidate.get_id(), lvol.lvs_name, operation_type="create")
+            if action == "reject":
+                msg = f"Cannot clone: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
+                logger.error(msg)
+                lvol.remove(db_controller.kv_store)
+                return False, msg
+            elif action == "proceed":
+                secondary_nodes.append(candidate)
+            elif action == "queue":
+                queue_for_restart_drain(
+                    candidate.get_id(), lvol.lvs_name,
+                    lambda c=candidate: lvol_controller.add_lvol_on_node(lvol, c, is_primary=False),
+                    f"register clone {lvol.uuid} on {candidate.get_id()[:8]}")
+            # "skip" — disconnected or pre_block, skip
+
+        had_lock = False
+        if lock:
+            had_lock = _acquire_lvol_mutation_lock(host_node)
 
         if primary_node:
             lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
@@ -731,7 +760,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 logger.error(error)
                 lvol.remove(db_controller.kv_store)
                 return False, error
-
             lvol.lvol_uuid = lvol_bdev['uuid']
             lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
@@ -741,6 +769,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 logger.error(error)
                 lvol.remove(db_controller.kv_store)
                 return False, error
+
+        if lock and had_lock:
+            _release_lvol_mutation_lock(host_node, had_lock)
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)

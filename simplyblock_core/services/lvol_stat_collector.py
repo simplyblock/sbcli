@@ -243,11 +243,11 @@ while True:
                 except Exception as e:
                     logger.error(e)
 
-            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
-                if not sec_id:
+            for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+                if not peer_id:
                     continue
                 try:
-                    sec_node = db.get_storage_node_by_id(sec_id)
+                    sec_node = db.get_storage_node_by_id(peer_id)
                 except KeyError:
                     continue
                 if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:

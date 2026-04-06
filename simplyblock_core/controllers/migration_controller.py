@@ -462,8 +462,8 @@ def apply_migration_to_db(migration):
     lvol.nodes = [tgt_node.get_id()]
     if tgt_node.secondary_node_id:
         lvol.nodes.append(tgt_node.secondary_node_id)
-    if tgt_node.secondary_node_id_2:
-        lvol.nodes.append(tgt_node.secondary_node_id_2)
+    if tgt_node.tertiary_node_id:
+        lvol.nodes.append(tgt_node.tertiary_node_id)
 
     lvol.write_to_db(db.kv_store)
     logger.info(

@@ -66,7 +66,7 @@ def _node(uuid, cluster_id="cluster-1", lvstore="LVS_100",
     n.hostname = f"host-{uuid}"
     n.lvstore = lvstore
     n.secondary_node_id = secondary_node_id
-    n.secondary_node_id_2 = ""
+    n.tertiary_node_id = ""
     n.mgmt_ip = f"10.0.0.{hash(uuid) % 254 + 1}"
     n.rpc_port = 8080
     n.rpc_username = "user"
@@ -79,8 +79,8 @@ def _node(uuid, cluster_id="cluster-1", lvstore="LVS_100",
     n.jm_device = None
     n.lvstore_status = "ready"
     n.lvstore_stack = []
-    n.lvstore_stack_secondary_1 = ""
-    n.lvstore_stack_secondary_2 = ""
+    n.lvstore_stack_secondary = ""
+    n.lvstore_stack_tertiary = ""
     n.enable_ha_jm = False
     n.raid = "raid0"
     n.max_lvol = 100

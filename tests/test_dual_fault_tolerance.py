@@ -43,9 +43,9 @@ def _cluster(ha_type="ha", distr_npcs=2, max_fault_tolerance=1):
 
 
 def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
-          hostname="", lvstore="", secondary_node_id="", secondary_node_id_2="",
+          hostname="", lvstore="", secondary_node_id="", tertiary_node_id="",
           mgmt_ip="", is_secondary_node=False,
-          lvstore_stack_secondary_1="", lvstore_stack_secondary_2=""):
+          lvstore_stack_secondary="", lvstore_stack_tertiary=""):
     n = StorageNode()
     n.uuid = uuid
     n.status = status
@@ -53,11 +53,11 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.hostname = hostname or f"host-{uuid}"
     n.lvstore = lvstore or f"lvs_{uuid}"
     n.secondary_node_id = secondary_node_id
-    n.secondary_node_id_2 = secondary_node_id_2
+    n.tertiary_node_id = tertiary_node_id
     n.mgmt_ip = mgmt_ip or f"10.0.0.{hash(uuid) % 254 + 1}"
     n.is_secondary_node = is_secondary_node
-    n.lvstore_stack_secondary_1 = lvstore_stack_secondary_1
-    n.lvstore_stack_secondary_2 = lvstore_stack_secondary_2
+    n.lvstore_stack_secondary = lvstore_stack_secondary
+    n.lvstore_stack_tertiary = lvstore_stack_tertiary
     return n
 
 
@@ -121,13 +121,13 @@ class TestClusterModel(unittest.TestCase):
 
 class TestStorageNodeModel(unittest.TestCase):
 
-    def test_default_secondary_node_id_2(self):
+    def test_default_tertiary_node_id(self):
         n = StorageNode()
-        assert n.secondary_node_id_2 == ""
+        assert n.tertiary_node_id == ""
 
-    def test_secondary_node_id_2_stored(self):
-        n = _node("n1", secondary_node_id_2="sec-2")
-        assert n.secondary_node_id_2 == "sec-2"
+    def test_tertiary_node_id_stored(self):
+        n = _node("n1", tertiary_node_id="sec-2")
+        assert n.tertiary_node_id == "sec-2"
 
 
 # ===========================================================================
@@ -216,7 +216,32 @@ class TestAddClusterValidation(unittest.TestCase):
 
 
 # ===========================================================================
-# 5. get_secondary_nodes with exclude_ids
+# 5. HA journal count resolution
+# ===========================================================================
+
+class TestHaJournalCountResolution(unittest.TestCase):
+
+    def test_ft2_defaults_to_four_journal_copies(self):
+        import simplyblock_core.storage_node_ops as ops
+
+        assert ops.resolve_ha_jm_count(_cluster(max_fault_tolerance=2), None) == 4
+
+    def test_ft1_defaults_to_three_journal_copies(self):
+        import simplyblock_core.storage_node_ops as ops
+
+        assert ops.resolve_ha_jm_count(_cluster(max_fault_tolerance=1), None) == 3
+
+    def test_ft2_rejects_too_few_journal_copies(self):
+        import simplyblock_core.storage_node_ops as ops
+
+        with self.assertRaises(ValueError) as ctx:
+            ops.resolve_ha_jm_count(_cluster(max_fault_tolerance=2), 3)
+
+        assert "minimum required is 4" in str(ctx.exception)
+
+
+# ===========================================================================
+# 6. get_secondary_nodes with exclude_ids
 # ===========================================================================
 
 class TestGetSecondaryNodes(unittest.TestCase):
@@ -295,9 +320,9 @@ class TestDBControllerSecondaryLookup(unittest.TestCase):
         assert len(result) == 1
         assert result[0].uuid == "primary"
 
-    def test_finds_primary_via_secondary_node_id_2(self):
+    def test_finds_primary_via_tertiary_node_id(self):
         from simplyblock_core.db_controller import DBController
-        primary = _node("primary", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        primary = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         primary.lvstore = "lvs_primary"
 
         mock_kv = MagicMock()
@@ -310,7 +335,7 @@ class TestDBControllerSecondaryLookup(unittest.TestCase):
 
     def test_no_match_returns_empty(self):
         from simplyblock_core.db_controller import DBController
-        primary = _node("primary", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        primary = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         primary.lvstore = "lvs_primary"
 
         mock_kv = MagicMock()
@@ -347,7 +372,7 @@ class TestApplyMigrationToDbDualSecondary(unittest.TestCase):
 
         lvol = _lvol("lvol-1", "node-src")
         tgt = _node("node-tgt", hostname="host-tgt", lvstore="lvs_tgt",
-                     secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+                     secondary_node_id="sec-1", tertiary_node_id="sec-2")
 
         mig = _migration(lvol_id="lvol-1", source_node="node-src",
                          target_node="node-tgt", snaps_migrated=[])
@@ -416,7 +441,7 @@ class TestGetTargetSecondaryNodes(unittest.TestCase):
             "sec-1": sec1, "sec-2": sec2
         }[id]
 
-        tgt = _node("tgt", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        tgt = _node("tgt", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         result, err = runner._get_target_secondary_nodes(tgt)
 
         assert err is None
@@ -433,7 +458,7 @@ class TestGetTargetSecondaryNodes(unittest.TestCase):
             "sec-1": sec1, "sec-2": sec2
         }[id]
 
-        tgt = _node("tgt", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        tgt = _node("tgt", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         result, err = runner._get_target_secondary_nodes(tgt)
 
         assert err is None
@@ -449,7 +474,7 @@ class TestGetTargetSecondaryNodes(unittest.TestCase):
             "sec-1": sec1, "sec-2": sec2
         }[id]
 
-        tgt = _node("tgt", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        tgt = _node("tgt", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         result, err = runner._get_target_secondary_nodes(tgt)
 
         assert result == []
@@ -471,7 +496,7 @@ class TestGetTargetSecondaryNodes(unittest.TestCase):
             raise KeyError(id)
         mock_db.get_storage_node_by_id.side_effect = _get
 
-        tgt = _node("tgt", secondary_node_id="sec-1", secondary_node_id_2="sec-missing")
+        tgt = _node("tgt", secondary_node_id="sec-1", tertiary_node_id="sec-missing")
         result, err = runner._get_target_secondary_nodes(tgt)
 
         assert err is None
@@ -514,11 +539,11 @@ class TestLvolNodesConstruction(unittest.TestCase):
     """Test that lvol.nodes is built correctly with dual secondaries."""
 
     def test_nodes_with_two_secondaries(self):
-        """Verify that when host_node has secondary_node_id_2, lvol.nodes has 3 entries."""
-        host = _node("primary", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        """Verify that when host_node has tertiary_node_id, lvol.nodes has 3 entries."""
+        host = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         nodes = [host.uuid] + [host.secondary_node_id]
-        if host.secondary_node_id_2:
-            nodes.append(host.secondary_node_id_2)
+        if host.tertiary_node_id:
+            nodes.append(host.tertiary_node_id)
 
         assert nodes == ["primary", "sec-1", "sec-2"]
         assert len(nodes) == 3
@@ -526,8 +551,8 @@ class TestLvolNodesConstruction(unittest.TestCase):
     def test_nodes_with_one_secondary(self):
         host = _node("primary", secondary_node_id="sec-1")
         nodes = [host.uuid] + [host.secondary_node_id]
-        if host.secondary_node_id_2:
-            nodes.append(host.secondary_node_id_2)
+        if host.tertiary_node_id:
+            nodes.append(host.tertiary_node_id)
 
         assert nodes == ["primary", "sec-1"]
         assert len(nodes) == 2
@@ -562,8 +587,8 @@ class TestLvolDelSyncLockResetDual(unittest.TestCase):
 
     @patch("simplyblock_core.db_controller.DBController")
     def test_lock_found_for_secondary_2(self, MockDB):
-        """Sync lock should be created when a sync-del task exists for secondary_node_id_2."""
-        node = _node("primary", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        """Sync lock should be created when a sync-del task exists for tertiary_node_id."""
+        node = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         node.cluster_id = "cluster-1"
 
         task_sec2 = self._make_task(JobSchedule.FN_LVOL_SYNC_DEL, "sec-2")
@@ -580,7 +605,7 @@ class TestLvolDelSyncLockResetDual(unittest.TestCase):
     @patch("simplyblock_core.db_controller.DBController")
     def test_no_lock_when_no_tasks(self, MockDB):
         """No lock should be created when no sync-del tasks exist for either secondary."""
-        node = _node("primary", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        node = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         node.cluster_id = "cluster-1"
 
         # Task for a different node
@@ -596,28 +621,28 @@ class TestLvolDelSyncLockResetDual(unittest.TestCase):
 
 
 # ===========================================================================
-# 12. recreate_lvstore_on_sec min_cntlid
+# 12. recreate_lvstore_on_non_leader min_cntlid
 # ===========================================================================
 
 class TestRecreateLvstoreMinCntlid(unittest.TestCase):
 
     def test_secondary_1_gets_cntlid_1000(self):
         """When secondary node is the primary's secondary_node_id, min_cntlid=1000."""
-        primary = _node("primary", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        primary = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         secondary = _node("sec-1")
 
-        if primary.secondary_node_id_2 == secondary.uuid:
+        if primary.tertiary_node_id == secondary.uuid:
             min_cntlid = 2000
         else:
             min_cntlid = 1000
         assert min_cntlid == 1000
 
     def test_secondary_2_gets_cntlid_2000(self):
-        """When secondary node is the primary's secondary_node_id_2, min_cntlid=2000."""
-        primary = _node("primary", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        """When secondary node is the primary's tertiary_node_id, min_cntlid=2000."""
+        primary = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         secondary = _node("sec-2")
 
-        if primary.secondary_node_id_2 == secondary.uuid:
+        if primary.tertiary_node_id == secondary.uuid:
             min_cntlid = 2000
         else:
             min_cntlid = 1000
@@ -630,29 +655,29 @@ class TestRecreateLvstoreMinCntlid(unittest.TestCase):
 
 class TestCheckSecNodeHublvolPrimaryResolution(unittest.TestCase):
 
-    def test_secondary_1_resolves_via_lvstore_stack_secondary_1(self):
-        """A node that is secondary_1 of a primary should have lvstore_stack_secondary_1 set."""
-        sec = _node("sec-1", lvstore_stack_secondary_1="primary-1")
-        primary_ref = sec.lvstore_stack_secondary_1 or sec.lvstore_stack_secondary_2
+    def test_secondary_1_resolves_via_lvstore_stack_secondary(self):
+        """A node that is secondary_1 of a primary should have lvstore_stack_secondary set."""
+        sec = _node("sec-1", lvstore_stack_secondary="primary-1")
+        primary_ref = sec.lvstore_stack_secondary or sec.lvstore_stack_tertiary
         assert primary_ref == "primary-1"
 
-    def test_secondary_2_resolves_via_lvstore_stack_secondary_2(self):
-        """A node that is only secondary_2 should resolve via lvstore_stack_secondary_2."""
-        sec = _node("sec-2", lvstore_stack_secondary_2="primary-1")
-        primary_ref = sec.lvstore_stack_secondary_1 or sec.lvstore_stack_secondary_2
+    def test_secondary_2_resolves_via_lvstore_stack_tertiary(self):
+        """A node that is only secondary_2 should resolve via lvstore_stack_tertiary."""
+        sec = _node("sec-2", lvstore_stack_tertiary="primary-1")
+        primary_ref = sec.lvstore_stack_secondary or sec.lvstore_stack_tertiary
         assert primary_ref == "primary-1"
 
     def test_both_set_prefers_secondary_1(self):
         """When both back-refs are set (node is sec for two primaries), secondary_1 wins."""
-        sec = _node("sec", lvstore_stack_secondary_1="primary-A",
-                     lvstore_stack_secondary_2="primary-B")
-        primary_ref = sec.lvstore_stack_secondary_1 or sec.lvstore_stack_secondary_2
+        sec = _node("sec", lvstore_stack_secondary="primary-A",
+                     lvstore_stack_tertiary="primary-B")
+        primary_ref = sec.lvstore_stack_secondary or sec.lvstore_stack_tertiary
         assert primary_ref == "primary-A"
 
     def test_explicit_primary_node_id_overrides(self):
         """When primary_node_id is passed explicitly, it should be used."""
-        _node("sec", lvstore_stack_secondary_1="primary-A",
-                     lvstore_stack_secondary_2="primary-B")
+        _node("sec", lvstore_stack_secondary="primary-A",
+                     lvstore_stack_tertiary="primary-B")
         explicit = "primary-B"
         primary_ref = explicit  # simulating the function logic
         assert primary_ref == "primary-B"
@@ -713,12 +738,12 @@ class TestCreateLvstoreSecondaryIteration(unittest.TestCase):
 
     def test_secondary_ids_list_both(self):
         """Verify secondary_ids list is built correctly with both secondaries."""
-        snode = _node("primary", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        snode = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
         secondary_ids = []
         if snode.secondary_node_id:
             secondary_ids.append(snode.secondary_node_id)
-        if snode.secondary_node_id_2:
-            secondary_ids.append(snode.secondary_node_id_2)
+        if snode.tertiary_node_id:
+            secondary_ids.append(snode.tertiary_node_id)
 
         assert secondary_ids == ["sec-1", "sec-2"]
 
@@ -727,8 +752,8 @@ class TestCreateLvstoreSecondaryIteration(unittest.TestCase):
         secondary_ids = []
         if snode.secondary_node_id:
             secondary_ids.append(snode.secondary_node_id)
-        if snode.secondary_node_id_2:
-            secondary_ids.append(snode.secondary_node_id_2)
+        if snode.tertiary_node_id:
+            secondary_ids.append(snode.tertiary_node_id)
 
         assert secondary_ids == ["sec-1"]
 
@@ -737,8 +762,8 @@ class TestCreateLvstoreSecondaryIteration(unittest.TestCase):
         secondary_ids = []
         if snode.secondary_node_id:
             secondary_ids.append(snode.secondary_node_id)
-        if snode.secondary_node_id_2:
-            secondary_ids.append(snode.secondary_node_id_2)
+        if snode.tertiary_node_id:
+            secondary_ids.append(snode.tertiary_node_id)
 
         assert secondary_ids == []
 
@@ -751,11 +776,11 @@ class TestSnapshotNodesConstruction(unittest.TestCase):
 
     def test_snap_nodes_includes_both_secondaries(self):
         """Verify snapshot controller builds nodes with all secondaries."""
-        host = _node("primary", secondary_node_id="sec-1", secondary_node_id_2="sec-2")
+        host = _node("primary", secondary_node_id="sec-1", tertiary_node_id="sec-2")
 
         secondary_ids = [host.secondary_node_id]
-        if host.secondary_node_id_2:
-            secondary_ids.append(host.secondary_node_id_2)
+        if host.tertiary_node_id:
+            secondary_ids.append(host.tertiary_node_id)
         nodes = [host.uuid] + secondary_ids
 
         assert nodes == ["primary", "sec-1", "sec-2"]
@@ -764,8 +789,8 @@ class TestSnapshotNodesConstruction(unittest.TestCase):
         host = _node("primary", secondary_node_id="sec-1")
 
         secondary_ids = [host.secondary_node_id]
-        if host.secondary_node_id_2:
-            secondary_ids.append(host.secondary_node_id_2)
+        if host.tertiary_node_id:
+            secondary_ids.append(host.tertiary_node_id)
         nodes = [host.uuid] + secondary_ids
 
         assert nodes == ["primary", "sec-1"]
@@ -780,21 +805,21 @@ class TestPortCheckMonitor(unittest.TestCase):
     def test_port_check_includes_secondary_2(self):
         """storage_node_monitor port check should trigger for secondary_2 nodes too."""
         snode = _node("sec-node",
-                       lvstore_stack_secondary_1="primary-A",
-                       lvstore_stack_secondary_2="primary-B")
+                       lvstore_stack_secondary="primary-A",
+                       lvstore_stack_tertiary="primary-B")
 
         # The condition in storage_node_monitor.py
-        should_check = bool(snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2)
+        should_check = bool(snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary)
         assert should_check is True
 
     def test_port_check_only_secondary_2(self):
-        snode = _node("sec-node", lvstore_stack_secondary_2="primary-B")
-        should_check = bool(snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2)
+        snode = _node("sec-node", lvstore_stack_tertiary="primary-B")
+        should_check = bool(snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary)
         assert should_check is True
 
     def test_port_check_no_secondary(self):
         snode = _node("node")
-        should_check = bool(snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2)
+        should_check = bool(snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary)
         assert should_check is False
 
 
