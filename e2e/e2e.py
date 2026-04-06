@@ -1,7 +1,7 @@
 ### simplyblock e2e tests
 import argparse
 import traceback
-from __init__ import get_all_tests, ALL_TESTS
+from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_stress_tests, ALL_TESTS
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -54,7 +54,15 @@ def main():
     test_class_run = []
     new_nodes = args.new_nodes.strip().split() if args.new_nodes else []
     skipped_cases = 0
-    if args.testname is None or len(args.testname.strip()) == 0:
+
+    # group keywords — run a named category of tests
+    if args.testname and args.testname.strip().lower() == "security":
+        test_class_run = get_security_tests()
+    elif args.testname and args.testname.strip().lower() == "backup":
+        test_class_run = get_backup_tests()
+    elif args.testname and args.testname.strip().lower() == "backup-stress":
+        test_class_run = get_backup_stress_tests()
+    elif args.testname is None or len(args.testname.strip()) == 0:
         for cls in tests:
             if cls.__name__ == "TestAddNodesDuringFioRun":
                 if len(new_nodes) == 0 or len(new_nodes) % 2 != 0:
@@ -77,7 +85,8 @@ def main():
             test_class_run.append(cls)
     else:
         for cls in ALL_TESTS:
-            if args.testname.lower() in cls.__name__.lower():
+            needle = args.testname.lower().replace("_", "")
+            if needle in cls.__name__.lower():
                 if cls.__name__ == "TestAddNodesDuringFioRun" and (len(new_nodes) == 0 or len(new_nodes) % 2 != 0):
                     raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
                 if cls.__name__ == "TestRestartNodeOnAnotherHost" and len(new_nodes) == 0:
@@ -154,19 +163,18 @@ def main():
             test_obj.run()
             passed_cases.append(f"{test.__name__}")
         except Exception as exp:
-            logger.error(traceback.format_exc())
-            errors[f"{test.__name__}"] = [exp]
+            tb = traceback.format_exc()
+            logger.error(tb)
+            errors[f"{test.__name__}"] = [exp, tb]
         try:
-            if i == (len(test_class_run) - 1) or check_for_dumps():
-                test_obj.collect_management_details(post_teardown=False)
+            test_obj.collect_management_details(post_teardown=False)
             test_obj.teardown(delete_lvols=False, close_ssh=False)
             if not args.run_k8s:
                 test_obj.stop_docker_logs_collect()
             else:
                 test_obj.stop_k8s_log_collect()
             test_obj.fetch_all_nodes_distrib_log()
-            if i == (len(test_class_run) - 1) or check_for_dumps():
-                test_obj.collect_management_details(post_teardown=True)
+            test_obj.collect_management_details(post_teardown=True)
             test_obj.teardown(delete_lvols=True, close_ssh=False)
             all_nodes = test_obj._get_all_nodes()
             test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
@@ -240,7 +248,9 @@ def main():
             logger.error(f"Failed to update Test Run status: {e}")
 
     if errors:
-        raise MultipleExceptions(errors)
+        exc = MultipleExceptions(errors)
+        logger.error(f"MultipleExceptions: {exc}")
+        raise exc
     if skipped_cases:
         raise SkippedTestsException("There are SKIPPED Tests. Please check!!")
     

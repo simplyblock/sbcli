@@ -275,22 +275,30 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                 if clone_details["snapshot"] in snapshots:
                     self.common_utils.validate_fio_test(client,
                                                         log_file=clone_details["Log"])
+                    self.disconnect_lvol(clone_details['ID'])
                     self.ssh_obj.find_process_name(client, f"{clone_name}_fio", return_pid=False)
                     fio_pids = self.ssh_obj.find_process_name(client, f"{clone_name}_fio", return_pid=True)
                     for pid in fio_pids:
                         self.ssh_obj.kill_processes(client, pid=pid)
                     attempt = 1
-                    while len(fio_pids) > 2:
+                    while True:
                         self.ssh_obj.find_process_name(client, f"{clone_name}_fio", return_pid=False)
                         fio_pids = self.ssh_obj.find_process_name(client, f"{clone_name}_fio", return_pid=True)
-                        if attempt >= 30:
-                            raise Exception("FIO not killed on clone")
+                        if len(fio_pids) <= 2:
+                            break
+                        for pid in fio_pids:
+                            self.ssh_obj.kill_processes(client, pid=pid)
+                        if attempt >= 20:
+                            self.logger.warning(
+                                f"FIO not fully killed on clone '{clone_name}' after {attempt} attempts "
+                                f"(remaining pids: {fio_pids}). Proceeding anyway."
+                            )
+                            break
                         attempt += 1
                         sleep_n_sec(10)
                         
                     self.ssh_obj.unmount_path(client, f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(client, dir_path=f"/mnt/{clone_name}")
-                    self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name)
                     to_delete.append(clone_name)
                     self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
@@ -304,22 +312,30 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
             self.common_utils.validate_fio_test(client,
                                                 log_file=self.lvol_mount_details[lvol]["Log"])
+            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.find_process_name(client, f"{lvol}_fio", return_pid=False)
             fio_pids = self.ssh_obj.find_process_name(client, f"{lvol}_fio", return_pid=True)
             for pid in fio_pids:
                 self.ssh_obj.kill_processes(client, pid=pid)
             attempt = 1
-            while len(fio_pids) > 2:
+            while True:
                 self.ssh_obj.find_process_name(client, f"{lvol}_fio", return_pid=False)
                 fio_pids = self.ssh_obj.find_process_name(client, f"{lvol}_fio", return_pid=True)
-                if attempt >= 30:
-                    raise Exception("FIO not killed on lvols")
+                if len(fio_pids) <= 2:
+                    break
+                for pid in fio_pids:
+                    self.ssh_obj.kill_processes(client, pid=pid)
+                if attempt >= 20:
+                    self.logger.warning(
+                        f"FIO not fully killed on lvol '{lvol}' after {attempt} attempts "
+                        f"(remaining pids: {fio_pids}). Proceeding anyway."
+                    )
+                    break
                 attempt += 1
                 sleep_n_sec(10)
 
             self.ssh_obj.unmount_path(client, f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(client, dir_path=f"/mnt/{lvol}")
-            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol)
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])

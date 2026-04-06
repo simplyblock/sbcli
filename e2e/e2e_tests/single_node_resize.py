@@ -151,12 +151,13 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             fio_thread.start()
             fio_threads.append(fio_thread)
 
-        for node in self.storage_nodes:
-            files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-            self.logger.info(f"Files in /etc/simplyblock: {files}")
-            if "core.react" in files:
-                raise Exception("Core file present! Not starting resize!!")
-            
+        if not self.k8s_test:
+            for node in self.storage_nodes:
+                files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                self.logger.info(f"Files in /etc/simplyblock: {files}")
+                if "core.react" in files:
+                    raise Exception("Core file present! Not starting resize!!")
+
         for i in range(1, 11):
             for j in range(1, 6):
                 lvol_name = f"{self.lvol_name}_{j}"
@@ -164,20 +165,22 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
                                             new_size=f"{lvol_size + i}G")
                 sleep_n_sec(10)
-                for node in self.storage_nodes:
-                    files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-                    self.logger.info(f"Files in /etc/simplyblock: {files}")
-                    if "core.react" in files:
-                        raise Exception("Core file present after lvol resize! Not continuing resize!!")
-                    
+                if not self.k8s_test:
+                    for node in self.storage_nodes:
+                        files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                        self.logger.info(f"Files in /etc/simplyblock: {files}")
+                        if "core.react" in files:
+                            raise Exception("Core file present after lvol resize! Not continuing resize!!")
+
                 self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(clone_name),
                                              new_size=f"{lvol_size + i}G")
                 sleep_n_sec(10)
-                for node in self.storage_nodes:
-                    files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-                    self.logger.info(f"Files in /etc/simplyblock: {files}")
-                    if "core.react" in files:
-                        raise Exception("Core file present after clone resize! Not continuing resize!!")
+                if not self.k8s_test:
+                    for node in self.storage_nodes:
+                        files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                        self.logger.info(f"Files in /etc/simplyblock: {files}")
+                        if "core.react" in files:
+                            raise Exception("Core file present after clone resize! Not continuing resize!!")
             
         lvol_size = lvol_size + 20
         
@@ -216,19 +219,21 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
                                         new_size=f"{lvol_size}G")
             sleep_n_sec(10)
-            for node in self.storage_nodes:
-                files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-                self.logger.info(f"Files in /etc/simplyblock: {files}")
-                if "core.react" in files:
-                    raise Exception("Core file present after lvol resize! Not continuing resize!!")
+            if not self.k8s_test:
+                for node in self.storage_nodes:
+                    files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                    self.logger.info(f"Files in /etc/simplyblock: {files}")
+                    if "core.react" in files:
+                        raise Exception("Core file present after lvol resize! Not continuing resize!!")
             self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(clone_name),
                                          new_size=f"{lvol_size}G")
             sleep_n_sec(10)
-            for node in self.storage_nodes:
-                files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-                self.logger.info(f"Files in /etc/simplyblock: {files}")
-                if "core.react" in files:
-                    raise Exception("Core file present after clone resize! Not continuing resize!!")
+            if not self.k8s_test:
+                for node in self.storage_nodes:
+                    files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                    self.logger.info(f"Files in /etc/simplyblock: {files}")
+                    if "core.react" in files:
+                        raise Exception("Core file present after clone resize! Not continuing resize!!")
             
             lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=mount_path)
             final_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)

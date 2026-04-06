@@ -67,8 +67,10 @@ class TestSingleNodeReboot(TestClusterBase):
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="10G",
-            # distr_ndcs=2,
-            # distr_npcs=1
+            distr_ndcs=self.ndcs,
+            distr_npcs=self.npcs,
+            distr_bs=self.bs,
+            distr_chunk_bs=self.chunk_bs,
         )
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
@@ -165,8 +167,10 @@ class TestSingleNodeReboot(TestClusterBase):
                     lvol_name=f"{self.lvol_name}_fail",
                     pool_name=self.pool_name,
                     size="10G",
-                    # distr_ndcs=2,
-                    # distr_npcs=1,
+                    distr_ndcs=self.ndcs,
+                    distr_npcs=self.npcs,
+                    distr_bs=self.bs,
+                    distr_chunk_bs=self.chunk_bs,
                     host_id=no_lvol_node_uuid,
                     retry=2
                 )
@@ -184,8 +188,10 @@ class TestSingleNodeReboot(TestClusterBase):
                     lvol_name=f"{self.lvol_name}_2",
                     pool_name=self.pool_name,
                     size="10G",
-                    # distr_ndcs=2,
-                    # distr_npcs=1,
+                    distr_ndcs=self.ndcs,
+                    distr_npcs=self.npcs,
+                    distr_bs=self.bs,
+                    distr_chunk_bs=self.chunk_bs,
                 )
             lvols = self.sbcli_utils.list_lvols()
             assert f"{self.lvol_name}_2" in list(lvols.keys()), \
@@ -514,6 +520,10 @@ class TestHASingleNodeReboot(TestClusterBase):
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="10G",
+            distr_ndcs=self.ndcs,
+            distr_npcs=self.npcs,
+            distr_bs=self.bs,
+            distr_chunk_bs=self.chunk_bs,
             host_id=host_id
         )
 
