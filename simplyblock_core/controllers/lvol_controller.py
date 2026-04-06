@@ -2072,7 +2072,6 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
         logger.error(error)
         return False, error
 
-    had_lock = None
     snapshot_uuid = None
     for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
         if snap.snap_name == clone_name:
@@ -2081,24 +2080,18 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
             break
 
     if not snapshot_uuid:
-        had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
         snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False)
         if err:
-            snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
             logger.error(err)
             return False, str(err)
-    if not had_lock:
-        had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
     new_lvol_uuid, err = snapshot_controller.clone(
         snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False)
     if err:
         logger.error(err)
         if snapshot_uuid:
                 snapshot_controller.delete(snapshot_uuid)
-        snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
         return False, str(err)
 
-    snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
     return new_lvol_uuid, False
 
 
