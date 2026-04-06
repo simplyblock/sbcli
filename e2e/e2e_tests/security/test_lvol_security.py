@@ -1559,10 +1559,13 @@ class TestLvolSecurityOutageRecovery(SecurityTestBase):
         self.logger.info("TC-SEC-071: Node offline PASSED")
 
         # TC-SEC-072: restart node and wait for it to come online
+        self.logger.info("TC-SEC-072: Waiting 2 min before restarting node …")
+        sleep_n_sec(120)
         self.logger.info("TC-SEC-072: Restarting the storage node …")
         self.sbcli_utils.restart_node(target_node)
         self.sbcli_utils.wait_for_storage_node_status(target_node, "online", timeout=300)
-        sleep_n_sec(10)
+        self.logger.info("TC-SEC-072: Node online — waiting 2 min for HA to settle …")
+        sleep_n_sec(120)
         self.logger.info("TC-SEC-072: Node back online PASSED")
 
         # TC-SEC-073: reconnect with original DHCHAP credentials
@@ -1744,10 +1747,13 @@ class TestLvolSecurityHAFailover(SecurityTestBase):
         self.logger.info("TC-SEC-082: Node offline PASSED")
 
         # TC-SEC-083: restart node, wait for HA to settle
+        self.logger.info("TC-SEC-083: Waiting 2 min before restarting node …")
+        sleep_n_sec(120)
         self.logger.info("TC-SEC-083: Restarting node and waiting for HA settle …")
         self.sbcli_utils.restart_node(target_node)
         self.sbcli_utils.wait_for_storage_node_status(target_node, "online", timeout=300)
-        sleep_n_sec(15)
+        self.logger.info("TC-SEC-083: Node online — waiting 2 min for HA to settle …")
+        sleep_n_sec(120)
         self.logger.info("TC-SEC-083: HA settled PASSED")
 
         # TC-SEC-084: reconnect with original DHCHAP creds
