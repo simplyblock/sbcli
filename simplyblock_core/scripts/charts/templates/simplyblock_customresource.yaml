@@ -170,6 +170,10 @@ spec:
   spdkImage: {{ $storageNodes.spdkImage }}
   {{- end }}
 
+  {{- if $storageNodes.spdkProxyImage }}
+  spdkProxyImage: {{ $storageNodes.spdkProxyImage }}
+  {{- end }}
+
   {{- if $storageNodes.driveSizeRange }}
   driveSizeRange: {{ $storageNodes.driveSizeRange | quote }}
   {{- end }}

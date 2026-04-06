@@ -663,9 +663,9 @@ spec:
 {{- end }}
 
         - name: tasks-runner-snapshot-replication
-          image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
+          image: "{{ .Values.image.snapshotReplication.repository }}:{{ .Values.image.snapshotReplication.tag }}"
           command: ["python", "simplyblock_core/services/snapshot_replication.py"]
-          imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+          imagePullPolicy: "{{ .Values.image.snapshotReplication.pullPolicy }}"
           env:
             - name: PROMETHEUS_URL
               value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"

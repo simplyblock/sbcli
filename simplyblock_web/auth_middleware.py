@@ -31,12 +31,16 @@ def token_required(f: F) -> Callable[..., ResponseType]:
     """
     @wraps(f)
     def decorated(*args: Any, **kwargs: Any) -> ResponseType:
+        normalized_path = request.path.rstrip("/")
+        if normalized_path.startswith("/api/v1"):
+            normalized_path = normalized_path[len("/api/v1"):]
+
         # Skip authentication for Swagger UI
         if request.method == "GET" and request.path.startswith("/swagger"):
             return cast(ResponseType, f(*args, **kwargs))
-        if request.method == "POST" and request.path.startswith("/cluster/create_first"):
+        if request.method == "POST" and normalized_path == "/cluster/create_first":
             return cast(ResponseType, f(*args, **kwargs))
-        if request.method == "GET" and request.path.startswith("/health/fdb"):
+        if request.method == "GET" and normalized_path == "/health/fdb":
             return cast(ResponseType, f(*args, **kwargs))
 
         cluster_id: str = ""

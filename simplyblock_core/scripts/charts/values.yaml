@@ -15,7 +15,11 @@ observability:
 
 image:
   simplyblock: 
-    repository: "simplyblock/simplyblock"
+    repository: "public.ecr.aws/simply-block/simplyblock"
+    tag: "main"
+    pullPolicy: "Always"
+  snapshotReplication:
+    repository: "public.ecr.aws/simply-block/simplyblock"
     tag: "main-snapshot-replication"
     pullPolicy: "Always"
   manager:
@@ -287,7 +291,7 @@ simplyblock:
     
   storageNodes:
     name: simplyblock-node
-    clusterImage: simplyblock/simplyblock:main-snapshot-replication
+    clusterImage: public.ecr.aws/simply-block/simplyblock:main
     mgmtIfc: eth0
     maxLVol: 1
     maxSize: 0
@@ -295,6 +299,7 @@ simplyblock:
     corePercentage: 65
     spdkDebug: false
     spdkImage:
+    spdkProxyImage: public.ecr.aws/simply-block/simplyblock:main
     coreIsolation: false
     skipKubeletConfiguration: false
     enableCpuTopology: false
@@ -329,7 +334,7 @@ simplyblock:
     # workerNode: ""
     # nodeAddr: ""
     workerNodes:
-      - vm12.simplyblock2.localdomain
+      - vm13.simplyblock2.localdomain
 
 
   devices:

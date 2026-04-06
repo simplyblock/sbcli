@@ -131,6 +131,8 @@ spec:
                 type: boolean
               spdkImage:
                 type: string
+              spdkProxyImage:
+                type: string
               tolerations:
                 items:
                   description: |-
