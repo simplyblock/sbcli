@@ -1436,8 +1436,7 @@ def calculate_unisolated_cores(cores, cores_percentage=0):
     total = len(cores)
     if cores_percentage:
         n = math.ceil(total * (100 - cores_percentage) / 100)
-        n_even = (n + 1) // 2 * 2
-        return n_even
+        return n
     if total <= 10:
         return 2
     if total <= 20:
@@ -1445,8 +1444,7 @@ def calculate_unisolated_cores(cores, cores_percentage=0):
     if total <= 28:
         return 4
     n = math.ceil(total * 0.15)
-    n_even = (n + 1) // 2 * 2
-    return n_even
+    return n
 
 
 def get_core_indexes(core_to_index, list_of_cores):
