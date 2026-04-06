@@ -1259,8 +1259,9 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
-            self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
-            self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
+            deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
+            if not deleted:
+                self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])

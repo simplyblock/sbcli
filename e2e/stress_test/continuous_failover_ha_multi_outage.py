@@ -52,6 +52,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.outage_start_time = None
         self.outage_end_time = None
         self.node_vs_lvol = {}
+        self.persistent_lvols: set[str] = set()
         self.outage_dur = 0
         self.sn_nodes_with_sec = []
         self.lvol_node = ""
@@ -348,6 +349,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         available_lvols = [
             lvol for node, lvols in self.node_vs_lvol.items()
             for lvol in lvols
+            if lvol not in self.persistent_lvols
         ]
 
         self.logger.info(f"Available Lvols: {available_lvols}")
@@ -364,8 +366,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     if self.k8s_test and clone_details.get("pending_connect"):
                         # Clone was never connected/mounted — skip FIO/unmount/disconnect
                         self.logger.info(f"[pending_connect] Deleting deferred clone '{clone_name}' (no FIO/mount to clean up).")
-                        self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
-                        self.record_pending_lvol_delete(clone_name, clone_details['ID'])
+                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        if not deleted:
+                            self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         if clone_name in self.lvols_without_sec_connect:
                             self.lvols_without_sec_connect.remove(clone_name)
                         to_delete.append(clone_name)
@@ -397,10 +400,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                             sleep_n_sec(10)
 
                         sleep_n_sec(10)
+                        self.disconnect_lvol(clone_details['ID'])
                         self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                         self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
-                        self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
-                        self.record_pending_lvol_delete(clone_name, clone_details['ID'])
+                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        if not deleted:
+                            self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         sleep_n_sec(30)
                         if clone_name in self.lvols_without_sec_connect:
                             self.lvols_without_sec_connect.remove(clone_name)
@@ -448,10 +453,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 sleep_n_sec(10)
 
             sleep_n_sec(10)
+            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
-            self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
-            self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
+            deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
+            if not deleted:
+                self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])
@@ -467,7 +474,6 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage, avoiding lvols on outage nodes."""
-        self.int_lvol_size += 1
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] in self.current_outage_nodes]
         self.logger.info(f"Skip Nodes: {skip_nodes}")
         for node in self.current_outage_nodes:
@@ -483,6 +489,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             return
         self.logger.info(f"Available lvols: {available_lvols}")
         for _ in range(3):
+            self.int_lvol_size += 1
             random.shuffle(available_lvols)
             lvol = available_lvols[0]
             snapshot_name = f"snap_{generate_random_sequence(15)}"

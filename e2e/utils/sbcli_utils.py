@@ -478,12 +478,12 @@ class SbcliUtils:
         except:
             if skip_error:
                 self.logger.info(f"Lvol {lvol_name} not not found!! Continuing without Delete!!")
-                return
+                return True
             raise Exception(f"No such Lvol {lvol_name} found!!")
 
         if not lvol_id:
             self.logger.info("Lvol does not exist. Exiting!!")
-            return
+            return True
         self.logger.info(f"ledoo {lvol_name}, {lvol_id}")
 
         data = self.delete_request(api_url=f"/lvol/{lvol_id}")
@@ -494,7 +494,7 @@ class SbcliUtils:
         while True:
             if lvol_name not in list(lvols.keys()):
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
-                break
+                return True
             if attempt % 12 == 0:
                 try:
                     cur_state = self.get_lvol_details(lvol_id=lvol_id)[0]["status"]
@@ -508,7 +508,7 @@ class SbcliUtils:
                     self.logger.info(f"Delete lvol resp: {data}")
             if attempt > max_attempt:
                 if skip_error:
-                    return
+                    return False
                 raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
             
             attempt += 1

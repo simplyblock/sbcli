@@ -546,7 +546,7 @@ class K8sSbcliUtils:
         if not lvol_id:
             if skip_error:
                 self.logger.info(f"Lvol {lvol_name} not found. Continuing without delete.")
-                return
+                return True
             raise Exception(f"No such Lvol {lvol_name} found!!")
 
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol delete {lvol_id}")
@@ -555,13 +555,13 @@ class K8sSbcliUtils:
         while attempt < max_attempt:
             if lvol_name not in self.list_lvols():
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
-                return
+                return True
             attempt += 1
             self.logger.info(f"Lvol {lvol_name} deletion in progress... ({attempt})")
             sleep_n_sec(5)
 
         if skip_error:
-            return
+            return False
         raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
 
     def delete_all_lvols(self):

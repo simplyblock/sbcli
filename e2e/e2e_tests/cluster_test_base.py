@@ -314,7 +314,20 @@ class TestClusterBase:
 
     def fetch_all_nodes_distrib_log(self):
         if self.k8s_test:
-            self.logger.info("Skipping distrib log fetch in K8s mode")
+            k8s_utils = getattr(self, "k8s_utils", None) or getattr(
+                getattr(self, "sbcli_utils", None), "k8s", None
+            )
+            if not k8s_utils:
+                self.logger.warning("Skipping distrib log fetch in K8s mode (k8s_utils not available)")
+                return
+            storage_nodes = self.sbcli_utils.get_storage_nodes()
+            for result in storage_nodes["results"]:
+                if not result.get("is_secondary_node"):
+                    k8s_utils.fetch_distrib_logs_k8s(
+                        storage_node_id=result["uuid"],
+                        storage_node_ip=result["mgmt_ip"],
+                        logs_path=self.docker_logs_path,
+                    )
             return
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         all_ok = True
