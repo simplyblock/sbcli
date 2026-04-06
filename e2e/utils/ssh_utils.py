@@ -1244,7 +1244,7 @@ class SshUtils:
             f"if x.get('SubsystemNQN','').strip()=='{nqn}']\""
         )
         out, _ = self.exec_command(node=node, command=cmd)
-        lines = [l.strip() for l in out.strip().split('\n') if l.strip()]
+        lines = [ln.strip() for ln in out.strip().split('\n') if ln.strip()]
         if lines:
             return lines[0]
 
@@ -1258,7 +1258,7 @@ class SshUtils:
             f"done"
         )
         out2, _ = self.exec_command(node=node, command=sysfs_cmd)
-        lines2 = [l.strip() for l in out2.strip().split('\n') if l.strip()]
+        lines2 = [ln.strip() for ln in out2.strip().split('\n') if ln.strip()]
         return lines2[0] if lines2 else None
 
     def disconnect_nvme(self, node, nqn_grep):
@@ -3361,7 +3361,8 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 
         tmp_files = []
         if sec_options is not None:
-            import random as _random, string as _string
+            import random as _random
+            import string as _string
             suffix = ''.join(_random.choices(_string.ascii_uppercase + _string.digits, k=6))
             p = f"/tmp/sec_pool_{suffix}.json"
             self.write_json_file(node, p, sec_options)

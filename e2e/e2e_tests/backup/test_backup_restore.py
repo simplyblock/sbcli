@@ -2720,7 +2720,7 @@ class TestBackupSecurityLvol(BackupTestBase):
         # TC-BCK-151: snapshot with --backup
         self.logger.info("TC-BCK-151: Creating backup snapshot …")
         snap_name = f"snap{lvol_name[-6:]}"
-        snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+        self._create_snapshot(lvol_id, snap_name, backup=True)
         sleep_n_sec(5)
         self.logger.info("TC-BCK-151: PASSED")
 
@@ -2795,7 +2795,7 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
         last_bk_id = None
         for cycle in range(1, 4):
             snap_name = f"snpv1c{cycle}{_rand_suffix()}"
-            snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
+            self._create_snapshot(lvol_id, snap_name, backup=True)
             sleep_n_sec(3)
             bk_id = self._wait_for_backup_by_snap(snap_name, label=f"TC-BCK-156 cycle {cycle}")
             last_bk_id = bk_id
@@ -2875,7 +2875,7 @@ class TestBackupPolicyMultipleOnSameLvol(BackupTestBase):
         bk_ids = []
         for cycle in range(1, 3):
             sn = f"snmp{suffix}c{cycle}"
-            snap_id = self._create_snapshot(lvol_id, sn, backup=True)
+            self._create_snapshot(lvol_id, sn, backup=True)
             sleep_n_sec(3)
             bk_id = self._wait_for_backup_by_snap(sn, label=f"TC-BCK-160 cycle {cycle}")
             snap_names.append(sn)

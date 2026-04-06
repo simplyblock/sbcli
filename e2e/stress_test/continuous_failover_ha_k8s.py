@@ -579,7 +579,7 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             )
 
         # K8s: never delete pools; use existing pool or create one if none exist.
-        self.logger.info(f"Ensuring pool is available before run.")
+        self.logger.info("Ensuring pool is available before run.")
         actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         if actual_pool and actual_pool != self.pool_name:
             self.logger.info(

@@ -1807,7 +1807,7 @@ class TestLvolSecurityMgmtNodeReboot(SecurityTestBase):
             self.mgmt_nodes[0], lvol_id, host_nqn)
         assert pre_secret and "error" not in pre_secret.lower(), \
             f"Pre-reboot get-secret failed: {pre_err}"
-        self.logger.info(f"TC-SEC-085: Pre-reboot secret obtained PASSED")
+        self.logger.info("TC-SEC-085: Pre-reboot secret obtained PASSED")
 
         # TC-SEC-086: reboot management node
         self.logger.info("TC-SEC-086: Rebooting management node …")
@@ -2482,7 +2482,7 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
         # Restored lvol inherits allowed_hosts — connect without host_nqn must fail
         assert not connect_ls or ("host-nqn" in (err or "").lower() or "allowed" in (err or "").lower()), \
             f"TC-SEC-118: Expected rejection without host-nqn, got connect_ls={connect_ls!r} err={err!r}"
-        self.logger.info(f"TC-SEC-118: Unauthenticated connect correctly rejected PASSED")
+        self.logger.info("TC-SEC-118: Unauthenticated connect correctly rejected PASSED")
 
         # TC-SEC-119: Connect restored lvol with source host NQN (security must be preserved)
         self.logger.info("TC-SEC-119: Connecting restored lvol with source host NQN …")

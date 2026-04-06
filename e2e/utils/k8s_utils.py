@@ -732,7 +732,7 @@ class K8sSbcliUtils:
                 self.logger.info(f"[pool] Pool '{actual}' is ready")
                 return actual
             sleep_n_sec(5)
-        self.logger.warning(f"[pool] Pool not confirmed after kubectl apply")
+        self.logger.warning("[pool] Pool not confirmed after kubectl apply")
         return pool_name
 
     def delete_storage_pool(self, pool_name):
