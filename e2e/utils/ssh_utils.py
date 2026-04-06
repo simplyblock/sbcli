@@ -1230,8 +1230,9 @@ class SshUtils:
     def get_nvme_device_for_nqn(self, node, nqn):
         """Return the block-device path (e.g. /dev/nvme2n2) already connected for *nqn*.
 
-        Uses ``nvme list -o json`` so it works even when the device was connected
-        before the caller captured its initial device list.
+        Tries two methods:
+        1. ``nvme list -o json`` (works when the namespace block device is visible)
+        2. sysfs scan via /sys/class/nvme-subsystem (fallback when nvme list misses it)
         Returns the path string, or None if not found.
         """
         cmd = (
@@ -1244,7 +1245,21 @@ class SshUtils:
         )
         out, _ = self.exec_command(node=node, command=cmd)
         lines = [l.strip() for l in out.strip().split('\n') if l.strip()]
-        return lines[0] if lines else None
+        if lines:
+            return lines[0]
+
+        # Fallback: scan sysfs — subsystem may be connected but not in nvme list
+        sysfs_cmd = (
+            f"for f in /sys/class/nvme-subsystem/*/subsysnqn; do "
+            f"  if [ \"$(cat $f 2>/dev/null)\" = \"{nqn}\" ]; then "
+            f"    ls $(dirname $f)/nvme*/nvme*n* 2>/dev/null | head -1; "
+            f"    break; "
+            f"  fi; "
+            f"done"
+        )
+        out2, _ = self.exec_command(node=node, command=sysfs_cmd)
+        lines2 = [l.strip() for l in out2.strip().split('\n') if l.strip()]
+        return lines2[0] if lines2 else None
 
     def disconnect_nvme(self, node, nqn_grep):
         """Disconnect NVMe device on the node."""

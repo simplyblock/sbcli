@@ -685,26 +685,61 @@ class K8sSbcliUtils:
 
     def add_storage_pool(self, pool_name, cluster_id=None, max_rw_iops=0, max_rw_mbytes=0,
                          max_r_mbytes=0, max_w_mbytes=0):
+        """Use an existing pool if any exist; only create via kubectl if none exist.
+
+        Returns the actual pool name to use (may differ from *pool_name* if an
+        existing pool with a different name was found).
+        """
         existing = self.list_storage_pools()
         self.logger.info(f"[pool] existing pools: {list(existing.keys())}")
-        if pool_name in existing:
-            self.logger.info(f"Pool {pool_name} already exists. Skipping")
-            return
+        if existing:
+            actual = next(iter(existing))
+            self.logger.info(f"[pool] Using existing pool '{actual}' (K8s: no new pool created)")
+            return actual
+
+        # No pools at all — create one via kubectl apply
         cid = cluster_id or self.cluster_id
-        self.logger.info(f"[pool] Creating pool '{pool_name}' in cluster '{cid}'")
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d pool add {shlex.quote(pool_name)} {cid}")
+        cluster_details = self.get_cluster_details(cluster_id=cid)
+        cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
+
+        k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+        ns = self.k8s.namespace
+
+        yaml_content = (
+            f"apiVersion: simplyblock.simplyblock.io/v1alpha1\n"
+            f"kind: SimplyBlockPool\n"
+            f"metadata:\n"
+            f"  name: {k8s_resource_name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  capacityLimit: 100Gi\n"
+            f"  clusterName: {cluster_name}\n"
+            f"  name: {pool_name}\n"
+        )
+
+        self.logger.info(
+            f"[pool] No pools found — creating '{pool_name}' via kubectl apply "
+            f"(cluster={cluster_name}, resource={k8s_resource_name})"
+        )
+        yaml_escaped = yaml_content.replace("'", "'\\''")
+        self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
+
+        # Wait up to 90s for the pool to become visible in sbcli
+        for _ in range(18):
+            pools = self.list_storage_pools()
+            if pools:
+                actual = next(iter(pools))
+                self.logger.info(f"[pool] Pool '{actual}' is ready")
+                return actual
+            sleep_n_sec(5)
+        self.logger.warning(f"[pool] Pool not confirmed after kubectl apply")
+        return pool_name
 
     def delete_storage_pool(self, pool_name):
-        pool_id = self.get_storage_pool_id(pool_name)
-        if not pool_id:
-            self.logger.info("Pool does not exist. Skipping")
-            return
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d pool delete {pool_id}")
+        self.logger.info(f"[pool] K8s mode: skipping delete of pool '{pool_name}'")
 
     def delete_all_storage_pools(self):
-        for name in list(self.list_storage_pools().keys()):
-            self.logger.info(f"Deleting pool: {name}")
-            self.delete_storage_pool(pool_name=name)
+        self.logger.info("[pool] K8s mode: skipping delete_all_storage_pools")
 
     # ── cluster methods ──────────────────────────────────────────────────────
 

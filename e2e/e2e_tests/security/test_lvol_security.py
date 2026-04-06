@@ -2348,10 +2348,11 @@ class TestLvolSecurityCloneOverride(SecurityTestBase):
             self.mgmt_nodes[0], parent_id, nqn_a)
         assert not err or "error" not in err.lower()
         sleep_n_sec(2)
-        cs_parent_a2, err_a2 = self._get_connect_str_cli(parent_id, host_nqn=nqn_a)
-        cs_clone_b2, _       = self._get_connect_str_cli(clone_id,  host_nqn=nqn_b)
-        assert not cs_parent_a2 or err_a2, \
-            "Parent NQN_A should be inaccessible after removal"
+        parent_api = self.sbcli_utils.get_lvol_details(lvol_id=parent_id)
+        allowed_after = [h.get("nqn") for h in parent_api[0].get("allowed_hosts", [])]
+        assert nqn_a not in allowed_after, \
+            f"NQN_A should have been removed from parent allowed_hosts, got: {allowed_after}"
+        cs_clone_b2, _ = self._get_connect_str_cli(clone_id, host_nqn=nqn_b)
         assert cs_clone_b2, "Clone NQN_B should still be accessible"
         self.logger.info("TC-SEC-114: Clone independence PASSED")
 
