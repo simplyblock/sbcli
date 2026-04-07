@@ -30,6 +30,7 @@ class Pool(BaseModel):
     users: List[str] = []
     qos_host: str = ""
     sec_options: dict = {}
+    dhchap: bool = False
 
 
     def has_qos(self):

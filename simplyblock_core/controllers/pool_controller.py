@@ -23,7 +23,7 @@ def _generate_string(length):
         string.ascii_letters + string.digits) for _ in range(length))
 
 
-def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id, qos_host=None, sec_options=None):
+def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id, qos_host=None, sec_options=None, dhchap=False):
     db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
@@ -91,6 +91,8 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
             logger.error(err)
             return False
         pool.sec_options = sec_options
+
+    pool.dhchap = bool(dhchap)
 
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)

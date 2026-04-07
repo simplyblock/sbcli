@@ -704,11 +704,6 @@ class CLIWrapperBase:
         return mgmt_ops.remove_mgmt_node(args.node_id)
 
     def storage_pool__add(self, sub_command, args):
-        import json as _json
-        sec_options = None
-        if args.sec_options:
-            with open(args.sec_options, 'r') as f:
-                sec_options = _json.load(f)
         return pool_controller.add_pool(
             args.name,
             args.pool_max,
@@ -719,7 +714,7 @@ class CLIWrapperBase:
             args.max_w_mbytes,
             args.cluster_id,
             args.qos_host,
-            sec_options=sec_options,
+            dhchap=args.dhchap,
         )
 
     def storage_pool__set(self, sub_command, args):
@@ -1004,16 +999,6 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
 
-        nvmeof_tls_config = None
-        if args.host_sec:
-            with open(args.host_sec, 'r') as f:
-                nvmeof_tls_config = _json.load(f)
-            from simplyblock_core.utils import validate_tls_config
-            ok, err = validate_tls_config(nvmeof_tls_config)
-            if not ok:
-                print(f"Error: {err}")
-                return False
-
         max_fault_tolerance = args.max_fault_tolerance
 
         backup_config = None
@@ -1028,7 +1013,7 @@ class CLIWrapperBase:
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring,
             strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
-            nvmeof_tls_config=nvmeof_tls_config, max_fault_tolerance=max_fault_tolerance,
+            max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
 

@@ -115,7 +115,7 @@ class StoragePoolDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    sec_options: dict = {}
+    dhchap: bool = False
 
     @staticmethod
     def from_model(model: Pool):
@@ -129,7 +129,7 @@ class StoragePoolDTO(BaseModel):
             max_rw_mbytes=model.max_rw_mbytes_per_sec,
             max_r_mbytes=model.max_r_mbytes_per_sec,
             max_w_mbytes=model.max_w_mbytes_per_sec,
-            sec_options=model.sec_options,
+            dhchap=getattr(model, 'dhchap', False),
         )
 
 

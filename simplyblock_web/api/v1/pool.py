@@ -80,12 +80,12 @@ def add_pool():
     max_r_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_r_mbytes", 0)
     max_w_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_w_mbytes", 0)
 
-    sec_options = pool_data.get('sec_options')
+    dhchap = bool(pool_data.get('dhchap', False))
 
     ret = pool_controller.add_pool(
         name, pool_max_size, lvol_max_size, max_rw_iops, max_rw_mbytes,
         max_r_mbytes_per_sec, max_w_mbytes_per_sec, cluster_id,
-        sec_options=sec_options)
+        dhchap=dhchap)
 
     return utils.get_response(ret)
 
