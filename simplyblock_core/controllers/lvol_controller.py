@@ -2535,6 +2535,25 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         snapshot = snaps[-1]
 
     if not snapshot:
+        target_node = db_controller.get_storage_node_by_id(lvol.replication_node_id)
+        logger.info(f"Looking for snapshot in target cluster: {target_node.cluster_id}")
+        for task in db_controller.get_job_tasks(target_node.cluster_id):
+            if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+                logger.debug(task)
+                try:
+                    snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+                except KeyError:
+                    continue
+
+                if snap.lvol.get_id() != lvol_id:
+                    continue
+                snaps.append(snap)
+
+        if snaps:
+            snaps = sorted(snaps, key=lambda x: x.created_at)
+            snapshot = snaps[-1]
+
+    if not snapshot:
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
         return False
 
