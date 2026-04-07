@@ -535,30 +535,31 @@ def loop_for_node(snode):
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
 
-logger.info("Starting node monitor")
-threads_maps: dict[str, threading.Thread] = {}
+if __name__ == '__main__':
+    logger.info("Starting node monitor")
+    threads_maps: dict[str, threading.Thread] = {}
 
-while True:
-    clusters = db.get_clusters()
-    for cluster in clusters:
-        cluster_id = cluster.get_id()
-        if cluster.status == Cluster.STATUS_IN_ACTIVATION:
-            logger.info(f"Cluster status is: {cluster.status}, skipping monitoring")
-            continue
-        logger.info(f"Looping for cluster {cluster_id}")
-        nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
-        for node in nodes:
-            node_id = node.get_id()
-            if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                logger.info(f"Creating thread for node {node_id}")
-                t = threading.Thread(target=loop_for_node, args=(node,))
-                t.start()
-                threads_maps[node_id] = t
-                logger.debug(threads_maps[node_id])
+    while True:
+        clusters = db.get_clusters()
+        for cluster in clusters:
+            cluster_id = cluster.get_id()
+            if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+                logger.info(f"Cluster status is: {cluster.status}, skipping monitoring")
+                continue
+            logger.info(f"Looping for cluster {cluster_id}")
+            nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+            for node in nodes:
+                node_id = node.get_id()
+                if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                    logger.info(f"Creating thread for node {node_id}")
+                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t.start()
+                    threads_maps[node_id] = t
+                    logger.debug(threads_maps[node_id])
 
-        try:
-            update_cluster_status(cluster_id)
-            logger.debug("Iteration has been finished...")
-        except Exception:
-            logger.error("Error while updating cluster status")
-    time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+            try:
+                update_cluster_status(cluster_id)
+                logger.debug("Iteration has been finished...")
+            except Exception:
+                logger.error("Error while updating cluster status")
+        time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
