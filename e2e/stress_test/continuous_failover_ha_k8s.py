@@ -504,45 +504,6 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             f"[K8s] container_stop: deleted SPDK pod {pod_name!r} for node {node_ip}"
         )
 
-    # ── Block-size logging ───────────────────────────────────────────────────
-
-    def _log_block_sizes(self, label: str = "") -> None:
-        """
-        For every connected lvol/clone, print the size of each per-controller
-        sysfs path (nvme<S>c<C>n<N>/size).
-
-        The device stored is the multipath namespace, e.g. /dev/nvme0n1.
-        From that we derive the subsystem (0) and namespace (1) numbers and
-        glob /sys/block/nvme0c*n1 to reach the individual controller entries —
-        the same paths the user reads with ``cat /sys/block/nvme0c0n1/size``.
-        """
-        tag = f"[block_size{' ' + label if label else ''}]"
-        all_details = {
-            **self.lvol_mount_details,
-            **self.clone_mount_details,
-        }
-        for lvol_name, details in all_details.items():
-            device = details.get("Device")
-            client = details.get("Client")
-            if not device or not client:
-                continue
-            dev_name = device.split("/")[-1]   # e.g. nvme0n1
-            m = re.match(r'nvme(\d+)n(\d+)', dev_name)
-            if not m:
-                continue
-            sub, ns = m.group(1), m.group(2)   # "0", "1"
-            self.logger.info(
-                f"{tag} {lvol_name} ({device}) — /sys/block/nvme{sub}c*n{ns}/size"
-            )
-            # List all per-controller paths for this subsystem+namespace
-            self.ssh_obj.exec_command(
-                node=client,
-                command=(
-                    f"for d in /sys/block/nvme{sub}c*n{ns}; do "
-                    f"echo \"$d: $(cat $d/size 2>/dev/null)\"; done"
-                ),
-            )
-
     def perform_n_plus_k_outages(self):
         """
         Two-phase K8s override of perform_n_plus_k_outages.
@@ -584,6 +545,16 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
 
+            # Also dump the secondary node of the outage node
+            secondary_id = self.sn_primary_secondary_map.get(node)
+            secondary_ip = None
+            if secondary_id:
+                try:
+                    sec_details = self.sbcli_utils.get_storage_node_details(secondary_id)
+                    secondary_ip = sec_details[0]["mgmt_ip"]
+                except Exception as e:
+                    self.logger.warning(f"[pre-dump] Could not get secondary node details for {secondary_id}: {e}")
+
             if self.k8s_test:
                 self.k8s_utils.dump_lvstore_k8s(
                     sbcli_cmd=self.sbcli_utils.sbcli_cmd,
@@ -596,6 +567,19 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                     storage_node_ip=node_ip,
                     logs_path=self.docker_logs_path,
                 )
+                if secondary_id and secondary_ip:
+                    self.logger.info(f"[pre-dump] Dumping secondary node {secondary_id} (IP={secondary_ip}) for outage node {node}")
+                    self.k8s_utils.dump_lvstore_k8s(
+                        sbcli_cmd=self.sbcli_utils.sbcli_cmd,
+                        storage_node_id=secondary_id,
+                        storage_node_ip=secondary_ip,
+                        logs_path=self.docker_logs_path,
+                    )
+                    self.k8s_utils.fetch_distrib_logs_k8s(
+                        storage_node_id=secondary_id,
+                        storage_node_ip=secondary_ip,
+                        logs_path=self.docker_logs_path,
+                    )
             else:
                 self.ssh_obj.dump_lvstore(
                     node_ip=self.mgmt_nodes[0], storage_node_id=node
@@ -607,6 +591,18 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                     validate_async=True,
                     error_sink=self.dump_validation_errors
                 )
+                if secondary_id and secondary_ip:
+                    self.logger.info(f"[pre-dump] Dumping secondary node {secondary_id} (IP={secondary_ip}) for outage node {node}")
+                    self.ssh_obj.dump_lvstore(
+                        node_ip=self.mgmt_nodes[0], storage_node_id=secondary_id
+                    )
+                    self.ssh_obj.fetch_distrib_logs(
+                        storage_node_ip=secondary_ip,
+                        storage_node_id=secondary_id,
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
+                    )
 
             node_plans.append((node, outage_type, node_ip, node_rpc_port))
 
@@ -694,18 +690,6 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
     #         self.current_outage_nodes.append(node)
     #     self.outage_start_time = int(datetime.now().timestamp())
     #     return outage_combinations
-
-    # ── Resize + recovery hooks ───────────────────────────────────────────────
-
-    def create_snapshots_and_clones(self):
-        """Delegate to parent then log block sizes for all lvols after resize."""
-        super().create_snapshots_and_clones()
-        self._log_block_sizes("after_resize")
-
-    def restart_nodes_after_failover(self, outage_type, restart=False):
-        """Delegate to parent then log block sizes for all lvols after recovery."""
-        super().restart_nodes_after_failover(outage_type, restart)
-        self._log_block_sizes("post_recovery")
 
     # ── run ──────────────────────────────────────────────────────────────────
 

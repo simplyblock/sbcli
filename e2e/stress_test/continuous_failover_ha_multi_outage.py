@@ -736,7 +736,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             if self.clone_mount_details[clone_name]["ID"]:
                 self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
                                              new_size=f"{self.int_lvol_size}G")
-
+        self._log_block_sizes("after_resize")
 
     # [COMMENTED OUT — kept for future use]
     # K8s temp method: connect/mount/FIO for clones deferred during outage.

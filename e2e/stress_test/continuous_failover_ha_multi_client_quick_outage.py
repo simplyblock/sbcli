@@ -397,6 +397,29 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             daemon=True,
         ).start()
 
+        # Also dump the secondary node before outage
+        secondary_id = self.sn_primary_secondary_map.get(self.current_outage_node)
+        if secondary_id:
+            try:
+                sec_details = self.sbcli_utils.get_storage_node_details(secondary_id)
+                sec_ip = sec_details[0]["mgmt_ip"]
+                self.logger.info(f"[LFNG] Pre-dump secondary node {secondary_id} (IP={sec_ip}) for outage node {self.current_outage_node}")
+                self.ssh_obj.fetch_distrib_logs(
+                    storage_node_ip=sec_ip,
+                    storage_node_id=secondary_id,
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
+                )
+                threading.Thread(
+                    target=self.ssh_obj.dump_lvstore,
+                    kwargs={"node_ip": self.mgmt_nodes[0],
+                            "storage_node_id": secondary_id},
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                self.logger.warning(f"[LFNG] Pre-dump secondary node {secondary_id} failed: {e}")
+
         self.outage_start_time = int(datetime.now().timestamp())
         self._log_outage_event(self.current_outage_node, outage_type, "Outage started")
         self.logger.info(f"[LFNG] Outage={outage_type} node={self.current_outage_node}")
@@ -578,8 +601,10 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         else:
             self.runner_k8s_log.restart_logging()
 
-        # small cool-down before next outage to reduce SSH churn
-        # sleep_n_sec(random.randint(30, 60))
+        self._log_block_sizes("post_recovery")
+
+        # small cool-down before next outage (dumps already add delay)
+        sleep_n_sec(10)
 
     # ---------- main ----------
 
@@ -884,6 +909,29 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             daemon=True,
         ).start()
 
+        # Also dump the secondary node before outage
+        secondary_id = self.sn_primary_secondary_map.get(self.current_outage_node)
+        if secondary_id:
+            try:
+                sec_details = self.sbcli_utils.get_storage_node_details(secondary_id)
+                sec_ip = sec_details[0]["mgmt_ip"]
+                self.logger.info(f"[V2] Pre-dump secondary node {secondary_id} (IP={sec_ip}) for outage node {self.current_outage_node}")
+                self.ssh_obj.fetch_distrib_logs(
+                    storage_node_ip=sec_ip,
+                    storage_node_id=secondary_id,
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors,
+                )
+                threading.Thread(
+                    target=self.ssh_obj.dump_lvstore,
+                    kwargs={"node_ip": self.mgmt_nodes[0],
+                            "storage_node_id": secondary_id},
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                self.logger.warning(f"[V2] Pre-dump secondary node {secondary_id} failed: {e}")
+
         self.outage_start_time = int(datetime.now().timestamp())
         self._log_outage_event(self.current_outage_node, outage_type, "Outage started")
         self.logger.info(
@@ -1111,10 +1159,10 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
         else:
             self.runner_k8s_log.restart_logging()
 
-        # 30–60 s gap: more than V1’s 18–30 s, less than 1 minute
-        # gap = random.randint(30, 60)
-        # self.logger.info(f"[V2] Outage resolved; waiting {gap}s before next outage.")
-        # sleep_n_sec(gap)
+        self._log_block_sizes("post_recovery")
+
+        # small cool-down before next outage (dumps already add delay)
+        sleep_n_sec(10)
 
     # ── Override 4: dual (simultaneous) outage support ───────────────────────
 
@@ -1395,9 +1443,8 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
         else:
             self.runner_k8s_log.restart_logging()
 
-        gap = random.randint(30, 60)
-        self.logger.info(f"[V2-dual] Both nodes online; waiting {gap}s before next outage.")
-        sleep_n_sec(gap)
+        self.logger.info("[V2-dual] Both nodes online; waiting 10s before next outage.")
+        sleep_n_sec(10)
 
         return result_dict
 

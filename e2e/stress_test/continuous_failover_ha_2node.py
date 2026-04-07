@@ -578,6 +578,7 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
         for node in self.sn_nodes_with_sec:
             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
                                       storage_node_id=node)
+        self._log_block_sizes("post_recovery")
 
 
     def create_snapshots_and_clones(self):
@@ -760,7 +761,7 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
             sleep_n_sec(10)
             self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
                                          new_size=f"{self.int_lvol_size}G")
-            
+        self._log_block_sizes("after_resize")
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage."""

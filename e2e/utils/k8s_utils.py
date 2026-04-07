@@ -216,8 +216,12 @@ class K8sUtils:
 
             dump_file = None
             for line in combined.splitlines():
-                if "LVS dump file will be here" in line and ":" in line:
-                    dump_file = line.split(":", 1)[1].strip()
+                if "LVS dump file will be here" in line:
+                    # Line format: "...: INFO: LVS dump file will be here: /etc/simplyblock/..."
+                    # Split on the marker text to reliably extract the path
+                    parts = line.split("LVS dump file will be here:", 1)
+                    if len(parts) == 2:
+                        dump_file = parts[1].strip()
                     break
 
             if not dump_file:
@@ -245,8 +249,8 @@ class K8sUtils:
         K8s equivalent of ssh_utils.fetch_distrib_logs:
           1. Find spdk.sock inside spdk-container.
           2. Get bdevs via RPC, collect distrib_* names.
-          3. For each distrib: run distr_debug_placement_map_dump RPC.
-          4. kubectl cp any new files from /tmp inside container → logs_path/<pod_name>/distrib_logs/.
+          3. For each distrib: create JSON config and run rpc_sock.py (same as SSH path).
+          4. kubectl cp result files from /tmp inside container → logs_path/<pod_name>/distrib_logs/.
         Returns True (non-fatal failures are logged and skipped).
         """
         try:
@@ -255,10 +259,10 @@ class K8sUtils:
             dest_dir = os.path.join(logs_path, pod_name, "distrib_logs")
             os.makedirs(dest_dir, exist_ok=True)
 
-            rpc_base = (
-                f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
-                f"python spdk/scripts/rpc.py -s {sock}"
+            kexec = (
+                f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} --"
             )
+            rpc_base = f"{kexec} python spdk/scripts/rpc.py -s {sock}"
 
             # 1. Get bdevs
             bdev_out, _ = self._exec_kubectl(f"{rpc_base} bdev_get_bdevs", supress_logs=True)
@@ -279,20 +283,50 @@ class K8sUtils:
 
             self.logger.info(f"[fetch_distrib_logs_k8s] distribs={distribs} pod={pod_name}")
 
-            # 2. Dump each distrib and kubectl cp result
+            # 2. Dump each distrib using rpc_sock.py (matches SSH approach)
             for distrib in distribs:
                 try:
-                    dump_out, _ = self._exec_kubectl(
-                        f"{rpc_base} distr_debug_placement_map_dump "
-                        f"--name {shlex.quote(distrib)}",
+                    # Create JSON config inside the container
+                    json_cfg = (
+                        '{"subsystems":[{"subsystem":"distr","config":'
+                        '[{"method":"distr_debug_placement_map_dump",'
+                        f'"params":{{"name":"{distrib}"}}'
+                        '}]}]}'
+                    )
+                    stack_file = f"/tmp/stack_{distrib}.json"
+                    rpc_log = f"/tmp/rpc_{distrib}.log"
+
+                    # Write JSON config, run rpc_sock.py, capture output
+                    self._exec_kubectl(
+                        f"{kexec} bash -c "
+                        + shlex.quote(
+                            f"echo '{json_cfg}' > {stack_file} && "
+                            f"python scripts/rpc_sock.py {stack_file} {sock} "
+                            f"> {rpc_log} 2>&1 || true"
+                        ),
                         supress_logs=True,
                     )
-                    self.logger.info(f"[fetch_distrib_logs_k8s] {distrib}: {dump_out.strip()}")
+
+                    # Read the RPC log to see what happened
+                    log_out, _ = self._exec_kubectl(
+                        f"{kexec} bash -c 'cat {rpc_log} 2>/dev/null || true'",
+                        supress_logs=True,
+                    )
+                    self.logger.info(
+                        f"[fetch_distrib_logs_k8s] {distrib} rpc_log: {log_out.strip()[:500]}"
+                    )
+
+                    # Copy the RPC log file out
+                    rpc_log_dest = os.path.join(dest_dir, f"rpc_{distrib}.log")
+                    self._exec_kubectl(
+                        f"kubectl cp -n {self.namespace} {pod_name}:{rpc_log} "
+                        f"-c spdk-container {rpc_log_dest}"
+                    )
 
                     # Collect any /tmp files matching this distrib name
                     ls_out, _ = self._exec_kubectl(
-                        f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
-                        f"bash -c 'ls /tmp/ 2>/dev/null | grep -F {shlex.quote(distrib)} || true'",
+                        f"{kexec} bash -c "
+                        + shlex.quote(f"ls /tmp/ 2>/dev/null | grep -F '{distrib}' || true"),
                         supress_logs=True,
                     )
                     for fname in ls_out.splitlines():
@@ -305,6 +339,13 @@ class K8sUtils:
                             f"-c spdk-container {dest}"
                         )
                         self.logger.info(f"[fetch_distrib_logs_k8s] copied /tmp/{fname} → {dest}")
+
+                    # Cleanup temp files in container
+                    self._exec_kubectl(
+                        f"{kexec} bash -c "
+                        + shlex.quote(f"rm -f {stack_file} {rpc_log} || true"),
+                        supress_logs=True,
+                    )
                 except Exception as e:
                     self.logger.warning(f"[fetch_distrib_logs_k8s] distrib={distrib} error: {e}")
 
