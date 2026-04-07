@@ -314,12 +314,23 @@ class TestRpcClientSignatures(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
         self.assertTrue(hasattr(RPCClient, "subsystem_remove_host"))
 
-    def test_bdev_nvme_set_options_dhchap_params(self):
+    def test_bdev_nvme_set_options_no_dhchap_params(self):
+        """DHCHAP moved to nvmf_set_config – bdev_nvme_set_options must not accept them."""
         import inspect
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.bdev_nvme_set_options)
+        self.assertNotIn("dhchap_digests", sig.parameters)
+        self.assertNotIn("dhchap_dhgroups", sig.parameters)
+
+    def test_nvmf_set_config_dhchap_params(self):
+        """nvmf_set_config must accept dhchap_digests and dhchap_dhgroups."""
+        import inspect
+        from simplyblock_core.rpc_client import RPCClient
+        sig = inspect.signature(RPCClient.nvmf_set_config)
         self.assertIn("dhchap_digests", sig.parameters)
         self.assertIn("dhchap_dhgroups", sig.parameters)
+        self.assertIsNone(sig.parameters["dhchap_digests"].default)
+        self.assertIsNone(sig.parameters["dhchap_dhgroups"].default)
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +705,7 @@ class TestConnectLvolTls(unittest.TestCase):
 class TestBdevNvmeSetOptionsParams(unittest.TestCase):
 
     def test_no_dhchap_params_not_in_request(self):
+        """bdev_nvme_set_options must never send dhchap params (moved to nvmf_set_config)."""
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
         client._request = MagicMock(return_value=True)
@@ -703,18 +715,45 @@ class TestBdevNvmeSetOptionsParams(unittest.TestCase):
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
 
-    def test_dhchap_params_passed_through(self):
+
+class TestNvmfSetConfigDhchapParams(unittest.TestCase):
+
+    def _client(self):
         from simplyblock_core.rpc_client import RPCClient
-        client = RPCClient.__new__(RPCClient)
-        client._request = MagicMock(return_value=True)
-        client.bdev_nvme_set_options(
-            dhchap_digests=["sha384", "sha512"],
-            dhchap_dhgroups=["ffdhe6144"],
-        )
-        call_args = client._request.call_args[0]
-        params = call_args[1]
-        self.assertEqual(params["dhchap_digests"], ["sha384", "sha512"])
-        self.assertEqual(params["dhchap_dhgroups"], ["ffdhe6144"])
+        c = RPCClient.__new__(RPCClient)
+        c._request = MagicMock(return_value=True)
+        return c
+
+    def test_without_dhchap_only_pollers_mask_sent(self):
+        client = self._client()
+        client.nvmf_set_config("0x1")
+        params = client._request.call_args[0][1]
+        self.assertEqual(params["poll_groups_mask"], "0x1")
+        self.assertNotIn("dhchap_digests", params)
+        self.assertNotIn("dhchap_dhgroups", params)
+
+    def test_with_dhchap_digests_and_dhgroups(self):
+        client = self._client()
+        client.nvmf_set_config("0x3",
+                               dhchap_digests=["sha256", "sha384", "sha512"],
+                               dhchap_dhgroups=["ffdhe2048"])
+        params = client._request.call_args[0][1]
+        self.assertEqual(params["poll_groups_mask"], "0x3")
+        self.assertEqual(params["dhchap_digests"], ["sha256", "sha384", "sha512"])
+        self.assertEqual(params["dhchap_dhgroups"], ["ffdhe2048"])
+
+    def test_fixed_constants_are_sent(self):
+        """The fixed DHCHAP_DIGESTS and DHCHAP_DHGROUP constants must match expectations."""
+        from simplyblock_core import constants
+        client = self._client()
+        client.nvmf_set_config("0x1",
+                               dhchap_digests=constants.DHCHAP_DIGESTS,
+                               dhchap_dhgroups=[constants.DHCHAP_DHGROUP])
+        params = client._request.call_args[0][1]
+        self.assertIn("sha256", params["dhchap_digests"])
+        self.assertIn("sha384", params["dhchap_digests"])
+        self.assertIn("sha512", params["dhchap_digests"])
+        self.assertEqual(params["dhchap_dhgroups"], ["ffdhe2048"])
 
 
 # ---------------------------------------------------------------------------
