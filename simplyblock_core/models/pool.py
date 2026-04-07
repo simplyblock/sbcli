@@ -31,6 +31,9 @@ class Pool(BaseModel):
     qos_host: str = ""
     sec_options: dict = {}
     dhchap: bool = False
+    dhchap_key: str = ""
+    dhchap_ctrlr_key: str = ""
+    allowed_hosts: List[str] = []
 
 
     def has_qos(self):

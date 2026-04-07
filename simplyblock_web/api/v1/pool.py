@@ -196,6 +196,30 @@ def pool_iostats(uuid, history):
 
 
 
+@bp.route('/pool/<string:pool_id>/host', methods=['POST'])
+def add_host_to_pool(pool_id):
+    data = request.get_json() or {}
+    host_nqn = data.get('host_nqn')
+    if not host_nqn:
+        return utils.get_response_error("missing required param: host_nqn", 400)
+    ok, err = pool_controller.add_host_to_pool(pool_id, host_nqn)
+    if not ok:
+        return utils.get_response_error(err, 400)
+    return utils.get_response("Done")
+
+
+@bp.route('/pool/<string:pool_id>/host', methods=['DELETE'])
+def remove_host_from_pool(pool_id):
+    data = request.get_json() or {}
+    host_nqn = data.get('host_nqn')
+    if not host_nqn:
+        return utils.get_response_error("missing required param: host_nqn", 400)
+    ok, err = pool_controller.remove_host_from_pool(pool_id, host_nqn)
+    if not ok:
+        return utils.get_response_error(err, 400)
+    return utils.get_response("Done")
+
+
 @bp.route('/pool/iostats-all-lvols/<string:pool_uuid>', methods=['GET'])
 def lvol_iostats(pool_uuid):
     try:

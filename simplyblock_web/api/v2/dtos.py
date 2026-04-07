@@ -116,6 +116,7 @@ class StoragePoolDTO(BaseModel):
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
     dhchap: bool = False
+    allowed_hosts: List[str] = []
 
     @staticmethod
     def from_model(model: Pool):
@@ -130,6 +131,7 @@ class StoragePoolDTO(BaseModel):
             max_r_mbytes=model.max_r_mbytes_per_sec,
             max_w_mbytes=model.max_w_mbytes_per_sec,
             dhchap=getattr(model, 'dhchap', False),
+            allowed_hosts=list(getattr(model, 'allowed_hosts', [])),
         )
 
 

@@ -782,6 +782,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_pool__disable(subparser)
         self.init_storage_pool__get_capacity(subparser)
         self.init_storage_pool__get_io_stats(subparser)
+        self.init_storage_pool__add_host(subparser)
+        self.init_storage_pool__remove_host(subparser)
 
 
     def init_storage_pool__add(self, subparser):
@@ -838,6 +840,16 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('pool_id', help='Pool id', type=str)
         argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
         argument = subcommand.add_argument('--records', help='Number of records, default: 20', type=int, default=20, dest='records')
+
+    def init_storage_pool__add_host(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add-host', 'Add a host NQN to a DHCHAP pool\'s allowed list')
+        subcommand.add_argument('pool_id', help='Pool id', type=str)
+        subcommand.add_argument('host_nqn', help='Host NQN to allow', type=str)
+
+    def init_storage_pool__remove_host(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'remove-host', 'Remove a host NQN from a DHCHAP pool\'s allowed list')
+        subcommand.add_argument('pool_id', help='Pool id', type=str)
+        subcommand.add_argument('host_nqn', help='Host NQN to remove', type=str)
 
 
     def init_snapshot(self):

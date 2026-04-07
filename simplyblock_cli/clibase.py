@@ -752,6 +752,20 @@ class CLIWrapperBase:
     def storage_pool__get_io_stats(self, sub_command, args):
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
 
+    def storage_pool__add_host(self, sub_command, args):
+        ok, err = pool_controller.add_host_to_pool(args.pool_id, args.host_nqn)
+        if not ok:
+            print(f"Error: {err}")
+            return False
+        return True
+
+    def storage_pool__remove_host(self, sub_command, args):
+        ok, err = pool_controller.remove_host_from_pool(args.pool_id, args.host_nqn)
+        if not ok:
+            print(f"Error: {err}")
+            return False
+        return True
+
     def snapshot__add(self, sub_command, args):
         backup = getattr(args, 'backup', False)
         snapshot_id, error = snapshot_controller.add(args.volume_id, args.name, backup=backup)

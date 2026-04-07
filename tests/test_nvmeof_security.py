@@ -544,9 +544,12 @@ class TestAddHostToLvol(unittest.TestCase):
         node2.cluster_id = cl.uuid
         lvol = _lvol(nodes=["node-1", "node-2"])
 
+        pool = _pool()  # dhchap=False – use legacy path
+
         mock_db = MagicMock()
         mock_db.get_lvol_by_id.return_value = lvol
         mock_db.get_cluster_by_id.return_value = cl
+        mock_db.get_pool_by_id.return_value = pool
         mock_db.kv_store = MagicMock()
 
         def get_node(nid):
@@ -1076,6 +1079,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         cl = _cluster(tls=True, tls_config={"params": {"dhchap_dhgroups": ["ffdhe2048"]}})
         mock_db = MagicMock()
         mock_db.get_cluster_by_id.return_value = cl
+        mock_db.get_pool_by_id.side_effect = KeyError("no pool")  # non-DHCHAP path
         MockDBCtrl.return_value = mock_db
 
         dhchap_host = {"nqn": "nqn:host", "dhchap_key": "DHHC-1:01:k:"}
