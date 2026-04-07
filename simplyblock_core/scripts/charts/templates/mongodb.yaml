@@ -15,7 +15,9 @@ spec:
             name: data-volume
           spec:
             accessModes: [ "ReadWriteOnce" ]
-            storageClassName: local-hostpath
+            {{- if .Values.storageclass.name }}
+            storageClassName: {{ .Values.storageclass.name }}
+            {{- end }}
             resources:
               requests:
                 storage: 5Gi
@@ -23,7 +25,9 @@ spec:
             name: logs-volume
           spec:
             accessModes: [ "ReadWriteOnce" ]
-            storageClassName: local-hostpath
+            {{- if .Values.storageclass.name }}
+            storageClassName: {{ .Values.storageclass.name }}
+            {{- end }}
             resources:
               requests:
                 storage: 5Gi

@@ -1,4 +1,3 @@
-
 observability:
   enabled: true
   secret: "sWbpOgba1bKnCfcPkVQi"
@@ -38,8 +37,13 @@ nodeSelector:
 ports:
   lvolNvmfPortStart: 9100
 
-storageclass:  
+csiHostpathDriver:
+  enabled: false
+
+storageclass:
+  name:  
   allowedTopologyZones: []
+
 
 foundationdb:
   multiAZ: false
@@ -90,7 +94,7 @@ opensearch:
   persistence:
     enabled: true
     image: busybox
-    storageClass: local-hostpath
+    storageClass:
     size: 20Gi
   image:
     repository: "opensearchproject/opensearch"
@@ -164,7 +168,7 @@ prometheus:
     persistentVolume:
       enabled: true
       size: 5Gi
-      storageClass: local-hostpath
+      storageClass:
     extraArgs:
       storage.tsdb.min-block-duration: 2h
       storage.tsdb.max-block-duration: 2h
@@ -296,7 +300,6 @@ simplyblock:
     skipKubeletConfiguration: false
     enableCpuTopology: false
     workerNodes:
-
 
   devices:
     name: simplyblock-devices
