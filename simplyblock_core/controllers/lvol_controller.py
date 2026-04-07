@@ -1181,14 +1181,10 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
 
     data = []
 
-    snap_dict : dict[str, int] = {}
     for lvol in lvols:
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
-        cloned_snapped = lvol.cloned_from_snap
-        if cloned_snapped:
-            snap_dict[cloned_snapped] = snap_dict.get(cloned_snapped, 0) + 1
         size_used = 0
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
@@ -1215,11 +1211,6 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Mode": mode
         }
         data.append(lvol_data)
-
-    for snap, count in snap_dict.items():
-        ref_snap = db_controller.get_snapshot_by_id(snap)
-        ref_snap.ref_count = count
-        ref_snap.write_to_db(db_controller.kv_store)
 
     if is_json:
         return json.dumps(data, indent=2)
