@@ -2828,6 +2828,15 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
     return True, ""
 
 
+def _allow_shutdown_with_migration_tasks(snode, db_controller):
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    return (
+        cluster.ha_type == "ha"
+        and cluster.max_fault_tolerance >= 2
+        and cluster.distr_npcs >= 2
+    )
+
+
 def shutdown_storage_node(node_id, force=False):
     db_controller = DBController()
     try:
@@ -2883,12 +2892,22 @@ def shutdown_storage_node(node_id, force=False):
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
     if tasks:
-        logger.error(f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force")
-        if force is False:
+        if not force and _allow_shutdown_with_migration_tasks(snode, db_controller):
+            logger.warning(
+                "Migration task found: %s, proceeding with shutdown because FTT=2 allows node outage",
+                len(tasks),
+            )
+        elif force:
+            logger.warning(
+                "Migration task found: %s, proceeding with forced shutdown and canceling tasks",
+                len(tasks),
+            )
+            for task in tasks:
+                if task.function_name != JobSchedule.FN_NODE_RESTART:
+                    tasks_controller.cancel_task(task.uuid)
+        else:
+            logger.error(f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force")
             return False
-        for task in tasks:
-            if task.function_name != JobSchedule.FN_NODE_RESTART:
-                tasks_controller.cancel_task(task.uuid)
 
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
@@ -2965,11 +2984,21 @@ def suspend_storage_node(node_id, force=False):
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
     if tasks:
-        logger.error(f"Migration task found: {len(tasks)}, can not suspend storage node, use --force")
-        if force is False:
+        if not force and _allow_shutdown_with_migration_tasks(snode, db_controller):
+            logger.warning(
+                "Migration task found: %s, proceeding with suspend because FTT=2 allows node outage",
+                len(tasks),
+            )
+        elif force:
+            logger.warning(
+                "Migration task found: %s, proceeding with forced suspend and canceling tasks",
+                len(tasks),
+            )
+            for task in tasks:
+                tasks_controller.cancel_task(task.uuid)
+        else:
+            logger.error(f"Migration task found: {len(tasks)}, can not suspend storage node, use --force")
             return False
-        for task in tasks:
-            tasks_controller.cancel_task(task.uuid)
 
     if not force:
         allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
