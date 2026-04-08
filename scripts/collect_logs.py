@@ -506,12 +506,28 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
             }
         })
     if source:
-        must_clauses.append({
-            "query_string": {
-                "default_field": "source",
-                "query": f'"{source}"',
-            }
-        })
+        # source may be a single string or a list of candidate values
+        # (e.g. multiple hostname formats for the same node).
+        # When it is a list we OR them so any matching format succeeds.
+        candidates = source if isinstance(source, (list, tuple)) else [source]
+        if len(candidates) == 1:
+            must_clauses.append({
+                "query_string": {
+                    "default_field": "source",
+                    "query": f'"{candidates[0]}"',
+                }
+            })
+        else:
+            must_clauses.append({
+                "bool": {
+                    "should": [
+                        {"query_string": {"default_field": "source",
+                                          "query": f'"{c}"'}}
+                        for c in candidates
+                    ],
+                    "minimum_should_match": 1,
+                }
+            })
 
     body = {
         "query": {"bool": {"must": must_clauses}},
@@ -872,13 +888,42 @@ def main():
 
             for cname, fname in snode_containers:
                 out_f = node_dir / fname
-                # Include source filter so we don't mix logs from different
-                # storage nodes that might share the same RPC port number.
-                gl_q = f'container_name:"{cname}" AND source:"{source_id}"'
+
+                if cname == "SNodeAPI":
+                    # SNodeAPI runs on every storage node so needs a source
+                    # filter to separate per-node logs.
+                    # The Graylog GELF 'source' field is the Docker host's
+                    # hostname, which on AWS EC2 is "ip-X-X-X-X" – not the
+                    # raw IP address.  We try all plausible formats so the
+                    # query succeeds regardless of naming convention:
+                    #   1. raw IP (e.g. "172.31.33.210")
+                    #   2. EC2 hostname from IP (e.g. "ip-172-31-33-210")
+                    #   3. sbctl Hostname field without trailing "_PORT" suffix
+                    base_hostname = (hostname.rsplit("_", 1)[0]
+                                     if "_" in hostname else hostname)
+                    ec2_hostname = (f"ip-{node_ip.replace('.', '-')}"
+                                    if node_ip else "")
+                    os_source: object = list(
+                        dict.fromkeys(            # deduplicate, preserve order
+                            s for s in [source_id, ec2_hostname, base_hostname]
+                            if s
+                        )
+                    )
+                    gl_q = (f'container_name:"{cname}" AND '
+                            f'(source:"{source_id}" OR '
+                            f'source:"{ec2_hostname}" OR '
+                            f'source:"{base_hostname}")')
+                else:
+                    # spdk_N and spdk_proxy_N are globally unique by RPC port
+                    # number – no source filter needed and avoids the
+                    # hostname-vs-IP ambiguity entirely.
+                    os_source = None
+                    gl_q = f'container_name:"{cname}"'
+
                 n = fetch(
                     gl_query=gl_q,
                     os_container=cname,
-                    os_source=source_id,
+                    os_source=os_source,
                     out_path=out_f,
                     **fetch_kw,
                 )
