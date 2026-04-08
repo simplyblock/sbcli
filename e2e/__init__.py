@@ -73,30 +73,12 @@ from stress_test.continuous_failover_ha_security import (
 
 from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityCombinations,
-    TestLvolAllowedHostsPositive,
-    TestLvolAllowedHostsNegative,
     TestLvolDynamicHostManagement,
-    TestLvolCryptoWithAllowedHosts,
-    TestLvolDhcapDirections,
-    TestLvolMultipleAllowedHosts,
+    TestLvolCryptoWithDhchap,
+    TestLvolDhchapBidirectional,
     TestLvolSecurityNegativeHostOps,
-    TestLvolSecurityNegativeCreation,
-    TestLvolSecurityNegativeConnect,
-    TestLvolAllowedHostsNoDhchap,
-    # Extended security tests (TC-SEC-070..127)
-    TestLvolSecurityHAFailover,
-    TestLvolSecurityMgmtNodeReboot,
-    TestLvolSecurityDynamicModification,
-    TestLvolSecurityMultiClientConcurrent,
-    TestLvolSecurityScaleAndRapidOps,
-    TestLvolSecurityNegativeConnectExtended,
-    TestLvolSecurityCloneOverride,
-    TestLvolSecurityWithBackup,
-    TestLvolSecurityResize,
-    TestLvolSecurityVolumeListFields,
-    TestLvolSecurityRDMA,
-    TestLvolSecurityOutageRecovery,
-    TestLvolSecurityNetworkInterrupt,  # last: may trigger core dump / node abort
+    TestLvolSecuritySnapshotClone,
+    TestLvolSecurityRDMAv2,
 )
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
@@ -177,31 +159,12 @@ ALL_TESTS = [
     TestAddK8sNodesDuringFioRun,
     # Security E2E tests
     TestLvolSecurityCombinations,
-    TestLvolAllowedHostsPositive,
-    TestLvolAllowedHostsNegative,
     TestLvolDynamicHostManagement,
-    TestLvolCryptoWithAllowedHosts,
-    TestLvolDhcapDirections,
-    TestLvolMultipleAllowedHosts,
-    TestLvolAllowedHostsNoDhchap,
-    # Security negative tests
+    TestLvolCryptoWithDhchap,
+    TestLvolDhchapBidirectional,
     TestLvolSecurityNegativeHostOps,
-    TestLvolSecurityNegativeCreation,
-    TestLvolSecurityNegativeConnect,
-    # Extended security E2E tests (TC-SEC-070..127)
-    TestLvolSecurityMgmtNodeReboot,
-    TestLvolSecurityDynamicModification,
-    TestLvolSecurityMultiClientConcurrent,
-    TestLvolSecurityScaleAndRapidOps,
-    TestLvolSecurityNegativeConnectExtended,
-    TestLvolSecurityCloneOverride,
-    TestLvolSecurityWithBackup,
-    TestLvolSecurityResize,
-    TestLvolSecurityVolumeListFields,
-    TestLvolSecurityRDMA,
-    TestLvolSecurityHAFailover,
-    TestLvolSecurityOutageRecovery,
-    TestLvolSecurityNetworkInterrupt,  # last: may trigger core dump / node abort
+    TestLvolSecuritySnapshotClone,
+    TestLvolSecurityRDMAv2,
     # Security stress tests
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
@@ -285,17 +248,12 @@ def get_all_tests(custom=True, ha_test=False):
     # tests += [
     #     # Security E2E tests
     #     TestLvolSecurityCombinations,
-    #     TestLvolAllowedHostsPositive,
-    #     TestLvolAllowedHostsNegative,
     #     TestLvolDynamicHostManagement,
-    #     TestLvolCryptoWithAllowedHosts,
-    #     TestLvolDhcapDirections,
-    #     TestLvolMultipleAllowedHosts,
-    #     TestLvolAllowedHostsNoDhchap,
-    #     # Security negative tests
+    #     TestLvolCryptoWithDhchap,
+    #     TestLvolDhchapBidirectional,
     #     TestLvolSecurityNegativeHostOps,
-    #     TestLvolSecurityNegativeCreation,
-    #     TestLvolSecurityNegativeConnect,
+    #     TestLvolSecuritySnapshotClone,
+    #     TestLvolSecurityRDMAv2,
     # ]
     if not custom:
         tests.remove(TestLvolFioNpcsCustom)
@@ -313,31 +271,12 @@ def get_security_tests():
     return [
         # Security E2E tests
         TestLvolSecurityCombinations,
-        TestLvolAllowedHostsPositive,
-        TestLvolAllowedHostsNegative,
         TestLvolDynamicHostManagement,
-        TestLvolCryptoWithAllowedHosts,
-        TestLvolDhcapDirections,
-        TestLvolMultipleAllowedHosts,
-        TestLvolAllowedHostsNoDhchap,
-        # Security negative tests
+        TestLvolCryptoWithDhchap,
+        TestLvolDhchapBidirectional,
         TestLvolSecurityNegativeHostOps,
-        TestLvolSecurityNegativeCreation,
-        TestLvolSecurityNegativeConnect,
-        # Extended security tests (TC-SEC-070..127)
-        TestLvolSecurityMgmtNodeReboot,
-        TestLvolSecurityDynamicModification,
-        TestLvolSecurityMultiClientConcurrent,
-        TestLvolSecurityScaleAndRapidOps,
-        TestLvolSecurityNegativeConnectExtended,
-        TestLvolSecurityCloneOverride,
-        TestLvolSecurityWithBackup,
-        TestLvolSecurityResize,
-        TestLvolSecurityVolumeListFields,
-        TestLvolSecurityRDMA,
-        TestLvolSecurityHAFailover,
-        TestLvolSecurityOutageRecovery,
-        TestLvolSecurityNetworkInterrupt,  # last: may trigger core dump / node abort
+        TestLvolSecuritySnapshotClone,
+        TestLvolSecurityRDMAv2,
     ]
 
 
