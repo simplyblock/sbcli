@@ -223,10 +223,10 @@ commands:
             action: store_false
             private: true
           - name: "--ha-jm-count"
-            help: "HA JM count"
+            help: "HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3."
             dest: ha_jm_count
             type: int
-            default: 3
+            default: null
           - name: "--namespace"
             help: "Kubernetes namespace to deploy on"
             dest: namespace

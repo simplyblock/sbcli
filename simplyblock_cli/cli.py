@@ -141,7 +141,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device', dest='enable_test_device', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation', dest='enable_ha_jm', action='store_false')
-        argument = subcommand.add_argument('--ha-jm-count', help='HA JM count', type=int, default=3, dest='ha_jm_count')
+        argument = subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3.', type=int, default=None, dest='ha_jm_count')
         argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to deploy on', type=str, dest='namespace')
         if self.developer_mode:
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use device nqn to identify it instead of serial number', dest='id_device_by_nqn', action='store_true')

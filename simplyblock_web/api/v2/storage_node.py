@@ -44,7 +44,7 @@ class StorageNodeParams(BaseModel):
     partitions: int = Field(1)
     iobuf_small_pool_count: int = Field(0)
     iobuf_large_pool_count: int = Field(0)
-    ha_jm_count: int = Field(3)
+    ha_jm_count: Optional[int] = Field(None)
     format_4k: bool = Field(False)
     spdk_proxy_image: Optional[str]
 
