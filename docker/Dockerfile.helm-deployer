@@ -1,0 +1,16 @@
+FROM alpine/helm:latest
+
+ARG SBCLI_BRANCH=""
+ARG CSI_BRANCH=""
+
+RUN apk add --no-cache git
+
+RUN if [ -n "$SBCLI_BRANCH" ]; then \
+      git clone --branch "$SBCLI_BRANCH" --depth 1 \
+        https://github.com/simplyblock/sbcli /opt/sbcli; \
+    fi
+
+RUN if [ -n "$CSI_BRANCH" ]; then \
+      git clone --branch "$CSI_BRANCH" --depth 1 \
+        https://github.com/simplyblock/simplyblock-csi /opt/simplyblock-csi; \
+    fi
