@@ -12,6 +12,52 @@ from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
+MIGRATION_WAIT_UNAVAILABLE_KEY = "wait_unavailable_before_retry"
+
+
+def _cluster_unavailable_state(cluster_id):
+    unavailable = []
+    for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            unavailable.append(f"node:{node.get_id()}")
+        for dev in node.nvme_devices:
+            if dev.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                continue
+            if dev.status != NVMeDevice.STATUS_ONLINE:
+                unavailable.append(f"dev:{dev.get_id()}")
+    return sorted(unavailable)
+
+
+def _migration_retry_allowed(task, unavailable):
+    previous = sorted(task.function_params.get(MIGRATION_WAIT_UNAVAILABLE_KEY, []))
+    if not unavailable:
+        if previous:
+            task.function_params.pop(MIGRATION_WAIT_UNAVAILABLE_KEY, None)
+            task.write_to_db(db.kv_store)
+        return True
+
+    recovered = set(previous) - set(unavailable)
+    if previous and recovered:
+        task.function_params[MIGRATION_WAIT_UNAVAILABLE_KEY] = unavailable
+        task.write_to_db(db.kv_store)
+        logger.info(
+            "Migration retry allowed after recovery event for task %s: %s",
+            task.uuid,
+            sorted(recovered),
+        )
+        return True
+
+    task.function_params[MIGRATION_WAIT_UNAVAILABLE_KEY] = unavailable
+    task.function_result = (
+        "waiting for unavailable nodes/devices to recover before restarting migration: "
+        f"{unavailable}"
+    )
+    task.status = JobSchedule.STATUS_SUSPENDED
+    task.write_to_db(db.kv_store)
+    return False
+
 
 def task_runner(task):
 
@@ -33,8 +79,12 @@ def task_runner(task):
     if snode.status != StorageNode.STATUS_ONLINE:
         task.function_result = "node is not online, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db(db.kv_store)
+        unavailable = _cluster_unavailable_state(task.cluster_id)
+        if not unavailable:
+            task.retry += 1
+            task.write_to_db(db.kv_store)
+        else:
+            _migration_retry_allowed(task, unavailable)
         return False
 
     cluster = db.get_cluster_by_id(task.cluster_id)
@@ -47,6 +97,7 @@ def task_runner(task):
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         current_online_devices = 0
+        unavailable = _cluster_unavailable_state(task.cluster_id)
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             if node.is_secondary_node:  # pass
                 continue
@@ -71,8 +122,14 @@ def task_runner(task):
         if current_online_devices < migration_devices:
             task.function_result = f"only {current_online_devices} devices online, waiting for more devices to be online"
             task.status = JobSchedule.STATUS_SUSPENDED
-            task.retry += 1
-            task.write_to_db(db.kv_store)
+            if not unavailable:
+                task.retry += 1
+                task.write_to_db(db.kv_store)
+            else:
+                _migration_retry_allowed(task, unavailable)
+            return False
+
+        if not _migration_retry_allowed(task, unavailable):
             return False
 
         task.status = JobSchedule.STATUS_RUNNING
@@ -118,8 +175,12 @@ def task_runner(task):
             logger.error(msg)
             task.function_result =msg
             task.status = JobSchedule.STATUS_SUSPENDED
-            task.retry += 1
-            task.write_to_db(db.kv_store)
+            unavailable = _cluster_unavailable_state(task.cluster_id)
+            if not unavailable:
+                task.retry += 1
+                task.write_to_db(db.kv_store)
+            else:
+                _migration_retry_allowed(task, unavailable)
             return True
         task.function_params['migration'] = {"name": distr_name}
         task.function_params['migration_devices'] = current_online_devices
