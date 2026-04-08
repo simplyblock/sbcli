@@ -299,65 +299,227 @@ def _os_get_index(session, os_url):
     return "_all"
 
 
-def _os_term(field, value):
+def _os_probe(session, os_url, index, from_ms, to_ms):
     """
-    Build an exact-match clause that works regardless of whether the field is
-    mapped as 'keyword' or 'text+keyword'.  Tries fieldname.keyword first;
-    OpenSearch ignores unknown sub-fields gracefully via a should/filter combo.
+    Probe the index to discover:
+      - The actual timestamp field name (e.g. 'timestamp' vs '@timestamp')
+      - The actual container-name field name
+      - How many documents exist in the requested time window (any container)
+      - A sample document so we can see real field values
+
+    Returns a dict with keys: ts_field, cname_field, window_count, sample_doc
     """
-    return {
-        "bool": {
-            "should": [
-                {"term": {f"{field}.keyword": value}},
-                {"term": {field: value}},
-            ],
-            "minimum_should_match": 1,
-        }
+    result = {"ts_field": "timestamp", "cname_field": "container_name",
+              "window_count": 0, "sample_doc": None}
+
+    # --- sample document (no time filter) ---
+    try:
+        r = session.post(
+            f"{os_url}/{index}/_search",
+            json={"size": 1, "query": {"match_all": {}}},
+            timeout=10,
+        )
+        if r.ok:
+            hits = r.json().get("hits", {}).get("hits", [])
+            if hits:
+                src = hits[0].get("_source", {})
+                result["sample_doc"] = src
+                # Detect timestamp field
+                if "@timestamp" in src:
+                    result["ts_field"] = "@timestamp"
+                # Detect container-name field (various naming conventions)
+                for candidate in ("container_name", "container_id", "containerName",
+                                  "_container_name", "docker_container_name"):
+                    if candidate in src:
+                        result["cname_field"] = candidate
+                        break
+    except Exception as exc:
+        print(f"    WARN: probe (sample doc) failed: {exc}", file=sys.stderr)
+
+    # --- count within the requested time window ---
+    ts = result["ts_field"]
+    try:
+        r = session.post(
+            f"{os_url}/{index}/_count",
+            json={"query": {"range": {ts: {"gte": from_ms, "lte": to_ms,
+                                           "format": "epoch_millis"}}}},
+            timeout=10,
+        )
+        if r.ok:
+            result["window_count"] = r.json().get("count", 0)
+    except Exception as exc:
+        print(f"    WARN: probe (window count) failed: {exc}", file=sys.stderr)
+
+    return result
+
+
+def _os_sample_container_names(session, os_url, index, from_ms, to_ms, ts_field, cname_field, n=30):
+    """
+    Return up to *n* distinct container_name values within the time window
+    using a terms aggregation.  Used by --diagnose.
+    """
+    body = {
+        "size": 0,
+        "query": {"range": {ts_field: {"gte": from_ms, "lte": to_ms,
+                                        "format": "epoch_millis"}}},
+        "aggs": {
+            "names": {
+                "terms": {
+                    "field": f"{cname_field}.keyword",
+                    "size": n,
+                }
+            }
+        },
     }
+    try:
+        r = session.post(f"{os_url}/{index}/_search", json=body, timeout=15)
+        if r.ok:
+            buckets = r.json().get("aggregations", {}).get("names", {}).get("buckets", [])
+            return [(b["key"], b["doc_count"]) for b in buckets]
+    except Exception:
+        pass
+    return []
 
 
-def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_iso, out_path):
+def opensearch_diagnose(session, os_url, from_iso, to_iso):
+    """
+    Print a detailed diagnostic report about what is in OpenSearch.
+    Called when --diagnose is passed.
+    """
+    print("\n" + "=" * 64)
+    print("  OpenSearch Diagnostic Report")
+    print("=" * 64)
+
+    from_ms = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    to_ms   = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp() * 1000)
+
+    # 1. List all indices
+    print("\n[D1] All indices:")
+    try:
+        r = session.get(f"{os_url}/_cat/indices?h=index,docs.count,store.size&format=json",
+                        timeout=10)
+        r.raise_for_status()
+        for idx in sorted(r.json(), key=lambda x: x["index"]):
+            print(f"     {idx['index']:<45} docs={idx.get('docs.count','?'):>10}  "
+                  f"size={idx.get('store.size','?')}")
+    except Exception as exc:
+        print(f"     ERROR: {exc}")
+
+    index = _os_get_index(session, os_url)
+    print(f"\n     → Using index(es): {index}")
+
+    # 2. Probe
+    probe = _os_probe(session, os_url, index, from_ms, to_ms)
+    print(f"\n[D2] Detected field names:")
+    print(f"     timestamp field    : {probe['ts_field']}")
+    print(f"     container_name field: {probe['cname_field']}")
+    print(f"\n[D3] Documents in requested time window: {probe['window_count']}")
+
+    # 3. Sample document
+    if probe["sample_doc"]:
+        print(f"\n[D4] Sample document fields and values:")
+        for k, v in sorted(probe["sample_doc"].items()):
+            v_str = str(v)[:120]
+            print(f"     {k:<35} = {v_str}")
+    else:
+        print("\n[D4] No sample document found (index may be empty).")
+
+    # 4. Container names in window
+    print(f"\n[D5] Distinct container_name values in time window (up to 30):")
+    names = _os_sample_container_names(session, os_url, index,
+                                        from_ms, to_ms,
+                                        probe["ts_field"], probe["cname_field"])
+    if names:
+        for name, count in names:
+            print(f"     {name:<60}  {count:>8} docs")
+    else:
+        print("     (none found – aggregation on .keyword sub-field may have failed)")
+        print("      Trying match_all sample …")
+        try:
+            r = session.post(
+                f"{os_url}/{index}/_search",
+                json={"size": 5, "query": {"match_all": {}},
+                      "_source": [probe["cname_field"]]},
+                timeout=10,
+            )
+            if r.ok:
+                for h in r.json().get("hits", {}).get("hits", []):
+                    print(f"     {h.get('_source', {}).get(probe['cname_field'], '???')}")
+        except Exception:
+            pass
+
+    print("\n" + "=" * 64)
+
+
+def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_iso, out_path,
+                         probe_cache=None):
     """
     Fetch logs directly from OpenSearch using the scroll API.
 
-    Builds a bool/must query filtering by container_name (and optionally
-    source) within the requested time range.  Scrolls through all hits.
+    Discovers the actual timestamp and container-name field names via a
+    one-time probe (cached in *probe_cache* dict across calls).
+    Uses query_string wildcards for container matching so Docker Swarm
+    names like 'simplyblock_WebAppAPI.1.<hash>' are matched by just
+    passing 'WebAppAPI'.
     Returns number of lines written.
     """
     # Graylog's OpenSearch index maps the timestamp field with format
     # "uuuu-MM-dd HH:mm:ss.SSS" (space separator, no timezone suffix).
-    # Sending ISO-8601 with "T" and "Z" causes a 400 parse_exception.
-    # epoch_millis is accepted by OpenSearch regardless of the field's
-    # stored date format and is therefore the most portable choice.
+    # epoch_millis is accepted regardless of the field's stored date format.
     from_ms = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp() * 1000)
-    to_ms = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    to_ms   = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp() * 1000)
 
+    # One-time index discovery + probe (cached)
+    if probe_cache is None:
+        probe_cache = {}
+    if "index" not in probe_cache:
+        probe_cache["index"] = _os_get_index(session, os_url)
+        probe_cache["probe"] = _os_probe(session, os_url, probe_cache["index"], from_ms, to_ms)
+        p = probe_cache["probe"]
+        print(f"    [OpenSearch] index={probe_cache['index']}  "
+              f"ts_field={p['ts_field']}  cname_field={p['cname_field']}  "
+              f"docs_in_window={p['window_count']}")
+        if p["window_count"] == 0:
+            print("    WARN: no documents in the requested time window – "
+                  "check the start_time / duration, or run with --diagnose",
+                  file=sys.stderr)
+
+    index  = probe_cache["index"]
+    probe  = probe_cache["probe"]
+    ts_f   = probe["ts_field"]
+    cname_f = probe["cname_field"]
+
+    # Build query
+    # Use query_string wildcards so partial names work:
+    #   "WebAppAPI"  matches "simplyblock_WebAppAPI.1.abc123"
+    #   "spdk_8080"  matches "/spdk_8080"
     must_clauses = [
-        {"range": {"timestamp": {"gte": from_ms, "lte": to_ms, "format": "epoch_millis"}}},
+        {"range": {ts_f: {"gte": from_ms, "lte": to_ms, "format": "epoch_millis"}}},
     ]
     if container_name:
-        # Docker may prepend a leading "/" to the container name; match both.
+        esc = container_name.replace("/", "\\/").replace(":", "\\:")
         must_clauses.append({
-            "bool": {
-                "should": [
-                    _os_term("container_name", container_name),
-                    _os_term("container_name", f"/{container_name}"),
-                ],
-                "minimum_should_match": 1,
+            "query_string": {
+                "default_field": cname_f,
+                "query": f"*{esc}*",
+                "analyze_wildcard": True,
             }
         })
     if source:
-        must_clauses.append(_os_term("source", source))
+        must_clauses.append({
+            "query_string": {
+                "default_field": "source",
+                "query": f'"{source}"',
+            }
+        })
 
     body = {
         "query": {"bool": {"must": must_clauses}},
-        "sort": [{"timestamp": {"order": "asc"}}],
+        "sort": [{ts_f: {"order": "asc"}}],
         "size": PAGE_SIZE,
-        "_source": ["timestamp", "source", "container_name", "level", "message"],
+        "_source": [ts_f, "source", cname_f, "level", "message"],
     }
 
-    # Discover actual index names – avoids wildcard in URL path (HAProxy rejects it)
-    index = _os_get_index(session, os_url)
     init_url = f"{os_url}/{index}/_search?scroll=2m"
     written = 0
 
@@ -366,7 +528,7 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
         if not r.ok:
             print(
                 f"    WARN: OpenSearch initial scroll failed: {r.status_code} {r.reason}"
-                f"\n          body: {r.text[:300]}",
+                f"\n          body: {r.text[:400]}",
                 file=sys.stderr,
             )
             Path(out_path).touch()
@@ -386,7 +548,13 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
     with open(out_path, "w") as fh:
         while hits:
             for h in hits:
-                fh.write(_fmt(h.get("_source", {})) + "\n")
+                src = h.get("_source", {})
+                # normalise field names to what _fmt expects
+                if ts_f != "timestamp":
+                    src["timestamp"] = src.get(ts_f, "")
+                if cname_f != "container_name":
+                    src["container_name"] = src.get(cname_f, "")
+                fh.write(_fmt(src) + "\n")
                 written += 1
             if len(hits) < PAGE_SIZE or not scroll_id:
                 break
@@ -436,6 +604,7 @@ def fetch(
     from_iso,
     to_iso,
     out_path,
+    probe_cache,
 ):
     """Route to Graylog or OpenSearch depending on *use_opensearch*."""
     if use_opensearch:
@@ -443,6 +612,7 @@ def fetch(
             os_session, opensearch_base,
             os_container, os_source,
             from_iso, to_iso, str(out_path),
+            probe_cache=probe_cache,
         )
     return graylog_fetch_all(
         gl_session, graylog_base,
@@ -504,7 +674,19 @@ def main():
         metavar="IP",
         help="Override the management-node IP used to reach Graylog / OpenSearch.",
     )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help=(
+            "Print a diagnostic report from OpenSearch (indices, field names, "
+            "sample documents, container names present in the time window) and "
+            "exit without collecting logs.  Use this when collections return 0 "
+            "to understand the actual data layout.  Implies --use-opensearch."
+        ),
+    )
     args = parser.parse_args()
+    if args.diagnose:
+        args.use_opensearch = True
 
     # ── 1. Parse time range ──────────────────────────────────────────────────
 
@@ -604,6 +786,11 @@ def main():
         except requests.RequestException as exc:
             print(f"    WARN: {exc}.")
 
+        # --diagnose: print full report and exit
+        if args.diagnose:
+            opensearch_diagnose(os_session, opensearch_base, from_iso, to_iso)
+            sys.exit(0)
+
     # ── 6. Prepare temp workspace ────────────────────────────────────────────
 
     ts_str = start_dt.strftime("%Y%m%d_%H%M%S")
@@ -611,6 +798,8 @@ def main():
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     tarball_path = output_dir / f"{bundle_name}.tar.gz"
+
+    probe_cache: dict = {}   # shared across all OpenSearch calls in this run
 
     fetch_kw = dict(
         gl_session=gl_session,
@@ -620,6 +809,7 @@ def main():
         use_opensearch=args.use_opensearch,
         from_iso=from_iso,
         to_iso=to_iso,
+        probe_cache=probe_cache,
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
