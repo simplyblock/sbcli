@@ -28,6 +28,18 @@ class _UpdateParams(BaseModel):
     restart: bool = Field(False)
 
 
+class BackupConfigParams(BaseModel):
+    access_key_id: Optional[str] = None
+    secret_access_key: Optional[str] = None
+    local_endpoint: Optional[str] = None
+    bucket_name: Optional[str] = None
+    snapshot_backups: Optional[bool] = None
+    with_compression: Optional[bool] = None
+    secondary_target: Optional[int] = Field(default=None, ge=0)
+    local_testing: Optional[bool] = None
+    s3_thread_pool_size: Optional[int] = Field(default=None, ge=0)
+
+
 class ClusterParams(BaseModel):
     name: str = ""
     blk_size: Literal[512, 4096] = 512
@@ -58,6 +70,7 @@ class ClusterParams(BaseModel):
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
+    backup_config: Optional[BackupConfigParams] = None
 
 
 @api.get('/', name='clusters:list')
@@ -74,7 +87,7 @@ def list() -> List[ClusterDTO]:
 
 @api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
 def add(parameters: ClusterParams):
-    cluster_id_or_false = cluster_ops.add_cluster(**parameters.model_dump())
+    cluster_id_or_false = cluster_ops.add_cluster(**parameters.model_dump(exclude_none=True))
     if not cluster_id_or_false:
         raise ValueError('Failed to create cluster')
 
