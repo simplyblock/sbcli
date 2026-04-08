@@ -5,12 +5,48 @@ import re
 import threading
 
 from simplyblock_core import utils
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
+
+
+def _remote_device_from_device(device, status, remote_bdev=None):
+    remote_device = RemoteDevice()
+    remote_device.uuid = device.uuid
+    remote_device.alceml_name = device.alceml_name
+    remote_device.node_id = device.node_id
+    remote_device.size = device.size
+    remote_device.status = status
+    remote_device.nvmf_multipath = device.nvmf_multipath
+    remote_device.remote_bdev = remote_bdev or f"remote_{device.alceml_bdev}n1"
+    return remote_device
+
+
+def _persist_target_device_event(device, status, target_node):
+    db_controller = DBController()
+    node = db_controller.get_storage_node_by_id(target_node.get_id())
+    if node.get_id() == device.node_id:
+        for dev in node.nvme_devices:
+            if dev.get_id() == device.get_id():
+                dev.status = status
+                break
+    else:
+        new_remote_devices = []
+        found = False
+        for rem_dev in node.remote_devices:
+            if rem_dev.get_id() == device.get_id():
+                rem_dev.status = status
+                if not rem_dev.remote_bdev and status == NVMeDevice.STATUS_ONLINE:
+                    rem_dev.remote_bdev = f"remote_{device.alceml_bdev}n1"
+                found = True
+            new_remote_devices.append(rem_dev)
+        if not found and status == NVMeDevice.STATUS_ONLINE:
+            new_remote_devices.append(_remote_device_from_device(device, status))
+        node.remote_devices = new_remote_devices
+    node.write_to_db(db_controller.kv_store)
 
 
 def send_node_status_event(node, node_status, target_node=None):
@@ -72,6 +108,7 @@ def send_dev_status_event(device, status, target_node=None):
             if node.status == StorageNode.STATUS_SCHEDULABLE:
                 skipped_nodes.append(node)
 
+    results = []
     for node in snodes:
         if node.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
             logger.info(f"skipping node: {node.get_id()} with status: {node.status}")
@@ -109,14 +146,26 @@ def send_dev_status_event(device, status, target_node=None):
             "storage_ID": storage_ID,
             "status": dev_status}]}
         logger.debug(f"Sending event updates, device: {storage_ID}, status: {dev_status}, node: {node.get_id()}")
-        t = threading.Thread(
-            target=_send_event_to_node,
-            args=(node,events,))
-        connect_threads.append(t)
-        t.start()
+        if target_node:
+            sent = _send_event_to_node(node, events)
+            results.append(sent)
+            if sent:
+                _persist_target_device_event(device, dev_status, node)
+        else:
+            result = {"sent": False, "node": node, "status": dev_status}
+            t = threading.Thread(
+                target=_send_event_to_node,
+                args=(node, events, result))
+            connect_threads.append((t, result))
+            t.start()
 
-    for t in connect_threads:
+    for t, result in connect_threads:
         t.join()
+        results.append(result["sent"])
+        if result["sent"]:
+            _persist_target_device_event(device, result["status"], result["node"])
+
+    return all(results) if results else False
 
 
 def disconnect_device(device):
@@ -376,9 +425,15 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
     return True
 
 
-def _send_event_to_node(node, events):
+def _send_event_to_node(node, events, result=None):
     try:
         node.rpc_client(timeout=1, retry=0).distr_status_events_update(events)
+        if result is not None:
+            result["sent"] = True
+        return True
     except Exception as e:
         logger.warning("Failed to send event update")
         logger.error(e)
+        if result is not None:
+            result["sent"] = False
+        return False

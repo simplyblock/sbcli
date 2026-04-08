@@ -9,7 +9,7 @@ from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
@@ -466,24 +466,6 @@ def _check_node_lvstore(
                                                     f"remote_{dev.alceml_bdev}", dev, node,
                                                     bdev_names=node_bdev_names, reattach=False)
                                                 if remote_bdev:
-                                                    new_remote_devices = []
-                                                    n = db_controller.get_storage_node_by_id(node.get_id())
-                                                    for rem_dev in n.remote_devices:
-                                                        if dev.get_id() == rem_dev.get_id():
-                                                            continue
-                                                        new_remote_devices.append(rem_dev)
-
-                                                    remote_device = RemoteDevice()
-                                                    remote_device.uuid = dev.uuid
-                                                    remote_device.alceml_name = dev.alceml_name
-                                                    remote_device.node_id = dev.node_id
-                                                    remote_device.size = dev.size
-                                                    remote_device.status = NVMeDevice.STATUS_ONLINE
-                                                    remote_device.nvmf_multipath = dev.nvmf_multipath
-                                                    remote_device.remote_bdev = remote_bdev
-                                                    new_remote_devices.append(remote_device)
-                                                    n.remote_devices = new_remote_devices
-                                                    n.write_to_db()
                                                     distr_controller.send_dev_status_event(dev, dev.status, node)
                                             except Exception as e:
                                                 logger.error(f"Failed to connect to {dev.get_id()}: {e}")

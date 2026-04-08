@@ -73,33 +73,7 @@ def exec_port_allow_task(task):
                     node_bdev_names[al] = b
         else:
             node_bdev_names = {}
-        remote_devices = []
-        for nd in nodes:
-            if nd.get_id() == node.get_id() or nd.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                continue
-            logger.info(f"Connecting to node {nd.get_id()}")
-            for index, dev in enumerate(nd.nvme_devices):
-
-                if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
-                                      NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                    logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
-                    continue
-
-                if not dev.alceml_bdev:
-                    raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
-
-                remote_device = RemoteDevice()
-                remote_device.uuid = dev.uuid
-                remote_device.alceml_name = dev.alceml_name
-                remote_device.node_id = dev.node_id
-                remote_device.size = dev.size
-                remote_device.nvmf_multipath = dev.nvmf_multipath
-                remote_device.status = NVMeDevice.STATUS_ONLINE
-                remote_device.remote_bdev = storage_node_ops.connect_device(
-                    f"remote_{dev.alceml_bdev}", dev, node,
-                    bdev_names=list(node_bdev_names), reattach=False)
-
-                remote_devices.append(remote_device)
+        remote_devices = storage_node_ops._connect_to_remote_devs(node, reattach=False)
         if not remote_devices:
             msg = "Node unable to connect to remote devs, retry task"
             logger.info(msg)
