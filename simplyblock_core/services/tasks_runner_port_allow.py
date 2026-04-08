@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
-from simplyblock_core.controllers import tcp_ports_events, health_controller, tasks_controller
+from simplyblock_core.controllers import tcp_ports_events, health_controller, tasks_controller, lvol_controller
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
@@ -14,6 +14,19 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
+
+def _get_lvs_leader(lvs_name, candidates):
+    for candidate in candidates:
+        if not candidate or candidate.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            if lvol_controller.is_node_leader(candidate, lvs_name):
+                return candidate
+        except Exception as e:
+            logger.warning("Failed to query leadership for %s on %s: %s",
+                           lvs_name, candidate.get_id(), e)
+    return None
 
 
 def exec_port_allow_task(task):
@@ -198,51 +211,74 @@ def exec_port_allow_task(task):
             time.sleep(3)
             lvol_sync_del_found = tasks_controller.get_lvol_sync_del_task(task.cluster_id, task.node_id)
 
-        # Drop leadership and drain inflight IO on ALL online secondaries before
-        # allowing the port.  Without this, the primary's JC reconnects to remote
-        # JMs that still hold stale write locks, triggering writer conflicts that
-        # cascade into block_port / IO errors on the secondary.
         port_number = task.function_params["port_number"]
         secs_to_unblock = []
-        for sid in sec_ids:
-            sn = db.get_storage_node_by_id(sid)
-            if not sn or sn.status != StorageNode.STATUS_ONLINE:
-                continue
+        primary_lvs_port = node.get_lvol_subsys_port(node.lvstore)
+        if port_number == primary_lvs_port:
+            candidates = [node] + [db.get_storage_node_by_id(sid) for sid in sec_ids]
+            current_leader = _get_lvs_leader(node.lvstore, candidates)
 
-            sn_rpc = sn.rpc_client()
-            ret = sn.wait_for_jm_rep_tasks_to_finish(node.jm_vuid)
-            if not ret:
-                msg = f"JM replication task found on secondary {sn.get_id()}"
-                logger.warning(msg)
-                task.function_result = msg
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
-                return
-
-            # Block → sleep → drop leadership → force non-leader → check inflight
-            sn_fw = FirewallClient(sn, timeout=5, retry=2)
-            sn_port_type = "udp" if sn.active_rdma else "tcp"
-            sn_fw.firewall_set_port(port_number, sn_port_type, "block", sn.rpc_port)
-            tcp_ports_events.port_deny(sn, port_number)
-
-            time.sleep(0.5)
-
-            sn_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
-            sn_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
-            logger.info(f"Checking for inflight IO from node: {sn.get_id()}")
-            for i in range(100):
-                is_inflight = sn_rpc.bdev_distrib_check_inflight_io(node.jm_vuid)
-                if is_inflight:
-                    logger.info("Inflight IO found, retry in 100ms")
-                    time.sleep(0.1)
-                else:
-                    logger.info("Inflight IO NOT found, continuing")
-                    break
+            if current_leader and current_leader.get_id() != node.get_id():
+                logger.info("Current leader for %s is %s, skipping peer demotion during port_allow on %s",
+                            node.lvstore, current_leader.get_id(), node.get_id())
             else:
-                logger.error(
-                    f"Timeout while checking for inflight IO after 10 seconds on node {sn.get_id()}")
+                if current_leader is None:
+                    logger.warning("No leader found for %s during port_allow on %s; attempting local restore",
+                                   node.lvstore, node.get_id())
+                    node.rpc_client().bdev_lvol_set_lvs_opts(
+                        node.lvstore,
+                        groupid=node.jm_vuid,
+                        subsystem_port=primary_lvs_port,
+                        role="primary"
+                    )
+                    node.rpc_client().bdev_lvol_set_leader(node.lvstore, leader=True)
+                    current_leader = _get_lvs_leader(node.lvstore, [node])
+                    if not current_leader:
+                        msg = f"No leader available for {node.lvstore}, retry task"
+                        logger.warning(msg)
+                        task.function_result = msg
+                        task.status = JobSchedule.STATUS_SUSPENDED
+                        task.write_to_db(db.kv_store)
+                        return
 
-            secs_to_unblock.append(sn)
+                for sid in sec_ids:
+                    sn = db.get_storage_node_by_id(sid)
+                    if not sn or sn.status != StorageNode.STATUS_ONLINE:
+                        continue
+
+                    sn_rpc = sn.rpc_client()
+                    ret = sn.wait_for_jm_rep_tasks_to_finish(node.jm_vuid)
+                    if not ret:
+                        msg = f"JM replication task found on secondary {sn.get_id()}"
+                        logger.warning(msg)
+                        task.function_result = msg
+                        task.status = JobSchedule.STATUS_SUSPENDED
+                        task.write_to_db(db.kv_store)
+                        return
+
+                    sn_fw = FirewallClient(sn, timeout=5, retry=2)
+                    sn_port_type = "udp" if sn.active_rdma else "tcp"
+                    sn_fw.firewall_set_port(port_number, sn_port_type, "block", sn.rpc_port)
+                    tcp_ports_events.port_deny(sn, port_number)
+
+                    time.sleep(0.5)
+
+                    sn_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+                    sn_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
+                    logger.info(f"Checking for inflight IO from node: {sn.get_id()}")
+                    for i in range(100):
+                        is_inflight = sn_rpc.bdev_distrib_check_inflight_io(node.jm_vuid)
+                        if is_inflight:
+                            logger.info("Inflight IO found, retry in 100ms")
+                            time.sleep(0.1)
+                        else:
+                            logger.info("Inflight IO NOT found, continuing")
+                            break
+                    else:
+                        logger.error(
+                            f"Timeout while checking for inflight IO after 10 seconds on node {sn.get_id()}")
+
+                    secs_to_unblock.append(sn)
 
     except Exception as e:
         logger.error(e)
