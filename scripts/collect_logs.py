@@ -276,6 +276,46 @@ def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
 # ---------------------------------------------------------------------------
 
 
+def _os_get_index(session, os_url):
+    """
+    Discover the graylog indices present in OpenSearch and return them as a
+    comma-separated string suitable for use in a URL path segment.
+
+    Using _cat/indices avoids embedding a '*' wildcard in the URL, which
+    HAProxy may reject (400).  Falls back to '_all' if discovery fails.
+    """
+    try:
+        r = session.get(f"{os_url}/_cat/indices?h=index&format=json", timeout=10)
+        r.raise_for_status()
+        indices = sorted(
+            i["index"]
+            for i in r.json()
+            if i["index"].startswith("graylog") and not i["index"].startswith(".")
+        )
+        if indices:
+            return ",".join(indices)
+    except Exception as exc:
+        print(f"    WARN: could not discover OpenSearch indices ({exc}); using _all", file=sys.stderr)
+    return "_all"
+
+
+def _os_term(field, value):
+    """
+    Build an exact-match clause that works regardless of whether the field is
+    mapped as 'keyword' or 'text+keyword'.  Tries fieldname.keyword first;
+    OpenSearch ignores unknown sub-fields gracefully via a should/filter combo.
+    """
+    return {
+        "bool": {
+            "should": [
+                {"term": {f"{field}.keyword": value}},
+                {"term": {field: value}},
+            ],
+            "minimum_should_match": 1,
+        }
+    }
+
+
 def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_iso, out_path):
     """
     Fetch logs directly from OpenSearch using the scroll API.
@@ -288,18 +328,18 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
         {"range": {"timestamp": {"gte": from_iso, "lte": to_iso}}},
     ]
     if container_name:
-        # Match with or without the leading "/" that the Docker daemon may add
+        # Docker may prepend a leading "/" to the container name; match both.
         must_clauses.append({
             "bool": {
                 "should": [
-                    {"term": {"container_name": container_name}},
-                    {"term": {"container_name": f"/{container_name}"}},
+                    _os_term("container_name", container_name),
+                    _os_term("container_name", f"/{container_name}"),
                 ],
                 "minimum_should_match": 1,
             }
         })
     if source:
-        must_clauses.append({"term": {"source": source}})
+        must_clauses.append(_os_term("source", source))
 
     body = {
         "query": {"bool": {"must": must_clauses}},
@@ -308,12 +348,21 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
         "_source": ["timestamp", "source", "container_name", "level", "message"],
     }
 
-    init_url = f"{os_url}/graylog_*/_search?scroll=2m"
+    # Discover actual index names – avoids wildcard in URL path (HAProxy rejects it)
+    index = _os_get_index(session, os_url)
+    init_url = f"{os_url}/{index}/_search?scroll=2m"
     written = 0
 
     try:
         r = session.post(init_url, json=body, timeout=60)
-        r.raise_for_status()
+        if not r.ok:
+            print(
+                f"    WARN: OpenSearch initial scroll failed: {r.status_code} {r.reason}"
+                f"\n          body: {r.text[:300]}",
+                file=sys.stderr,
+            )
+            Path(out_path).touch()
+            return 0
     except requests.RequestException as exc:
         print(f"    WARN: OpenSearch initial scroll failed: {exc}", file=sys.stderr)
         Path(out_path).touch()
