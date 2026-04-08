@@ -324,8 +324,16 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
     source) within the requested time range.  Scrolls through all hits.
     Returns number of lines written.
     """
+    # Graylog's OpenSearch index maps the timestamp field with format
+    # "uuuu-MM-dd HH:mm:ss.SSS" (space separator, no timezone suffix).
+    # Sending ISO-8601 with "T" and "Z" causes a 400 parse_exception.
+    # epoch_millis is accepted by OpenSearch regardless of the field's
+    # stored date format and is therefore the most portable choice.
+    from_ms = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp() * 1000)
+    to_ms = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp() * 1000)
+
     must_clauses = [
-        {"range": {"timestamp": {"gte": from_iso, "lte": to_iso}}},
+        {"range": {"timestamp": {"gte": from_ms, "lte": to_ms, "format": "epoch_millis"}}},
     ]
     if container_name:
         # Docker may prepend a leading "/" to the container name; match both.
