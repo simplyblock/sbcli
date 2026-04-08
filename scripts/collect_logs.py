@@ -862,68 +862,48 @@ def main():
         sn_root = log_root / "storage_nodes"
         sn_root.mkdir()
 
+        # SNodeAPI runs on every storage node under the same container name.
+        # Its GELF 'source' field is the Docker host hostname whose exact
+        # format varies by deployment and cannot be reliably derived from
+        # the management IP alone.  Collect ALL SNodeAPI logs once (no
+        # source filter) into a shared file; each line contains src=<host>
+        # so per-node filtering can be done with grep afterwards.
+        print(f"\n  SNodeAPI (all nodes combined) …")
+        snode_api_log = sn_root / "SNodeAPI_all_nodes.log"
+        snode_api_count = fetch(
+            gl_query='container_name:"SNodeAPI"',
+            os_container="SNodeAPI",
+            os_source=None,
+            out_path=snode_api_log,
+            **fetch_kw,
+        )
+        print(f"  {'SNodeAPI (all nodes)':<42} {snode_api_count:>8,} lines")
+        print(f"  (filter by src=<ip> to isolate per-node logs)")
+
         for node in sn_list:
             hostname = node.get("Hostname", "unknown")
             node_ip = node.get("Management IP", "")
             rpc_port = node.get("SPDK P", 8080)
 
-            # The GELF 'source' field is the Docker host's address.
-            # We prefer the IP; fall back to the hostname.
-            source_id = node_ip or hostname
             node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
             node_dir = sn_root / node_label
             node_dir.mkdir()
 
             print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
 
-            # Per-node containers:
-            #   spdk_{rpc_port}        – SPDK process
-            #   spdk_proxy_{rpc_port}  – SPDK HTTP proxy
-            #   SNodeAPI               – storage node API (firewall / management)
-            snode_containers = [
+            # spdk_N and spdk_proxy_N are globally unique by RPC port number;
+            # no source filter needed.
+            spdk_containers = [
                 (f"spdk_{rpc_port}",       f"spdk_{rpc_port}.log"),
                 (f"spdk_proxy_{rpc_port}", f"spdk_proxy_{rpc_port}.log"),
-                ("SNodeAPI",               "SNodeAPI.log"),
             ]
 
-            for cname, fname in snode_containers:
+            for cname, fname in spdk_containers:
                 out_f = node_dir / fname
-
-                if cname == "SNodeAPI":
-                    # SNodeAPI runs on every storage node so needs a source
-                    # filter to separate per-node logs.
-                    # The Graylog GELF 'source' field is the Docker host's
-                    # hostname, which on AWS EC2 is "ip-X-X-X-X" – not the
-                    # raw IP address.  We try all plausible formats so the
-                    # query succeeds regardless of naming convention:
-                    #   1. raw IP (e.g. "172.31.33.210")
-                    #   2. EC2 hostname from IP (e.g. "ip-172-31-33-210")
-                    #   3. sbctl Hostname field without trailing "_PORT" suffix
-                    base_hostname = (hostname.rsplit("_", 1)[0]
-                                     if "_" in hostname else hostname)
-                    ec2_hostname = (f"ip-{node_ip.replace('.', '-')}"
-                                    if node_ip else "")
-                    os_source: object = list(
-                        dict.fromkeys(            # deduplicate, preserve order
-                            s for s in [source_id, ec2_hostname, base_hostname]
-                            if s
-                        )
-                    )
-                    gl_q = (f'container_name:"{cname}" AND '
-                            f'(source:"{source_id}" OR '
-                            f'source:"{ec2_hostname}" OR '
-                            f'source:"{base_hostname}")')
-                else:
-                    # spdk_N and spdk_proxy_N are globally unique by RPC port
-                    # number – no source filter needed and avoids the
-                    # hostname-vs-IP ambiguity entirely.
-                    os_source = None
-                    gl_q = f'container_name:"{cname}"'
-
                 n = fetch(
-                    gl_query=gl_q,
+                    gl_query=f'container_name:"{cname}"',
                     os_container=cname,
-                    os_source=os_source,
+                    os_source=None,
                     out_path=out_f,
                     **fetch_kw,
                 )
