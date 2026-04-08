@@ -166,8 +166,8 @@ def process_snap_replicate_finish(task, snapshot):
 
     # chain snaps on primary
     if target_prev_snap:
-        logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap.snap_bdev}")
-        ret = remote_snode.rpc_client().bdev_lvol_add_clone( remote_lv.top_bdev, target_prev_snap.snap_bdev)
+        logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
+        ret = remote_snode.rpc_client().bdev_lvol_add_clone( remote_lv.top_bdev, target_prev_snap['snap_bdev'])
         if not ret:
             logger.error("Failed to chain replicated snapshot on primary node")
             return False
@@ -182,8 +182,8 @@ def process_snap_replicate_finish(task, snapshot):
     sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
     if sec_node.status == StorageNode.STATUS_ONLINE:
         if target_prev_snap:
-            logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap.snap_bdev}")
-            ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap.snap_bdev)
+            logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
+            ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap['snap_bdev'])
             if not ret:
                 logger.error("Failed to chain replicated snapshot on secondary node")
                 return False
@@ -218,10 +218,13 @@ def process_snap_replicate_finish(task, snapshot):
             snapshot.target_replicated_snap_uuid = new_snapshot_uuid
             new_snapshot.source_replicated_snap_uuid = snapshot.uuid
 
-        if target_prev_snap:
-            new_snapshot.prev_snap_uuid = target_prev_snap.get_id()
-            target_prev_snap.next_snap_uuid = new_snapshot_uuid
-            target_prev_snap.write_to_db()
+        try:
+            if target_prev_snap:
+                new_snapshot.prev_snap_uuid = target_prev_snap.get_id()
+                target_prev_snap.next_snap_uuid = new_snapshot_uuid
+                target_prev_snap.write_to_db()
+        except Exception as e:
+            logger.error(e)
 
     new_snapshot.write_to_db()
 
