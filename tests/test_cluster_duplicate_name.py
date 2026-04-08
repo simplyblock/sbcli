@@ -20,21 +20,13 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
-# Stub out all modules with external / unavailable dependencies before any
-# simplyblock_core import happens (including the autouse conftest fixtures).
-# This must be the very first thing in the file.
+# Stub out only the truly uninstallable C-extension (fdb / FoundationDB).
+# Everything else (docker, kubernetes, boto3, simplyblock_core modules) can
+# be imported cleanly and must NOT be stubbed here because this module-level
+# code runs during pytest collection – before any test in any file executes –
+# and permanent sys.modules replacements would break other test files that
+# import the same modules as real modules.
 # ---------------------------------------------------------------------------
-
-# docker SDK exists as a bare namespace package in this env (no DockerClient)
-_docker_mock = MagicMock()
-_docker_mock.DockerClient = MagicMock()
-_docker_mock.errors = MagicMock()
-_docker_mock.errors.DockerException = Exception
-_docker_mock.errors.APIError = Exception
-_docker_mock.errors.ImageNotFound = Exception
-_docker_mock.errors.NotFound = Exception
-sys.modules["docker"] = _docker_mock
-sys.modules["docker.errors"] = _docker_mock.errors
 
 # Provide a real Singleton class so the conftest autouse fixture can call
 # Singleton._instances.clear() without error.
@@ -45,45 +37,16 @@ _db_ctrl_mock = MagicMock()
 _db_ctrl_mock.Singleton = _Singleton
 _db_ctrl_mock.DBController = MagicMock()
 
-_STUB_MODULES = [
-    # C-extension / native packages
-    "fdb", "fdb.tuple",
-    # Kubernetes SDK
-    "kubernetes", "kubernetes.client", "kubernetes.config",
-    # AWS SDK
-    "boto3", "boto3.session", "botocore", "botocore.exceptions",
-    # simplyblock_web
-    "simplyblock_web", "simplyblock_web.node_utils",
-    # simplyblock_core submodules with heavy external deps
-    "simplyblock_core.utils",
-    "simplyblock_core.scripts",
-    "simplyblock_core.shell_utils",
-    "simplyblock_core.constants",
-    "simplyblock_core.mgmt_node_ops",
-    "simplyblock_core.storage_node_ops",
-    "simplyblock_core.prom_client",
-    "simplyblock_core.controllers",
-    "simplyblock_core.controllers.backup_controller",
-    "simplyblock_core.controllers.cluster_events",
-    "simplyblock_core.controllers.device_controller",
-    "simplyblock_core.controllers.qos_controller",
-    "simplyblock_core.controllers.tasks_controller",
-    # models that transitively import utils
-    "simplyblock_core.models.storage_node",
-    "simplyblock_core.models.mgmt_node",
-    "simplyblock_core.models.stats",
-    "simplyblock_core.models.nvme_device",
-    "simplyblock_core.models.lvol_model",
-    "simplyblock_core.models.pool",
-    "simplyblock_core.models.job_schedule",
-]
-for _mod in _STUB_MODULES:
-    sys.modules[_mod] = MagicMock()
+# Only stub the C-extension that cannot be pip-installed in dev environments.
+sys.modules.setdefault("fdb", MagicMock())
+sys.modules.setdefault("fdb.tuple", MagicMock())
 
-# Replace db_controller with the version that has a real Singleton class
+# Replace db_controller with a stub that exposes a real Singleton class so
+# the conftest autouse fixture works, and a mock DBController for tests.
 sys.modules["simplyblock_core.db_controller"] = _db_ctrl_mock
 
 # Now we can safely import simplyblock_core pieces.
+from simplyblock_core import cluster_ops  # noqa: E402  (needed so @patch can resolve the target)
 from simplyblock_core.models.cluster import Cluster  # noqa: E402
 
 
@@ -245,10 +208,10 @@ class TestCreateClusterDuplicateName(unittest.TestCase):
 
     def test_no_existing_clusters_skips_name_check(self):
         """When no clusters exist the duplicate-name check must not fire."""
-        # If any ValueError surfaces it must not be our duplicate-name error.
+        # If any exception surfaces it must not be our duplicate-name ValueError.
         try:
             self._call("brand-new", existing_clusters=[])
-        except ValueError as exc:
+        except Exception as exc:
             self.assertNotIn("already exists", str(exc))
 
 

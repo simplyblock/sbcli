@@ -240,6 +240,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
+    if name:
+        existing_clusters = db_controller.get_clusters()
+        for existing in existing_clusters:
+            if existing.cluster_name and existing.cluster_name == name:
+                raise ValueError(f"A cluster with the name '{name}' already exists")
+
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
 
     logger.info("Installing dependencies...")
@@ -295,12 +301,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     if not cli_pass:
         cli_pass = utils.generate_string(10)
-
-    if name:
-        existing_clusters = db_controller.get_clusters()
-        for existing in existing_clusters:
-            if existing.cluster_name and existing.cluster_name == name:
-                raise ValueError(f"A cluster with the name '{name}' already exists")
 
     logger.info("Adding new cluster object")
     cluster = Cluster()
