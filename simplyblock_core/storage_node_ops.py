@@ -854,6 +854,7 @@ def _connect_to_remote_devs(
         node_bdev_names = []
 
     remote_devices = []
+    existing_remote_devices = {dev.get_id(): dev for dev in this_node.remote_devices}
 
     allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
     allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]
@@ -892,6 +893,13 @@ def _connect_to_remote_devs(
     if node_bdevs:
         node_bdev_names = [b['name'] for b in node_bdevs]
 
+    def _find_remote_bdev(dev):
+        expected_prefix = f"remote_{dev.alceml_bdev}"
+        for bdev in node_bdev_names:
+            if bdev.startswith(expected_prefix):
+                return bdev
+        return ""
+
     for dev in devices_to_connect:
         remote_bdev = RemoteDevice()
         remote_bdev.uuid = dev.uuid
@@ -900,10 +908,19 @@ def _connect_to_remote_devs(
         remote_bdev.size = dev.size
         remote_bdev.status = NVMeDevice.STATUS_ONLINE
         remote_bdev.nvmf_multipath = dev.nvmf_multipath
-        for bdev in node_bdev_names:
-            if bdev.startswith(f"remote_{dev.alceml_bdev}"):
-                remote_bdev.remote_bdev = bdev
+        remote_bdev.remote_bdev = _find_remote_bdev(dev)
+        for _ in range(10):
+            if remote_bdev.remote_bdev:
                 break
+            time.sleep(0.5)
+            node_bdevs = rpc_client.get_bdevs()
+            if node_bdevs:
+                node_bdev_names = [b['name'] for b in node_bdevs]
+            remote_bdev.remote_bdev = _find_remote_bdev(dev)
+        if not remote_bdev.remote_bdev and dev.get_id() in existing_remote_devices:
+            existing_remote_device = existing_remote_devices[dev.get_id()]
+            if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
+                remote_bdev.remote_bdev = existing_remote_device.remote_bdev
         if not remote_bdev.remote_bdev:
             logger.error(f"Failed to connect to remote device {dev.alceml_name}")
             continue
@@ -953,6 +970,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE]
 
     new_devs = []
+    existing_remote_jm_devices = {dev.get_id(): dev for dev in this_node.remote_jm_devices}
     for jm_dev in remote_devices:
         if not jm_dev.jm_bdev:
             continue
@@ -984,6 +1002,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         remote_device.jm_bdev = org_dev.jm_bdev
         remote_device.status = NVMeDevice.STATUS_ONLINE
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
+        expected_bdev = f"remote_{org_dev.jm_bdev}n1"
         try:
             remote_device.remote_bdev = connect_device(
                 f"remote_{org_dev.jm_bdev}", org_dev, this_node,
@@ -991,6 +1010,20 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             )
         except RuntimeError:
             logger.error(f'Failed to connect to {org_dev.get_id()}')
+        for _ in range(10):
+            if remote_device.remote_bdev and rpc_client.get_bdevs(remote_device.remote_bdev):
+                break
+            if rpc_client.get_bdevs(expected_bdev):
+                remote_device.remote_bdev = expected_bdev
+                break
+            time.sleep(0.5)
+        if not remote_device.remote_bdev and org_dev.get_id() in existing_remote_jm_devices:
+            existing_remote_device = existing_remote_jm_devices[org_dev.get_id()]
+            if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
+                remote_device.remote_bdev = existing_remote_device.remote_bdev
+        if not remote_device.remote_bdev:
+            logger.error(f"Failed to connect to remote JM device {org_dev.alceml_name}")
+            continue
         new_devs.append(remote_device)
 
     return new_devs
@@ -2273,6 +2306,25 @@ def restart_storage_node(
     else:
         snode = db_controller.get_storage_node_by_id(snode.get_id())
 
+        # Remote device connectivity is node-level and must be established before
+        # any LVS recreation consumes remote alceml bdevs in distrib maps/stacks.
+        logger.info("Make other nodes connect to the node devices")
+        snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        for node in snodes:
+            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                continue
+
+            try:
+                # Re-read node from DB to avoid overwriting concurrent changes
+                node = db_controller.get_storage_node_by_id(node.get_id())
+                node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+                if node.enable_ha_jm:
+                    node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+            except RuntimeError:
+                logger.error('Failed to connect to remote devices')
+                return False
+            node.write_to_db()
+
         # === LVS Recreation: clear sequential structure per design ===
         # No recursion. Process primary, secondary, tertiary LVS in order.
         # Before each, perform disconnect checks on the other two nodes.
@@ -2317,6 +2369,8 @@ def restart_storage_node(
                 # Re-read node from DB to avoid overwriting concurrent changes
                 node = db_controller.get_storage_node_by_id(node.get_id())
                 node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+                if node.enable_ha_jm:
+                    node.remote_jm_devices = _connect_to_remote_jm_devs(node)
             except RuntimeError:
                 logger.error('Failed to connect to remote devices')
                 return False
@@ -2338,6 +2392,7 @@ def restart_storage_node(
 
         logger.info("Setting node status to Online")
         set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        _refresh_cluster_maps_after_node_recovery(snode)
 
         lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
         logger.info(f"Found {len(lvol_list)} lvols")
