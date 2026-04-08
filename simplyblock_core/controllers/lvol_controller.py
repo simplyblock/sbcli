@@ -2538,9 +2538,10 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         target_node = db_controller.get_storage_node_by_id(lvol.replication_node_id)
         logger.info(f"Looking for snapshot in target cluster: {target_node.cluster_id}")
         target_lvol_id = None
+        lvol_id_in_nqn = lvol.nqn.split(":")[-1]
         for lv in db_controller.get_lvols(target_node.cluster_id):
-            if lv.nqn == lvol.nqn:
-                logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+            if lv.nqn.split(":")[-1] == lvol_id_in_nqn:
+                logger.info(f"LVol with same lvol nqn already exists on target cluster: {lv.get_id()}")
                 target_lvol_id = lv.get_id()
 
         if not target_lvol_id:
