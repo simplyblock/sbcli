@@ -764,6 +764,8 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
+            snode.jm_device = ret
+            snode.write_to_db()
             return True
 
         jm_bdevs_found = []
@@ -780,6 +782,8 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
             if not ret:
                 logger.error("Failed to create JM device")
                 return False
+            snode.jm_device = ret
+            snode.write_to_db()
         else:
             logger.error("Only one jm nvme bdev found, setting jm device to removed")
             jm_device.status = JMDevice.STATUS_REMOVED
@@ -834,6 +838,9 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
                 if iface.ip4_address:
                     logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
                     ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+        jm_device.status = JMDevice.STATUS_ONLINE
+        snode.jm_device = jm_device
+        snode.write_to_db()
 
     return True
 
@@ -4737,6 +4744,21 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
         role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
+    leader_restored = False
+    for _ in range(10):
+        try:
+            ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+            if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
+                leader_restored = True
+                break
+        except Exception:
+            pass
+        time.sleep(0.2)
+    if not leader_restored:
+        logger.error("Failed to restore leadership for %s on node %s", lvs_name, snode.get_id())
+        if not force:
+            _kill_app()
+            raise Exception(f"Failed to restore leadership for {lvs_name}")
 
     ### 8- create hublvol and expose via subsystem with listeners (per data NICs)
     if sec_nodes:
