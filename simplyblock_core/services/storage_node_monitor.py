@@ -266,7 +266,7 @@ def set_node_unreachable(node):
 
 
 def is_node_data_plane_disconnected(node):
-    """Return True if all online primary peers report *node*'s remote JM as disconnected.
+    """Return True if all other online nodes report *node*'s remote JM as disconnected.
 
     Returns False if no peers are available to check (conservative).
     """
@@ -275,95 +275,47 @@ def is_node_data_plane_disconnected(node):
 
 
 def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None):
-    """Return True if a majority of peers report *node*'s remote JM as disconnected.
-
-    Args:
-        node: the node whose data-plane connectivity is being checked.
-        lvs_peer_ids: optional list of specific peer node UUIDs to query
-            (the LVS peers for the LVS being processed).  When provided,
-            only these peers vote — giving a per-LVS quorum check as
-            required by the design.  When None, falls back to querying
-            all online primary nodes globally (legacy behavior).
+    """Return True if a majority of online nodes report *node*'s remote JM as disconnected.
 
     Returns False if no peers are available to check (conservative).
     """
-    if lvs_peer_ids is not None:
-        disconnected, total = _count_data_plane_votes_from_peers(node, lvs_peer_ids)
-    else:
-        disconnected, total = _count_data_plane_votes(node)
+    disconnected, total = _count_data_plane_votes(node)
     return total > 0 and disconnected > total // 2
 
 
-def _count_data_plane_votes_from_peers(node, peer_ids):
-    """Query specific LVS peer nodes for *node*'s JM connectivity.
-
-    Only peers that are online and reachable participate in the vote.
-    Returns (disconnected_count, total_peers_checked).
-    """
-    node_id = node.get_id()
-    remote_jm_key = f"remote_jm_{node_id}n1"
-    disconnected = 0
-    total = 0
-
-    for peer_id in peer_ids:
-        if peer_id == node_id:
-            continue
-        try:
-            peer = db.get_storage_node_by_id(peer_id)
-        except (KeyError, Exception):
-            continue
-
-        if peer.status != StorageNode.STATUS_ONLINE:
-            continue
-        if not peer.jm_vuid:
-            continue
-
-        try:
-            ret = peer.rpc_client(timeout=5, retry=1).jc_get_jm_status(peer.jm_vuid)
-            total += 1
-            if ret and ret.get(remote_jm_key) is True:
-                logger.info("Per-LVS data-plane check: peer %s still sees %s JM as connected",
-                            peer.get_id(), node_id)
-            else:
-                disconnected += 1
-        except Exception as e:
-            logger.debug("jc_get_jm_status on peer %s failed: %s", peer.get_id(), e)
-            continue
-
-    logger.info("Per-LVS data-plane check for %s: %d/%d peers report disconnected",
-                node_id, disconnected, total)
-    return disconnected, total
-
-
 def _count_data_plane_votes(node):
-    """Query online primary peers for *node*'s JM connectivity.
+    """Query all other online storage nodes for *node*'s JM connectivity.
 
     Returns (disconnected_count, total_peers_checked).
     """
     node_id = node.get_id()
     cluster_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
 
-    online_primaries = [
+    online_peers = [
         n for n in cluster_nodes
         if n.get_id() != node_id
         and n.status == StorageNode.STATUS_ONLINE
-        and not n.is_secondary_node
         and n.jm_vuid
     ]
 
-    if not online_primaries:
-        logger.debug("No online primary peers to verify data plane for %s", node_id)
+    if not online_peers:
+        logger.debug("No online peers to verify data plane for %s", node_id)
         return 0, 0
 
     remote_jm_key = f"remote_jm_{node_id}n1"
     disconnected = 0
     total = 0
 
-    for peer in online_primaries:
+    for peer in online_peers:
         try:
             ret = peer.rpc_client(timeout=5, retry=1).jc_get_jm_status(peer.jm_vuid)
+            if not ret or remote_jm_key not in ret:
+                logger.debug("Data-plane check: peer %s has no status for %s JM; ignoring vote",
+                             peer.get_id(), node_id)
+                continue
+
             total += 1
-            if ret and ret.get(remote_jm_key) is True:
+            if ret[remote_jm_key] is True:
                 logger.info("Data-plane check: peer %s still sees %s JM as connected",
                             peer.get_id(), node_id)
             else:

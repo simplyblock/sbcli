@@ -4113,7 +4113,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node):
 
     nodes_to_unblock = []
 
-    ### 3- block leader port and drop leadership temporarily
+    ### 3- briefly block peer ports while the non-leader LVS is examined
     # Per design: use disconnect check, not node status
     lvs_peer_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.tertiary_node_id] if sid]
     if not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids):
@@ -4123,28 +4123,10 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node):
             tcp_ports_events.port_deny(leader_node, leader_lvs_port)
             time.sleep(0.5)
 
-            ### 4- drop leader's leadership and wait for inflight IO
-            leader_rpc = RPCClient(leader_node.mgmt_ip, leader_node.rpc_port,
-                                   leader_node.rpc_username, leader_node.rpc_password)
-            leader_rpc.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
-            leader_rpc.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
-            logger.info(f"Checking for inflight IO from node: {leader_node.get_id()}")
-            for i in range(100):
-                is_inflight = leader_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
-                if is_inflight:
-                    logger.info("Inflight IO found, retry in 100ms")
-                    time.sleep(0.1)
-                else:
-                    logger.info("Inflight IO NOT found, continuing")
-                    break
-            else:
-                logger.error(f"Timeout checking inflight IO on node {leader_node.get_id()}")
             nodes_to_unblock.append(leader_node)
         except Exception as e:
-            rpc_result = _handle_rpc_failure_on_peer(snode, leader_node, primary_node.jm_vuid)
-            if rpc_result == "abort":
-                raise Exception(f"Abort restart: leader {leader_node.get_id()} fabric-connected but mgmt unresponsive")
-            # skip or leader_dropped — continue without unblock
+            logger.warning("Skipping peer port block for leader %s on %s: %s",
+                           leader_node.get_id(), primary_node.lvstore, e)
 
     # Block sibling (the other peer that is not snode or leader)
     other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.tertiary_node_id]
@@ -4161,19 +4143,10 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node):
             other_fw.firewall_set_port(leader_lvs_port, other_pt, "block", other_sec.rpc_port)
             tcp_ports_events.port_deny(other_sec, leader_lvs_port)
             time.sleep(0.5)
-            other_rpc = RPCClient(other_sec.mgmt_ip, other_sec.rpc_port,
-                                  other_sec.rpc_username, other_sec.rpc_password)
-            logger.info(f"Checking for inflight IO from sibling {other_sec.get_id()}")
-            for i in range(100):
-                if other_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid):
-                    time.sleep(0.1)
-                else:
-                    break
             nodes_to_unblock.append(other_sec)
         except Exception as e:
-            rpc_result = _handle_rpc_failure_on_peer(snode, other_sec, primary_node.jm_vuid)
-            if rpc_result == "abort":
-                raise Exception(f"Abort restart: sibling {other_sec.get_id()} fabric-connected but mgmt unresponsive")
+            logger.warning("Skipping peer port block for sibling %s on %s: %s",
+                           other_sec.get_id(), primary_node.lvstore, e)
 
     ### 5- examine
     ret = snode_rpc_client.bdev_examine(primary_node.raid)
@@ -4523,22 +4496,23 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
             tcp_ports_events.port_deny(sec_node, snode_lvs_port)
 
             time.sleep(0.5)
-            ### 4- set leadership to false
-            sec_rpc_client.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
-            sec_rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
-            ### 4-1 check for inflight IO
-            logger.info(f"Checking for inflight IO from node: {sec_node.get_id()}")
-            for i in range(100):
-                is_inflight = sec_rpc_client.bdev_distrib_check_inflight_io(lvs_jm_vuid)
-                if is_inflight:
-                    logger.info("Inflight IO found, retry in 100ms")
-                    time.sleep(0.1)
+            if current_leader and sec_node.get_id() == current_leader.get_id():
+                ### 4- set leadership to false
+                sec_rpc_client.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
+                sec_rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
+                ### 4-1 check for inflight IO
+                logger.info(f"Checking for inflight IO from leader node: {sec_node.get_id()}")
+                for i in range(100):
+                    is_inflight = sec_rpc_client.bdev_distrib_check_inflight_io(lvs_jm_vuid)
+                    if is_inflight:
+                        logger.info("Inflight IO found, retry in 100ms")
+                        time.sleep(0.1)
+                    else:
+                        logger.info("Inflight IO NOT found, continuing")
+                        break
                 else:
-                    logger.info("Inflight IO NOT found, continuing")
-                    break
-            else:
-                logger.error(
-                    f"Timeout while checking for inflight IO after 10 seconds on node {sec_node.get_id()}")
+                    logger.error(
+                        f"Timeout while checking for inflight IO after 10 seconds on node {sec_node.get_id()}")
         except Exception as e:
             # RPC failed on connected peer — use hublvol disconnect check (Method 2)
             rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid)
@@ -4682,6 +4656,10 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
 
     # Clear restart phase for this LVS
     _set_restart_phase(snode, lvs_name, "", db_controller)
+
+    lvs_node = db_controller.get_storage_node_by_id(lvs_node.get_id())
+    lvs_node.lvstore_status = "ready"
+    lvs_node.write_to_db()
 
     # reset snapshot delete status (only for own primary LVS)
     if not is_takeover:
