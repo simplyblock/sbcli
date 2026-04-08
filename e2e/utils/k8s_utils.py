@@ -233,12 +233,19 @@ class K8sUtils:
             pod_name = self.get_spdk_pod_name(storage_node_ip)
             dest_dir = os.path.join(logs_path, pod_name, "lvstore_dumps")
             os.makedirs(dest_dir, exist_ok=True)
-            dest_path = os.path.join(dest_dir, os.path.basename(dump_file))
+            safe_name = os.path.basename(dump_file).replace(":", "_")
+            dest_path = os.path.join(dest_dir, safe_name)
 
+            # kubectl cp misinterprets colons in filenames as pod:path
+            # separators, so copy to a colon-free temp path first.
+            kexec = f"kubectl exec -n {self.namespace} {pod_name} -c spdk-container --"
+            tmp_path = f"/tmp/{safe_name}"
+            self._exec_kubectl(f"{kexec} cp {dump_file} {tmp_path}")
             self._exec_kubectl(
-                f"kubectl cp -n {self.namespace} {pod_name}:{dump_file} "
+                f"kubectl cp -n {self.namespace} {pod_name}:{tmp_path} "
                 f"-c spdk-container {dest_path}"
             )
+            self._exec_kubectl(f"{kexec} rm -f {tmp_path}", supress_logs=True)
             self.logger.info(f"[dump_lvstore_k8s] {dump_file} → {dest_path}")
         except Exception as e:
             self.logger.warning(f"[dump_lvstore_k8s] FAILED node={storage_node_id}: {e}")

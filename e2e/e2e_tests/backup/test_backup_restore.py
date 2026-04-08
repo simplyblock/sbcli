@@ -261,7 +261,13 @@ class BackupTestBase(TestClusterBase):
 
     def _wait_for_restore(self, lvol_name: str, timeout: int = _RESTORE_COMPLETE_TIMEOUT,
                           expect_failure: bool = False):
-        """Wait until restored lvol appears in lvol list.
+        """Wait until restored lvol appears in lvol list, then wait for the
+        restore task to reach *done* status before allowing connect/mount.
+
+        If the restore task reaches *done* within 5 minutes, an additional
+        60-second stabilisation sleep is applied.  If the task does not reach
+        *done* within 5 minutes the method returns anyway so the caller can
+        proceed with connect/mount.
 
         Set expect_failure=True to skip cluster-task failure detection (used in
         interrupted-restore tests where a suspended task is tolerated).
@@ -278,9 +284,66 @@ class BackupTestBase(TestClusterBase):
             if lvol_name in out:
                 if not expect_failure:
                     self._assert_no_new_restore_failures(suspended_before, lvol_name)
+                # Lvol visible — now wait for the restore task to complete
+                if not expect_failure:
+                    self._wait_for_restore_task_done(lvol_name)
                 return
             sleep_n_sec(_POLL_INTERVAL)
         raise TimeoutError(f"Restored lvol {lvol_name} not visible after {timeout}s")
+
+    def _wait_for_restore_task_done(self, lvol_name: str,
+                                     timeout: int = 300) -> None:
+        """Poll cluster tasks for up to *timeout* seconds (default 5 min)
+        waiting for the s3_backup_restore task targeting *lvol_name* to reach
+        ``done`` status.
+
+        If the task reaches ``done`` within the timeout, sleep an extra 60 s
+        to let the data-plane stabilise before connect/mount.  If the timeout
+        expires the method logs a warning and returns so the caller can
+        proceed anyway.
+        """
+        _POLL = 10
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name) or ""
+        deadline = time.time() + timeout
+
+        self.logger.info(
+            f"[restore] Waiting up to {timeout}s for restore task to complete "
+            f"for {lvol_name} ({lvol_id})"
+        )
+
+        while time.time() < deadline:
+            try:
+                out, _ = self._sbcli(f"cluster list-tasks {self.cluster_id} --limit 0")
+                for line in (out or "").splitlines():
+                    if "|" not in line or "s3_backup_restore" not in line:
+                        continue
+                    parts = [p.strip() for p in line.split("|") if p.strip()]
+                    if len(parts) < 5 or parts[2] != "s3_backup_restore":
+                        continue
+                    target_id = parts[1]
+                    status = parts[4]
+                    # Match by lvol id (target_id column)
+                    if lvol_id and target_id == lvol_id:
+                        if status == "done":
+                            self.logger.info(
+                                f"[restore] Restore task for {lvol_name} is done. "
+                                "Waiting 60s before connect/mount."
+                            )
+                            sleep_n_sec(60)
+                            return
+                        self.logger.info(
+                            f"[restore] Restore task for {lvol_name} status: {status} "
+                            f"({int(deadline - time.time())}s remaining)"
+                        )
+                        break
+            except Exception as e:
+                self.logger.warning(f"[restore] Could not check restore task status: {e}")
+            sleep_n_sec(_POLL)
+
+        self.logger.warning(
+            f"[restore] Restore task for {lvol_name} did not reach 'done' "
+            f"within {timeout}s — proceeding with connect/mount anyway."
+        )
 
     def _validate_backup_fields(self, backup: dict, lvol_name: str = None,
                                  snap_name: str = None) -> None:
