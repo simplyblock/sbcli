@@ -900,6 +900,7 @@ def _connect_to_remote_devs(
                 return bdev
         return ""
 
+    remote_device_ids = set()
     for dev in devices_to_connect:
         remote_bdev = RemoteDevice()
         remote_bdev.uuid = dev.uuid
@@ -925,8 +926,90 @@ def _connect_to_remote_devs(
             logger.error(f"Failed to connect to remote device {dev.alceml_name}")
             continue
         remote_devices.append(remote_bdev)
+        remote_device_ids.add(dev.get_id())
+
+    # Some callers overwrite node.remote_devices with this return value. Make
+    # the return value authoritative for existing SPDK state, not only for the
+    # connect attempts above.
+    for node in nodes:
+        if node.get_id() == this_node.get_id() or node.status not in allowed_node_statuses:
+            continue
+        for dev in node.nvme_devices:
+            if dev.get_id() in remote_device_ids:
+                continue
+            if dev.status not in allowed_dev_statuses:
+                continue
+            expected_bdev = f"remote_{dev.alceml_bdev}n1"
+            if expected_bdev not in node_bdev_names:
+                continue
+            remote_bdev = RemoteDevice()
+            remote_bdev.uuid = dev.uuid
+            remote_bdev.alceml_name = dev.alceml_name
+            remote_bdev.node_id = dev.node_id
+            remote_bdev.size = dev.size
+            remote_bdev.status = NVMeDevice.STATUS_ONLINE
+            remote_bdev.nvmf_multipath = dev.nvmf_multipath
+            remote_bdev.remote_bdev = expected_bdev
+            remote_devices.append(remote_bdev)
+            remote_device_ids.add(dev.get_id())
 
     return remote_devices
+
+
+def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
+    """Persist remote data bdevs that already exist in SPDK for this node."""
+    db_controller = DBController()
+    if node_bdev_names is None:
+        rpc_client = RPCClient(
+            this_node.mgmt_ip, this_node.rpc_port,
+            this_node.rpc_username, this_node.rpc_password, timeout=5, retry=1)
+        node_bdevs = rpc_client.get_bdevs()
+        node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
+    elif isinstance(node_bdev_names, dict):
+        node_bdev_names = list(node_bdev_names.keys())
+
+    node_bdev_names = set(node_bdev_names)
+    fresh_node = db_controller.get_storage_node_by_id(this_node.get_id())
+    remote_by_id = {dev.get_id(): dev for dev in fresh_node.remote_devices}
+    changed = False
+
+    for peer in db_controller.get_storage_nodes_by_cluster_id(fresh_node.cluster_id):
+        if peer.get_id() == fresh_node.get_id():
+            continue
+        if peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_RESTARTING]:
+            continue
+        for dev in peer.nvme_devices:
+            if dev.status not in [
+                NVMeDevice.STATUS_ONLINE,
+                NVMeDevice.STATUS_READONLY,
+                NVMeDevice.STATUS_CANNOT_ALLOCATE,
+            ]:
+                continue
+            expected_bdev = f"remote_{dev.alceml_bdev}n1"
+            if expected_bdev not in node_bdev_names:
+                continue
+            remote_dev = remote_by_id.get(dev.get_id())
+            if remote_dev:
+                if remote_dev.remote_bdev != expected_bdev or remote_dev.status != NVMeDevice.STATUS_ONLINE:
+                    remote_dev.remote_bdev = expected_bdev
+                    remote_dev.status = NVMeDevice.STATUS_ONLINE
+                    changed = True
+            else:
+                remote_dev = RemoteDevice()
+                remote_dev.uuid = dev.uuid
+                remote_dev.alceml_name = dev.alceml_name
+                remote_dev.node_id = dev.node_id
+                remote_dev.size = dev.size
+                remote_dev.status = NVMeDevice.STATUS_ONLINE
+                remote_dev.nvmf_multipath = dev.nvmf_multipath
+                remote_dev.remote_bdev = expected_bdev
+                fresh_node.remote_devices.append(remote_dev)
+                remote_by_id[dev.get_id()] = remote_dev
+                changed = True
+
+    if changed:
+        fresh_node.write_to_db(db_controller.kv_store)
+    return changed
 
 
 def _connect_to_remote_jm_devs(this_node, jm_ids=None):
