@@ -380,45 +380,8 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         if self.first_outage_ts is None:
             self.first_outage_ts = int(datetime.now().timestamp())
 
-        cur_node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
-        cur_node_ip = cur_node_details[0]["mgmt_ip"]
-        self.ssh_obj.fetch_distrib_logs(
-            storage_node_ip=cur_node_ip,
-            storage_node_id=self.current_outage_node,
-            logs_path=self.docker_logs_path,
-            validate_async=True,
-            error_sink=self.dump_validation_errors
-        )
-
-        threading.Thread(
-            target=self.ssh_obj.dump_lvstore,
-            kwargs={"node_ip": self.mgmt_nodes[0],
-                    "storage_node_id": self.current_outage_node},
-            daemon=True,
-        ).start()
-
-        # Also dump the secondary node before outage
-        secondary_id = self.sn_primary_secondary_map.get(self.current_outage_node)
-        if secondary_id:
-            try:
-                sec_details = self.sbcli_utils.get_storage_node_details(secondary_id)
-                sec_ip = sec_details[0]["mgmt_ip"]
-                self.logger.info(f"[LFNG] Pre-dump secondary node {secondary_id} (IP={sec_ip}) for outage node {self.current_outage_node}")
-                self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=sec_ip,
-                    storage_node_id=secondary_id,
-                    logs_path=self.docker_logs_path,
-                    validate_async=True,
-                    error_sink=self.dump_validation_errors
-                )
-                threading.Thread(
-                    target=self.ssh_obj.dump_lvstore,
-                    kwargs={"node_ip": self.mgmt_nodes[0],
-                            "storage_node_id": secondary_id},
-                    daemon=True,
-                ).start()
-            except Exception as e:
-                self.logger.warning(f"[LFNG] Pre-dump secondary node {secondary_id} failed: {e}")
+        # Collect diagnostics for ALL nodes before outage (parallel)
+        self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
 
         self.outage_start_time = int(datetime.now().timestamp())
         self._log_outage_event(self.current_outage_node, outage_type, "Outage started")
@@ -447,47 +410,12 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                     )
                 self.logger.info(f"Node {self.current_outage_node} not yet offline; retrying shutdown...")
 
-            for node in self.sn_nodes_with_sec:
-                if node != self.current_outage_node:
-                    cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                    cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=cur_node_ip,
-                        storage_node_id=node,
-                        logs_path=self.docker_logs_path,
-                        validate_async=True,
-                        error_sink=self.dump_validation_errors
-                    )
-                    threading.Thread(
-                        target=self.ssh_obj.dump_lvstore,
-                        kwargs={"node_ip": self.mgmt_nodes[0], "storage_node_id": node},
-                        daemon=True,
-                    ).start()
-            # Keep node strictly offline for 5 minutes
-            # sleep_n_sec(60)
-
         elif outage_type == "container_stop":
             if self.k8s_test and self.k8s_utils:
                 self.k8s_utils.stop_spdk_pod(node_ip)
             else:
                 self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, ["offline", "unreachable"], timeout=900)
-            for node in self.sn_nodes_with_sec:
-                if node != self.current_outage_node:
-                    cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                    cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=cur_node_ip,
-                        storage_node_id=node,
-                        logs_path=self.docker_logs_path,
-                        validate_async=True,
-                        error_sink=self.dump_validation_errors
-                    )
-                    threading.Thread(
-                        target=self.ssh_obj.dump_lvstore,
-                        kwargs={"node_ip": self.mgmt_nodes[0], "storage_node_id": node},
-                        daemon=True,
-                    ).start()
 
         elif outage_type == "interface_full_network_interrupt":
             # Before cutting the network: start local-tmp logging alongside NFS logging
@@ -509,17 +437,6 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             # Down all active data interfaces for ~300s (5 minutes) with ping verification
             active = self.ssh_obj.get_active_interfaces(node_ip)
             self.ssh_obj.disconnect_all_active_interfaces(node_ip, active, 300)
-            for node in self.sn_nodes_with_sec:
-                if node != self.current_outage_node:
-                    cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                    cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=cur_node_ip,
-                        storage_node_id=node,
-                        logs_path=self.docker_logs_path,
-                        validate_async=True,
-                        error_sink=self.dump_validation_errors
-                    )
             sleep_n_sec(200)
             try:
                 self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, ["offline", "down"], timeout=130)
@@ -531,22 +448,6 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
     def restart_nodes_after_failover(self, outage_type):
 
         self.logger.info(f"[LFNG] Recover outage={outage_type} node={self.current_outage_node}")
-
-        cur_node_details = self.sbcli_utils.get_storage_node_details(self.sn_primary_secondary_map[self.current_outage_node])
-        cur_node_ip = cur_node_details[0]["mgmt_ip"]
-        self.ssh_obj.fetch_distrib_logs(
-            storage_node_ip=cur_node_ip,
-            storage_node_id=self.sn_primary_secondary_map[self.current_outage_node],
-            logs_path=self.docker_logs_path,
-            validate_async=True,
-            error_sink=self.dump_validation_errors
-        )
-        threading.Thread(
-            target=self.ssh_obj.dump_lvstore,
-            kwargs={"node_ip": self.mgmt_nodes[0],
-                    "storage_node_id": self.sn_primary_secondary_map[self.current_outage_node]},
-            daemon=True,
-        ).start()
 
         # Only wait for ONLINE (skip deep health)
         if outage_type == 'graceful_shutdown':
@@ -573,21 +474,8 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             self.ssh_obj.flush_local_logs_to_nfs(_nip, _local_dir, nfs_target)
             self.logger.info(f"[LFNG] Flushed local outage logs to NFS: {nfs_target}")
 
-        cur_node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
-        cur_node_ip = cur_node_details[0]["mgmt_ip"]
-        self.ssh_obj.fetch_distrib_logs(
-            storage_node_ip=cur_node_ip,
-            storage_node_id=self.current_outage_node,
-            logs_path=self.docker_logs_path,
-            validate_async=True,
-            error_sink=self.dump_validation_errors
-        )
-        threading.Thread(
-            target=self.ssh_obj.dump_lvstore,
-            kwargs={"node_ip": self.mgmt_nodes[0],
-                    "storage_node_id": self.current_outage_node},
-            daemon=True,
-        ).start()
+        # Collect diagnostics for ALL nodes after recovery (parallel)
+        self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
 
         # keep container log streaming going
         if not self.k8s_test:
@@ -657,19 +545,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                 # Wait for all fio jobs to end (they’re 30min jobs)
                 self.common_utils.manage_fio_threads(self.fio_node, [], timeout=self._fio_wait_timeout)
 
-                for node in self.sn_nodes_with_sec:
-                    cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                    cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=cur_node_ip,
-                        storage_node_id=node,
-                        logs_path=self.docker_logs_path,
-                        validate_async=True,
-                        error_sink=self.dump_validation_errors
-                    )
-
-                    self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                              storage_node_id=node)
+                self.collect_outage_diagnostics("validation_checkpoint")
 
                 # Validate logs
                 for lvol, det in self.lvol_mount_details.items():
@@ -893,44 +769,8 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
         if self.first_outage_ts is None:
             self.first_outage_ts = int(datetime.now().timestamp())
 
-        cur_node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
-        cur_node_ip = cur_node_details[0]["mgmt_ip"]
-        self.ssh_obj.fetch_distrib_logs(
-            storage_node_ip=cur_node_ip,
-            storage_node_id=self.current_outage_node,
-            logs_path=self.docker_logs_path,
-            validate_async=True,
-            error_sink=self.dump_validation_errors,
-        )
-        threading.Thread(
-            target=self.ssh_obj.dump_lvstore,
-            kwargs={"node_ip": self.mgmt_nodes[0],
-                    "storage_node_id": self.current_outage_node},
-            daemon=True,
-        ).start()
-
-        # Also dump the secondary node before outage
-        secondary_id = self.sn_primary_secondary_map.get(self.current_outage_node)
-        if secondary_id:
-            try:
-                sec_details = self.sbcli_utils.get_storage_node_details(secondary_id)
-                sec_ip = sec_details[0]["mgmt_ip"]
-                self.logger.info(f"[V2] Pre-dump secondary node {secondary_id} (IP={sec_ip}) for outage node {self.current_outage_node}")
-                self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=sec_ip,
-                    storage_node_id=secondary_id,
-                    logs_path=self.docker_logs_path,
-                    validate_async=True,
-                    error_sink=self.dump_validation_errors,
-                )
-                threading.Thread(
-                    target=self.ssh_obj.dump_lvstore,
-                    kwargs={"node_ip": self.mgmt_nodes[0],
-                            "storage_node_id": secondary_id},
-                    daemon=True,
-                ).start()
-            except Exception as e:
-                self.logger.warning(f"[V2] Pre-dump secondary node {secondary_id} failed: {e}")
+        # Collect diagnostics for ALL nodes before outage (parallel)
+        self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
 
         self.outage_start_time = int(datetime.now().timestamp())
         self._log_outage_event(self.current_outage_node, outage_type, "Outage started")
@@ -942,24 +782,6 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
         node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
         node_ip = node_details[0]["mgmt_ip"]
         node_rpc_port = node_details[0]["rpc_port"]
-
-        def _fetch_others():
-            for node in self.sn_nodes_with_sec:
-                if node == self.current_outage_node:
-                    continue
-                nd = self.sbcli_utils.get_storage_node_details(node)
-                self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=nd[0]["mgmt_ip"],
-                    storage_node_id=node,
-                    logs_path=self.docker_logs_path,
-                    validate_async=True,
-                    error_sink=self.dump_validation_errors,
-                )
-                threading.Thread(
-                    target=self.ssh_obj.dump_lvstore,
-                    kwargs={"node_ip": self.mgmt_nodes[0], "storage_node_id": node},
-                    daemon=True,
-                ).start()
 
         if outage_type == "graceful_shutdown":
             deadline = time.time() + 300
@@ -978,8 +800,6 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
                         f"[V2] Node {self.current_outage_node} did not go offline within 5 min."
                     )
                 self.logger.info(f"[V2] Node {self.current_outage_node} not yet offline; retrying...")
-            _fetch_others()
-            # sleep_n_sec(60)
 
         elif outage_type == "container_stop":
             if self.k8s_test and self.k8s_utils:
@@ -989,7 +809,6 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             self.sbcli_utils.wait_for_storage_node_status(
                 self.current_outage_node, ["offline", "unreachable"], timeout=900
             )
-            _fetch_others()
 
         elif outage_type == "interface_full_network_interrupt":
             if not self.k8s_test and node_ip in self.container_nodes:
@@ -1014,8 +833,6 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             self.ssh_obj.disconnect_all_active_interfaces(node_ip, active, outage_dur)
             # disconnect_all_active_interfaces blocks for outage_dur seconds then reconnects
 
-            _fetch_others()
-
             if outage_dur >= 300:
                 # Long outage: SPDK should have aborted; wait for offline detection
                 sleep_n_sec(200)
@@ -1035,22 +852,6 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
 
     def restart_nodes_after_failover(self, outage_type):
         self.logger.info(f"[V2] Recovering outage={outage_type} node={self.current_outage_node}")
-
-        partner = self.sn_primary_secondary_map.get(self.current_outage_node)
-        if partner:
-            nd = self.sbcli_utils.get_storage_node_details(partner)
-            self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=nd[0]["mgmt_ip"],
-                storage_node_id=partner,
-                logs_path=self.docker_logs_path,
-                validate_async=True,
-                error_sink=self.dump_validation_errors,
-            )
-            threading.Thread(
-                target=self.ssh_obj.dump_lvstore,
-                kwargs={"node_ip": self.mgmt_nodes[0], "storage_node_id": partner},
-                daemon=True,
-            ).start()
 
         if outage_type == "graceful_shutdown":
             max_retries = 4
@@ -1132,20 +933,8 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             self.ssh_obj.flush_local_logs_to_nfs(_nip, _local_dir, nfs_target)
             self.logger.info(f"[V2] Flushed local outage logs to NFS: {nfs_target}")
 
-        nd = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
-        self.ssh_obj.fetch_distrib_logs(
-            storage_node_ip=nd[0]["mgmt_ip"],
-            storage_node_id=self.current_outage_node,
-            logs_path=self.docker_logs_path,
-            validate_async=True,
-            error_sink=self.dump_validation_errors,
-        )
-        threading.Thread(
-            target=self.ssh_obj.dump_lvstore,
-            kwargs={"node_ip": self.mgmt_nodes[0],
-                    "storage_node_id": self.current_outage_node},
-            daemon=True,
-        ).start()
+        # Collect diagnostics for ALL nodes after recovery (parallel)
+        self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
 
         # Restart container log streaming
         if not self.k8s_test:
@@ -1230,14 +1019,6 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             self._log_outage_event(node_uuid, outage_type, "Outage started")
             self.logger.info(f"[V2-dual] Outage={outage_type} node={node_uuid}")
 
-            self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=node_ip,
-                storage_node_id=node_uuid,
-                logs_path=self.docker_logs_path,
-                validate_async=True,
-                error_sink=self.dump_validation_errors,
-            )
-
             if outage_type == "graceful_shutdown":
                 deadline = time.time() + 300
                 while True:
@@ -1301,17 +1082,6 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
         """Thread worker: wait for node_uuid to come back online after an outage."""
         self.logger.info(f"[V2-dual] Recovering node={node_uuid} outage_type={outage_type}")
 
-        partner = self.sn_primary_secondary_map.get(node_uuid)
-        if partner:
-            nd = self.sbcli_utils.get_storage_node_details(partner)
-            self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=nd[0]["mgmt_ip"],
-                storage_node_id=partner,
-                logs_path=self.docker_logs_path,
-                validate_async=True,
-                error_sink=self.dump_validation_errors,
-            )
-
         if outage_type == "graceful_shutdown":
             max_retries = 8
             for attempt in range(max_retries):
@@ -1364,20 +1134,15 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             self.ssh_obj.flush_local_logs_to_nfs(_nip, _local_dir, nfs_target)
             self.logger.info(f"[V2-dual] Flushed local logs for {node_uuid}")
 
-        nd = self.sbcli_utils.get_storage_node_details(node_uuid)
-        self.ssh_obj.fetch_distrib_logs(
-            storage_node_ip=nd[0]["mgmt_ip"],
-            storage_node_id=node_uuid,
-            logs_path=self.docker_logs_path,
-            validate_async=True,
-            error_sink=self.dump_validation_errors,
-        )
-
     def _dual_outage_cycle(self, node_a, node_b):
         """Perform simultaneous outages on two non-related nodes then recover both in parallel."""
         self.logger.info(f"[V2-dual] Starting dual outage: {node_a} + {node_b}")
         if self.first_outage_ts is None:
             self.first_outage_ts = int(datetime.now().timestamp())
+
+        # Collect diagnostics for ALL nodes before dual outage (parallel)
+        self.collect_outage_diagnostics(f"pre_dual_outage_{node_a}_{node_b}")
+
         self.outage_start_time = int(datetime.now().timestamp())
 
         result_dict = {}
@@ -1430,6 +1195,9 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
 
         self.outage_end_time = int(datetime.now().timestamp())
         self._last_outage_node = node_b
+
+        # Collect diagnostics for ALL nodes after dual recovery (parallel)
+        self.collect_outage_diagnostics(f"post_dual_recovery_{node_a}_{node_b}")
 
         # Restart container/k8s logging after all nodes are recovered
         if not self.k8s_test:
@@ -1526,18 +1294,7 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
                     self.fio_node, [], timeout=self._fio_wait_timeout
                 )
 
-                for node in self.sn_nodes_with_sec:
-                    nd = self.sbcli_utils.get_storage_node_details(node)
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=nd[0]["mgmt_ip"],
-                        storage_node_id=node,
-                        logs_path=self.docker_logs_path,
-                        validate_async=True,
-                        error_sink=self.dump_validation_errors,
-                    )
-                    self.ssh_obj.dump_lvstore(
-                        node_ip=self.mgmt_nodes[0], storage_node_id=node
-                    )
+                self.collect_outage_diagnostics("validation_checkpoint")
 
                 for lvol, det in self.lvol_mount_details.items():
                     self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])
@@ -1648,18 +1405,7 @@ class RandomRapidFailoverNoGapV2NoMigration(RandomRapidFailoverNoGapV2):
                     self.fio_node, [], timeout=self._fio_wait_timeout
                 )
 
-                for node in self.sn_nodes_with_sec:
-                    nd = self.sbcli_utils.get_storage_node_details(node)
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=nd[0]["mgmt_ip"],
-                        storage_node_id=node,
-                        logs_path=self.docker_logs_path,
-                        validate_async=True,
-                        error_sink=self.dump_validation_errors,
-                    )
-                    self.ssh_obj.dump_lvstore(
-                        node_ip=self.mgmt_nodes[0], storage_node_id=node
-                    )
+                self.collect_outage_diagnostics("validation_checkpoint")
 
                 for lvol, det in self.lvol_mount_details.items():
                     self.common_utils.validate_fio_test(det["Client"], log_file=det["Log"])

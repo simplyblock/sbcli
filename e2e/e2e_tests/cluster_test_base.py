@@ -339,6 +339,130 @@ class TestClusterBase:
                     all_ok = False
         assert all_ok, "Placement dump validation failed on one or more storage nodes"
 
+    def collect_outage_diagnostics(self, label):
+        """Collect management details + lvstore dumps + distrib placement dumps
+        for ALL storage nodes, right before an outage or right after recovery.
+
+        Args:
+            label: e.g. "pre_outage", "post_recovery", "pre_outage_node_<id>"
+        """
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        tag = f"_{label}_{timestamp}"
+        self.logger.info(f"[diagnostics] === Collecting outage diagnostics: {label} at {timestamp} ===")
+
+        # 1. Collect management details (cluster/sn/lvol/pool lists etc.)
+        try:
+            self.collect_management_details(suffix=tag)
+        except Exception as e:
+            self.logger.warning(f"[diagnostics] collect_management_details failed: {e}")
+
+        # 2. Collect dump_lvstore + distrib placement for ALL nodes in parallel
+        try:
+            self._collect_all_node_dumps_parallel(tag)
+        except Exception as e:
+            self.logger.warning(f"[diagnostics] _collect_all_node_dumps_parallel failed: {e}")
+
+        self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
+
+    def _collect_all_node_dumps_parallel(self, tag):
+        """Collect dump_lvstore + fetch_distrib_logs for ALL storage nodes in parallel.
+
+        Handles both k8s and non-k8s environments. Each node's dumps are collected
+        in a separate thread for speed. The dumps are stored in a tagged subdirectory
+        so pre-outage and post-recovery dumps are clearly separated.
+
+        Args:
+            tag: suffix for directory naming, e.g. "_pre_outage_20240408_143000"
+        """
+        try:
+            storage_nodes = self.sbcli_utils.get_storage_nodes()
+            nodes = storage_nodes.get("results", [])
+        except Exception as e:
+            self.logger.warning(f"[node_dumps] Cannot get storage nodes: {e}")
+            return
+
+        if not nodes:
+            self.logger.warning("[node_dumps] No storage nodes found")
+            return
+
+        dump_dir = os.path.join(self.docker_logs_path, f"node_dumps{tag}")
+        os.makedirs(dump_dir, exist_ok=True)
+
+        threads = []
+        for node_info in nodes:
+            node_id = node_info["uuid"]
+            node_ip = node_info.get("mgmt_ip", "")
+            t = threading.Thread(
+                target=self._collect_single_node_dump,
+                args=(node_id, node_ip, dump_dir),
+                daemon=True,
+            )
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join(timeout=600)
+
+        self.logger.info(f"[node_dumps] Completed parallel dumps for {len(nodes)} nodes → {dump_dir}")
+
+    def _collect_single_node_dump(self, node_id, node_ip, dump_dir):
+        """Collect dump_lvstore and distrib placement dump for a single node.
+
+        Args:
+            node_id: Storage node UUID
+            node_ip: Storage node management IP
+            dump_dir: Directory to store dump files
+        """
+        self.logger.info(f"[node_dump] Starting dump for node {node_id} ({node_ip})")
+        try:
+            if self.k8s_test:
+                k8s_obj = getattr(self, 'k8s_utils', None) or getattr(
+                    getattr(self, 'sbcli_utils', None), 'k8s', None
+                )
+                if not k8s_obj:
+                    self.logger.warning(f"[node_dump] k8s_utils not available for node {node_id}")
+                    return
+                sbcli_cmd = getattr(
+                    getattr(self, 'sbcli_utils', None), 'sbcli_cmd',
+                    os.environ.get("SBCLI_CMD", "sbcli-dev")
+                )
+                try:
+                    k8s_obj.dump_lvstore_k8s(
+                        storage_node_id=node_id,
+                        storage_node_ip=node_ip,
+                        logs_path=dump_dir,
+                        sbcli_cmd=sbcli_cmd,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"[node_dump] dump_lvstore_k8s failed for {node_id}: {e}")
+                try:
+                    k8s_obj.fetch_distrib_logs_k8s(
+                        storage_node_id=node_id,
+                        storage_node_ip=node_ip,
+                        logs_path=dump_dir,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"[node_dump] fetch_distrib_logs_k8s failed for {node_id}: {e}")
+            else:
+                try:
+                    self.ssh_obj.dump_lvstore(
+                        node_ip=self.mgmt_nodes[0],
+                        storage_node_id=node_id,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"[node_dump] dump_lvstore failed for {node_id}: {e}")
+                try:
+                    self.ssh_obj.fetch_distrib_logs(
+                        storage_node_ip=node_ip,
+                        storage_node_id=node_id,
+                        logs_path=dump_dir,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"[node_dump] fetch_distrib_logs failed for {node_id}: {e}")
+        except Exception as e:
+            self.logger.warning(f"[node_dump] Failed for node {node_id} ({node_ip}): {e}")
+        self.logger.info(f"[node_dump] Completed dump for node {node_id} ({node_ip})")
+
     def _collect_management_details_k8s(self, suffix: str):
         """Collect management details via kubectl exec (k8s mode)."""
         base_path = os.path.join(self.docker_logs_path, "mgmt_details")
@@ -422,8 +546,9 @@ class TestClusterBase:
             except Exception as e:
                 self.logger.warning(f"[k8s collect_mgmt] journalctl/dmesg for {node}: {e}")
 
-    def collect_management_details(self, post_teardown=False):
-        suffix = "_pre_teardown" if not post_teardown else "_post_teardown"
+    def collect_management_details(self, post_teardown=False, suffix=None):
+        if suffix is None:
+            suffix = "_pre_teardown" if not post_teardown else "_post_teardown"
         if self.k8s_test:
             self._collect_management_details_k8s(suffix)
             return

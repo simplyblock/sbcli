@@ -776,6 +776,22 @@ class K8sSbcliUtils:
         self.logger.warning("[pool] Pool not confirmed after kubectl apply")
         return pool_name
 
+    def add_host_to_pool(self, pool_id, host_nqn):
+        """Run ``pool add-host <pool_id> <nqn>`` via kubectl exec.
+
+        Registers a client NQN at pool level so it can connect to any
+        DHCHAP-enabled volume in the pool.
+        """
+        out = self._run(f"{self.sbcli_cmd} pool add-host {pool_id} {host_nqn}")
+        self.logger.info(f"[add_host_to_pool] pool={pool_id} nqn={host_nqn}: {out}")
+        return out
+
+    def remove_host_from_pool(self, pool_id, host_nqn):
+        """Run ``pool remove-host <pool_id> <nqn>`` via kubectl exec."""
+        out = self._run(f"{self.sbcli_cmd} pool remove-host {pool_id} {host_nqn}")
+        self.logger.info(f"[remove_host_from_pool] pool={pool_id} nqn={host_nqn}: {out}")
+        return out
+
     def delete_storage_pool(self, pool_name):
         self.logger.info(f"[pool] K8s mode: skipping delete of pool '{pool_name}'")
 

@@ -949,3 +949,22 @@ class SbcliUtils:
             except Exception as e:
                 self.logger.info(f"Snapshot delete failed (continuing): {snap_name}, err={e}")
 
+    # ── Pool-level host management (DHCHAP) ─────────────────────────────────
+
+    def add_host_to_pool(self, pool_id, host_nqn):
+        """Register a client NQN at pool level.
+
+        POST /pool/<pool_id>/host  body: {"host_nqn": "<nqn>"}
+        """
+        body = {"host_nqn": host_nqn}
+        self.logger.info(f"[add_host_to_pool] pool={pool_id} nqn={host_nqn}")
+        return self.post_request(api_url=f"/pool/{pool_id}/host", body=body)
+
+    def remove_host_from_pool(self, pool_id, host_nqn):
+        """Remove a client NQN from pool-level host list.
+
+        DELETE /pool/<pool_id>/host  body: {"host_nqn": "<nqn>"}
+        """
+        self.logger.info(f"[remove_host_from_pool] pool={pool_id} nqn={host_nqn}")
+        return self.delete_request(api_url=f"/pool/{pool_id}/host/{host_nqn}")
+
