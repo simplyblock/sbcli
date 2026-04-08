@@ -7,16 +7,12 @@ on:
         description: "sbcli branch to clone (leave empty to skip)"
         required: false
         default: "main"
-        type: choice
-        options:
-          - main
+        type: string
       csi_branch:
         description: "simplyblock-csi branch to clone (leave empty to skip)"
         required: false
         default: "master"
-        type: choice
-        options:
-          - master
+        type: string
 
 jobs:
   build:
@@ -40,12 +36,13 @@ jobs:
       - name: Build & Push
         run: |
           docker buildx create --name mybuilder --bootstrap --use
+          TAG=$(echo "${{ github.event.inputs.sbcli_branch }}" | sed 's/\//-/g')
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --build-arg SBCLI_BRANCH="${{ github.event.inputs.sbcli_branch }}" \
             --build-arg CSI_BRANCH="${{ github.event.inputs.csi_branch }}" \
-            -t simplyblock/helm-deployer:latest \
+            -t simplyblock/helm-deployer:$TAG \
             -f docker/Dockerfile.helm-deployer \
             . --push
 
-          echo "::notice title=Docker.com::simplyblock/helm-deployer:latest"
+          echo "::notice title=Docker.com::simplyblock/helm-deployer:$TAG"
