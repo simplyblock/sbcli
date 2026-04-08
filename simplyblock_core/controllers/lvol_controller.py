@@ -2563,6 +2563,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         if snaps:
             snaps = sorted(snaps, key=lambda x: x.created_at)
             snapshot = snaps[-1]
+            snapshot = snapshot.target_replicated_snap_uuid
 
     if not snapshot:
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
