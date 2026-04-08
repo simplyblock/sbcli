@@ -6,11 +6,12 @@ import paramiko
 import time
 import re
 import json
+import select
 
 # --- INPUT PARAMETERS ---
 AMI_ID = "ami-0dfc569a8686b9320"  # Rocky 9 us-east-1
 KEY_NAME = "mtes01"
-KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
+KEY_PATH = r"C:\ssh\mtes01.pem"
 AZ = "us-east-1a"
 SG_NAME = "default"
 BRANCH = "main"
@@ -20,7 +21,7 @@ MAX_LVOL = "50"
 SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 SN_TYPE = "i3en.2xlarge"
-SN_COUNT = 4
+SN_COUNT = 6
 MGMT_TYPE = "m6i.2xlarge"
 # --- Selectable Client Specification ---
 CLIENT_COUNT = 1            # How many separate EC2 instances to launch
@@ -116,10 +117,57 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
     return results
 
 
+def ssh_exec_stream(ip, cmd, check=False):
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(ip, username='ec2-user', key_filename=KEY_PATH,
+                allow_agent=False, look_for_keys=False)
+    print(f"  [{ip}] $ {cmd}")
+
+    stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
+    channel = stdout.channel
+    out_chunks = []
+    err_chunks = []
+
+    while True:
+        read_list = []
+        if channel.recv_ready():
+            read_list.append(channel)
+        if channel.recv_stderr_ready():
+            read_list.append(channel)
+
+        if read_list:
+            select.select(read_list, [], [], 0.1)
+
+        while channel.recv_ready():
+            chunk = channel.recv(4096).decode('utf-8', errors='replace')
+            out_chunks.append(chunk)
+            print(chunk, end='')
+
+        while channel.recv_stderr_ready():
+            chunk = channel.recv_stderr(4096).decode('utf-8', errors='replace')
+            err_chunks.append(chunk)
+            print(chunk, end='')
+
+        if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+            break
+
+        time.sleep(0.1)
+
+    rc = channel.recv_exit_status()
+    ssh.close()
+
+    out = ''.join(out_chunks)
+    err = ''.join(err_chunks)
+    if rc != 0 and check:
+        raise RuntimeError(f"Command failed on {ip} (rc={rc}): {cmd}")
+    return out, err
+
+
 def get_sn_uuids(mgmt_ip):
     print("Fetching Storage Node UUIDs...")
     # Get the raw table output
-    node_list_raw = ssh_exec(mgmt_ip, ["sudo /usr/local/bin/sbctl sn list"], get_output=True)[0]
+    node_list_raw = ssh_exec(mgmt_ip, ["sudo /usr/local/bin/sbctl -d sn list"], get_output=True)[0]
 
     uuids = []
     for line in node_list_raw.splitlines():
@@ -281,7 +329,7 @@ def main():
     # Step 5a: Create cluster on mgmt (sequential, must complete first)
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
-        "sudo /usr/local/bin/sbctl cluster create --enable-node-affinity"
+        "sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
         " --max-fault-tolerance 2"
     ], check=True)
@@ -291,7 +339,7 @@ def main():
     print("Phase 2b: Configuring storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl sn configure --max-lvol {MAX_LVOL}"
+            f"sudo /usr/local/bin/sbctl -d sn configure --max-lvol {MAX_LVOL}"
         ], check=True) for ip in sn_ips]
         for t in tasks:
             t.result()
@@ -300,7 +348,7 @@ def main():
     print("Phase 2c: Deploying storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl sn deploy --isolate-cores --ifname {IFACE}"
+            f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}"
         ], check=True) for ip in sn_ips]
         for t in tasks:
             t.result()
@@ -321,7 +369,7 @@ def main():
     time.sleep(60)
 
     # --- 6. Cluster Activation & Node Addition ---
-    cluster_list = ssh_exec(mgmt_ip, ["sudo /usr/local/bin/sbctl cluster list"], get_output=True)[0]
+    cluster_list = ssh_exec(mgmt_ip, ["sudo /usr/local/bin/sbctl -d cluster list"], get_output=True)[0]
     cluster_match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', cluster_list)
     if not cluster_match:
         raise Exception("Could not find Cluster UUID")
@@ -333,7 +381,7 @@ def main():
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
-                    f"sudo /usr/local/bin/sbctl sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
+                    f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
                 ], check=True)
                 break
             except RuntimeError:
@@ -346,7 +394,7 @@ def main():
 
     # Verify all nodes are visible
     print("Verifying node status...")
-    sn_list = ssh_exec(mgmt_ip, ["sudo /usr/local/bin/sbctl sn list"], get_output=True)[0]
+    sn_list = ssh_exec(mgmt_ip, ["sudo /usr/local/bin/sbctl -d sn list"], get_output=True)[0]
     print(sn_list)
     online_count = sn_list.count("online")
     if online_count < SN_COUNT:
@@ -355,14 +403,16 @@ def main():
 
     print("Phase 4: Activating cluster...")
     time.sleep(10)
-    ssh_exec(mgmt_ip, [
-        f"sudo /usr/local/bin/sbctl cluster activate {cluster_uuid}"
-    ], check=True)
+    ssh_exec_stream(
+        mgmt_ip,
+        f"sudo /usr/local/bin/sbctl -d cluster activate {cluster_uuid}",
+        check=True,
+    )
     print("Phase 4: DONE - cluster activated.")
 
     print("Creating pool...")
     ssh_exec(mgmt_ip, [
-        f"sudo /usr/local/bin/sbctl pool add pool01 {cluster_uuid}"
+        f"sudo /usr/local/bin/sbctl -d pool add pool01 {cluster_uuid}"
     ], check=True)
     print("Pool created.")
 
@@ -375,7 +425,7 @@ def main():
 
 
     print("Prepping clients...")
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, len(client_pub_ips))) as executor:
         futures = [executor.submit(ssh_exec, ip, client_prep_cmds, check=True) for ip in client_pub_ips]
         for f in futures:
             f.result()

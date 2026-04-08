@@ -50,7 +50,7 @@ class StorageNodeParams(BaseModel):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
-    ha_jm_count: int = Field(3)
+    ha_jm_count: Optional[int] = Field(None)
     format_4k: bool = Field(False)
     spdk_proxy_image: Optional[str] = None
 

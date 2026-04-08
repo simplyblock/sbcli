@@ -255,7 +255,7 @@ def storage_node_add():
     if 'iobuf_large_pool_count' in req_data:
         iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
 
-    ha_jm_count = 3
+    ha_jm_count = None
     if 'ha_jm_count' in req_data:
         ha_jm_count = int(req_data['ha_jm_count'])
 
