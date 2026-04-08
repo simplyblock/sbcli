@@ -2537,6 +2537,16 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     if not snapshot:
         target_node = db_controller.get_storage_node_by_id(lvol.replication_node_id)
         logger.info(f"Looking for snapshot in target cluster: {target_node.cluster_id}")
+        target_lvol_id = None
+        for lv in db_controller.get_lvols(target_node.cluster_id):
+            if lv.nqn == lvol.nqn:
+                logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+                target_lvol_id = lv.get_id()
+
+        if not target_lvol_id:
+            logger.error(f"LVol with same nqn does not exist on target cluster: {target_node.cluster_id}")
+            return False
+
         for task in db_controller.get_job_tasks(target_node.cluster_id):
             if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
                 logger.debug(task)
@@ -2545,7 +2555,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
                 except KeyError:
                     continue
 
-                if snap.lvol.get_id() != lvol_id:
+                if snap.lvol.get_id() != target_lvol_id:
                     continue
                 snaps.append(snap)
 
