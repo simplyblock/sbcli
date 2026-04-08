@@ -909,7 +909,79 @@ def main():
                 )
                 print(f"    {cname:<42} {n:>8,} lines")
 
-        # ── 9. Write a collection manifest ───────────────────────────────────
+        # ── 9. sbctl cluster / node snapshots ────────────────────────────────
+
+        print(f"\n[7] Collecting sbctl cluster / node info …")
+        info_dir = log_root / "sbctl_info"
+        info_dir.mkdir()
+
+        def save_sbctl(label, cmd_args, out_name, use_json=False):
+            """Run sbctl, save output to out_name, print status."""
+            if use_json:
+                data = sbctl_json(*cmd_args)
+                if data is not None:
+                    out_path = info_dir / out_name
+                    with open(out_path, "w") as f:
+                        json.dump(data, f, indent=2)
+                    print(f"  {label:<50} OK  ({out_name})")
+                    return True
+            else:
+                text = sbctl_raw(*cmd_args)
+                if text is not None:
+                    out_path = info_dir / out_name
+                    out_path.write_text(text)
+                    print(f"  {label:<50} OK  ({out_name})")
+                    return True
+            print(f"  {label:<50} FAILED", file=sys.stderr)
+            return False
+
+        # 1. cluster show
+        save_sbctl(
+            "sbctl cluster show",
+            ["cluster", "show", cluster_uuid],
+            "cluster_show.txt",
+        )
+
+        # 2. lvol list
+        save_sbctl(
+            "sbctl lvol list",
+            ["lvol", "list", "--cluster-id", cluster_uuid],
+            "lvol_list.json",
+            use_json=True,
+        )
+
+        # 3. sn list (already fetched; save the raw JSON for completeness)
+        save_sbctl(
+            "sbctl sn list",
+            ["sn", "list"],
+            "sn_list.json",
+            use_json=True,
+        )
+
+        # 4. sn check <node_uuid>  – one file per storage node
+        print(f"  sbctl sn check  (per node) …")
+        sn_check_dir = info_dir / "sn_check"
+        sn_check_dir.mkdir()
+        for node in sn_list:
+            node_uuid = node.get("UUID", "")
+            node_hostname = node.get("Hostname", node_uuid)
+            node_ip = node.get("Management IP", "")
+            label = f"{node_hostname}_{node_ip}".strip("_") if node_ip else node_hostname
+            text = sbctl_raw("sn", "check", node_uuid)
+            if text is not None:
+                (sn_check_dir / f"{label}.txt").write_text(text)
+                print(f"    {label}")
+            else:
+                print(f"    {label}  FAILED", file=sys.stderr)
+
+        # 5. cluster get-logs --limit 0  (all cluster-level events)
+        save_sbctl(
+            "sbctl cluster get-logs --limit 0",
+            ["cluster", "get-logs", cluster_uuid, "--limit", "0"],
+            "cluster_get_logs.txt",
+        )
+
+        # ── 11. Write a collection manifest ──────────────────────────────────
 
         manifest = {
             "collected_at": datetime.now(timezone.utc).isoformat(),
@@ -932,9 +1004,9 @@ def main():
         with open(log_root / "manifest.json", "w") as mf:
             json.dump(manifest, mf, indent=2)
 
-        # ── 10. Pack into tarball ─────────────────────────────────────────────
+        # ── 12. Pack into tarball ─────────────────────────────────────────────
 
-        print(f"\n[7] Creating tarball …")
+        print(f"\n[8] Creating tarball …")
         with tarfile.open(str(tarball_path), "w:gz") as tar:
             tar.add(str(log_root), arcname=bundle_name)
 
