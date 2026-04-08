@@ -654,7 +654,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
         # Step 2: Execute on leader (with failover on failure)
         def _create_on_leader(leader):
-            return add_lvol_on_node(lvol, leader)
+            lvol_bdev, error = add_lvol_on_node(lvol, leader)
+            if error:
+                raise RuntimeError(error)
+            return lvol_bdev
 
         success, actual_leader, result = execute_on_leader_with_failover(
             all_nodes, lvol.lvs_name, _create_on_leader)
@@ -980,7 +983,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
     return True
 
 
-def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, force=False):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -990,24 +993,25 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
 
     # Per design: gate sync deletes on non-leader nodes.
     from simplyblock_core.storage_node_ops import check_non_leader_for_operation, queue_for_restart_drain
-    action = check_non_leader_for_operation(node_id, lvol.lvs_name, operation_type="delete")
-    if action == "skip":
-        logger.info(f"Skipping sync delete of {lvol_id} on {node_id[:8]}: node disconnected")
-        lvol.deletion_status = node_id
-        lvol.write_to_db(db_controller.kv_store)
-        return True
-    elif action == "queue":
-        queue_for_restart_drain(
-            node_id, lvol.lvs_name,
-            lambda: delete_lvol_from_node(lvol_id, node_id, clear_data, del_async),
-            f"sync delete lvol {lvol_id}")
-        return True
-    elif action == "retry":
-        queue_for_restart_drain(
-            node_id, lvol.lvs_name,
-            lambda: delete_lvol_from_node(lvol_id, node_id, clear_data, del_async),
-            f"retry sync delete lvol {lvol_id}")
-        return True
+    if not force:
+        action = check_non_leader_for_operation(node_id, lvol.lvs_name, operation_type="delete")
+        if action == "skip":
+            logger.info(f"Skipping sync delete of {lvol_id} on {node_id[:8]}: node disconnected")
+            lvol.deletion_status = node_id
+            lvol.write_to_db(db_controller.kv_store)
+            return True
+        elif action == "queue":
+            queue_for_restart_drain(
+                node_id, lvol.lvs_name,
+                lambda: delete_lvol_from_node(lvol_id, node_id, clear_data, del_async),
+                f"sync delete lvol {lvol_id}")
+            return True
+        elif action == "retry":
+            queue_for_restart_drain(
+                node_id, lvol.lvs_name,
+                lambda: delete_lvol_from_node(lvol_id, node_id, clear_data, del_async),
+                f"retry sync delete lvol {lvol_id}")
+            return True
     # action == "proceed" — execute now
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
@@ -1107,7 +1111,7 @@ def delete_lvol(id_or_name, force_delete=False):
         return True
 
     if lvol.ha_type == 'single':
-        ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
+        ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
         if not ret:
             if not force_delete:
                 return False
@@ -1129,7 +1133,7 @@ def delete_lvol(id_or_name, force_delete=False):
 
         # Step 1: Execute async delete on leader (with failover)
         def _delete_on_leader(leader):
-            ret = delete_lvol_from_node(lvol.get_id(), leader.get_id())
+            ret = delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
             return ret if ret else None
 
         success, actual_leader, result = execute_on_leader_with_failover(
