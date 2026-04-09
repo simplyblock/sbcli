@@ -54,7 +54,7 @@ class TestSingleNodeFailure(TestClusterBase):
         """ Performs each step of the testcase
         """
         self.logger.info(f"Inside run function. Base command: {self.base_cmd}")
-        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
 
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
@@ -106,12 +106,18 @@ class TestSingleNodeFailure(TestClusterBase):
         node_ip = no_lvol_node[0]["mgmt_ip"]
         
         self.logger.info("Taking snapshot")
-        self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
-                                  lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                  snapshot_name=f"{self.snapshot_name}_1")
-        snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
-                                                     snapshot_name=f"{self.snapshot_name}_1")
-        
+        lvol_id_for_snap = self.sbcli_utils.get_lvol_id(self.lvol_name)
+        if self.k8s_test:
+            self.sbcli_utils.add_snapshot(lvol_id=lvol_id_for_snap,
+                                          snapshot_name=f"{self.snapshot_name}_1")
+            snapshot_id_1 = self.sbcli_utils.get_snapshot_id(snap_name=f"{self.snapshot_name}_1")
+        else:
+            self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
+                                      lvol_id=lvol_id_for_snap,
+                                      snapshot_name=f"{self.snapshot_name}_1")
+            snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
+                                                         snapshot_name=f"{self.snapshot_name}_1")
+
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
                                      new_size="20G")
 
@@ -125,7 +131,12 @@ class TestSingleNodeFailure(TestClusterBase):
         
         sleep_n_sec(30)
         timestamp = int(datetime.now().timestamp())
-        self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node[0]["rpc_port"], cluster_id=self.cluster_id)
+        if self.k8s_test:
+            k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
+            if k8s_obj:
+                k8s_obj.restart_spdk_pod(node_ip)
+        else:
+            self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node[0]["rpc_port"], cluster_id=self.cluster_id)
 
         try:
             self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")
@@ -227,24 +238,35 @@ class TestSingleNodeFailure(TestClusterBase):
                                                         threads=[fio_thread1],
                                                         timeout=1000)
         
-        self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
-                                  lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                  snapshot_name=f"{self.snapshot_name}_2")
-        snapshot_id_2 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
-                                                     snapshot_name=f"{self.snapshot_name}_2")
-        
+        lvol_id_for_snap2 = self.sbcli_utils.get_lvol_id(self.lvol_name)
+        if self.k8s_test:
+            self.sbcli_utils.add_snapshot(lvol_id=lvol_id_for_snap2,
+                                          snapshot_name=f"{self.snapshot_name}_2")
+            snapshot_id_2 = self.sbcli_utils.get_snapshot_id(snap_name=f"{self.snapshot_name}_2")
+        else:
+            self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
+                                      lvol_id=lvol_id_for_snap2,
+                                      snapshot_name=f"{self.snapshot_name}_2")
+            snapshot_id_2 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
+                                                         snapshot_name=f"{self.snapshot_name}_2")
+
         lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=self.mount_path)
         original_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
 
         clone_mount_file = f"{self.mount_path}_cl"
 
-        self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
-                               snapshot_id=snapshot_id_1,
-                               clone_name=f"{self.lvol_name}_cl_1")
-        
-        self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
-                               snapshot_id=snapshot_id_2,
-                               clone_name=f"{self.lvol_name}_cl_2")
+        if self.k8s_test:
+            self.sbcli_utils.add_clone(snapshot_id=snapshot_id_1,
+                                       clone_name=f"{self.lvol_name}_cl_1")
+            self.sbcli_utils.add_clone(snapshot_id=snapshot_id_2,
+                                       clone_name=f"{self.lvol_name}_cl_2")
+        else:
+            self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
+                                   snapshot_id=snapshot_id_1,
+                                   clone_name=f"{self.lvol_name}_cl_1")
+            self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
+                                   snapshot_id=snapshot_id_2,
+                                   clone_name=f"{self.lvol_name}_cl_2")
         
         initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_1")
@@ -409,7 +431,12 @@ class TestHASingleNodeFailure(TestClusterBase):
 
             sleep_n_sec(30)
             timestamp = int(datetime.now().timestamp())
-            self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node["rpc_port"], cluster_id=self.cluster_id)
+            if self.k8s_test:
+                k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
+                if k8s_obj:
+                    k8s_obj.restart_spdk_pod(node_ip)
+            else:
+                self.ssh_obj.stop_spdk_process(node=node_ip, rpc_port=no_lvol_node["rpc_port"], cluster_id=self.cluster_id)
 
             try:
                 self.logger.info(f"Waiting for node to become offline/unreachable, {no_lvol_node_uuid}")

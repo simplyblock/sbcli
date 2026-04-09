@@ -25,9 +25,9 @@ on:
       SBCLI_BRANCH:
         type: string
         default: "R25.10-Hotfix"
-      SIMPLY_BLOCK_SPDK_ULTRA_IMAGE:
+      CUSTOM_IMAGES:
         type: string
-        default: ""
+        default: 'spdk="" docker=""'
       SSH_USER:
         type: string
         default: "root"
@@ -77,6 +77,10 @@ on:
         type: string
         default: ""
         description: "Optional label appended to artifact names to avoid collisions when called multiple times in the same workflow run (e.g. 'run1', 'run2')"
+      CLUSTER_SECURITY:
+        type: string
+        default: "none"
+        description: "Cluster security mode: none or host-sec"
   workflow_dispatch:
     inputs:
       # =========================
@@ -116,8 +120,9 @@ on:
         required: true
         default: "R25.10-Hotfix"
 
-      SIMPLY_BLOCK_SPDK_ULTRA_IMAGE:
-        description: "Optional SPDK image (if set, pass --spdk-image)"
+      CUSTOM_IMAGES:
+        description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
+        default: 'spdk="" docker=""'
         required: false
 
       # =========================
@@ -204,15 +209,34 @@ on:
         required: false
         type: string
 
+      # =========================
+      # Security inputs
+      # =========================
+      CLUSTER_SECURITY:
+        description: |
+          Cluster setup mode.
+          'host-sec'        — writes dhchap JSON and passes --host-sec to cluster create.
+          'backup'          — writes s3-backup.json and passes --use-backup to cluster create.
+          'host-sec+backup' — applies both.
+          Required for security E2E tests (TestLvolSecurity*, TestLvolAllowedHosts*, etc.)
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - host-sec
+          - backup
+          - host-sec+backup
+
 concurrency:
-  group: simplyblock-lab-e2e
+  group: simplyblock-lab-e2e-${{ inputs.MNODES }}
   cancel-in-progress: true
 
 jobs:
   bootstrap-and-e2e:
     name: Pre-clean -> Bootstrap -> E2E
     runs-on: [self-hosted]
-    timeout-minutes: 240
+    timeout-minutes: 1000
 
     env:
       # Cluster/lab env
@@ -250,6 +274,7 @@ jobs:
       NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       TEST_CLASS: ${{ inputs.TEST_CLASS || '' }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'none' }}
 
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -301,16 +326,25 @@ jobs:
             exit 1
           fi
 
-      - name: Export SPDK image env (only if provided)
+      - name: Parse CUSTOM_IMAGES overrides
         shell: bash
         run: |
           set -euxo pipefail
-          if [[ -n "${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" ]]; then
-            echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" >> "$GITHUB_ENV"
-            echo "SPDK image exported"
-          else
-            echo "SPDK image not provided; skipping export"
-          fi
+          custom="${{ inputs.CUSTOM_IMAGES }}"
+          for item in $custom; do
+            key="${item%%=*}"
+            value="${item#*=}"
+            value="${value//\"/}"   # strip surrounding quotes
+            if [[ -z "$value" ]]; then
+              echo "Skipping $key (empty)"
+              continue
+            fi
+            case "$key" in
+              spdk)   echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=$value" >> "$GITHUB_ENV" ; echo "SPDK image set: $value" ;;
+              docker) echo "SIMPLY_BLOCK_DOCKER_IMAGE=$value"     >> "$GITHUB_ENV" ; echo "Docker image set: $value" ;;
+              *)      echo "Unknown image key: $key (ignored)" ;;
+            esac
+          done
 
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash
@@ -377,12 +411,25 @@ jobs:
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
+          run_remote_with_retry() {
+            local ip="$1"
+            local script="$2"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+
           targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for ip in $uniq_targets; do
             echo "---- $ip: kill fio/tmux + umount ${NFS_MOUNTPOINT} ----"
-            run_remote "$ip" "set -euxo pipefail;
+            run_remote_with_retry "$ip" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
               mp='${NFS_MOUNTPOINT}';
@@ -477,7 +524,7 @@ jobs:
               for d in \$dirs; do rm -rf \"\$d\" || true; done"
           done
 
-      - name: Remove /etc/simplyblock on MNODES + storage, reboot storage, wait online, disk reset + PCI rebind + mklabel
+      - name: Reboot storage nodes, wait online, disk reset + PCI rebind + mklabel
         shell: bash
         run: |
           set -euxo pipefail
@@ -490,13 +537,6 @@ jobs:
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
-
-          # remove /etc/simplyblock on MNODES + storage
-          targets="$MNODES $STORAGE_PRIVATE_IPS"
-          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
-          for ip in $uniq_targets; do
-            run_remote "$ip" "rm -rf /etc/simplyblock || true"
-          done
 
           # reboot storage nodes
           for ip in $STORAGE_PRIVATE_IPS; do
@@ -567,6 +607,75 @@ jobs:
           rm -rf simplyBlockDeploy
           git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
           test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
+
+      - name: Write cluster security/backup config to mgmt node
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ "${CLUSTER_SECURITY:-none}" == "none" || -z "${CLUSTER_SECURITY:-}" ]]; then
+            echo "CLUSTER_SECURITY=none; skipping."
+            exit 0
+          fi
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          if [[ "${CLUSTER_SECURITY}" == "host-sec" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
+            echo "Writing /root/host-sec.json to ${mgmt_ip}..."
+            HOST_SEC_JSON='{"dhchap_digests":["sha256","sha384"],"dhchap_dhgroups":["ffdhe2048","ffdhe3072","ffdhe4096","ffdhe6144","ffdhe8192"]}'
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${mgmt_ip}" \
+              "echo '${HOST_SEC_JSON}' > /root/host-sec.json && echo 'Written:' && cat /root/host-sec.json"
+            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --host-sec /root/host-sec.json" >> "$GITHUB_ENV"
+            echo "Appended --host-sec /root/host-sec.json to EXTRA_CLUSTER_ARGS"
+          fi
+          if [[ "${CLUSTER_SECURITY}" == "backup" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
+            echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
+            S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${mgmt_ip}" \
+              "echo '${S3_BACKUP_JSON}' > /root/s3-backup.json && echo 'Written:' && cat /root/s3-backup.json"
+            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --use-backup /root/s3-backup.json" >> "$GITHUB_ENV"
+            echo "Appended --use-backup /root/s3-backup.json to EXTRA_CLUSTER_ARGS"
+          fi
+
+      - name: Remove /etc/simplyblock on all nodes and verify it is gone
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
+          }
+
+          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          for ip in $uniq_targets; do
+            echo "---- removing /etc/simplyblock on $ip ----"
+            run_remote "$ip" "rm -rf /etc/simplyblock || true"
+          done
+
+          # Verify the folder is actually gone on every node
+          failed=0
+          for ip in $uniq_targets; do
+            if sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "test -e /etc/simplyblock"; then
+              echo "ERROR: /etc/simplyblock still exists on ${ip}"
+              failed=1
+            else
+              echo "OK: /etc/simplyblock is absent on ${ip}"
+            fi
+          done
+          [[ "$failed" -eq 0 ]] || exit 1
 
       - name: Bootstrap cluster (all params are inputs; --spdk-image only if set)
         shell: bash
@@ -740,6 +849,45 @@ jobs:
             --run_ha true \
             2>&1 | tee output.log
 
+      - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            ssh -i "${KEY_PATH}" \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script" || true
+          }
+
+          run_remote_with_retry() {
+            local ip="$1"
+            local script="$2"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+
+          for ip in $MNODES $STORAGE_PRIVATE_IPS; do
+            echo "---- $ip: kill tmux ----"
+            run_remote_with_retry "$ip" "pkill -9 tmux || true"
+          done
+
+          for ip in $CLIENTNODES; do
+            echo "---- $ip: kill fio and tmux----"
+            run_remote_with_retry "$ip" "pkill -9 fio || true"
+            run_remote_with_retry "$ip" "pkill -9 tmux || true"
+          done
+
       - name: Mark test end time (always)
         if: always()
         shell: bash
@@ -862,7 +1010,9 @@ jobs:
               continue
             fi
 
+            set +e
             while IFS= read -r C; do
+              C="${C%%$'\r'}"
               [[ -z "${C}" ]] && continue
               echo "    dumping: ${C}"
               ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
@@ -872,6 +1022,7 @@ jobs:
                 "docker inspect '${C}' 2>&1 || true" \
                 > "${LOCAL_NODE_DIR}/${C}_inspect.json" || true
             done <<< "${CONTAINERS}"
+            set -e
           done
 
       - name: Collect distrib debug dumps into RUN_BASE_DIR (always)
@@ -1202,12 +1353,12 @@ jobs:
           failure_reason = ""
           multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
           if multi:
-              failure_reason = multi[0][:600]
+              failure_reason = multi[0][:2000]
           elif content:
               exc_lines = [ansi.sub('', l) for l in content.splitlines()
                            if re.search(r'(Exception:|AssertionError|Input/output error)', l)]
               if exc_lines:
-                  failure_reason = '\n'.join(exc_lines[-3:])[:600]
+                  failure_reason = '\n'.join(exc_lines[-5:])[:2000]
 
           # --- Env ---
           s    = int(os.environ.get("TEST_START_EPOCH", "0") or "0")

@@ -57,13 +57,94 @@ from stress_test.continuous_failover_ha_geomtery import RandomMultiGeometryFailo
 from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailoverTest
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
-from stress_test.continuous_failover_ha_multi_client_quick_outage import RandomRapidFailoverNoGap
+from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
+from stress_test.continuous_failover_ha_multi_client_quick_outage import (
+    RandomRapidFailoverNoGap,
+    RandomRapidFailoverNoGapV2,
+    RandomRapidFailoverNoGapV2NoMigration,
+)
 from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvolSnapshotCloneAPI
 from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
 from stress_test.continuous_single_node_outage import RandomMultiClientSingleNodeTest
+from stress_test.continuous_failover_ha_security import (
+    RandomSecurityFailoverTest,
+    RandomAllSecurityFailoverTest,
+)
 
+from e2e_tests.security.test_lvol_security import (
+    TestLvolSecurityCombinations,
+    TestLvolAllowedHostsPositive,
+    TestLvolAllowedHostsNegative,
+    TestLvolDynamicHostManagement,
+    TestLvolCryptoWithAllowedHosts,
+    TestLvolDhcapDirections,
+    TestLvolMultipleAllowedHosts,
+    TestLvolSecurityNegativeHostOps,
+    TestLvolSecurityNegativeCreation,
+    TestLvolSecurityNegativeConnect,
+    TestLvolAllowedHostsNoDhchap,
+    # Extended security tests (TC-SEC-070..127)
+    TestLvolSecurityHAFailover,
+    TestLvolSecurityMgmtNodeReboot,
+    TestLvolSecurityDynamicModification,
+    TestLvolSecurityMultiClientConcurrent,
+    TestLvolSecurityScaleAndRapidOps,
+    TestLvolSecurityNegativeConnectExtended,
+    TestLvolSecurityCloneOverride,
+    TestLvolSecurityWithBackup,
+    TestLvolSecurityResize,
+    TestLvolSecurityVolumeListFields,
+    TestLvolSecurityRDMA,
+    TestLvolSecurityOutageRecovery,
+    TestLvolSecurityNetworkInterrupt,  # last: may trigger core dump / node abort
+)
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
+
+from e2e_tests.backup.test_backup_restore import (
+    TestBackupBasicPositive,
+    TestBackupRestoreDataIntegrity,
+    TestBackupPolicy,
+    TestBackupNegative,
+    TestBackupCryptoLvol,
+    TestBackupCustomGeometry,
+    TestBackupDeleteAndRestore,
+    TestBackupCrossClusterRestore,  # NOT in get_backup_tests(); run explicitly only
+    # Extra coverage tests (TC-BCK-100..148)
+    TestBackupConcurrentIO,
+    TestBackupMultipleRestores,
+    TestBackupDeltaChainPointInTime,
+    TestBackupEmptyLvol,
+    TestBackupPoolRecreateRestore,
+    TestBackupPolicyAgeOnly,
+    TestBackupSnapshotClone,
+    TestBackupFilesystemXFS,
+    TestBackupLargeLvol,
+    TestBackupDeleteInProgress,
+    TestBackupPolicyMultipleLvols,
+    # Extended backup tests (TC-BCK-150..190)
+    TestBackupSecurityLvol,
+    TestBackupPolicyVersionsOne,
+    TestBackupPolicyMultipleOnSameLvol,
+    TestBackupPolicyLvolLevel,
+    TestBackupResizedLvol,
+    TestBackupListFields,
+    TestBackupUpgradeCompatibility,
+    TestBackupRestoreEdgeCases,
+    TestBackupSourceSwitch,
+)
+
+from stress_test.continuous_backup_stress import (
+    BackupStressParallelSnapshots,
+    BackupStressTcpFailover,
+    BackupStressRdmaFailover,
+    BackupStressCryptoMix,
+    BackupStressPolicyRetention,
+    BackupStressRestoreConcurrent,
+    TestBackupInterruptedBackup,
+    TestBackupInterruptedRestore,
+    BackupStressMarathon,
+)
 
 
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
@@ -93,7 +174,82 @@ ALL_TESTS = [
     TestHASingleNodeReboot,
     TestHASingleNodeOutage,
     TestSingleNodeResizeLvolCone,
-    TestAddK8sNodesDuringFioRun
+    TestAddK8sNodesDuringFioRun,
+    # Security E2E tests
+    TestLvolSecurityCombinations,
+    TestLvolAllowedHostsPositive,
+    TestLvolAllowedHostsNegative,
+    TestLvolDynamicHostManagement,
+    TestLvolCryptoWithAllowedHosts,
+    TestLvolDhcapDirections,
+    TestLvolMultipleAllowedHosts,
+    TestLvolAllowedHostsNoDhchap,
+    # Security negative tests
+    TestLvolSecurityNegativeHostOps,
+    TestLvolSecurityNegativeCreation,
+    TestLvolSecurityNegativeConnect,
+    # Extended security E2E tests (TC-SEC-070..127)
+    TestLvolSecurityMgmtNodeReboot,
+    TestLvolSecurityDynamicModification,
+    TestLvolSecurityMultiClientConcurrent,
+    TestLvolSecurityScaleAndRapidOps,
+    TestLvolSecurityNegativeConnectExtended,
+    TestLvolSecurityCloneOverride,
+    TestLvolSecurityWithBackup,
+    TestLvolSecurityResize,
+    TestLvolSecurityVolumeListFields,
+    TestLvolSecurityRDMA,
+    TestLvolSecurityHAFailover,
+    TestLvolSecurityOutageRecovery,
+    TestLvolSecurityNetworkInterrupt,  # last: may trigger core dump / node abort
+    # Security stress tests
+    RandomSecurityFailoverTest,
+    RandomAllSecurityFailoverTest,
+    # RDMA stress tests
+    RandomRDMAFailoverTest,
+    RandomRDMAMultiFailoverTest,
+    # Backup E2E tests
+    TestBackupBasicPositive,
+    TestBackupRestoreDataIntegrity,
+    TestBackupPolicy,
+    TestBackupNegative,
+    TestBackupCryptoLvol,
+    TestBackupCustomGeometry,
+    TestBackupDeleteAndRestore,
+    TestBackupInterruptedBackup,
+    TestBackupInterruptedRestore,
+    # Backup extra E2E tests (TC-BCK-100..148)
+    TestBackupConcurrentIO,
+    TestBackupMultipleRestores,
+    TestBackupDeltaChainPointInTime,
+    TestBackupEmptyLvol,
+    TestBackupPoolRecreateRestore,
+    TestBackupPolicyAgeOnly,
+    TestBackupSnapshotClone,
+    TestBackupFilesystemXFS,
+    TestBackupLargeLvol,
+    TestBackupDeleteInProgress,
+    TestBackupPolicyMultipleLvols,
+    # Extended backup E2E tests (TC-BCK-150..190)
+    TestBackupSecurityLvol,
+    TestBackupPolicyVersionsOne,
+    TestBackupPolicyMultipleOnSameLvol,
+    TestBackupPolicyLvolLevel,
+    TestBackupResizedLvol,
+    TestBackupListFields,
+    TestBackupUpgradeCompatibility,
+    TestBackupRestoreEdgeCases,
+    TestBackupSourceSwitch,
+    # Backup stress tests
+    BackupStressParallelSnapshots,
+    BackupStressTcpFailover,
+    BackupStressRdmaFailover,
+    BackupStressCryptoMix,
+    BackupStressPolicyRetention,
+    BackupStressRestoreConcurrent,
+    BackupStressMarathon,
+    # Cross-cluster restore — explicit-only (requires CLUSTER2_* env vars)
+    TestBackupCrossClusterRestore,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -126,6 +282,21 @@ def get_all_tests(custom=True, ha_test=False):
         # TestManyClonesFromSameSnapshot,
         # TestDeviceNodeRestart
     ]
+    # tests += [
+    #     # Security E2E tests
+    #     TestLvolSecurityCombinations,
+    #     TestLvolAllowedHostsPositive,
+    #     TestLvolAllowedHostsNegative,
+    #     TestLvolDynamicHostManagement,
+    #     TestLvolCryptoWithAllowedHosts,
+    #     TestLvolDhcapDirections,
+    #     TestLvolMultipleAllowedHosts,
+    #     TestLvolAllowedHostsNoDhchap,
+    #     # Security negative tests
+    #     TestLvolSecurityNegativeHostOps,
+    #     TestLvolSecurityNegativeCreation,
+    #     TestLvolSecurityNegativeConnect,
+    # ]
     if not custom:
         tests.remove(TestLvolFioNpcsCustom)
     else:
@@ -137,6 +308,38 @@ def get_all_tests(custom=True, ha_test=False):
         # tests.remove(TestHASingleNodeReboot)
         # tests.remove(TestHASingleNodeOutage)
     return tests
+
+def get_security_tests():
+    return [
+        # Security E2E tests
+        TestLvolSecurityCombinations,
+        TestLvolAllowedHostsPositive,
+        TestLvolAllowedHostsNegative,
+        TestLvolDynamicHostManagement,
+        TestLvolCryptoWithAllowedHosts,
+        TestLvolDhcapDirections,
+        TestLvolMultipleAllowedHosts,
+        TestLvolAllowedHostsNoDhchap,
+        # Security negative tests
+        TestLvolSecurityNegativeHostOps,
+        TestLvolSecurityNegativeCreation,
+        TestLvolSecurityNegativeConnect,
+        # Extended security tests (TC-SEC-070..127)
+        TestLvolSecurityMgmtNodeReboot,
+        TestLvolSecurityDynamicModification,
+        TestLvolSecurityMultiClientConcurrent,
+        TestLvolSecurityScaleAndRapidOps,
+        TestLvolSecurityNegativeConnectExtended,
+        TestLvolSecurityCloneOverride,
+        TestLvolSecurityWithBackup,
+        TestLvolSecurityResize,
+        TestLvolSecurityVolumeListFields,
+        TestLvolSecurityRDMA,
+        TestLvolSecurityHAFailover,
+        TestLvolSecurityOutageRecovery,
+        TestLvolSecurityNetworkInterrupt,  # last: may trigger core dump / node abort
+    ]
+
 
 def get_stress_tests():
     tests = [
@@ -155,12 +358,65 @@ def get_stress_tests():
         RandomMultiClient2NodeFailoverTest,
         RandomRDMAFailoverTest,
         RandomRDMAMultiFailoverTest,
+        RandomK8sMultiOutageFailoverTest,
         RandomRapidFailoverNoGap,
+        RandomRapidFailoverNoGapV2,
+        RandomRapidFailoverNoGapV2NoMigration,
         TestParallelLvolSnapshotCloneAPI,
         RandomMultiClientFailoverNamespaceTest,
         RandomMultiClientSingleNodeTest,
     ]
     return tests
+
+def get_backup_tests():
+    return [
+        # E2E backup tests
+        TestBackupBasicPositive,
+        TestBackupRestoreDataIntegrity,
+        TestBackupPolicy,
+        TestBackupNegative,
+        TestBackupCryptoLvol,
+        # TestBackupCustomGeometry, # Will re-enable when we have a way to reliably test it in CI (currently requires manual setup of custom geometry pool)
+        TestBackupDeleteAndRestore,
+        # Interrupted-operation tests
+        TestBackupInterruptedBackup,
+        TestBackupInterruptedRestore,
+        # Extra coverage tests (TC-BCK-100..148)
+        TestBackupConcurrentIO,
+        TestBackupMultipleRestores,
+        TestBackupDeltaChainPointInTime,
+        TestBackupEmptyLvol,
+        TestBackupPoolRecreateRestore,
+        TestBackupPolicyAgeOnly,
+        TestBackupSnapshotClone,
+        TestBackupFilesystemXFS,
+        TestBackupLargeLvol,
+        TestBackupDeleteInProgress,
+        TestBackupPolicyMultipleLvols,
+        # Extended backup tests (TC-BCK-150..190)
+        TestBackupSecurityLvol,
+        TestBackupPolicyVersionsOne,
+        TestBackupPolicyMultipleOnSameLvol,
+        TestBackupPolicyLvolLevel,
+        TestBackupResizedLvol,
+        TestBackupListFields,
+        TestBackupUpgradeCompatibility,
+        TestBackupRestoreEdgeCases,
+        TestBackupSourceSwitch,
+    ]
+
+
+def get_backup_stress_tests():
+    return [
+        BackupStressParallelSnapshots,
+        BackupStressTcpFailover,
+        BackupStressRdmaFailover,
+        BackupStressCryptoMix,
+        BackupStressPolicyRetention,
+        BackupStressRestoreConcurrent,
+        BackupStressMarathon,
+    ]
+
 
 def get_upgrade_tests():
     tests = [

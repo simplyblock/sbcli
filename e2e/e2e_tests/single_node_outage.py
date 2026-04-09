@@ -1,6 +1,7 @@
 ### simplyblock e2e tests
 from datetime import datetime
 import os
+import time
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
@@ -134,26 +135,40 @@ class TestSingleNodeOutage(TestClusterBase):
                          )
 
         self.logger.info("Taking snapshot")
-        self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
-                                  lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                  snapshot_name=f"{self.snapshot_name}_1")
-        snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
-                                                     snapshot_name=f"{self.snapshot_name}_1")
-        
+        lvol_id_for_snap = self.sbcli_utils.get_lvol_id(self.lvol_name)
+        if self.k8s_test:
+            self.sbcli_utils.add_snapshot(lvol_id=lvol_id_for_snap,
+                                          snapshot_name=f"{self.snapshot_name}_1")
+            snapshot_id_1 = self.sbcli_utils.get_snapshot_id(snap_name=f"{self.snapshot_name}_1")
+        else:
+            self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
+                                      lvol_id=lvol_id_for_snap,
+                                      snapshot_name=f"{self.snapshot_name}_1")
+            snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
+                                                         snapshot_name=f"{self.snapshot_name}_1")
+
         self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
                                      new_size="20G")
-        
+
         timestamp = int(datetime.now().timestamp())
 
-        self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
-        try:
-            self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=True)
-        except Exception as _:
-            self.logger.info("Waiting for node shutdown")
-
-        self.sbcli_utils.wait_for_storage_node_status(node_id=no_lvol_node_uuid,
-                                                      status="offline",
-                                                      timeout=100)
+        self.logger.info(f"Issuing graceful shutdown (no --force) for node {no_lvol_node_uuid}.")
+        deadline = time.time() + 300  # 5 minutes
+        while True:
+            try:
+                self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=False)
+            except Exception as e:
+                self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
+            sleep_n_sec(20)
+            node_detail = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
+            if node_detail[0]["status"] == "offline":
+                self.logger.info(f"Node {no_lvol_node_uuid} is offline.")
+                break
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"Node {no_lvol_node_uuid} did not go offline within 5 minutes of graceful shutdown."
+                )
+            self.logger.info(f"Node {no_lvol_node_uuid} not yet offline; retrying shutdown...")
 
         self.logger.info("Sleeping for 30 seconds")
         sleep_n_sec(30)
@@ -166,9 +181,11 @@ class TestSingleNodeOutage(TestClusterBase):
                          device_health_check=None
                          )
 
-        # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-        self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
-                                  node_id=no_lvol_node_uuid)
+        if self.k8s_test:
+            self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+        else:
+            self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
+                                      node_id=no_lvol_node_uuid)
 
         self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
         self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=180)
@@ -207,7 +224,7 @@ class TestSingleNodeOutage(TestClusterBase):
 
         # Write steps in order
         steps = {
-            "Storage Node": ["suspended", "shutdown", "restart"],
+            "Storage Node": ["shutdown", "restart"],
             "Device": {"restart"}
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
@@ -217,24 +234,35 @@ class TestSingleNodeOutage(TestClusterBase):
                                              threads=[fio_thread1],
                                              timeout=600)
         
-        self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
-                                  lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                  snapshot_name=f"{self.snapshot_name}_2")
-        snapshot_id_2 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
-                                                     snapshot_name=f"{self.snapshot_name}_2")
-        
+        lvol_id_for_snap2 = self.sbcli_utils.get_lvol_id(self.lvol_name)
+        if self.k8s_test:
+            self.sbcli_utils.add_snapshot(lvol_id=lvol_id_for_snap2,
+                                          snapshot_name=f"{self.snapshot_name}_2")
+            snapshot_id_2 = self.sbcli_utils.get_snapshot_id(snap_name=f"{self.snapshot_name}_2")
+        else:
+            self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
+                                      lvol_id=lvol_id_for_snap2,
+                                      snapshot_name=f"{self.snapshot_name}_2")
+            snapshot_id_2 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
+                                                         snapshot_name=f"{self.snapshot_name}_2")
+
         lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=self.mount_path)
         original_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
 
         clone_mount_file = f"{self.mount_path}_cl"
 
-        self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
-                               snapshot_id=snapshot_id_1,
-                               clone_name=f"{self.lvol_name}_cl_1")
-        
-        self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
-                               snapshot_id=snapshot_id_2,
-                               clone_name=f"{self.lvol_name}_cl_2")
+        if self.k8s_test:
+            self.sbcli_utils.add_clone(snapshot_id=snapshot_id_1,
+                                       clone_name=f"{self.lvol_name}_cl_1")
+            self.sbcli_utils.add_clone(snapshot_id=snapshot_id_2,
+                                       clone_name=f"{self.lvol_name}_cl_2")
+        else:
+            self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
+                                   snapshot_id=snapshot_id_1,
+                                   clone_name=f"{self.lvol_name}_cl_1")
+            self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
+                                   snapshot_id=snapshot_id_2,
+                                   clone_name=f"{self.lvol_name}_cl_2")
         
         initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_1")
@@ -396,15 +424,23 @@ class TestHASingleNodeOutage(TestClusterBase):
         for i in range(2):
             timestamp = int(datetime.now().timestamp())
             sleep_n_sec(30)
-            self.sbcli_utils.suspend_node(node_uuid=no_lvol_node_uuid)
-            try:
-                self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=True)
-            except Exception as _:
-                self.logger.info("Waiting for node shutdown")
-
-            self.sbcli_utils.wait_for_storage_node_status(node_id=no_lvol_node_uuid,
-                                                        status="offline",
-                                                        timeout=100)
+            self.logger.info(f"Issuing graceful shutdown (no --force) for node {no_lvol_node_uuid}.")
+            deadline = time.time() + 300  # 5 minutes
+            while True:
+                try:
+                    self.sbcli_utils.shutdown_node(node_uuid=no_lvol_node_uuid, force=False)
+                except Exception as e:
+                    self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
+                sleep_n_sec(20)
+                node_detail = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
+                if node_detail[0]["status"] == "offline":
+                    self.logger.info(f"Node {no_lvol_node_uuid} is offline.")
+                    break
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"Node {no_lvol_node_uuid} did not go offline within 5 minutes of graceful shutdown."
+                    )
+                self.logger.info(f"Node {no_lvol_node_uuid} not yet offline; retrying shutdown...")
 
             self.logger.info("Sleeping for 30 seconds")
             sleep_n_sec(30)
@@ -417,9 +453,11 @@ class TestHASingleNodeOutage(TestClusterBase):
                             device_health_check=None
                             )
 
-            # self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
-            self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
-                                      node_id=no_lvol_node_uuid)
+            if self.k8s_test:
+                self.sbcli_utils.restart_node(node_uuid=no_lvol_node_uuid)
+            else:
+                self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
+                                          node_id=no_lvol_node_uuid)
 
             self.logger.info(f"Waiting for node to become online, {no_lvol_node_uuid}")
             self.sbcli_utils.wait_for_storage_node_status(no_lvol_node_uuid, "online", timeout=300)
@@ -448,7 +486,7 @@ class TestHASingleNodeOutage(TestClusterBase):
 
         # Write steps in order
         steps = {
-            "Storage Node": ["suspended", "shutdown", "restart"],
+            "Storage Node": ["shutdown", "restart"],
             "Device": {"restart"}
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,

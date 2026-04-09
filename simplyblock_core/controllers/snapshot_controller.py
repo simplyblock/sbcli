@@ -21,27 +21,6 @@ logger = lg.getLogger()
 db_controller = DBController()
 
 
-def _acquire_lvol_mutation_lock(node):
-    """Block concurrent lvstore mutations while HA registration is in flight."""
-    had_lock = node.lvol_sync_del()
-    if not had_lock:
-        node.lvol_del_sync_lock()
-    return had_lock
-
-
-def _release_lvol_mutation_lock(node, had_lock):
-    if not had_lock:
-        node.lvol_del_sync_lock_reset()
-
-
-def _rollback_lvol_creation(lvol, node_ids):
-    for node_id in dict.fromkeys(node_ids):
-        try:
-            lvol_controller.delete_lvol_from_node(lvol.get_id(), node_id)
-        except Exception as e:
-            logger.error(f"Failed to rollback lvol {lvol.get_id()} from node {node_id}: {e}")
-
-
 def add(lvol_id, snapshot_name, backup=False, lock=True):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -191,10 +170,6 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
             except KeyError:
                 pass
 
-        had_lock = False
-        if lock:
-            had_lock = _acquire_lvol_mutation_lock(host_node)
-
         if primary_node:
             rpc_client = RPCClient(
                 primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
@@ -231,8 +206,6 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
                     logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 return False, msg
 
-        if lock:
-            _release_lvol_mutation_lock(host_node, had_lock)
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
@@ -710,10 +683,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             except KeyError:
                 pass
 
-        had_lock = False
-        if lock:
-            had_lock = _acquire_lvol_mutation_lock(host_node)
-
         if primary_node:
             lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
             if error:
@@ -730,8 +699,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 logger.error(error)
                 lvol.remove(db_controller.kv_store)
                 return False, error
-        if lock and had_lock:
-            _release_lvol_mutation_lock(host_node, had_lock)
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)

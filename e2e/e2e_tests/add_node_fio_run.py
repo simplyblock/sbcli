@@ -31,6 +31,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             node_uuid = self.sbcli_utils.get_node_without_lvols()
 
             self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="10G",
+                                      distr_ndcs=self.ndcs, distr_npcs=self.npcs,
+                                      distr_bs=self.bs, distr_chunk_bs=self.chunk_bs,
                                       host_id=node_uuid)
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
@@ -56,7 +58,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             )
             fio_thread.start()
             fio_threads.append(fio_thread)
-            
+
             lvol_details[lvol_name] = {
                 "ID": self.sbcli_utils.get_lvol_id(lvol_name),
                 "Mount": mount_path,
@@ -70,7 +72,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             }
 
             sleep_n_sec(10)
-            
+
             snapshot_name = f"snap_{lvol_name}"
             self.ssh_obj.add_snapshot(self.mgmt_nodes[0], lvol_details[lvol_name]["ID"], snapshot_name)
 
@@ -200,6 +202,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             log_path = f"{self.log_base}/{lvol_name}.log"
 
             self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="10G",
+                                      distr_ndcs=self.ndcs, distr_npcs=self.npcs,
+                                      distr_bs=self.bs, distr_chunk_bs=self.chunk_bs,
                                       host_id=node)
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
@@ -225,7 +229,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             )
             fio_thread.start()
             fio_threads.append(fio_thread)
-            
+
             lvol_details[lvol_name] = {
                 "ID": self.sbcli_utils.get_lvol_id(lvol_name),
                 "Mount": mount_path,
@@ -239,7 +243,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             }
 
             sleep_n_sec(10)
-            
+
             snapshot_name = f"snap_{lvol_name}"
             self.ssh_obj.add_snapshot(self.mgmt_nodes[0], lvol_details[lvol_name]["ID"], snapshot_name)
 
@@ -427,6 +431,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
             node_uuid = self.sbcli_utils.get_node_without_lvols()
 
             self.sbcli_utils.add_lvol(lvol_name, self.storage_pool_name, size="10G",
+                                      distr_ndcs=self.ndcs, distr_npcs=self.npcs,
+                                      distr_bs=self.bs, distr_chunk_bs=self.chunk_bs,
                                       host_id=node_uuid)
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:
@@ -585,6 +591,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
             log_path = f"{self.log_base}/{lvol_name}.log"
 
             self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="10G",
+                                      distr_ndcs=self.ndcs, distr_npcs=self.npcs,
+                                      distr_bs=self.bs, distr_chunk_bs=self.chunk_bs,
                                       host_id=node)
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
             for connect_str in connect_ls:

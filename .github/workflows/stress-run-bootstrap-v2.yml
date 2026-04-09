@@ -33,8 +33,9 @@ on:
         required: true
         default: "R25.10-Hotfix"
 
-      SIMPLY_BLOCK_SPDK_ULTRA_IMAGE:
-        description: "Optional SPDK image override (if set, pass --spdk-image)"
+      CUSTOM_IMAGES:
+        description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
+        default: 'spdk="" docker=""'
         required: false
 
       BOOTSTRAP_IS_SINGLE_NODE:
@@ -53,6 +54,21 @@ on:
         description: "Stress test class name (--testname)"
         required: true
         default: "RandomMultiClientMultiFailoverTest"
+
+      CLUSTER_SECURITY:
+        description: |
+          Cluster setup mode.
+          'host-sec'        — writes dhchap JSON and passes --host-sec to cluster create.
+          'backup'          — writes s3-backup.json and passes --use-backup to cluster create.
+          'host-sec+backup' — applies both.
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - host-sec
+          - backup
+          - host-sec+backup
 
 concurrency:
   group: simplyblock-lab-stress-v2
@@ -99,6 +115,7 @@ jobs:
       NDCS: '2'
       NPCS: '2'
       TEST_CLASS: ${{ inputs.TEST_CLASS || 'RandomMultiClientMultiFailoverTest' }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'none' }}
 
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -246,16 +263,25 @@ jobs:
             exit 1
           fi
       
-      - name: Export SPDK image env (only if provided)
+      - name: Parse CUSTOM_IMAGES overrides
         shell: bash
         run: |
           set -euxo pipefail
-          if [[ -n "${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" ]]; then
-            echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=${{ inputs.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE }}" >> "$GITHUB_ENV"
-            echo "SPDK image exported"
-          else
-            echo "SPDK image not provided; skipping export"
-          fi
+          custom="${{ inputs.CUSTOM_IMAGES }}"
+          for item in $custom; do
+            key="${item%%=*}"
+            value="${item#*=}"
+            value="${value//\"/}"   # strip surrounding quotes
+            if [[ -z "$value" ]]; then
+              echo "Skipping $key (empty)"
+              continue
+            fi
+            case "$key" in
+              spdk)   echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=$value" >> "$GITHUB_ENV" ; echo "SPDK image set: $value" ;;
+              docker) echo "SIMPLY_BLOCK_DOCKER_IMAGE=$value"     >> "$GITHUB_ENV" ; echo "Docker image set: $value" ;;
+              *)      echo "Unknown image key: $key (ignored)" ;;
+            esac
+          done
 
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash
@@ -322,12 +348,25 @@ jobs:
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
+          run_remote_with_retry() {
+            local ip="$1"
+            local script="$2"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+
           targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for ip in $uniq_targets; do
             echo "---- $ip: kill fio/tmux + umount ${NFS_MOUNTPOINT} ----"
-            run_remote "$ip" "set -euxo pipefail;
+            run_remote_with_retry "$ip" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
               mp='${NFS_MOUNTPOINT}';
@@ -422,7 +461,7 @@ jobs:
               for d in \$dirs; do rm -rf \"\$d\" || true; done"
           done
 
-      - name: Remove /etc/simplyblock on MNODES + storage, reboot storage, wait online, disk reset + PCI rebind + mklabel
+      - name: Reboot storage nodes, wait online, disk reset + PCI rebind + mklabel
         shell: bash
         run: |
           set -euxo pipefail
@@ -435,13 +474,6 @@ jobs:
               -o UserKnownHostsFile=/dev/null \
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
-
-          # remove /etc/simplyblock on MNODES + storage
-          targets="$MNODES $STORAGE_PRIVATE_IPS"
-          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
-          for ip in $uniq_targets; do
-            run_remote "$ip" "rm -rf /etc/simplyblock || true"
-          done
 
           # reboot storage nodes
           for ip in $STORAGE_PRIVATE_IPS; do
@@ -512,6 +544,75 @@ jobs:
           rm -rf simplyBlockDeploy
           git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
           test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
+
+      - name: Remove /etc/simplyblock on all nodes and verify it is gone
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
+          }
+
+          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+
+          for ip in $uniq_targets; do
+            echo "---- removing /etc/simplyblock on $ip ----"
+            run_remote "$ip" "rm -rf /etc/simplyblock || true"
+          done
+
+          # Verify the folder is actually gone on every node
+          failed=0
+          for ip in $uniq_targets; do
+            if sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "test -e /etc/simplyblock"; then
+              echo "ERROR: /etc/simplyblock still exists on ${ip}"
+              failed=1
+            else
+              echo "OK: /etc/simplyblock is absent on ${ip}"
+            fi
+          done
+          [[ "$failed" -eq 0 ]] || exit 1
+
+      - name: Write cluster security/backup config to mgmt node
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ "${CLUSTER_SECURITY:-none}" == "none" || -z "${CLUSTER_SECURITY:-}" ]]; then
+            echo "CLUSTER_SECURITY=none; skipping."
+            exit 0
+          fi
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          if [[ "${CLUSTER_SECURITY}" == "host-sec" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
+            echo "Writing /root/host-sec.json to ${mgmt_ip}..."
+            HOST_SEC_JSON='{"dhchap_digests":["sha256","sha384"],"dhchap_dhgroups":["ffdhe2048","ffdhe3072","ffdhe4096","ffdhe6144","ffdhe8192"]}'
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${mgmt_ip}" \
+              "echo '${HOST_SEC_JSON}' > /root/host-sec.json && echo 'Written:' && cat /root/host-sec.json"
+            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --host-sec /root/host-sec.json" >> "$GITHUB_ENV"
+            echo "Appended --host-sec /root/host-sec.json to EXTRA_CLUSTER_ARGS"
+          fi
+          if [[ "${CLUSTER_SECURITY}" == "backup" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
+            echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
+            S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${mgmt_ip}" \
+              "echo '${S3_BACKUP_JSON}' > /root/s3-backup.json && echo 'Written:' && cat /root/s3-backup.json"
+            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --use-backup /root/s3-backup.json" >> "$GITHUB_ENV"
+            echo "Appended --use-backup /root/s3-backup.json to EXTRA_CLUSTER_ARGS"
+          fi
 
       - name: Bootstrap cluster (all params are inputs; --spdk-image only if set)
         shell: bash
@@ -666,7 +767,46 @@ jobs:
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
             2>&1 | tee output.log
-      
+
+      - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            ssh -i "${KEY_PATH}" \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script" || true
+          }
+
+          run_remote_with_retry() {
+            local ip="$1"
+            local script="$2"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+
+          for ip in $MNODES $STORAGE_PRIVATE_IPS; do
+            echo "---- $ip: kill tmux ----"
+            run_remote_with_retry "$ip" "pkill -9 tmux || true"
+          done
+
+          for ip in $CLIENTNODES; do
+            echo "---- $ip: kill fio and tmux----"
+            run_remote_with_retry "$ip" "pkill -9 fio || true"
+            run_remote_with_retry "$ip" "pkill -9 tmux || true"
+          done
+
       - name: Export RUN_BASE_DIR from RUN_DIR_FILE
         if: always()
         shell: bash
@@ -812,7 +952,9 @@ jobs:
               continue
             fi
 
+            set +e
             while IFS= read -r C; do
+              C="${C%%$'\r'}"
               [[ -z "${C}" ]] && continue
               echo "    dumping: ${C}"
               LOG_FILE="${REMOTE_DIR}/${C}.txt"
@@ -821,6 +963,7 @@ jobs:
               ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps --details '${C}' > '${LOG_FILE}' 2>&1 || true\"" || true
               ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker inspect '${C}' > '${INSPECT_FILE}' 2>&1 || true\"" || true
             done <<< "${CONTAINERS}"
+            set -e
           done
 
 
@@ -976,15 +1119,29 @@ jobs:
             [[ -n "${outage_latest}" && -f "${outage_latest}" ]] && outage_tail="$(tail -n 20 "${outage_latest}" 2>/dev/null || true)"
           fi
 
-          failure_reason="(unknown)"
+          # --- failure reason: MultipleExceptions line has "TestName: actual error" ---
+          failure_summary="(unknown)"
+          log_tail=""
           if [[ -f "${out_log}" ]]; then
-            if grep -Eqi 'Traceback \(most recent call last\)|Exception:|ERROR|AssertionError|Input/output error|FAILED|FATAL' "${out_log}"; then
-              failure_reason="$(grep -Ein 'Traceback \(most recent call last\)|Exception:|ERROR|AssertionError|Input/output error|FAILED|FATAL' "${out_log}" | tail -n 3 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-              failure_reason="$(printf '%s' "${failure_reason}" | tr '\r' ' ' | sed 's/[[:space:]]\+/ /g')"
-            else
-              failure_reason="$(tail -n 20 "${out_log}" | tr '\r' ' ' | sed 's/[[:space:]]\+/ /g' | tail -n 3)"
+            # The MultipleExceptions line is the definitive failure summary: "TestName: error"
+            failure_summary="$(grep -oE 'MultipleExceptions: .+|SkippedTestsException: .+' "${out_log}" \
+              | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -z "${failure_summary}" ]]; then
+              # Fallback: last RuntimeError / AssertionError logged
+              failure_summary="$(grep -E 'RuntimeError:|AssertionError:|Error:' "${out_log}" \
+                | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
             fi
+            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
+            log_tail="$(tail -n 50 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
           fi
+
+          # --- test result counts from stress.py log lines ---
+          total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          skipped_cnt="$(grep -E 'Number of Skipped Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE\.' "${out_log}" 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
 
           mgmt_dir="${RUN_BASE_DIR:-}/$(echo "${MNODES}" | awk '{print $1}')/mgmt_details/mgmt"
           mgmt_files="(not found)"
@@ -1012,6 +1169,14 @@ jobs:
             echo "- **End (UTC):** ${TEST_END_HUMAN:-unknown}"
             echo "- **Duration:** ${dur_fmt}"
             echo ""
+            echo "### Test Results"
+            echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
+            if [[ -n "${test_wise}" ]]; then
+              echo '```'
+              printf '%s\n' "${test_wise}"
+              echo '```'
+            fi
+            echo ""
             echo "### NFS Run Folder"
             echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
             echo "- Client logs: \`${RUN_BASE_DIR:-<run_dir>}/ClientLogs\`"
@@ -1032,10 +1197,19 @@ jobs:
               echo "</details>"
             fi
             echo ""
-            echo "### Failure Reason (best-effort)"
+            echo "### Failure Reason"
             echo '```'
-            printf '%s\n' "${failure_reason}"
+            printf '%s\n' "${failure_summary}"
             echo '```'
+            if [[ -n "${log_tail}" ]]; then
+              echo ""
+              echo "<details><summary>Last 50 lines of output.log</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "${log_tail}"
+              echo '```'
+              echo "</details>"
+            fi
             echo ""
             echo "### Mgmt Artifacts (mgmt_details/mgmt)"
             echo "- Path: \`${mgmt_dir}\`"
