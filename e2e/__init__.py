@@ -114,6 +114,9 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupUpgradeCompatibility,
     TestBackupRestoreEdgeCases,
     TestBackupSourceSwitch,
+    # Interrupted backup/restore E2E tests (TC-BCK-080..097)
+    TestBackupInterruptedBackup,
+    TestBackupInterruptedRestore,
 )
 
 from stress_test.continuous_backup_stress import (
@@ -123,8 +126,6 @@ from stress_test.continuous_backup_stress import (
     BackupStressCryptoMix,
     BackupStressPolicyRetention,
     BackupStressRestoreConcurrent,
-    TestBackupInterruptedBackup,
-    TestBackupInterruptedRestore,
     BackupStressMarathon,
 )
 
@@ -317,9 +318,6 @@ def get_backup_tests():
         TestBackupCryptoLvol,
         # TestBackupCustomGeometry, # Will re-enable when we have a way to reliably test it in CI (currently requires manual setup of custom geometry pool)
         TestBackupDeleteAndRestore,
-        # Interrupted-operation tests
-        TestBackupInterruptedBackup,
-        TestBackupInterruptedRestore,
         # Extra coverage tests (TC-BCK-100..148)
         TestBackupConcurrentIO,
         TestBackupMultipleRestores,
@@ -339,9 +337,12 @@ def get_backup_tests():
         TestBackupPolicyLvolLevel,
         TestBackupResizedLvol,
         TestBackupListFields,
-        TestBackupUpgradeCompatibility,
         TestBackupRestoreEdgeCases,
         TestBackupSourceSwitch,
+        # Outage tests — run last (involves node shutdown/restart)
+        TestBackupUpgradeCompatibility,
+        TestBackupInterruptedBackup,
+        TestBackupInterruptedRestore,
     ]
 
 
