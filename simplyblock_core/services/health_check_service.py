@@ -164,7 +164,6 @@ def check_node(snode):
                         bdev_names=list(node_bdev_names), reattach=False,
                     )
                     connected_devices.append(org_dev.get_id())
-                    distr_controller.send_dev_status_event(org_dev, NVMeDevice.STATUS_ONLINE, snode)
                 except RuntimeError:
                     logger.error(f"Failed to connect to device: {org_dev.get_id()}")
                     node_remote_devices_check = False
