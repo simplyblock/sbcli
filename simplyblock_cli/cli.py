@@ -410,7 +410,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--ingress-host-source', help='Ingress host source: \'hostip\' for node IP, \'loadbalancer\' for external LB, or \'dns\' for custom domain. Default: hostip.', type=str, default='hostip', dest='ingress_host_source', choices=['hostip','loadbalancer','dns',])
         argument = subcommand.add_argument('--dns-name', help='Fully qualified DNS name to use as the Ingress host (required if --ingress-host-source=dns).', type=str, default='', dest='dns_name')
         argument = subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes.', dest='enable_node_affinity', action='store_true')
-        argument = subcommand.add_argument('--fabric', help='Fabric: tcp, rdma or both (specify: tcp, rdma). Default: tcp.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
+        argument = subcommand.add_argument('--fabric', help='The NVMe fabric to use (specify: tcp, rdma). Default: tcp.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         if self.developer_mode:
             argument = subcommand.add_argument('--max-queue-size', help='The max size the queue will grow. Default: 128.', type=int, default=128, dest='max_queue_size')
         if self.developer_mode:
