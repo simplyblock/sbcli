@@ -240,6 +240,12 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
+    if name:
+        existing_clusters = db_controller.get_clusters()
+        for existing in existing_clusters:
+            if existing.cluster_name and existing.cluster_name == name:
+                raise ValueError(f"A cluster with the name '{name}' already exists")
+
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
 
     logger.info("Installing dependencies...")
@@ -296,7 +302,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not cli_pass:
         cli_pass = utils.generate_string(10)
 
-    # validate cluster duplicate
     logger.info("Adding new cluster object")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
@@ -466,6 +471,11 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if not clusters:
         raise ValueError("No previous clusters found!")
 
+    if name:
+        for existing in clusters:
+            if existing.cluster_name and existing.cluster_name == name:
+                raise ValueError(f"A cluster with the name '{name}' already exists")
+
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
 
@@ -536,6 +546,10 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
 def set_name(cl_id, name) -> Cluster:
     cluster = db_controller.get_cluster_by_id(cl_id)
+    if name:
+        for existing in db_controller.get_clusters():
+            if existing.uuid != cl_id and existing.cluster_name and existing.cluster_name == name:
+                raise ValueError(f"A cluster with the name '{name}' already exists")
     old_name = cluster.cluster_name
     cluster.cluster_name = name
     cluster.write_to_db(db_controller.kv_store)
@@ -1186,6 +1200,10 @@ def set_fabric(cluster_id, fabric) -> None:
 
 def change_cluster_name(cluster_id, new_name) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)
+    if new_name:
+        for existing in db_controller.get_clusters():
+            if existing.uuid != cluster_id and existing.cluster_name and existing.cluster_name == new_name:
+                raise ValueError(f"A cluster with the name '{new_name}' already exists")
     old_name = cluster.cluster_name
     cluster.cluster_name = new_name
     cluster.write_to_db(db_controller.kv_store)
