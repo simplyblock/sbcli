@@ -133,15 +133,26 @@ def update_cluster_status(cluster_id):
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
 
-    first_iter_task_pending = 0
+    rebalancing_task_names = {
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+        JobSchedule.FN_FAILED_DEV_MIG,
+        JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+        JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+        JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
+        JobSchedule.FN_LVOL_MIG,
+    }
+    active_rebalancing_tasks = 0
     for task in db.get_job_tasks(cluster_id):
-        if task.status != JobSchedule.STATUS_DONE and task.function_name in [
-            JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
-            if "migration" not in task.function_params:
-                first_iter_task_pending += 1
+        if task.canceled:
+            continue
+        if task.status == JobSchedule.STATUS_DONE:
+            continue
+        if task.function_name in rebalancing_task_names:
+            active_rebalancing_tasks += 1
 
     cluster = db.get_cluster_by_id(cluster_id)
-    cluster.is_re_balancing = first_iter_task_pending > 0
+    cluster.is_re_balancing = active_rebalancing_tasks > 0
     cluster.write_to_db()
 
     current_cluster_status = cluster.status
