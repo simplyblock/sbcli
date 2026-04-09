@@ -940,7 +940,7 @@ commands:
             type: bool
             action: store_true
           - name: "--fabric"
-            help: "Fabric: tcp, rdma or both (specify: tcp, rdma). Default: tcp."
+            help: "The NVMe fabric to use (specify: tcp, rdma). Default: tcp."
             dest: fabric
             type: str
             choices:
