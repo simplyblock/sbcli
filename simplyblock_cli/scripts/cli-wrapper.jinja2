@@ -78,7 +78,7 @@ class CLIWrapper(CLIWrapperBase):
 , '{{ alias }}'
 {%- endfor -%}
 {%- endif -%}
-, help='{{ parameter.help | escape_strings | escape_python_string }}'
+, help='{{ parameter | apply_deprecated_warning }}{{ parameter.help | escape_strings | escape_python_string }}'
 {%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type | argument_type }}{% endif %}
 {%- if parameter.default is defined %}, default={{ parameter | default_value }}{% endif %}
 {%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
@@ -136,6 +136,11 @@ class CLIWrapper(CLIWrapperBase):
 {%- endif %}
                         args.{{ parameter.dest }} = {{ parameter | default_value }}
 {%- endif -%}
+{%- endfor -%}
+{%- for parameter in subcommand.parameters -%}
+{%- if parameter.deprecated is defined and parameter.deprecated.migration is defined %}
+                    args = self.{{ parameter.deprecated.migration }}(args)
+{%- endif %}
 {%- endfor -%}
 {%- if subcommand.private %}
                     if not self.developer_mode:

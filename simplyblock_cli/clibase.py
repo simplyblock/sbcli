@@ -161,18 +161,7 @@ class CLIWrapperBase:
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
         format_4k = args.format_4k
-
-        if args.enable_journal_device:
-            num_partitions_per_dev = 0
-        else:
-            # Deprecated but still supported for backward compatibility.
-            if args.partitions is None:
-                num_partitions_per_dev = 1
-            elif args.partitions < 0 or args.partitions > 1:
-                self.parser.error("partitions must be either 0 or 1")
-            else:
-                print("WARNING: --journal-partition is deprecated, use --enable-journal-device instead")
-                num_partitions_per_dev = args.partitions
+        num_partitions_per_dev = 0 if args.enable_journal_device else 1
 
         try:
             out = storage_ops.add_node(
@@ -1091,3 +1080,11 @@ class CLIWrapperBase:
     def _completer_get_sn_list(self, prefix, parsed_args, **kwargs):
         db = db_controller.DBController()
         return (cluster.get_id() for cluster in db.get_storage_nodes() if cluster.get_id().startswith(prefix))
+
+    def migrate_journal_partition(self, args):
+        if args.partitions < 0 or args.partitions > 1:
+            self.parser.error("partitions must be either 0 or 1")
+        else:
+            args.enable_journal_device = True
+            del args.partitions
+        return args

@@ -295,11 +295,28 @@ properties:
                       x-intellij-html-description: |
                         The action value parameter. <b>Positional arguments cannot have actions.</b>
                     choices:
-                        type: array
-                        description: The valid choices of the positional argument or parameter.
-                        x-intellij-html-description: The valid choices of the positional argument or parameter.
-                        items:
-                          minItems: 2
-                          oneOf:
-                            - type: string
-                            - type: integer
+                      type: array
+                      description: The valid choices of the positional argument or parameter.
+                      x-intellij-html-description: The valid choices of the positional argument or parameter.
+                      items:
+                        minItems: 2
+                        oneOf:
+                          - type: string
+                          - type: integer
+                    deprecated:
+                      type: object
+                      required:
+                        - since
+                      properties:
+                        replaced-by:
+                          type: string
+                          description: The replacement of the parameter.
+                          x-intellij-html-description: The replacement of the parameter.
+                        since:
+                          type: string
+                          description: The version of the parameter which deprecates the replacement.
+                          x-intellij-html-description: The version of the parameter which deprecates the replacement.
+                        migration:
+                          type: string
+                          description: The migration function which migrates the old value to the new value..
+                          x-intellij-html-description: The migration function which migrates the old value to the new value.
