@@ -35,7 +35,7 @@ nodeSelector:
   value:
 
 ports:
-  lvolNvmfPortStart:
+  lvolNvmfPortStart: 9110
 
 storageclass:
   allowedTopologyZones: []
