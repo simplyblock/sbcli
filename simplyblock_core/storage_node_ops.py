@@ -2503,11 +2503,6 @@ def restart_storage_node(
                 return False
             node.write_to_db()
 
-        logger.info("Sending device status event")
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        for db_dev in snode.nvme_devices:
-            distr_controller.send_dev_status_event(db_dev, db_dev.status)
-
         if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
             device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
 
@@ -2519,6 +2514,12 @@ def restart_storage_node(
 
         logger.info("Setting node status to Online")
         set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+
+        logger.info("Sending device status event")
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        for db_dev in snode.nvme_devices:
+            distr_controller.send_dev_status_event(db_dev, db_dev.status)
+
         _refresh_cluster_maps_after_node_recovery(snode)
 
         lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
