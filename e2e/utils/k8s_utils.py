@@ -589,7 +589,8 @@ class K8sSbcliUtils:
         self.k8s.exec_sbcli(cmd)
 
     def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
-        """Delete lvol by name, waiting until it disappears."""
+        """Delete lvol by name, retrying the delete command periodically
+        if the lvol returns to online state (mirrors sbcli_utils behaviour)."""
         lvol_id = self.get_lvol_id(lvol_name=lvol_name)
         if not lvol_id:
             if skip_error:
@@ -601,9 +602,21 @@ class K8sSbcliUtils:
 
         attempt = 0
         while attempt < max_attempt:
-            if lvol_name not in self.list_lvols():
+            lvols = self.list_lvols()
+            if lvol_name not in lvols:
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
                 return True
+            # Every 12 attempts, check status and retry delete if lvol is
+            # back to online (e.g. delete failed during outage).
+            if attempt > 0 and attempt % 12 == 0:
+                try:
+                    details = self.get_lvol_details(lvol_id=lvol_id)
+                    cur_state = details[0]["status"] if details else "unknown"
+                except Exception:
+                    cur_state = "unknown"
+                if cur_state == "online":
+                    self.logger.info(f"Lvol {lvol_name} in online state. Retrying delete!")
+                    self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol delete {lvol_id}")
             attempt += 1
             self.logger.info(f"Lvol {lvol_name} deletion in progress... ({attempt})")
             sleep_n_sec(5)
@@ -1015,19 +1028,34 @@ class K8sSbcliUtils:
                 self.logger.info(f"Snapshot not found (skip_error=True). snap_name={snap_name}")
                 return
             raise Exception(f"Snapshot not found. snap_name={snap_name}")
+
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d snapshot delete {snap_id}")
-        # Wait for it to disappear from the list
+
         resolve_name = snap_name or next(
             (k for k, v in self.list_snapshots().items() if v == snap_id), None
         )
-        if resolve_name:
-            try:
-                self.wait_for_snapshot(resolve_name, present=False, timeout=60)
-            except TimeoutError as e:
-                if skip_error:
-                    self.logger.warning(str(e))
-                else:
-                    raise
+        # Wait for it to disappear, retrying the delete command periodically
+        attempt = 0
+        while attempt < max_attempt:
+            cur = self.list_snapshots()
+            gone = True
+            if resolve_name and resolve_name in cur:
+                gone = False
+            elif not resolve_name and snap_id in cur.values():
+                gone = False
+            if gone:
+                self.logger.info(f"Snapshot {snap_name or snap_id} deleted successfully!")
+                return
+            if attempt > 0 and attempt % 12 == 0:
+                self.logger.info(f"Snapshot {snap_name or snap_id} still present. Retrying delete!")
+                self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d snapshot delete {snap_id}")
+            attempt += 1
+            sleep_n_sec(5)
+
+        if skip_error:
+            self.logger.warning(f"Snapshot {snap_name or snap_id} not deleted after {max_attempt} attempts")
+            return
+        raise Exception(f"Snapshot did not get deleted in time. snap_name={snap_name}, snap_id={snap_id}")
 
     def delete_all_snapshots(self):
         for snap_name in list(self.list_snapshots().keys()):
