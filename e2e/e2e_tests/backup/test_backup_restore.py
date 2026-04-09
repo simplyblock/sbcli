@@ -3623,7 +3623,7 @@ class _InterruptedTestBase(BackupTestBase):
             sleep_n_sec(_BACKUP_POLL_INTERVAL_INTR)
         return "timeout"
 
-    def _get_lvol_status(self, lvol_name: str) -> str | None:
+    def _get_lvol_status(self, lvol_name: str):
         """Return the status of *lvol_name* from `lvol list`, or None if absent."""
         out, _ = self._sbcli("lvol list")
         rows = self._parse_table(out)
