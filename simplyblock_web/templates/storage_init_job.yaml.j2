@@ -23,7 +23,7 @@ spec:
             path: /proc
       containers:
         - name: init-setup
-          image: simplyblock/ubuntu-tools:22.04
+          image: alpine:3.21.3
           securityContext:
             privileged: true
           volumeMounts:
@@ -33,6 +33,7 @@ spec:
           args:
             - |
               set -e
+              apk add --no-cache curl iproute2 util-linux >/dev/null
 
               echo "--- Starting init setup ---"
 
