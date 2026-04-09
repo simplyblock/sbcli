@@ -4,6 +4,7 @@ import traceback
 import os
 import time
 import subprocess
+import shutil
 from __init__ import get_stress_tests
 from logger_config import setup_logger
 from exceptions.custom_exception import (
@@ -54,7 +55,8 @@ def main():
         test_class_run = tests
     else:
         for cls in tests:
-            if args.testname.lower() in cls.__name__.lower():
+            needle = args.testname.lower().replace("_", "")
+            if needle in cls.__name__.lower():
                 test_class_run.append(cls)
 
     if not test_class_run:
@@ -64,22 +66,25 @@ def main():
     
     test_run_api = TestRunsAPI(PROFILE_KEY)
     try:
-        cluster_base = TestClusterBase()
+        cluster_base = TestClusterBase(k8s_run=args.run_k8s)
         ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
-        sbcli_utils = SbcliUtils(
-            cluster_api_url=cluster_base.api_base_url,
-            cluster_id=cluster_base.cluster_id,
-            cluster_secret=cluster_base.cluster_secret
-        )
 
-        mgmt_nodes, storage_node = sbcli_utils.get_all_nodes_ip()
+        mgmt_nodes, storage_node = cluster_base.sbcli_utils.get_all_nodes_ip()
         mgmt_ip_for_env = mgmt_nodes[0]
         environment_id = resolve_environment_id_from_ip(mgmt_ip_for_env)
         if not environment_id:
             raise RuntimeError(f"Could not resolve environment for mgmt IP {mgmt_ip_for_env}")
-        ssh_obj.connect(address=storage_node[0], bastion_server_address=cluster_base.bastion_server)
 
-        fe_branch, fe_commit, be_branch, be_commit = detect_fe_be_tags(ssh_obj, storage_node[0])
+        fe_branch, fe_commit, be_branch, be_commit = None, None, None, None
+        try:
+            ssh_obj.connect(address=storage_node[0], bastion_server_address=cluster_base.bastion_server)
+            fe_branch, fe_commit, be_branch, be_commit = detect_fe_be_tags(ssh_obj, storage_node[0])
+            # Close the temp SSH connection used for tag detection
+            for node, ssh in ssh_obj.ssh_connections.items():
+                logger.info(f"Closing temp ssh connection for FE/BE detection: {node}")
+                ssh.close()
+        except Exception as tag_err:
+            logger.warning(f"Could not detect FE/BE tags (will use 'unknown'): {tag_err}")
 
         test_run_id = test_run_api.create_run(
             jira_ticket=JIRA_TICKET,
@@ -90,11 +95,6 @@ def main():
             environment_id=environment_id
         )
         logger.info(f"Test Run started: {test_run_id}")
-
-        # Close the temp SSH connection used for tag detection
-        for node, ssh in ssh_obj.ssh_connections.items():
-            logger.info(f"Closing temp ssh connection for FE/BE detection: {node}")
-            ssh.close()
 
     except Exception as e:
         logger.error("Failed to create Test Run; proceeding without external tracking.")
@@ -121,20 +121,35 @@ def main():
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
+        log_path = getattr(test_obj, "docker_logs_path", "")
         try:
-            if not args.run_k8s:
+            if args.run_k8s:
+                test_obj.stop_k8s_log_collect()
+            else:
                 test_obj.stop_docker_logs_collect()
             test_obj.fetch_all_nodes_distrib_log()
-            if i == (len(test_class_run) - 1):
-                test_obj.collect_management_details()
+            test_obj.collect_management_details()
             all_nodes = test_obj._get_all_nodes()
-            test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
+            if not args.run_k8s:
+                test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
             test_obj.teardown(delete_lvols=False, close_ssh=True)
             # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            if log_path:
+                logger.info(f"Test logs saved at: {log_path}")
+            # Copy e2e/logs/ folder to NFS share so automation logs are accessible post-run
+            if log_path:
+                logs_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+                if os.path.isdir(logs_src):
+                    logs_dest = os.path.join(log_path, "automation_logs")
+                    try:
+                        shutil.copytree(logs_src, logs_dest, dirs_exist_ok=True)
+                        logger.info(f"Automation logs copied to: {logs_dest}")
+                    except Exception as _copy_err:
+                        logger.warning(f"Failed to copy automation logs to NFS: {_copy_err}")
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
@@ -253,11 +268,14 @@ def upload_logs():
 
 def check_for_dumps():
     """Validates whether core dumps present on machines
-    
+
     Returns:
         bool: If there are core dumps or not
     """
     logger.info("Checking for core dumps!!")
+    if not os.getenv("API_BASE_URL"):
+        logger.info("Skipping core dump check (K8s mode: no direct SSH to storage nodes)")
+        return False
     cluster_base = TestClusterBase()
     ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
     sbcli_utils = SbcliUtils(

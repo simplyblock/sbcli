@@ -232,15 +232,15 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
         if node.is_secondary_node:  # pass
             continue
         if node.status == node.STATUS_ONLINE:
-            lvol_count = len(db_controller.get_lvols_by_node_id(node.get_id()))
-            if lvol_count >= node.max_lvol:
+            subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(node.get_id())))
+            if subsys_count >= node.max_lvol:
                 continue
             if node.lvol_sync_del():
                 logger.warning(f"LVol sync delete task found on node: {node.get_id()}, skipping")
                 continue
             online_nodes.append(node)
             node_st = {
-                "lvol": lvol_count+1
+                "lvol": subsys_count+1
             }
             node_stats[node.get_id()] = node_st
 
@@ -561,9 +561,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.npcs = cl.distr_npcs
         lvol.ndcs = cl.distr_ndcs
 
-    lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
-    if lvol_count > host_node.max_lvol:
-        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(host_node.get_id())))
+    if subsys_count > host_node.max_lvol:
+        error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {subsys_count}"
         logger.error(error)
         return False, error
 
@@ -1431,14 +1431,10 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         elif att.target_type == "pool":
             pool_policy_map[att.target_id] = pol
 
-    snap_dict : dict[str, int] = {}
     for lvol in lvols:
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
-        cloned_snapped = lvol.cloned_from_snap
-        if cloned_snapped:
-            snap_dict[cloned_snapped] = snap_dict.get(cloned_snapped, 0) + 1
         size_used = 0
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
@@ -1468,11 +1464,6 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Policy": eff_policy.policy_name if eff_policy else "",
         }
         data.append(lvol_data)
-
-    for snap, count in snap_dict.items():
-        ref_snap = db_controller.get_snapshot_by_id(snap)
-        ref_snap.ref_count = count
-        ref_snap.write_to_db(db_controller.kv_store)
 
     if is_json:
         return json.dumps(data, indent=2)
@@ -2115,6 +2106,45 @@ def list_by_node(node_id=None, is_json=False):
     return utils.print_table(data)
 
 
+def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    host_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    lvol_count = len(db_controller.get_lvols_by_node_id(lvol.node_id))
+    if lvol_count >= host_node.max_lvol:
+        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+        logger.error(error)
+        return False, error
+
+    snapshot_uuid = None
+    for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
+        if snap.snap_name == clone_name:
+            logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
+            snapshot_uuid = snap.uuid
+            break
+
+    if not snapshot_uuid:
+        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False)
+        if err:
+            logger.error(err)
+            return False, str(err)
+    new_lvol_uuid, err = snapshot_controller.clone(
+        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False)
+    if err:
+        logger.error(err)
+        if snapshot_uuid:
+                snapshot_controller.delete(snapshot_uuid)
+        return False, str(err)
+
+    return new_lvol_uuid, False
+
+
+
 def _build_host_entries(allowed_hosts, sec_options=None):
     """Build the allowed_hosts list with auto-generated keys.
 
@@ -2288,50 +2318,3 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     if errors:
         return True, f"Warning: SPDK remove_host failed on nodes: {', '.join(errors)}"
     return True, None
-
-
-def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
-    db_controller = DBController()
-    try:
-        lvol = db_controller.get_lvol_by_id(lvol_id)
-    except KeyError as e:
-        logger.error(e)
-        return False
-
-    try:
-        snapshot_uuid = None
-        for snap in db_controller.get_snapshots_by_lvol_id(lvol_id):
-            if snap.snap_name == clone_name:
-                logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.snap_uuid}, using it for cloning")
-                snapshot_uuid = snap.snap_uuid
-                break
-        if not snapshot_uuid:
-            for i in range(10):
-                snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name)
-                if err:
-                    logger.error(err)
-                    time.sleep(1)
-                    continue
-            else:
-                if not snapshot_uuid:
-                    logger.error("Failed to create snapshot for clone after 10 attempts")
-                    return False
-        new_lvol_uuid = None
-        for i in range(10):
-            new_lvol_uuid, err = snapshot_controller.clone(
-                snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True)
-            if err:
-                logger.error(err)
-                time.sleep(1)
-                continue
-        else:
-            if not new_lvol_uuid:
-                logger.error("Failed to clone lvol after 10 attempts")
-                if snapshot_uuid:
-                    snapshot_controller.delete(snapshot_uuid)
-                return False
-
-        return new_lvol_uuid
-    except Exception as e:
-        logger.error(e)
-        return False

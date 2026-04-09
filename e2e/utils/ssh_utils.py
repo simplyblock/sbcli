@@ -717,11 +717,12 @@ class SshUtils:
     #     self.logger.error(f"Failed to execute command '{command}' on node {node} after {max_retries} retries.")
     #     return "", "Command failed after max retries"
 
-    def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None, supress_logs=False):
-        """
+    def exec_command(self, node, command, timeout=360, max_retries=3, stream_callback=None, supress_logs=False, raise_on_error=False):
+        '''
         Execute a command with auto-reconnect (serialized per node), optional streaming,
         and proper exit-status capture to reduce “ran but no output” confusion.
-        """
+        If raise_on_error=True, raises RuntimeError when exit_status != 0.
+        '''
         retry = 0
         while retry < max_retries:
             with self.ssh_semaphore:
@@ -738,7 +739,7 @@ class SshUtils:
 
                 try:
                     if not supress_logs:
-                        self.logger.info(f"Executing command: {command}")
+                        self.logger.info(f"Executing command on {node}: {command}")
                     stdin, stdout, stderr = ssh.exec_command(command, timeout=timeout)
                     output_chunks, error_chunks = [], []
 
@@ -773,9 +774,9 @@ class SshUtils:
                         exit_status = stdout.channel.recv_exit_status()
 
                     if (not supress_logs) and out:
-                        self.logger.info(f"Command output: {out.strip()}")
+                        self.logger.info(f"Command output [{node}]: {out.strip()}")
                     if (not supress_logs) and err:
-                        self.logger.error(f"Command error: {err.strip()}")
+                        self.logger.error(f"Command error [{node}]: {err.strip()}")
 
                     if exit_status != 0 and not err:
                         # some tools write nothing on stderr but non-zero exit
@@ -784,6 +785,11 @@ class SshUtils:
                     if not out and not err:
                         if not supress_logs:
                             self.logger.warning(f"Command '{command}' executed but returned no output or error.")
+
+                    if raise_on_error and exit_status != 0:
+                        raise RuntimeError(
+                            f"Command failed on {node} (exit {exit_status}): {command}\n{err.strip()}"
+                        )
 
                     return out, err
 
@@ -1221,6 +1227,40 @@ class SshUtils:
             return output, error
         return None, None
 
+    def get_nvme_device_for_nqn(self, node, nqn):
+        """Return the block-device path (e.g. /dev/nvme2n2) already connected for *nqn*.
+
+        Tries two methods:
+        1. ``nvme list -o json`` (works when the namespace block device is visible)
+        2. sysfs scan via /sys/class/nvme-subsystem (fallback when nvme list misses it)
+        Returns the path string, or None if not found.
+        """
+        cmd = (
+            "sudo nvme list -o json 2>/dev/null | "
+            "python3 -c \""
+            "import sys,json; "
+            "d=json.load(sys.stdin); "
+            "[print(x['DevicePath']) for x in d.get('Devices',[]) "
+            f"if x.get('SubsystemNQN','').strip()=='{nqn}']\""
+        )
+        out, _ = self.exec_command(node=node, command=cmd)
+        lines = [ln.strip() for ln in out.strip().split('\n') if ln.strip()]
+        if lines:
+            return lines[0]
+
+        # Fallback: scan sysfs — subsystem may be connected but not in nvme list
+        sysfs_cmd = (
+            f"for f in /sys/class/nvme-subsystem/*/subsysnqn; do "
+            f"  if [ \"$(cat $f 2>/dev/null)\" = \"{nqn}\" ]; then "
+            f"    ls $(dirname $f)/nvme*/nvme*n* 2>/dev/null | head -1; "
+            f"    break; "
+            f"  fi; "
+            f"done"
+        )
+        out2, _ = self.exec_command(node=node, command=sysfs_cmd)
+        lines2 = [ln.strip() for ln in out2.strip().split('\n') if ln.strip()]
+        return lines2[0] if lines2 else None
+
     def disconnect_nvme(self, node, nqn_grep):
         """Disconnect NVMe device on the node."""
         cmd = f"sudo nvme disconnect -n {nqn_grep}"
@@ -1432,7 +1472,22 @@ class SshUtils:
             checksums[file] = checksum
         return checksums
 
-    def verify_checksums(self, node, files, checksums, clone_base=False):
+    def verify_checksums(self, node, files, checksums, clone_base=False, message=None, by_name=False):
+        """Verify md5 checksums for a list of files.
+
+        by_name=True: compare by filename only, ignoring directory path.
+        Use this for backup-restore verification where the restored lvol is
+        mounted at a different path than the original.
+        """
+        if not files:
+            raise ValueError(
+                message or "No files found in mount — restore may have failed or filesystem was formatted")
+        if by_name:
+            name_checksums = {os.path.basename(k): v for k, v in checksums.items()}
+            if len(files) != len(name_checksums):
+                raise ValueError(
+                    message or
+                    f"File count mismatch: restored has {len(files)}, expected {len(name_checksums)}")
         for file in files:
             command = f"md5sum {file}"
             stdout, _ = self.exec_command(node, command)
@@ -1443,13 +1498,23 @@ class SshUtils:
                 base_file_complete = base_dir_name[0] + "_" + base_dir_name[1] + "/" + file_name
                 self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {checksums[base_file_complete]}")
                 if checksum != checksums[base_file_complete]:
-                    raise ValueError(f"Checksum mismatch for file {file}")
+                    raise ValueError(message or f"Checksum mismatch for file {file}")
+                else:
+                    self.logger.info(f"Checksum match for file: {file}")
+            elif by_name:
+                fname = os.path.basename(file)
+                if fname not in name_checksums:
+                    raise ValueError(message or f"No matching checksum for filename {fname}")
+                expected = name_checksums[fname]
+                self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {expected}")
+                if checksum != expected:
+                    raise ValueError(message or f"Checksum mismatch for file {file}")
                 else:
                     self.logger.info(f"Checksum match for file: {file}")
             else:
                 self.logger.info(f"Checksum for file {file}: Actual: {checksum}, Expected: {checksums[file]}")
                 if checksum != checksums[file]:
-                    raise ValueError(f"Checksum mismatch for file {file}")
+                    raise ValueError(message or f"Checksum mismatch for file {file}")
                 else:
                     self.logger.info(f"Checksum match for file: {file}")
 
@@ -1878,6 +1943,148 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to restart Docker log collection on node {node_ip}: {e}")
 
+    def stop_node_docker_logging(self, node_ip):
+        """
+        Kill all running 'docker logs --follow' processes on *node_ip*.
+
+        Called before a network-isolating outage (interface_full / interface_partial)
+        so that tmux sessions that write to NFS paths are cleanly stopped before the
+        NFS mount becomes unreachable.
+        """
+        try:
+            # Kill every tmux session whose command contains 'docker logs --follow'
+            # so we don't leave stale writers against a now-unavailable NFS path.
+            self.exec_command(
+                node_ip,
+                "sudo bash -c \"tmux list-sessions -F '#{session_name}' 2>/dev/null | "
+                "xargs -I{} sh -c \\\"tmux send-keys -t {} q Enter 2>/dev/null; "
+                "tmux kill-session -t {} 2>/dev/null\\\" || true\"",
+                supress_logs=True,
+            )
+            # Belt-and-suspenders: also kill any background docker-logs processes
+            self.exec_command(
+                node_ip,
+                "sudo pkill -f 'docker logs --follow' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            self.logger.info(f"[local-log] Stopped NFS-targeted docker logging on {node_ip}")
+        except Exception as e:
+            self.logger.warning(f"[local-log] stop_node_docker_logging error on {node_ip}: {e}")
+
+    def start_local_docker_logging(self, node_ip, containers, local_log_dir, test_name):
+        """
+        Start docker log collection writing to a LOCAL directory on *node_ip*.
+
+        Unlike start_docker_logging(), the target path is on the node's own
+        filesystem (e.g. /tmp/…) so it keeps working even when the NFS mount
+        becomes unreachable during a network-isolating outage.
+
+        Args:
+            node_ip (str):      IP of the storage node.
+            containers (list):  Container names to log.
+            local_log_dir (str): Local path on the node (e.g. /tmp/outage_logs/…).
+            test_name (str):    Test name embedded in the log file name.
+        """
+        try:
+            self.exec_command(
+                node_ip,
+                f"sudo mkdir -p {local_log_dir} && sudo chmod 777 {local_log_dir}",
+            )
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for container in containers:
+                log_file = (
+                    f"{local_log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_local_outage.txt"
+                )
+                session = f"{container}_local_{generate_random_string()}"
+
+                # Resolve the Docker JSON log file path once.  Docker reuses the same
+                # path when a container restarts, so `tail -F` on that file survives
+                # container crashes/restarts — unlike `docker logs --follow` which exits
+                # the moment the container dies and captures ALL historical logs first.
+                log_path_out, _ = self.exec_command(
+                    node_ip,
+                    "sudo docker inspect --format '{{.LogPath}}' " + container,
+                    supress_logs=True,
+                )
+                docker_log_path = log_path_out.strip()
+
+                if docker_log_path:
+                    # tail -F  : follow by file name; retries when removed/recreated
+                    # -n 0     : start from the current end (no historical replay)
+                    #            → local file contains ONLY outage-window log lines
+                    cmd = (
+                        f"sudo tmux new-session -d -s {session} "
+                        f"\"tail -F -n 0 '{docker_log_path}' > '{log_file}' 2>&1\""
+                    )
+                    self.logger.info(
+                        f"[local-log] Local logging started for '{container}' on {node_ip} "
+                        f"(tail -F {docker_log_path}) → {log_file}"
+                    )
+                else:
+                    # Fallback: container not yet inspectable — use docker logs --follow
+                    self.logger.warning(
+                        f"[local-log] Could not resolve log path for '{container}' on "
+                        f"{node_ip}; falling back to docker logs --follow"
+                    )
+                    cmd = (
+                        f"sudo tmux new-session -d -s {session} "
+                        f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                    )
+
+                self.exec_command(node_ip, cmd)
+        except Exception as e:
+            self.logger.warning(
+                f"[local-log] start_local_docker_logging error on {node_ip}: {e}"
+            )
+
+    def flush_local_logs_to_nfs(self, node_ip, local_log_dir, nfs_log_dir):
+        """
+        Copy logs accumulated in *local_log_dir* on *node_ip* to *nfs_log_dir*.
+
+        Called once the node's network is restored (after a network-isolating outage)
+        to preserve the log data that was written locally during the outage.
+
+        Requires rsync to be available on the node; falls back to cp -r if not.
+
+        Args:
+            node_ip (str):       IP of the storage node.
+            local_log_dir (str): Source directory on the node (e.g. /tmp/outage_logs/…).
+            nfs_log_dir (str):   Destination path on NFS (e.g. /mnt/nfs_share/…/node_ip/).
+        """
+        try:
+            # Ensure destination directory exists on NFS
+            self.exec_command(
+                node_ip,
+                f"sudo mkdir -p {nfs_log_dir} && sudo chmod 777 {nfs_log_dir}",
+            )
+            # Try rsync first (preserves timestamps and is idempotent)
+            out, err = self.exec_command(
+                node_ip,
+                "which rsync 2>/dev/null",
+                supress_logs=True,
+            )
+            if out and "rsync" in out:
+                copy_cmd = (
+                    f"sudo rsync -av --ignore-errors {local_log_dir}/ {nfs_log_dir}/ 2>&1 || true"
+                )
+            else:
+                copy_cmd = f"sudo cp -r {local_log_dir}/. {nfs_log_dir}/ 2>&1 || true"
+
+            self.exec_command(node_ip, copy_cmd)
+            self.logger.info(
+                f"[local-log] Flushed local outage logs from {local_log_dir} → {nfs_log_dir} on {node_ip}"
+            )
+            # Clean up local temp dir after successful copy
+            self.exec_command(
+                node_ip,
+                f"sudo rm -rf {local_log_dir} 2>/dev/null || true",
+                supress_logs=True,
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"[local-log] flush_local_logs_to_nfs error on {node_ip}: {e}"
+            )
+
     def get_running_containers(self, node_ip):
         """
         Fetch running containers from all storage nodes.
@@ -2296,18 +2503,43 @@ class SshUtils:
                 all_ok = False
         return all_ok
 
-    def _validate_distrib_dumps(self, base_path, distribs):
+    def _validate_distrib_dumps(self, base_path, distribs, timeout=60):
         """
         For each distrib, reads rpc_{distrib}.log to find the 'Response:' file path,
         then checks the corresponding map txt file in base_path has lpgi data.
-        Returns True if all distribs have valid data, False otherwise.
+
+        - Retries FileNotFoundError for up to `timeout` seconds (default 1 hour) to
+          handle NFS propagation delays.
+        - Raises ValueError immediately if a file exists but contains no lpgi data
+          (corrupt/invalid dump — fail fast, don't wait).
+        - Returns True if all distribs are valid, False if any file is still missing
+          after the timeout.
         """
+        import time as _time
+
+        def _read_with_retry(path):
+            deadline = _time.time() + timeout
+            attempt = 0
+            while True:
+                try:
+                    with open(path, "r") as f:
+                        return f.read()
+                except FileNotFoundError:
+                    if _time.time() >= deadline:
+                        raise FileNotFoundError(
+                            f"[PLACEMENT_DUMP] File not visible after {timeout}s: {path}"
+                        )
+                    attempt += 1
+                    self.logger.warning(
+                        f"[PLACEMENT_DUMP] File not yet visible (attempt {attempt}): {path}"
+                    )
+                    _time.sleep(5)
+
         all_ok = True
         for distrib in distribs:
             rpc_log_path = os.path.join(base_path, f"rpc_{distrib}.log")
             try:
-                with open(rpc_log_path, "r") as f:
-                    rpc_content = f.read()
+                rpc_content = _read_with_retry(rpc_log_path)
             except Exception as e:
                 self.logger.error(f"[PLACEMENT_DUMP] Cannot read rpc log {rpc_log_path}: {e}")
                 all_ok = False
@@ -2322,22 +2554,26 @@ class SshUtils:
             response_filename = os.path.basename(match.group(1))
             map_file_path = os.path.join(base_path, response_filename)
             try:
-                with open(map_file_path, "r") as f:
-                    map_content = f.read()
+                map_content = _read_with_retry(map_file_path)
             except Exception as e:
                 self.logger.error(f"[PLACEMENT_DUMP] Cannot read map file {map_file_path}: {e}")
                 all_ok = False
                 continue
 
-            if "lpgi:" not in map_content:
-                self.logger.error(f"[PLACEMENT_DUMP] Map file has no lpgi data: {map_file_path}")
-                all_ok = False
+            if not map_content.strip():
+                self.logger.warning(f"[PLACEMENT_DUMP] Map file is empty (skipping): {map_file_path}")
+            elif "lpgi:" not in map_content:
+                # File exists but data is corrupt — raise immediately, do not retry
+                raise ValueError(
+                    f"[PLACEMENT_DUMP] Map file exists but contains no lpgi data (CORRUPT): {map_file_path}"
+                )
             else:
                 self.logger.info(f"[PLACEMENT_DUMP] Valid: {response_filename} (distrib={distrib})")
 
         return all_ok
 
-    def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path):
+    def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path,
+                           validate_async=False, error_sink=None):
         self.logger.info(f"Fetching distrib logs for Storage Node ID: {storage_node_id} on {storage_node_ip}")
 
         # 0) Find SPDK container name
@@ -2469,10 +2705,40 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 
         # ------------------------------
         # Validate placement dump files
-        # Validate placement dump files
         # ------------------------------
-        ok = self._validate_distrib_dumps(base_path, distribs)
+        if validate_async:
+            # Run validation in background — each file gets up to 1 hour to appear.
+            # Raises ValueError immediately if a file exists but has no lpgi data.
+            # Any failure is appended to error_sink for the caller to check later.
+            _sink = error_sink if error_sink is not None else []
+            _node_ip = storage_node_ip
 
+            def _bg_validate():
+                try:
+                    ok = self._validate_distrib_dumps(base_path, distribs, timeout=3600)
+                    if not ok:
+                        msg = (
+                            f"[PLACEMENT_DUMP] Validation FAILED for {_node_ip} "
+                            f"(file missing after 1 hour): {base_path}"
+                        )
+                        self.logger.error(msg)
+                        _sink.append(msg)
+                    else:
+                        self.logger.info(f"[{_node_ip}] Placement dump validation passed (async).")
+                except ValueError as e:
+                    # Corrupt data — fail immediately
+                    self.logger.error(str(e))
+                    _sink.append(str(e))
+                except Exception as e:
+                    msg = f"[PLACEMENT_DUMP] Unexpected error for {_node_ip}: {e}"
+                    self.logger.error(msg)
+                    _sink.append(msg)
+
+            t = threading.Thread(target=_bg_validate, daemon=True)
+            t.start()
+            return t
+
+        ok = self._validate_distrib_dumps(base_path, distribs)
         if not ok:
             self.logger.error(f"[{storage_node_ip}] Placement dump validation FAILED.")
             return False
@@ -2656,7 +2922,30 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         self.exec_command(node_ip, f"sudo tmux new-session -d -s netstat_log 'bash -c \"while true; do netstat -s | grep \\\"segments dropped\\\" >> {netstat_log}; sleep 5; done\"'")
         self.exec_command(node_ip, f"sudo tmux new-session -d -s dmesg_log 'bash -c \"while true; do sudo dmesg | grep -i \\\"tcp\\\" >> {dmesg_log}; sleep 5; done\"'")
         self.exec_command(node_ip, f"sudo tmux new-session -d -s journalctl_log 'bash -c \"while true; do sudo journalctl -k --no-tail | grep -i \\\"tcp\\\" >> {journalctl_log}; sleep 5; done\"'")
-                
+
+    def start_full_journal_dmesg_logging(self, node_ip, log_dir):
+        """
+        Start full (unfiltered) continuous journalctl and dmesg logging for a node.
+
+        - journalctl_full_{node_ip}.log : live-followed full journal (all units, appended)
+        - dmesg_full_{node_ip}.log      : full dmesg snapshot refreshed every 30 s
+        """
+        journalctl_full_log = f"{log_dir}/journalctl_full_{node_ip}.log"
+        dmesg_full_log = f"{log_dir}/dmesg_full_{node_ip}.log"
+
+        # Follow the full journal and append continuously
+        self.exec_command(
+            node_ip,
+            f"sudo tmux new-session -d -s journalctl_full_log "
+            f"'bash -c \"sudo journalctl -f -o short-precise >> {journalctl_full_log} 2>&1\"'"
+        )
+        # Refresh full dmesg snapshot every 30 s (overwrite avoids duplication)
+        self.exec_command(
+            node_ip,
+            f"sudo tmux new-session -d -s dmesg_full_log "
+            f"'bash -c \"while true; do sudo dmesg -T > {dmesg_full_log}; sleep 30; done\"'"
+        )
+
     def reset_iptables_in_spdk(self, node_ip):
         """
         Resets iptables rules inside the SPDK container on a given node.
@@ -3049,9 +3338,15 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 
         print(f"\n All logs and /etc/simplyblock configs copied to: {logs_path}\n")
 
-    def add_storage_pool(self, node, pool_name, cluster_id, 
-                         max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0):
-        """Adds a new storage pool using sbcli-dev CLI command (skips zero-value params)"""
+    def add_storage_pool(self, node, pool_name, cluster_id,
+                         max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
+                         sec_options=None):
+        """Adds a new storage pool using sbcli-dev CLI command (skips zero-value params).
+
+        sec_options: dict e.g. {"dhchap_key": True, "dhchap_ctrlr_key": True}.
+                     Written to a temp file and passed via --sec-options.
+                     Security is applied to all volumes created in this pool.
+        """
         cmd_parts = [f"{self.base_cmd} -d pool add"]
 
         # Append only non-zero QoS parameters
@@ -3064,6 +3359,17 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         if max_w_mbytes:
             cmd_parts.append(f"--max-w-mbytes {max_w_mbytes}")
 
+        tmp_files = []
+        if sec_options is not None:
+            import random as _random
+            import string as _string
+            suffix = ''.join(_random.choices(_string.ascii_uppercase + _string.digits, k=6))
+            p = f"/tmp/sec_pool_{suffix}.json"
+            self.write_json_file(node, p, sec_options)
+            self.exec_command(node, f"chmod 600 {p}", supress_logs=True)
+            cmd_parts.append(f"--sec-options {p}")
+            tmp_files.append(p)
+
         # Append required positional arguments
         cmd_parts.extend([pool_name, cluster_id])
 
@@ -3071,6 +3377,10 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         cmd = " ".join(cmd_parts)
 
         output, error = self.exec_command(node=node, command=cmd)
+
+        for f in tmp_files:
+            self.exec_command(node, f"rm -f {f}", supress_logs=True)
+
         return output, error
     
     def list_nvme_ns_devices(self, node, ctrl_dev: str) -> list[str]:
@@ -3083,7 +3393,144 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         cmd = f"ls -1 {ctrl}n* 2>/dev/null | sort -V || true"
         out, _ = self.exec_command(node=node, command=f"bash -lc \"{cmd}\"", supress_logs=True)
         return [x.strip() for x in (out or "").splitlines() if x.strip()]
-    
+
+    # ── Security helpers ──────────────────────────────────────────────────────
+
+    def write_json_file(self, node, path, data):
+        """Serialize *data* as JSON and write it to *path* on *node*."""
+        import json as _json
+        json_str = _json.dumps(data).replace("'", "'\\''")
+        self.exec_command(node, f"echo '{json_str}' > {path}", supress_logs=True)
+
+    def get_client_host_nqn(self, node):
+        """Generate a persistent NVMe host NQN on *node* and return it.
+
+        Writes the NQN to /etc/nvme/hostnqn so the kernel NVMe driver
+        uses the same NQN that is registered in the volume's allowed-hosts list.
+        Validates by reading both ``cat /etc/nvme/hostnqn`` and
+        ``nvme show-hostnqn``.
+        """
+        self.exec_command(node, "sudo mkdir -p /etc/nvme")
+        self.exec_command(
+            node, "sudo sh -c 'nvme gen-hostnqn > /etc/nvme/hostnqn'")
+        nqn_cat, _ = self.exec_command(node, "cat /etc/nvme/hostnqn")
+        nqn_show, _ = self.exec_command(node, "nvme show-hostnqn")
+        self.logger.info(
+            f"[get_client_host_nqn] cat /etc/nvme/hostnqn: {nqn_cat!r}")
+        self.logger.info(
+            f"[get_client_host_nqn] nvme show-hostnqn: {nqn_show!r}")
+        nqn = nqn_cat.strip().split('\n')[0].strip()
+        return nqn
+
+    def get_lvol_connect_str_with_host_nqn(self, node, lvol_id, host_nqn,
+                                            ctrl_loss_tmo=-1):
+        """
+        Run ``volume connect <id> --host-nqn <nqn> --ctrl-loss-tmo <tmo>``
+        and return (list_of_connect_commands, stderr).
+
+        Using ``ctrl_loss_tmo=-1`` means NVMe controllers never time out
+        during a storage-node outage.
+        """
+        cmd = (f"{self.base_cmd} volume connect {lvol_id}"
+               f" --host-nqn {host_nqn}"
+               f" --ctrl-loss-tmo {ctrl_loss_tmo}")
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[get_lvol_connect_str_with_host_nqn] id={lvol_id} "
+            f"host_nqn={host_nqn}: out={out!r}, err={err!r}")
+        connect_lines = [
+            ' '.join(line.split()) for line in out.strip().split('\n')
+            if line.strip() and 'nvme connect' in line
+        ]
+        self.logger.info(
+            f"[get_lvol_connect_str_with_host_nqn] connect_lines repr: {connect_lines!r}")
+        return connect_lines, err
+
+    def create_sec_lvol(self, node, lvol_name, size, pool,
+                        allowed_hosts=None,
+                        encrypt=False, key1=None, key2=None,
+                        distr_ndcs=0, distr_npcs=0, fabric="tcp"):
+        """
+        Create an lvol with optional security parameters via CLI.
+
+        Security (DHCHAP) is configured at pool level via ``pool add --sec-options``.
+        This method only handles volume-level options: ``--allowed-hosts``,
+        encryption, fabric, and distribution parameters.
+
+        allowed_hosts: list of NQN strings
+        distr_ndcs   : number of data chunks per stripe (0 = cluster default)
+        distr_npcs   : number of parity chunks per stripe (0 = cluster default)
+        fabric       : "tcp" or "rdma"
+        Returns (stdout, stderr).
+        """
+        cmd = f"{self.base_cmd} -d volume add {lvol_name} {size} {pool}"
+        if encrypt and key1 and key2:
+            cmd += f" --encrypt --crypto-key1 {key1} --crypto-key2 {key2}"
+        if fabric and fabric != "tcp":
+            cmd += f" --fabric {fabric}"
+        if distr_ndcs and distr_npcs:
+            cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
+
+        self.logger.info(f"[create_sec_lvol] allowed_hosts={allowed_hosts!r} "
+                         f"encrypt={encrypt} fabric={fabric} ndcs={distr_ndcs} npcs={distr_npcs}")
+
+        tmp_files = []
+        if allowed_hosts is not None:
+            p = f"/tmp/hosts_{lvol_name}.json"
+            self.logger.info(f"[create_sec_lvol] Writing allowed_hosts to {p} on {node}: {allowed_hosts}")
+            self.write_json_file(node, p, allowed_hosts)
+            self.exec_command(node, f"chmod 600 {p}", supress_logs=False)
+            out_cat, _ = self.exec_command(node, f"cat {p}", supress_logs=False)
+            self.logger.info(f"[create_sec_lvol] allowed_hosts file contents: {out_cat!r}")
+            cmd += f" --allowed-hosts {p}"
+            tmp_files.append(p)
+
+        self.logger.info(f"[create_sec_lvol] FULL COMMAND: {cmd}")
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(f"[create_sec_lvol] {lvol_name}: out={out!r}, err={err!r}")
+
+        # Log lvol details post-creation to verify security was applied
+        lvol_id_line = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        if lvol_id_line:
+            # try to show the volume details for debug
+            possible_id = lvol_id_line[-1]
+            get_out, get_err = self.exec_command(node, f"{self.base_cmd} volume get {possible_id}", supress_logs=False)
+            self.logger.info(f"[create_sec_lvol] volume get {possible_id}: out={get_out!r}, err={get_err!r}")
+
+        for f in tmp_files:
+            self.exec_command(node, f"rm -f {f}", supress_logs=True)
+        return out, err
+
+    def add_host_to_lvol(self, node, lvol_id, host_nqn):
+        """
+        Run ``volume add-host <id> <nqn>``.
+
+        Security credentials (DHCHAP) are inherited from the pool's --sec-options
+        configuration and are no longer specified per-host at add time.
+        Returns (stdout, stderr).
+        """
+        cmd = f"{self.base_cmd} volume add-host {lvol_id} {host_nqn}"
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[add_host_to_lvol] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
+        return out, err
+
+    def remove_host_from_lvol(self, node, lvol_id, host_nqn):
+        """Run ``volume remove-host <id> <nqn>`` and return (stdout, stderr)."""
+        cmd = f"{self.base_cmd} volume remove-host {lvol_id} {host_nqn}"
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[remove_host_from_lvol] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
+        return out, err
+
+    def get_lvol_host_secret(self, node, lvol_id, host_nqn):
+        """Run ``volume get-secret <id> <nqn>`` and return (stdout, stderr)."""
+        cmd = f"{self.base_cmd} volume get-secret {lvol_id} {host_nqn}"
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[get_lvol_host_secret] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
+        return out, err
+
 
 class RunnerK8sLog:
     """
@@ -3177,9 +3624,24 @@ class RunnerK8sLog:
             print(f"No running pods found for logging ({outage_type}).")
             return
 
+        _LOG_PREFIXES = (
+            "simplyblock-admin-control",
+            "simplyblock-csi-controller",
+            "simplyblock-csi-node",
+            "simplyblock-fdb-",
+            "simplyblock-manager",
+            "simplyblock-mgmt-api-job",
+            "simplyblock-monitoring",
+            "simplyblock-prometheus",
+            "simplyblock-storage-node-controller",
+            "simplyblock-storage-node-ds",
+            "simplyblock-tasks",
+            "simplyblock-webappapi",
+            "snode-spdk-pod",
+        )
         for pod in pods:
             # Filter pods based on prefixes
-            if not (pod.startswith(("simplyblock-csi-controller", "simplyblock-csi-node", "simplyblock-mgmt-api-job", "simplyblock-storage-node-controller", "simplyblock-storage-node-ds", "snode-spdk-pod"))):
+            if not pod.startswith(_LOG_PREFIXES):
                 continue
 
             # Get all containers in the pod
@@ -3190,9 +3652,13 @@ class RunnerK8sLog:
                 self.logger.info(f"Error fetching containers for pod {pod}: {e}")
                 continue
 
+            # Per-pod subdirectory
+            pod_log_dir = os.path.join(self.log_dir, pod)
+            os.makedirs(pod_log_dir, exist_ok=True)
+
             for container in containers:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                log_file = f"{self.log_dir}/{pod}_{container}_{self.test_name}_{timestamp}_{outage_type}.log"
+                log_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_{outage_type}.log"
                 session_name = f"{pod}_{container}_logs_{self.generate_random_string()}"
                 container_id = self._get_container_id(pod, container)
                 key = f"{pod}:{container}"
@@ -3248,17 +3714,33 @@ class RunnerK8sLog:
         except subprocess.CalledProcessError:
             return None
 
-    def monitor_pod_logs(self, poll_interval=10):
+    def monitor_pod_logs(self, poll_interval=60):
         """
         Continuously monitor running pods and their containers for restarts.
         Starts new kubectl log sessions if containers change.
         """
 
+        _LOG_PREFIXES = (
+            "simplyblock-admin-control",
+            "simplyblock-csi-controller",
+            "simplyblock-csi-node",
+            "simplyblock-fdb-",
+            "simplyblock-manager",
+            "simplyblock-mgmt-api-job",
+            "simplyblock-monitoring",
+            "simplyblock-prometheus",
+            "simplyblock-storage-node-controller",
+            "simplyblock-storage-node-ds",
+            "simplyblock-tasks",
+            "simplyblock-webappapi",
+            "snode-spdk-pod",
+        )
+
         def _monitor():
             while not self._monitor_stop_flag.is_set():
                 pods = self.get_running_pods()
                 for pod in pods:
-                    if not (pod.startswith("storage-node-ds") or pod.startswith("snode-spdk-deployment") or pod.startswith("storage-node-handler-")):
+                    if not pod.startswith(_LOG_PREFIXES):
                         continue
 
                     cmd = ["kubectl", "get", "pod", pod, "-n", self.namespace,
@@ -3279,7 +3761,9 @@ class RunnerK8sLog:
                         if current_id != prev_id:
                             self._pod_container_map[key] = current_id
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            log_file = f"{self.log_dir}/{pod}_{container}_{self.test_name}_{timestamp}_restart.log"
+                            pod_log_dir = os.path.join(self.log_dir, pod)
+                            os.makedirs(pod_log_dir, exist_ok=True)
+                            log_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_restart.log"
                             session_name = f"{pod}_{container}_restart_{self.generate_random_string()}"
 
                             cmd = [

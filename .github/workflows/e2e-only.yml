@@ -229,12 +229,25 @@ jobs:
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
+          run_remote_with_retry() {
+            local ip="$1"
+            local script="$2"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+
           targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for ip in $uniq_targets; do
             echo "---- $ip: kill fio/tmux + umount ${NFS_MOUNTPOINT} ----"
-            run_remote "$ip" "set -euxo pipefail;
+            run_remote_with_retry "$ip" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
               mp='${NFS_MOUNTPOINT}';
@@ -363,6 +376,45 @@ jobs:
             --npcs "${NPCS}" \
             2>&1 | tee output.log
 
+      - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script" || true
+          }
+
+          run_remote_with_retry() {
+            local ip="$1"
+            local script="$2"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+
+          for ip in $MNODES $STORAGE_PRIVATE_IPS; do
+            echo "---- $ip: kill tmux ----"
+            run_remote_with_retry "$ip" "pkill -9 tmux || true"
+          done
+
+          for ip in $CLIENTNODES; do
+            echo "---- $ip: kill fio and tmux----"
+            run_remote_with_retry "$ip" "pkill -9 fio || true"
+            run_remote_with_retry "$ip" "pkill -9 tmux || true"
+          done
+
       - name: Mark test end time (always)
         if: always()
         shell: bash
@@ -485,7 +537,9 @@ jobs:
               continue
             fi
 
+            set +e
             while IFS= read -r C; do
+              C="${C%%$'\r'}"
               [[ -z "${C}" ]] && continue
               echo "    dumping: ${C}"
               ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" \
@@ -495,6 +549,7 @@ jobs:
                 "docker inspect '${C}' 2>&1 || true" \
                 > "${LOCAL_NODE_DIR}/${C}_inspect.json" || true
             done <<< "${CONTAINERS}"
+            set -e
           done
 
       - name: Collect distrib debug dumps into RUN_BASE_DIR (always)
@@ -824,12 +879,12 @@ jobs:
           failure_reason = ""
           multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
           if multi:
-              failure_reason = multi[0][:600]
+              failure_reason = multi[0][:2000]
           elif content:
               exc_lines = [ansi.sub('', l) for l in content.splitlines()
                            if re.search(r'(Exception:|AssertionError|Input/output error)', l)]
               if exc_lines:
-                  failure_reason = '\n'.join(exc_lines[-3:])[:600]
+                  failure_reason = '\n'.join(exc_lines[-5:])[:2000]
 
           # --- Env ---
           s    = int(os.environ.get("TEST_START_EPOCH", "0") or "0")

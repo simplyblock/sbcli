@@ -659,6 +659,9 @@ class CLIWrapperBase:
     def volume__inflate(self, sub_command, args):
         return lvol_controller.inflate_lvol(args.volume_id)
 
+    def volume__clone_lvol(self, sub_command, args):
+        return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
+
     def volume__migrate(self, sub_command, args):
         migration_id, error = migration_controller.start_migration(
             args.volume_id,

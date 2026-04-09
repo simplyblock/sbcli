@@ -33,6 +33,7 @@ class TestLvolHACluster(FioWorkloadTest):
         self.mount_path = "/mnt/"
         self.lvol_mount_details = {}
         self.log_path = Path.home()
+        self.dump_validation_errors = []
     
     def create_lvols(self):
         """Create 500 lvols with mixed crypto and non-crypto."""

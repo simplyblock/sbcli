@@ -595,7 +595,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                         return False, True, _WAIT
                     break  # one check is enough
 
-            transfers = []
+            transfers: list[dict] = []
             for snap_uuid in unprocessed:
                 snap_index = plan.index(snap_uuid)
                 try:
@@ -1547,6 +1547,7 @@ def task_runner(task):
             # Advance to next phase and continue immediately in the same invocation.
             # This avoids the 3-second sleep between phase transitions (e.g. the gap
             # between the last snapshot completing and LVOL_MIGRATE starting).
+            assert next_phase is not None
             migration.phase = next_phase
             migration.current_job_id = ""
             migration.write_to_db(db.kv_store)

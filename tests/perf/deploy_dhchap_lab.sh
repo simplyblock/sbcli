@@ -141,7 +141,7 @@ log "Step 10: Add storage nodes"
 NODES_ADDED=0
 for ip in "${STORAGE_NODES[@]}"; do
     log "  Adding $ip..."
-    result=$(run_mgmt "sbctl sn add-node $CLUSTER_ID $ip:5000 eth0 --data-nics eth1 2>&1")
+    result=$(run_mgmt "sbctl sn add-node $CLUSTER_ID $ip:5000 eth0 --data-nics eth1 --ha-jm-count 4 2>&1")
     echo "$result" | tail -3
     if echo "$result" | grep -q "Success"; then
         NODES_ADDED=$((NODES_ADDED + 1))
@@ -159,14 +159,9 @@ fi
 log "Step 11: Activate cluster"
 run_mgmt "sbctl cluster activate $CLUSTER_ID 2>&1 | tail -5"
 
-# Step 12: Create pool with DH-CHAP security
-log "Step 12: Create pool with DH-CHAP security"
-run_mgmt "
-cat > /tmp/sec_options.json << 'EOFJ'
-{\"dhchap_key\": true, \"dhchap_ctrlr_key\": true}
-EOFJ
-sbctl pool add pool01 $CLUSTER_ID --sec-options /tmp/sec_options.json 2>&1 | tail -3
-"
+# Step 12: Create pool (no security)
+log "Step 12: Create pool"
+run_mgmt "sbctl pool add pool01 $CLUSTER_ID 2>&1 | tail -3"
 
 # Step 13: Verify
 log "=== Verification ==="

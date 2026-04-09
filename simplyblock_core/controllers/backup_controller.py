@@ -449,6 +449,7 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
     if not target_node.lvstore:
         return None, f"Target node {restore_node_id} has no lvstore (S3 bdev requires lvstore)"
 
+    logger.info(f"Backup allowed hosts: {backup.allowed_hosts}")
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,
@@ -464,7 +465,8 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
         use_comp=False,
         distr_vuid=0,
         lvol_priority_class=0,
-        allowed_hosts=backup.allowed_hosts,
+        allowed_hosts=[h["nqn"] if isinstance(h, dict) else h
+                       for h in (backup.allowed_hosts or [])] or None,
         fabric="tcp",
     )
     if error or not lvol_id:

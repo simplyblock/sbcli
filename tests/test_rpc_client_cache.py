@@ -4,13 +4,11 @@ test_rpc_client_cache.py – unit tests for RPCClient._request_cached and
 the cached wrappers get_bdevs / subsystem_list.
 """
 
-import json
 import time
 import threading
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from simplyblock_core import rpc_client as mod
 from simplyblock_core.rpc_client import RPCClient, _rpc_cache, _rpc_cache_lock
 
 
@@ -143,14 +141,15 @@ class TestGetBdevsUsesCache(unittest.TestCase):
             _rpc_cache.clear()
 
     @patch.object(RPCClient, "_request")
-    def test_get_bdevs_uses_cache(self, mock_req):
+    def test_get_bdevs_calls_request_each_time(self, mock_req):
         mock_req.return_value = [{"name": "bdev0"}]
         client = _make_client()
 
         r1 = client.get_bdevs()
         r2 = client.get_bdevs()
 
-        mock_req.assert_called_once()
+        # get_bdevs uses _request directly (no caching)
+        self.assertEqual(mock_req.call_count, 2)
         self.assertEqual(r1, r2)
 
     @patch.object(RPCClient, "_request")
@@ -175,14 +174,15 @@ class TestSubsystemListUsesCache(unittest.TestCase):
             _rpc_cache.clear()
 
     @patch.object(RPCClient, "_request")
-    def test_subsystem_list_uses_cache(self, mock_req):
+    def test_subsystem_list_calls_request_each_time(self, mock_req):
         mock_req.return_value = [{"nqn": "nqn.test", "namespaces": []}]
         client = _make_client()
 
         r1 = client.subsystem_list()
         r2 = client.subsystem_list()
 
-        mock_req.assert_called_once()
+        # subsystem_list uses _request directly (no caching)
+        self.assertEqual(mock_req.call_count, 2)
         self.assertEqual(r1, r2)
 
     @patch.object(RPCClient, "_request")

@@ -6,6 +6,7 @@ import threading
 import string
 import random
 import os
+import time
 
 
 generated_sequences = set()
@@ -67,6 +68,8 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
         self.blocked_ports = None
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
+        # Maps node_uuid -> (node_ip, local_tmp_log_dir) for ongoing network outages
+        self._local_outage_log_dirs = {}
 
     def _initialize_outage_log(self):
         """Create or initialize the outage log file."""
@@ -322,86 +325,31 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
         self.outage_start_time = int(datetime.now().timestamp())
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
         if outage_type == "graceful_shutdown":
-            # self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            # self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=4000)
-            sleep_n_sec(10)
-            # self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            # self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=4000)
-            max_retries = 10
-            retry_delay = 10  # seconds
-            # Retry mechanism for suspending the node
-            # for attempt in range(max_retries):
-            #     try:
-            #         if attempt == max_retries - 1:
-            #             self.logger.info("[CHECK] Suspending Node via CLI as via API Fails.")
-            #             self.ssh_obj.suspend_node(node=self.mgmt_nodes[0],
-            #                                       node_id=self.current_outage_node)
-            #         else:
-            #             self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            #         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=1000)
-            #         break  # Exit loop if successful
-            #     except Exception as _:
-            #         if attempt < max_retries - 2:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node. Retrying in {retry_delay} seconds...")
-            #             sleep_n_sec(retry_delay)
-            #         elif attempt < max_retries - 1:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node via API. Retrying in {retry_delay} seconds via CMD...")
-            #             sleep_n_sec(retry_delay)
-            #         else:
-            #             self.logger.info("Max retries reached. Failed to suspend node.")
-            #             raise  # Rethrow the last exception
-            # for attempt in range(max_retries):
-            #     try:
-            #         if attempt == max_retries - 1:
-            #             self.logger.info("[CHECK] Suspending Node via CLI as via API Fails.")
-            #             self.ssh_obj.suspend_node(node=self.mgmt_nodes[0],
-            #                                       node_id=self.current_outage_node)
-            #         else:
-            #             self.sbcli_utils.suspend_node(node_uuid=self.current_outage_node, expected_error_code=[503])
-            #         self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "suspended", timeout=1000)
-            #         break  # Exit loop if successful
-            #     except Exception as _:
-            #         if attempt < max_retries - 2:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node. Retrying in {retry_delay} seconds...")
-            #             sleep_n_sec(retry_delay)
-            #         elif attempt < max_retries - 1:
-            #             self.logger.info(f"Attempt {attempt + 1} failed to suspend node via API. Retrying in {retry_delay} seconds via CMD...")
-            #             sleep_n_sec(retry_delay)
-            #         else:
-            #             self.logger.info("Max retries reached. Failed to suspend node.")
-            #             raise  # Rethrow the last exception
-
-            sleep_n_sec(10)  # Wait before shutting down
-
-            # Retry mechanism for shutting down the node
-            for attempt in range(max_retries):
+            self.logger.info(f"Issuing graceful shutdown (no --force) for node {self.current_outage_node}.")
+            deadline = time.time() + 300  # 5 minutes
+            while True:
                 try:
-                    if attempt == max_retries - 1:
-                        self.logger.info("[CHECK] Shutting down Node via CLI as via API Fails.")
-                        self.ssh_obj.shutdown_node(node=self.mgmt_nodes[0],
-                                                   node_id=self.current_outage_node,
-                                                   force=True)
-                    else:
-                        self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=True,
-                                                       expected_error_code=[503])
-                    self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "offline", timeout=1000)
-                    break  # Exit loop if successful
-                except Exception as _:
-                    if attempt < max_retries - 2:
-                        self.logger.info(f"Attempt {attempt + 1} failed to shutdown node. Retrying in {retry_delay} seconds...")
-                        sleep_n_sec(retry_delay)
-                    elif attempt < max_retries - 1:
-                        self.logger.info(f"Attempt {attempt + 1} failed to shutdown node via API. Retrying in {retry_delay} seconds via CMD...")
-                        sleep_n_sec(retry_delay)
-                    else:
-                        self.logger.info("Max retries reached. Failed to shutdown node.")
-                        raise  # Rethrow the last exception
+                    self.sbcli_utils.shutdown_node(node_uuid=self.current_outage_node, force=False)
+                except Exception as e:
+                    self.logger.warning(f"shutdown_node raised (may already be shutting down): {e}")
+                sleep_n_sec(20)
+                node_detail = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
+                if node_detail[0]["status"] == "offline":
+                    self.logger.info(f"Node {self.current_outage_node} is offline.")
+                    break
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"Node {self.current_outage_node} did not go offline within 5 minutes of graceful shutdown."
+                    )
+                self.logger.info(f"Node {self.current_outage_node} not yet offline; retrying shutdown...")
         elif outage_type == "container_stop":
             self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
         elif outage_type == "port_network_interrupt":
@@ -439,7 +387,22 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
         elif outage_type == "interface_full_network_interrupt":
             self.logger.info("Handling full interface based network interruption...")
             active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-            
+
+            # Before cutting the network: start local-tmp logging alongside NFS logging
+            if not self.k8s_test and node_ip in self.container_nodes:
+                ts = int(datetime.now().timestamp())
+                local_log_dir = f"/tmp/outage_logs/{self.current_outage_node}_{ts}"
+                self.ssh_obj.start_local_docker_logging(
+                    node_ip,
+                    self.container_nodes[node_ip],
+                    local_log_dir,
+                    self.test_name,
+                )
+                self._local_outage_log_dirs[self.current_outage_node] = (node_ip, local_log_dir)
+                self.logger.info(
+                    f"[NW-OUTAGE] Local logging started alongside NFS on {node_ip} → {local_log_dir}"
+                )
+
             self.disconnect_thread = threading.Thread(
                 target=self.ssh_obj.disconnect_all_active_interfaces,
                 args=(node_ip, active_interfaces, 600),
@@ -591,6 +554,13 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
 
         self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=1000)
         self.outage_end_time = int(datetime.now().timestamp())
+
+        # Flush local outage logs to NFS if we started local logging before a network outage
+        if self.current_outage_node in self._local_outage_log_dirs:
+            _nip, _local_dir = self._local_outage_log_dirs.pop(self.current_outage_node)
+            nfs_target = os.path.join(self.docker_logs_path, _nip, "local_logs")
+            self.ssh_obj.flush_local_logs_to_nfs(_nip, _local_dir, nfs_target)
+            self.logger.info(f"[NW-OUTAGE] Flushed local outage logs to NFS: {nfs_target}")
 
         if self.secondary_outage:
             for lvol in self.lvols_without_sec_connect:
@@ -848,18 +818,25 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                     for pid in fio_pids:
                         self.ssh_obj.kill_processes(clone_details["Client"], pid=pid)
                     attempt = 1
-                    while len(fio_pids) > 2:
+                    while True:
                         self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=False)
                         fio_pids = self.ssh_obj.find_process_name(clone_details["Client"], f"{clone_name}_fio", return_pid=True)
-                        if attempt >= 30:
-                            raise Exception("FIO not killed on clone")
+                        if len(fio_pids) <= 2:
+                            break
+                        for pid in fio_pids:
+                            self.ssh_obj.kill_processes(clone_details["Client"], pid=pid)
+                        if attempt >= 20:
+                            self.logger.warning(
+                                f"FIO not fully killed on clone '{clone_name}' after {attempt} attempts "
+                                f"(remaining pids: {fio_pids}). Proceeding anyway."
+                            )
+                            break
                         attempt += 1
-                        sleep_n_sec(20)
+                        sleep_n_sec(10)
                     
                     sleep_n_sec(10)
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
-                    self.disconnect_lvol(clone_details['ID'])
                     self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
                     sleep_n_sec(30)
                     if clone_name in self.lvols_without_sec_connect:
@@ -880,24 +857,31 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
 
             self.common_utils.validate_fio_test(self.lvol_mount_details[lvol]["Client"],
                                                 log_file=self.lvol_mount_details[lvol]["Log"])
+            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=False)
-            sleep_n_sec(10)
             fio_pids = self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=True)
             for pid in fio_pids:
                 self.ssh_obj.kill_processes(self.lvol_mount_details[lvol]["Client"], pid=pid)
             attempt = 1
-            while len(fio_pids) > 2:
+            while True:
                 self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=False)
                 fio_pids = self.ssh_obj.find_process_name(self.lvol_mount_details[lvol]["Client"], f"{lvol}_fio", return_pid=True)
-                if attempt >= 30:
-                    raise Exception("FIO not killed on lvols")
+                if len(fio_pids) <= 2:
+                    break
+                for pid in fio_pids:
+                    self.ssh_obj.kill_processes(self.lvol_mount_details[lvol]["Client"], pid=pid)
+                if attempt >= 20:
+                    self.logger.warning(
+                        f"FIO not fully killed on lvol '{lvol}' after {attempt} attempts "
+                        f"(remaining pids: {fio_pids}). Proceeding anyway."
+                    )
+                    break
                 attempt += 1
-                sleep_n_sec(20)
+                sleep_n_sec(10)
 
             sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
-            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
@@ -923,7 +907,9 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
         outage_type = self.perform_random_outage()
         
@@ -946,7 +932,9 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
             self.create_lvols_with_fio(3)
             if not self.k8s_test:
@@ -983,7 +971,9 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
         self.restart_nodes_after_failover(outage_type)
         
@@ -993,7 +983,9 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
             self.ssh_obj.fetch_distrib_logs(
                 storage_node_ip=cur_node_ip,
                 storage_node_id=node,
-                logs_path=self.docker_logs_path
+                logs_path=self.docker_logs_path,
+                validate_async=True,
+                error_sink=self.dump_validation_errors
             )
 
         return outage_type
@@ -1150,6 +1142,10 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
         sleep_n_sec(30)
         
         while True:
+            if self.dump_validation_errors:
+                raise RuntimeError(
+                    f"Placement dump validation failed: {self.dump_validation_errors}"
+                )
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             if iteration > 1:
@@ -1174,7 +1170,9 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                     self.ssh_obj.fetch_distrib_logs(
                         storage_node_ip=cur_node_ip,
                         storage_node_id=node,
-                        logs_path=self.docker_logs_path
+                        logs_path=self.docker_logs_path,
+                        validate_async=True,
+                        error_sink=self.dump_validation_errors
                     )
                 self.create_lvols_with_fio(5)
                 if not self.k8s_test:
@@ -1208,7 +1206,9 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
             self.restart_nodes_after_failover(outage_type)
             for node in self.sn_nodes_with_sec:
@@ -1217,7 +1217,9 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
             self.logger.info("Waiting for fallback.")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
@@ -1298,6 +1300,8 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                 self.ssh_obj.fetch_distrib_logs(
                     storage_node_ip=cur_node_ip,
                     storage_node_id=node,
-                    logs_path=self.docker_logs_path
+                    logs_path=self.docker_logs_path,
+                    validate_async=True,
+                    error_sink=self.dump_validation_errors
                 )
             iteration += 1

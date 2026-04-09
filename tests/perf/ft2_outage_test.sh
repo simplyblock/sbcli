@@ -3,19 +3,20 @@
 # Run from .211 (mgmt node)
 #
 # 1. Creates one volume per storage node
-# 2. Connects volumes from .211
-# 3. Starts long-running fio on each volume
+# 2. Connects volumes from .211, formats with XFS, mounts
+# 3. Starts long-running fio on each mounted filesystem
 # 4. Iterates: picks 2 random nodes, overlapping outages, verifies fio alive
 # 5. Waits for cluster active before next iteration
 #
 # Usage: bash ft2_outage_test.sh [iterations] [outage_duration_sec]
+#   iterations=0 (default) means run indefinitely
 
 set -uo pipefail
 
-ITERATIONS="${1:-20}"
+ITERATIONS="${1:-0}"
 OUTAGE_DURATION="${2:-30}"
 OVERLAP_DELAY=10  # seconds between first and second outage
-POOL="pool_test"
+POOL="pool01"
 VOL_SIZE="1G"
 FIO_RUNTIME=86400  # 24h
 
@@ -88,10 +89,11 @@ fi
 log "=== Phase 2: Create volumes ==="
 declare -A VOL_UUIDS
 declare -A VOL_NQNS
+TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 
 for uuid in "${NODE_LIST[@]}"; do
     ip="${NODE_IPS[$uuid]}"
-    vol_name="test_${ip##*.}"
+    vol_name="ft2_${ip##*.}_${TIMESTAMP}"
     log "  Creating $vol_name on $ip..."
     vol_uuid=$(sbctl lvol add "$vol_name" "$VOL_SIZE" "$POOL" --ha-type ha 2>&1 | tail -1)
     if [[ "$vol_uuid" =~ ^[a-f0-9-]+$ ]]; then
@@ -104,7 +106,7 @@ for uuid in "${NODE_LIST[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Phase 3: Connect volumes from .211
+# Phase 3: Connect volumes from .211, format with XFS, mount
 # ---------------------------------------------------------------------------
 log "=== Phase 3: Connect volumes ==="
 HOST_NQN=$(cat /etc/nvme/hostnqn)
@@ -134,10 +136,17 @@ done
 # Wait for devices to appear
 sleep 5
 log "  Connected devices:"
-nvme list 2>/dev/null | grep -i simplyblock || true
+nvme list 2>/dev/null || true
 
-# Map volumes to /dev/nvme*n1 devices
-NVME_DEVICES=($(nvme list 2>/dev/null | grep -i simplyblock | awk '{print $1}'))
+# Map volumes to /dev/nvme*n1 devices — match by volume UUIDs we created
+NVME_DEVICES=()
+for uuid in "${NODE_LIST[@]}"; do
+    vol_uuid="${VOL_UUIDS[$uuid]}"
+    dev=$(nvme list 2>/dev/null | grep "$vol_uuid" | awk '{print $1}')
+    if [ -n "$dev" ]; then
+        NVME_DEVICES+=("$dev")
+    fi
+done
 log "  Found ${#NVME_DEVICES[@]} NVMe devices"
 
 if [ "${#NVME_DEVICES[@]}" -lt "${#NODE_LIST[@]}" ]; then
@@ -145,7 +154,7 @@ if [ "${#NVME_DEVICES[@]}" -lt "${#NODE_LIST[@]}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Phase 4: Start long-running fio on each device
+# Phase 4: Start long-running fio on each block device
 # ---------------------------------------------------------------------------
 log "=== Phase 4: Start fio ==="
 FIO_PIDS=()
@@ -160,8 +169,9 @@ for i in "${!NVME_DEVICES[@]}"; do
         --rw=randrw \
         --rwmixread=70 \
         --bs=4k \
-        --iodepth=1 \
-        --numjobs=1 \
+        --iodepth=4 \
+        --numjobs=4 \
+        --max_latency=15000000 \
         --time_based \
         --runtime="$FIO_RUNTIME" \
         --output="/tmp/fio_${i}.log" \
@@ -187,7 +197,11 @@ log "  All fio processes running"
 # ---------------------------------------------------------------------------
 # Phase 5: Outage iterations
 # ---------------------------------------------------------------------------
-log "=== Phase 5: Starting $ITERATIONS outage iterations ==="
+if [ "$ITERATIONS" -gt 0 ]; then
+    log "=== Phase 5: Starting $ITERATIONS outage iterations ==="
+else
+    log "=== Phase 5: Starting continuous outage iterations ==="
+fi
 
 outage_node() {
     local ip="$1"
@@ -238,18 +252,20 @@ for n in json.load(sys.stdin):
 
             if [ "$attempt" -eq 1 ]; then
                 log "    Node $ip ($uuid) status: $node_status — recovering..."
-                # Flush iptables in case of leftover network block
-                run_remote "$ip" "iptables -F" 2>/dev/null || true
             fi
 
-            # If node is not online and not already restarting, force-shutdown + restart
-            if [ "$node_status" != "in_restart" ] && [ "$node_status" != "in_creation" ]; then
-                if [ "$node_status" != "offline" ]; then
-                    sbctl sn shutdown "$uuid" --force 2>&1 | tail -1 || true
-                    sleep 3
-                fi
+            # Only restart nodes that are offline. "down" means data network
+            # issue — wait for it to recover, don't force-restart.
+            if [ "$node_status" = "offline" ]; then
+                sbctl sn restart "$uuid" --force 2>&1 | tail -1 || true
+            elif [ "$node_status" = "unreachable" ]; then
+                # Flush iptables then shutdown + restart
+                run_remote "$ip" "iptables -F" 2>/dev/null || true
+                sbctl sn shutdown "$uuid" --force 2>&1 | tail -1 || true
+                sleep 3
                 sbctl sn restart "$uuid" --force 2>&1 | tail -1 || true
             fi
+            # For "down", "in_restart", "in_creation" — just wait
 
             sleep 10
         done
@@ -265,25 +281,36 @@ for n in json.load(sys.stdin):
 }
 
 wait_cluster_active() {
-    log "  Waiting for cluster ACTIVE (not rebalancing)..."
+    log "  Waiting for cluster ACTIVE and rebalancing complete..."
+    local cluster_id
+    cluster_id=$(sbctl cluster list --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['UUID'])" 2>/dev/null)
     for attempt in $(seq 1 180); do
         status=$(sbctl cluster list --json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['Status'])" 2>/dev/null || echo "unknown")
-        if [ "$status" = "ACTIVE" ]; then
-            log "  Cluster ACTIVE"
+        rebalancing=$(sbctl cluster get "$cluster_id" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('is_re_balancing', False))" 2>/dev/null || echo "True")
+        migrations=$(sbctl lvol migrate-list --json 2>/dev/null | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+        if [ "$status" = "ACTIVE" ] && [ "$rebalancing" = "False" ] && [ "$migrations" = "0" ]; then
+            log "  Cluster ACTIVE, rebalancing complete, no active migrations"
             return 0
         fi
         if [ "$((attempt % 10))" -eq 0 ]; then
-            log "    Cluster status: $status (attempt $attempt)"
+            log "    Cluster status: $status, rebalancing: $rebalancing, migrations: $migrations (attempt $attempt)"
         fi
         sleep 5
     done
-    log "  ERROR: Cluster not ACTIVE after 15 minutes: $status"
+    log "  ERROR: Cluster not stable after 15 minutes: status=$status, rebalancing=$rebalancing"
     return 1
 }
 
-for iter in $(seq 1 "$ITERATIONS"); do
+iter=0
+while true; do
+    iter=$((iter + 1))
+    if [ "$ITERATIONS" -gt 0 ] && [ "$iter" -gt "$ITERATIONS" ]; then break; fi
     log ""
-    log "=== Iteration $iter/$ITERATIONS ==="
+    if [ "$ITERATIONS" -gt 0 ]; then
+        log "=== Iteration $iter/$ITERATIONS ==="
+    else
+        log "=== Iteration $iter (continuous) ==="
+    fi
 
     # Pick 2 random distinct nodes
     idx1=$((RANDOM % NUM_NODES))
@@ -354,12 +381,16 @@ for iter in $(seq 1 "$ITERATIONS"); do
     fi
 
     sbctl sn list 2>&1 | head -10
-    log "  Iteration $iter/$ITERATIONS complete"
+    if [ "$ITERATIONS" -gt 0 ]; then
+        log "  Iteration $iter/$ITERATIONS complete"
+    else
+        log "  Iteration $iter complete"
+    fi
     sleep 10
 done
 
 log ""
-log "=== ALL $ITERATIONS ITERATIONS PASSED ==="
+log "=== ALL $iter ITERATIONS PASSED ==="
 log "Stopping fio..."
 for pid in "${FIO_PIDS[@]}"; do
     kill "$pid" 2>/dev/null

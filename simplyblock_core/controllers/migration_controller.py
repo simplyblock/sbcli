@@ -385,7 +385,7 @@ def get_snaps_to_delete_on_target(migration):
     preexisting = set(migration.snaps_preexisting_on_target)
 
     # Rule 2: protect snaps referenced by other target lvols
-    protected = set()
+    protected: set[str] = set()
     target_lvols = db.get_lvols_by_node_id(migration.target_node_id)
     for lvol in target_lvols:
         if lvol.uuid == migration.lvol_id:

@@ -187,8 +187,6 @@ class TestNamespaceVolumeCreation(unittest.TestCase):
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_namespace_reuses_master_nqn(self, mock_db_cls):
         """When namespace is set, the new lvol should reuse the master's NQN."""
-        from simplyblock_core.controllers.lvol_controller import add_lvol_ha
-
         cluster = _cluster()
         pool = _pool()
         node = _node("node-1", secondary_node_id="node-2")
@@ -201,7 +199,6 @@ class TestNamespaceVolumeCreation(unittest.TestCase):
 
         # We can't easily call add_lvol_ha end-to-end due to complex deps,
         # so test the namespace logic directly
-        from simplyblock_core.controllers import lvol_controller
         db_controller = db
 
         # Simulate the namespace check at line 325-342
@@ -225,8 +222,6 @@ class TestNamespaceVolumeCreation(unittest.TestCase):
 
     def test_namespace_count_limit(self):
         """Should reject when namespace is full."""
-        cluster = _cluster()
-        pool = _pool()
         master = _lvol("master-1", "node-1", nqn="nqn.shared:subsys1", max_ns=2)
         # Two existing members
         member1 = _lvol("m1", "node-1", nqn="nqn.shared:subsys1", namespace="master-1")

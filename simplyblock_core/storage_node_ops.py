@@ -1033,12 +1033,31 @@ def ifc_is_roce(nic):
     return False
 
 
+def get_required_ha_jm_count(cluster) -> int:
+    return 4 if cluster.max_fault_tolerance >= 2 else 3
+
+
+def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
+    required_ha_jm_count = get_required_ha_jm_count(cluster)
+
+    if ha_jm_count is None:
+        return required_ha_jm_count
+
+    if ha_jm_count < required_ha_jm_count:
+        raise ValueError(
+            f"ha_jm_count={ha_jm_count} is too low for max_fault_tolerance="
+            f"{cluster.max_fault_tolerance}; minimum required is {required_ha_jm_count}"
+        )
+
+    return ha_jm_count
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=3, format_4k=False, spdk_proxy_image=None):
+             partition_size="", ha_jm_count=None, format_4k=False, spdk_proxy_image=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1059,6 +1078,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         except KeyError:
             logger.error("Cluster not found: %s", cluster_id)
             return False
+
+        ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
 
         logger.info(f"Adding Storage node: {node_addr}")
 
@@ -1761,6 +1782,14 @@ def restart_storage_node(
         logger.error("Cluster is in activation status, can not restart node")
         return False
 
+    # Guard: only one node may restart at a time per cluster
+    for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if peer.get_id() != node_id and peer.status == StorageNode.STATUS_RESTARTING:
+            logger.error(
+                f"Node {peer.get_id()} is already restarting in this cluster, "
+                f"cannot restart {node_id} concurrently")
+            return False
+
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not restart storage node")
@@ -1974,7 +2003,7 @@ def restart_storage_node(
     if not results:
         logger.error(f"Failed to start spdk: {err}")
         return False
-    # time.sleep(3)
+    time.sleep(5)
 
     if small_bufsize:
         snode.iobuf_small_bufsize = small_bufsize
@@ -2314,7 +2343,6 @@ def restart_storage_node(
 
             logger.info("Setting node status to Online")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
-            _refresh_cluster_maps_after_node_recovery(snode)
 
             lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
             logger.info(f"Found {len(lvol_list)} lvols")
@@ -3456,32 +3484,33 @@ def set_node_status(node_id, status, reconnect_on_online=True):
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
-        distr_controller.send_cluster_map_to_node(snode)
+
+        # Send device status events to update peers on device availability
+        for db_dev in snode.nvme_devices:
+            distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
         for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
             if node.get_id() == snode.get_id():
                 continue
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                 try:
-                    # Re-read node from DB to avoid overwriting concurrent changes
                     node = db_controller.get_storage_node_by_id(node.get_id())
                     node.remote_devices = _connect_to_remote_devs(node)
                     node.write_to_db()
-                    distr_controller.send_cluster_map_to_node(node)
                 except RuntimeError:
                     logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
                     continue
 
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
+            for sec_id, sec_role in [(snode.secondary_node_id, "secondary"), (snode.secondary_node_id_2, "tertiary")]:
                 if not sec_id:
                     continue
                 sec_node = db_controller.get_storage_node_by_id(sec_id)
                 if sec_node and snode.lvstore_status == "ready":
                     if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                         try:
-                            sec_node.connect_to_hublvol(snode)
+                            sec_node.connect_to_hublvol(snode, role=sec_role)
                         except Exception as e:
                             logger.error("Error establishing hublvol: %s", e)
 
@@ -3493,7 +3522,6 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 if primary_node and primary_node.lvstore_status == "ready":
                     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                         try:
-                            # If this node is sec_2 for this primary, multipath to sec_1
                             failover_node = None
                             if sec_attr == 'lvstore_stack_secondary_2' and primary_node.secondary_node_id:
                                 try:
@@ -3502,7 +3530,8 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                                         failover_node = sec1
                                 except KeyError:
                                     pass
-                            snode.connect_to_hublvol(primary_node, failover_node=failover_node)
+                            sec_role = "tertiary" if sec_attr == 'lvstore_stack_secondary_2' else "secondary"
+                            snode.connect_to_hublvol(primary_node, failover_node=failover_node, role=sec_role)
                         except Exception as e:
                             logger.error("Error establishing hublvol: %s", e)
 
@@ -3572,9 +3601,20 @@ def recreate_lvstore_on_sec(secondary_node):
         primary_lvs_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
 
         is_second_sec = (primary_node.secondary_node_id_2 == secondary_node.get_id())
+        logger.info(f"[RESTART-DEBUG] Processing primary {primary_node.get_id()[:8]} lvstore={primary_node.lvstore} "
+                     f"jm_vuid={primary_node.jm_vuid} status={primary_node.status} is_second_sec={is_second_sec}")
+
+        # If primary is unreachable/down, check data plane and escalate to offline if confirmed
+        if primary_node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN]:
+            logger.info(f"[RESTART-DEBUG] Primary {primary_node.get_id()[:8]} is {primary_node.status}, checking data plane")
+            from simplyblock_core.services.storage_node_monitor import _check_data_plane_and_escalate
+            _check_data_plane_and_escalate(primary_node)
+            primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
+            logger.info(f"[RESTART-DEBUG] After data plane check, primary status={primary_node.status}")
 
         # Collect nodes that need port block/unblock during this failback
         nodes_to_unblock = []
+        logger.info(f"[RESTART-DEBUG] About to check primary status for port blocking: {primary_node.status}")
 
         if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
             fw_api = FirewallClient(primary_node, timeout=5, retry=2)
@@ -3604,45 +3644,54 @@ def recreate_lvstore_on_sec(secondary_node):
 
             nodes_to_unblock.append(primary_node)
 
-        elif not is_second_sec:
-            ### 3b- Primary is offline, this is the first secondary.
-            # The other secondary may be the active leader for this group.
-            # Drop leadership on all other online secondaries before examine,
-            # to prevent writer conflicts when this node's JC connects to remote JMs.
-            other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.secondary_node_id_2]
-                            if sid and sid != secondary_node.get_id()]
-            for other_sec_id in other_sec_ids:
-                other_sec = db_controller.get_storage_node_by_id(other_sec_id)
-                if other_sec and other_sec.status == StorageNode.STATUS_ONLINE:
-                    logger.info(f"Primary offline: dropping leadership for jm_vuid {primary_node.jm_vuid} "
-                                f"on other secondary {other_sec.get_id()}")
-                    other_fw_api = FirewallClient(other_sec, timeout=5, retry=2)
-                    other_sec_port_type = "udp" if other_sec.active_rdma else "tcp"
-                    other_fw_api.firewall_set_port(
-                        primary_lvs_port, other_sec_port_type, "block", other_sec.rpc_port)
-                    tcp_ports_events.port_deny(other_sec, primary_lvs_port)
+        # Block the other secondary/tertiary for this LVS (regardless of primary status).
+        # When secondary restarts, block tertiary. When tertiary restarts, block secondary.
+        # Leadership drop only needed when primary is truly offline and sec1 is restarting
+        # (sec1 will become leader, so sibling must drop leadership first).
+        from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
+        primary_truly_offline = (not is_second_sec
+                                 and is_node_data_plane_disconnected_quorum(primary_node))
+        other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.secondary_node_id_2]
+                        if sid and sid != secondary_node.get_id()]
+        logger.info(f"[RESTART-DEBUG] Sibling blocking: other_sec_ids={[s[:8] for s in other_sec_ids]} "
+                     f"primary_truly_offline={primary_truly_offline}")
+        for other_sec_id in other_sec_ids:
+            other_sec = db_controller.get_storage_node_by_id(other_sec_id)
+            if other_sec and other_sec.status == StorageNode.STATUS_ONLINE:
+                logger.info(f"Blocking port for jm_vuid {primary_node.jm_vuid} "
+                            f"on sibling secondary {other_sec.get_id()}")
+                other_fw_api = FirewallClient(other_sec, timeout=5, retry=2)
+                other_sec_port_type = "udp" if other_sec.active_rdma else "tcp"
+                other_fw_api.firewall_set_port(
+                    primary_lvs_port, other_sec_port_type, "block", other_sec.rpc_port)
+                tcp_ports_events.port_deny(other_sec, primary_lvs_port)
 
-                    time.sleep(0.5)
+                time.sleep(0.5)
 
-                    other_rpc = RPCClient(other_sec.mgmt_ip, other_sec.rpc_port,
-                                          other_sec.rpc_username, other_sec.rpc_password)
+                other_rpc = RPCClient(other_sec.mgmt_ip, other_sec.rpc_port,
+                                      other_sec.rpc_username, other_sec.rpc_password)
+
+                if primary_truly_offline:
+                    logger.info(f"Primary offline: dropping leadership on sibling {other_sec.get_id()}")
                     other_rpc.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
                     other_rpc.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
-                    logger.info(f"Checking for inflight IO from node: {other_sec.get_id()}")
-                    for i in range(100):
-                        is_inflight = other_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
-                        if is_inflight:
-                            logger.info("Inflight IO found, retry in 100ms")
-                            time.sleep(0.1)
-                        else:
-                            logger.info("Inflight IO NOT found, continuing")
-                            break
+
+                logger.info(f"Checking for inflight IO from node: {other_sec.get_id()}")
+                for i in range(100):
+                    is_inflight = other_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
+                    if is_inflight:
+                        logger.info("Inflight IO found, retry in 100ms")
+                        time.sleep(0.1)
                     else:
-                        logger.error(
-                            f"Timeout while checking for inflight IO after 10 seconds on node {other_sec.get_id()}")
+                        logger.info("Inflight IO NOT found, continuing")
+                        break
+                else:
+                    logger.error(
+                        f"Timeout while checking for inflight IO after 10 seconds on node {other_sec.get_id()}")
 
-                    nodes_to_unblock.append(other_sec)
+                nodes_to_unblock.append(other_sec)
 
+        logger.info(f"[RESTART-DEBUG] Sibling blocking done, proceeding to examine {primary_node.raid}")
         ### 5- examine
         ret = secondary_rpc_client.bdev_examine(primary_node.raid)
 
@@ -3651,16 +3700,52 @@ def recreate_lvstore_on_sec(secondary_node):
         if not ret:
             logger.warning("Failed to examine bdevs on secondary node")
 
-        if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+        # If this is sec_1, always create a secondary hublvol so sec_2 can multipath
+        if not is_second_sec and primary_node.secondary_node_id_2:
             try:
-                # If this is sec_1, create a secondary hublvol so sec_2 can multipath
-                if not is_second_sec and primary_node.secondary_node_id_2:
-                    try:
-                        cluster = db_controller.get_cluster_by_id(primary_node.cluster_id)
-                        secondary_node.create_secondary_hublvol(primary_node, cluster.nqn)
-                    except Exception as e:
-                        logger.error("Error creating secondary hublvol: %s", e)
+                cluster = db_controller.get_cluster_by_id(primary_node.cluster_id)
+                secondary_node.create_secondary_hublvol(primary_node, cluster.nqn)
+            except Exception as e:
+                logger.error("Error creating secondary hublvol: %s", e)
 
+        if primary_truly_offline:
+            # Verify lvstore recovered
+            ret = secondary_rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore)
+            if not ret:
+                logger.error(f"Failed to recover lvstore: {primary_node.lvstore} "
+                             f"on secondary: {secondary_node.get_id()}")
+                storage_events.snode_restart_failed(secondary_node)
+                snode_api = SNodeClient(secondary_node.api_endpoint, timeout=5, retry=5)
+                snode_api.spdk_process_kill(secondary_node.rpc_port, secondary_node.cluster_id)
+                set_node_status(secondary_node.get_id(), StorageNode.STATUS_OFFLINE)
+                return False
+
+            # Verify bdevs recovered
+            ret = secondary_rpc_client.get_bdevs()
+            node_bdev_names = {}
+            if ret:
+                for b in ret:
+                    node_bdev_names[b['name']] = b
+                    for al in b['aliases']:
+                        node_bdev_names[al] = b
+            for lv in lvol_list:
+                passed = health_controller.check_bdev(lv.lvol_uuid, bdev_names=node_bdev_names)
+                if not passed:
+                    logger.error(f"Failed to recover BDev: {lv.lvol_uuid} "
+                                 f"on secondary: {secondary_node.get_id()}")
+                    storage_events.snode_restart_failed(secondary_node)
+                    snode_api = SNodeClient(secondary_node.api_endpoint, timeout=5, retry=5)
+                    snode_api.spdk_process_kill(secondary_node.rpc_port, secondary_node.cluster_id)
+                    set_node_status(secondary_node.get_id(), StorageNode.STATUS_OFFLINE)
+                    return False
+
+            # Promote secondary to leader
+            logger.info("Primary %s is offline — promoting secondary %s to leader for %s",
+                        primary_node.get_id(), secondary_node.get_id(), primary_node.lvstore)
+            secondary_rpc_client.bdev_lvol_set_leader(primary_node.lvstore, leader=True)
+
+        elif primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+            try:
                 # If this is sec_2, connect with multipath to primary + sec_1
                 failover_node = None
                 if is_second_sec and primary_node.secondary_node_id:
@@ -3671,11 +3756,11 @@ def recreate_lvstore_on_sec(secondary_node):
                     except KeyError:
                         pass
 
-                secondary_node.connect_to_hublvol(primary_node, failover_node=failover_node)
+                sec_role = "tertiary" if is_second_sec else "secondary"
+                secondary_node.connect_to_hublvol(primary_node, failover_node=failover_node, role=sec_role)
 
             except Exception as e:
                 logger.error("Error connecting to hublvol: %s", e)
-                # return False
 
         ### 8- allow ports on nodes that were blocked
         for node_to_unblock in nodes_to_unblock:
@@ -3685,7 +3770,7 @@ def recreate_lvstore_on_sec(secondary_node):
             tcp_ports_events.port_allowed(node_to_unblock, primary_lvs_port)
 
         ### 7- add lvols to subsystems
-        lvol_ana_state = "non_optimized"
+        lvol_ana_state = "optimized" if primary_truly_offline else "non_optimized"
 
         executor = ThreadPoolExecutor(max_workers=50)
         for lvol in lvol_list:
@@ -3884,7 +3969,7 @@ def recreate_lvstore(snode, force=False):
         snode.lvstore,
         groupid=snode.jm_vuid,
         subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
-        primary=True
+        role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
@@ -3915,7 +4000,8 @@ def recreate_lvstore(snode, force=False):
             # sec_2 gets multipath failover to sec_1
             failover_node = sec1 if i >= 1 and sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN] else None
             try:
-                sec_node.connect_to_hublvol(snode, failover_node=failover_node)
+                sec_role = "tertiary" if i >= 1 else "secondary"
+                sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
                 # return False
@@ -4243,7 +4329,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.lvstore,
         groupid=snode.jm_vuid,
         subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
-        primary=True
+        role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)
 
@@ -4284,18 +4370,31 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
     # Create hublvol on primary after all secondaries have their stacks
     if secondary_ids:
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         try:
-            snode.create_hublvol()
+            snode.create_hublvol(cluster_nqn=cluster.nqn)
         except RPCException as e:
             logger.error("Error establishing hublvol: %s", e.message)
             # return False
 
-        for sec_node_id in secondary_ids:
+        # Create secondary hublvol on sec_1 so sec_2 can multipath
+        sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
+        if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
+            try:
+                cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+                sec1.create_secondary_hublvol(snode, cluster.nqn)
+            except Exception as e:
+                logger.error("Error creating secondary hublvol on sec_1: %s", e)
+
+        for i, sec_node_id in enumerate(secondary_ids):
             sec_node = db_controller.get_storage_node_by_id(sec_node_id)
             if sec_node.status == StorageNode.STATUS_ONLINE:
                 try:
                     time.sleep(1)
-                    sec_node.connect_to_hublvol(snode)
+                    # sec_2 gets multipath failover to sec_1
+                    failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
+                    sec_role = "tertiary" if i >= 1 else "secondary"
+                    sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
                 except Exception as e:
                     logger.error("Error establishing hublvol: %s", e)
                     # return False
