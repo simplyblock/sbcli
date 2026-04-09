@@ -21,7 +21,7 @@ commands:
             dest: ifname
             type: str
           - name: "--isolate-cores"
-            help: "Isolates cores in kernel args for the provided CPU mask. Default: false."
+            help: "Isolates cores in kernel args for the provided CPU mask. Default: `false`."
             dest: isolate_cores
             type: bool
             default: false
@@ -45,19 +45,19 @@ commands:
             type: str
             required: false
           - name: "--nodes-per-socket"
-            help: "The number of each node to be added per each socket. Default: 1."
+            help: "The number of each node to be added per each socket. Default: `1`."
             dest: nodes_per_socket
             type: int
             default: 1
           - name: "--sockets-to-use"
-            help: "The system socket to use when adding the storage nodes. Default: 0."
+            help: "The system socket to use when adding the storage nodes. Default: `0`."
             description: >
               System socket to use when adding storage nodes. Comma-separated list: e.g. 0,1
             dest: sockets_to_use
             type: str
             default: "0"
           - name: "--cores-percentage"
-            help: "The percentage of cores to be used for spdk (0-99). Default: 0."
+            help: "The percentage of cores to be used for spdk (0-99). Default: `0`."
             description: >
               The percentage of cores to be used for spdk (0-99)
             dest: cores_percentage
@@ -137,7 +137,7 @@ commands:
           Run locally on storage nodes to clean nvme devices and free them.
         arguments:
           - name: "--config-path"
-            help: "The config path to read stored nvme devices from. Default: /etc/simplyblock/sn_config_file."
+            help: "The config path to read stored nvme devices from. Default: `/etc/simplyblock/sn_config_file`."
             dest: config_path
             required: false
             type: str
@@ -162,7 +162,7 @@ commands:
             help: |
               **Deprecated:** use `--enable-journal-device` instead.
               
-              1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: 1.
+              1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.
             dest: partitions
             type: int
             choices:
@@ -180,7 +180,7 @@ commands:
             type: bool
             action: store_true
           - name: "--jm-percent"
-            help: "Number in percent to use for JM from each device. Default: 3."
+            help: "Number in percent to use for JM from each device. Default: `3`."
             dest: jm_percent
             type: int
             default: 3
@@ -209,13 +209,13 @@ commands:
             action: store_true
             private: true
           - name: "--iobuf_small_bufsize"
-            help: "Bdev_set_options param. Default: 0."
+            help: "Bdev_set_options param. Default: `0`."
             dest: small_bufsize
             type: int
             default: 0
             private: true
           - name: "--iobuf_large_bufsize"
-            help: "Bdev_set_options param. Default: 0."
+            help: "Bdev_set_options param. Default: `0`."
             dest: large_bufsize
             type: int
             default: 0
@@ -227,14 +227,14 @@ commands:
             action: store_true
             private: true
           - name: "--disable-ha-jm"
-            help: "Disable HA JM for distrib creation. Default: true."
+            help: "Disable HA JM for distrib creation. Default: `true`."
             dest: enable_ha_jm
             type: bool
             default: true
             action: store_false
             private: true
           - name: "--ha-jm-count"
-            help: "The HA JM count. Default: 3."
+            help: "The HA JM count. Default: `3`."
             dest: ha_jm_count
             type: int
             default: 3
@@ -243,14 +243,14 @@ commands:
             dest: namespace
             type: str
           - name: "--id-device-by-nqn"
-            help: "Use the device NQN instead of the serial number for identification. Default: false."
+            help: "Use the device NQN instead of the serial number for identification. Default: `false`."
             dest: id_device_by_nqn
             type: bool
             default: false
             action: store_true
             private: true
           - name: "--max-snap"
-            help: "The max snapshot per storage node. Default: 5000."
+            help: "The max snapshot per storage node. Default: `5000`."
             dest: max_snap
             type: int
             default: 5000
@@ -329,18 +329,18 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "--max-lvol"
-            help: "The max logical volume per storage node. Default: 0."
+            help: "The max logical volume per storage node. Default: `0`."
             dest: max_lvol
             type: int
             default: 0
           - name: "--max-snap"
-            help: "The max snapshot per storage node. Default: 5000."
+            help: "The max snapshot per storage node. Default: `5000`."
             dest: max_snap
             type: int
             default: 5000
             private: true
           - name: "--max-size"
-            help: "The maximum amount of GB to be utilized on this storage node. Default: 0."
+            help: "The maximum amount of GB to be utilized on this storage node. Default: `0`."
             description: >
               Maximum amount of GB to be utilized on this storage node. This cannot be larger than the total effective
               cluster capacity. A safe value is `1/n * 2.0` of effective cluster capacity. Meaning, if you have three
@@ -380,13 +380,13 @@ commands:
             action: store_true
             private: true
           - name: "--iobuf_small_bufsize"
-            help: "Bdev_set_options param. Default: 0."
+            help: "Bdev_set_options param. Default: `0`."
             dest: small_bufsize
             type: int
             default: 0
             private: true
           - name: "--iobuf_large_bufsize"
-            help: "Bdev_set_options param. Default: 0."
+            help: "Bdev_set_options param. Default: `0`."
             dest: large_bufsize
             type: int
             default: 0
@@ -404,7 +404,7 @@ commands:
             nargs: +
             default: ""
           - name: "--force-lvol-recreate"
-            help: "Force logical volume recreation on node restart even if the logical volume bdev was not recovered. Default: False."
+            help: "Force logical volume recreation on node restart even if the logical volume bdev was not recovered. Default: `False`."
             dest: force_lvol_recreate
             type: bool
             action: store_true
@@ -463,7 +463,7 @@ commands:
             dest: history
             type: str
           - name: "--records"
-            help: "The number of records. Default: 20."
+            help: "The number of records. Default: `20`."
             dest: records
             type: int
             default: 20
@@ -501,7 +501,7 @@ commands:
             dest: device_id
             type: str
           - name: "mode"
-            help: "The testing mode. Default: full_pass_through."
+            help: "The testing mode. Default: `full_pass_through`."
             dest: mode
             type: str
             choices:
@@ -597,7 +597,7 @@ commands:
             dest: history
             type: str
           - name: "--records"
-            help: "The number of records. Default: 20."
+            help: "The number of records. Default: `20`."
             dest: records
             type: int
             default: 20
@@ -814,7 +814,7 @@ commands:
           Created a new control plane cluster with the current node as the primary control plane node.
         arguments:
           - name: "--page_size"
-            help: "The size of a data page in bytes. Default: 2097152."
+            help: "The size of a data page in bytes. Default: `2097152`."
             dest: page_size
             type: int
             default: 2097152
@@ -825,22 +825,22 @@ commands:
             type: str
             private: true
           - name: "--cap-warn"
-            help: "The capacity warning level in percent. Default: 89."
+            help: "The capacity warning level in percent. Default: `89`."
             dest: cap_warn
             type: int
             default: 89
           - name: "--cap-crit"
-            help: "The capacity critical level in percent. Default: 99."
+            help: "The capacity critical level in percent. Default: `99`."
             dest: cap_crit
             type: int
             default: 99
           - name: "--prov-cap-warn"
-            help: "The capacity warning level in percent. Default: 250."
+            help: "The capacity warning level in percent. Default: `250`."
             dest: prov_cap_warn
             type: int
             default: 250
           - name: "--prov-cap-crit"
-            help: "The capacity critical level in percent. Default: 500."
+            help: "The capacity critical level in percent. Default: `500`."
             dest: prov_cap_crit
             type: int
             default: 500
@@ -857,12 +857,12 @@ commands:
             dest: tls_secret
             type: str
           - name: "--log-del-interval"
-            help: "The logging retention policy. Default: 3d."
+            help: "The logging retention policy. Default: `3d`."
             dest: log_del_interval
             type: str
             default: 3d
           - name: "--metrics-retention-period"
-            help: "Retention period for I/O statistics (Prometheus). Default: 7d."
+            help: "Retention period for I/O statistics (Prometheus). Default: `7d`."
             dest: metrics_retention_period
             type: str
             default: 7d
@@ -877,29 +877,29 @@ commands:
             type: str
             default: ""
           - name: "--data-chunks-per-stripe"
-            help: "The erasure coding schema parameter k (distributed raid). Default: 1."
+            help: "The erasure coding schema parameter k (distributed raid). Default: `1`."
             dest: distr_ndcs
             type: int
             default: 1
           - name: "--parity-chunks-per-stripe"
-            help: "The erasure coding schema parameter n (distributed raid). Default: 1."
+            help: "The erasure coding schema parameter n (distributed raid). Default: `1`."
             dest: distr_npcs
             type: int
             default: 1
           - name: "--distr-bs"
-            help: "The (Dev) distrb bdev block size. Default: 4096."
+            help: "The (Dev) distrb bdev block size. Default: `4096`."
             dest: distr_bs
             type: int
             default: 4096
             private: true
           - name: "--distr-chunk-bs"
-            help: "The (Dev) distrb bdev chunk block size. Default: 4096."
+            help: "The (Dev) distrb bdev chunk block size. Default: `4096`."
             dest: distr_chunk_bs
             type: int
             default: 4096
             private: true
           - name: "--ha-type"
-            help: "Logical volume HA type (single, ha), default is cluster ha type. Default: ha."
+            help: "Logical volume HA type (single, ha), default is cluster ha type. Default: `ha`."
             dest: ha_type
             type: str
             choices:
@@ -907,13 +907,13 @@ commands:
               - ha
             default: ha
           - name: "--is-single-node"
-            help: "For single-node clusters only. Default: false."
+            help: "For single-node clusters only. Default: `false`."
             dest: is_single_node
             type: bool
             action: store_true
             default: false
           - name: "--mode"
-            help: "The environment to deploy management services. Default: docker."
+            help: "The environment to deploy management services. Default: `docker`."
             dest: mode
             type: str
             choices:
@@ -921,7 +921,7 @@ commands:
               - kubernetes
             default: docker
           - name: "--ingress-host-source"
-            help: "Ingress host source: 'hostip' for node IP, 'loadbalancer' for external LB, or 'dns' for custom domain. Default: hostip."
+            help: "Ingress host source: 'hostip' for node IP, 'loadbalancer' for external LB, or 'dns' for custom domain. Default: `hostip`."
             dest: ingress_host_source
             type: str
             choices:
@@ -940,7 +940,7 @@ commands:
             type: bool
             action: store_true
           - name: "--fabric"
-            help: "The NVMe fabric to use (specify: tcp, rdma). Default: tcp."
+            help: "The NVMe fabric to use (specify: `tcp`, `rdma`, `tcp,rdma`). Default: `tcp`."
             dest: fabric
             type: str
             choices:
@@ -949,19 +949,19 @@ commands:
               - tcp,rdma
             default: tcp
           - name: "--max-queue-size"
-            help: "The max size the queue will grow. Default: 128."
+            help: "The max size the queue will grow. Default: `128`."
             dest: max_queue_size
             type: int
             default: 128
             private: true
           - name: "--inflight-io-threshold"
-            help: "The number of inflight IOs allowed before the IO queuing starts. Default: 4."
+            help: "The number of inflight IOs allowed before the IO queuing starts. Default: `4`."
             dest: inflight_io_threshold
             type: int
             default: 4
             private: true
           - name: "--disable-monitoring"
-            help: "Disable monitoring stack, false by default. Default: false."
+            help: "Disable monitoring stack, false by default. Default: `false`."
             dest: disable_monitoring
             type: bool
             default: false
@@ -982,7 +982,7 @@ commands:
               - "-n"
             type: str
           - name: "--qpair-count"
-            help: "The NVMe/TCP transport qpair count per logical volume. Default: 32."
+            help: "The NVMe/TCP transport qpair count per logical volume. Default: `32`."
             usage: >
               Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
               of very small logical volumes.
@@ -993,7 +993,7 @@ commands:
                 max: 128
             default: 32
           - name: "--client-qpair-count"
-            help: "The default NVMe/TCP transport qpair count per logical volume for client. Default: 3."
+            help: "The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`."
             usage: >
               Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
               of very small logical volumes.
@@ -1013,7 +1013,7 @@ commands:
             dest: host_sec
             type: str
           - name: "--max-fault-tolerance"
-            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1."
+            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`."
             dest: max_fault_tolerance
             type: int
             default: 1
@@ -1025,17 +1025,17 @@ commands:
             dest: use_backup
             type: str
           - name: "--nvmf-base-port"
-            help: "Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420."
+            help: "Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`."
             dest: nvmf_base_port
             type: int
             default: 4420
           - name: "--rpc-base-port"
-            help: "The base port for SPDK JSON-RPC. Default: 8080."
+            help: "The base port for SPDK JSON-RPC. Default: `8080`."
             dest: rpc_base_port
             type: int
             default: 8080
           - name: "--snode-api-port"
-            help: "The SNodeAPI/firewall port (one per host IP). Default: 50001."
+            help: "The SNodeAPI/firewall port (one per host IP). Default: `50001`."
             dest: snode_api_port
             type: int
             default: 50001
@@ -1043,55 +1043,55 @@ commands:
         help: "Adds a new cluster."
         arguments:
           - name: "--page_size"
-            help: "The size of a data page in bytes. Default: 2097152."
+            help: "The size of a data page in bytes. Default: `2097152`."
             dest: page_size
             type: int
             default: 2097152
             private: true
           - name: "--cap-warn"
-            help: "The capacity warning level in percent. Default: 89."
+            help: "The capacity warning level in percent. Default: `89`."
             dest: cap_warn
             type: int
             default: 89
           - name: "--cap-crit"
-            help: "The capacity critical level in percent. Default: 99."
+            help: "The capacity critical level in percent. Default: `99`."
             dest: cap_crit
             type: int
             default: 99
           - name: "--prov-cap-warn"
-            help: "The capacity warning level in percent. Default: 250."
+            help: "The capacity warning level in percent. Default: `250`."
             dest: prov_cap_warn
             type: int
             default: 250
           - name: "--prov-cap-crit"
-            help: "The capacity critical level in percent. Default: 500."
+            help: "The capacity critical level in percent. Default: `500`."
             dest: prov_cap_crit
             type: int
             default: 500
           - name: "--data-chunks-per-stripe"
-            help: "The erasure coding schema parameter k (distributed raid). Default: 1."
+            help: "The erasure coding schema parameter k (distributed raid). Default: `1`."
             dest: distr_ndcs
             type: int
             default: 1
           - name: "--parity-chunks-per-stripe"
-            help: "The erasure coding schema parameter n (distributed raid). Default: 1."
+            help: "The erasure coding schema parameter n (distributed raid). Default: `1`."
             dest: distr_npcs
             type: int
             default: 1
           - name: "--distr-bs"
-            help: "The (Dev) distrb bdev block size. Default: 4096."
+            help: "The (Dev) distrb bdev block size. Default: `4096`."
             dest: distr_bs
             type: int
             default: 4096
             private: true
           - name: "--distr-chunk-bs"
-            help: "The (Dev) distrb bdev chunk block size. Default: 4096."
+            help: "The (Dev) distrb bdev chunk block size. Default: `4096`."
             dest: distr_chunk_bs
             type: int
             default: 4096
             private: true
           - name: "--ha-type"
-            help: "Logical volume HA type (single, ha), default is cluster single type. Default: ha."
+            help: "Logical volume HA type (single, ha), default is cluster single type. Default: `ha`."
             dest: ha_type
             type: str
             choices:
@@ -1104,7 +1104,7 @@ commands:
             type: bool
             action: store_true
           - name: "--fabric"
-            help: "Fabric: tcp, rdma or both (specify: tcp, rdma). Default: tcp."
+            help: "Fabric: tcp, rdma or both (specify: tcp, rdma). Default: `tcp`."
             dest: fabric
             type: str
             choices:
@@ -1113,13 +1113,13 @@ commands:
               - tcp,rdma
             default: tcp
           - name: "--is-single-node"
-            help: "For single-node clusters only. Default: false."
+            help: "For single-node clusters only. Default: `false`."
             dest: is_single_node
             type: bool
             action: store_true
             default: false
           - name: "--qpair-count"
-            help: "The NVMe/TCP transport qpair count per logical volume. Default: 32."
+            help: "The NVMe/TCP transport qpair count per logical volume. Default: `32`."
             usage: >
               Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
               of very small logical volumes.
@@ -1130,7 +1130,7 @@ commands:
                 max: 128
             default: 32
           - name: "--client-qpair-count"
-            help: "The default NVMe/TCP transport qpair count per logical volume for client. Default: 3."
+            help: "The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`."
             usage: >
               Increase for clusters with few but very large logical volumes or decrease for clusters with a large number
               of very small logical volumes.
@@ -1141,13 +1141,13 @@ commands:
                 max: 128
             default: 3
           - name: "--max-queue-size"
-            help: "The max size the queue will grow. Default: 128."
+            help: "The max size the queue will grow. Default: `128`."
             dest: max_queue_size
             type: int
             default: 128
             private: true
           - name: "--inflight-io-threshold"
-            help: "The number of inflight IOs allowed before the IO queuing starts. Default: 4."
+            help: "The number of inflight IOs allowed before the IO queuing starts. Default: `4`."
             dest: inflight_io_threshold
             type: int
             default: 4
@@ -1172,7 +1172,7 @@ commands:
             dest: client_data_nic
             type: str
           - name: "--max-fault-tolerance"
-            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: 1."
+            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`."
             dest: max_fault_tolerance
             type: int
             default: 1
@@ -1184,17 +1184,17 @@ commands:
             dest: use_backup
             type: str
           - name: "--nvmf-base-port"
-            help: "Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: 4420."
+            help: "Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`."
             dest: nvmf_base_port
             type: int
             default: 4420
           - name: "--rpc-base-port"
-            help: "The base port for SPDK JSON-RPC. Default: 8080."
+            help: "The base port for SPDK JSON-RPC. Default: `8080`."
             dest: rpc_base_port
             type: int
             default: 8080
           - name: "--snode-api-port"
-            help: "The SNodeAPI/firewall port (one per host IP). Default: 50001."
+            help: "The SNodeAPI/firewall port (one per host IP). Default: `50001`."
             dest: snode_api_port
             type: int
             default: 50001
@@ -1295,7 +1295,7 @@ commands:
             type: str
             completer: _completer_get_cluster_list
           - name: "--records"
-            help: "The number of records. Default: 20."
+            help: "The number of records. Default: `20`."
             dest: records
             type: int
             default: 20
@@ -1317,7 +1317,7 @@ commands:
             type: bool
             action: store_true
           - name: "--limit"
-            help: "Show last number of logs, default 50. Default: 50."
+            help: "Show last number of logs, default 50. Default: `50`."
             dest: limit
             type: int
             default: 50
@@ -1350,7 +1350,7 @@ commands:
             type: str
             completer: _completer_get_cluster_list
           - name: "fabric"
-            help: "Fabric: tcp, rdma or both (specify: tcp, rdma). Default: tcp."
+            help: "Fabric: tcp, rdma or both (specify: tcp, rdma). Default: `tcp`."
             dest: fabric
             type: str
             choices:
@@ -1379,7 +1379,7 @@ commands:
             type: str
             completer: _completer_get_cluster_list
           - name: "--cp-only"
-            help: "Update the control plane only. Default: false."
+            help: "Update the control plane only. Default: `false`."
             dest: mgmt_only
             type: bool
             default: false
@@ -1427,7 +1427,7 @@ commands:
             type: str
             completer: _completer_get_cluster_list
           - name: "--limit"
-            help: "Show last number of tasks, default 50. Default: 50."
+            help: "Show last number of tasks, default 50. Default: `50`."
             dest: limit
             type: int
             default: 50
@@ -1528,13 +1528,13 @@ commands:
           - name: "--snapshot"
             aliases:
               - "-s"
-            help: "Make logical volume with snapshot capability. Default: false."
+            help: "Make logical volume with snapshot capability. Default: `false`."
             dest: snapshot
             type: bool
             action: store_true
             default: false
           - name: "--max-size"
-            help: "The logical volume max size. Default: 1000T."
+            help: "The logical volume max size. Default: `1000T`."
             dest: max_size
             type: size
             default: "1000T"
@@ -1572,7 +1572,7 @@ commands:
             dest: max_w_mbytes
             type: int
           - name: "--max-namespace-per-subsys"
-            help: "The maximum Namespace per subsystem. Default: 32."
+            help: "The maximum Namespace per subsystem. Default: `32`."
             dest: max_namespace_per_subsys
             type: int
             default: 32
@@ -1582,7 +1582,7 @@ commands:
             type: int
             private: true
           - name: "--ha-type"
-            help: "Logical volume HA type (single, ha), default is cluster HA type. Default: default."
+            help: "Logical volume HA type (single, ha), default is cluster HA type. Default: `default`."
             dest: ha_type
             type: str
             choices:
@@ -1591,7 +1591,7 @@ commands:
               - ha
             default: default
           - name: "--fabric"
-            help: "The transport fabric type (tcp or rdma). The cluster must support the chosen fabric. Default: tcp."
+            help: "The transport fabric type (tcp or rdma). The cluster must support the chosen fabric. Default: `tcp`."
             dest: fabric
             type: str
             choices:
@@ -1600,7 +1600,7 @@ commands:
               - tcp,rdma
             default: tcp
           - name: "--lvol-priority-class"
-            help: "The logical volume priority class. Default: 0."
+            help: "The logical volume priority class. Default: `0`."
             dest: lvol_priority_class
             type: int
             default: 0
@@ -1625,12 +1625,12 @@ commands:
             dest: pvc_name
             type: str
           - name: "--data-chunks-per-stripe"
-            help: "The erasure coding schema parameter k (distributed raid). Default: 0."
+            help: "The erasure coding schema parameter k (distributed raid). Default: `0`."
             dest: ndcs
             type: int
             default: 0
           - name: "--parity-chunks-per-stripe"
-            help: "The erasure coding schema parameter n (distributed raid). Default: 0."
+            help: "The erasure coding schema parameter n (distributed raid). Default: `0`."
             dest: npcs
             type: int
             default: 0
@@ -1821,7 +1821,7 @@ commands:
             dest: clone_name
             type: str
           - name: "--resize"
-            help: "New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: 0."
+            help: "New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: `0`."
             dest: resize
             type: size
             default: "0"
@@ -1865,7 +1865,7 @@ commands:
             dest: history
             type: str
           - name: "--records"
-            help: "The number of records. Default: 20."
+            help: "The number of records. Default: `20`."
             dest: records
             type: int
             default: 20
@@ -1956,12 +1956,12 @@ commands:
             dest: target_node_id
             type: str
           - name: "--max-retries"
-            help: "Maximum retry attempts before aborting. Default: 10."
+            help: "Maximum retry attempts before aborting. Default: `10`."
             dest: max_retries
             type: int
             default: 10
           - name: "--deadline"
-            help: "Migration deadline in seconds (0 = no deadline. Default: 14400."
+            help: "Migration deadline in seconds (0 = no deadline. Default: `14400`."
             dest: deadline_seconds
             type: int
             default: 14400
@@ -2017,7 +2017,7 @@ commands:
             dest: mgmt_ip
             type: str
           - name: "--mode"
-            help: "The environment to deploy management services. Default: docker."
+            help: "The environment to deploy management services. Default: `docker`."
             dest: mode
             type: str
             choices:
@@ -2057,12 +2057,12 @@ commands:
             dest: cluster_id
             type: str
           - name: "--pool-max"
-            help: "Pool maximum size: 20M, 20G, 0. Default: 0."
+            help: "Pool maximum size: 20M, 20G, 0. Default: `0`."
             dest: pool_max
             type: size
             default: "0"
           - name: "--lvol-max"
-            help: "Logical volume maximum size: 20M, 20G, 0. Default: 0."
+            help: "Logical volume maximum size: 20M, 20G, 0. Default: `0`."
             dest: lvol_max
             type: size
             default: "0"
@@ -2187,7 +2187,7 @@ commands:
             dest: history
             type: str
           - name: "--records"
-            help: "The number of records. Default: 20."
+            help: "The number of records. Default: `20`."
             dest: records
             type: int
             default: 20
@@ -2260,7 +2260,7 @@ commands:
             dest: lvol_name
             type: str
           - name: "--resize"
-            help: "New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: 0."
+            help: "New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: `0`."
             dest: resize
             type: size
             default: "0"
