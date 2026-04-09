@@ -23,7 +23,15 @@ def process_snap_replicate_start(task, snapshot):
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
         if replicate_to_source:
             org_snap = db.get_snapshot_by_id(snapshot.source_replicated_snap_uuid)
-            remote_node_uuid = db.get_storage_node_by_id(task.node_id)
+            try:
+                remote_node_uuid = db.get_storage_node_by_id(task.node_id)
+            except KeyError:
+                msg = f"Unable to find node: {task.node_id}, stopping task"
+                logger.error(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_DONE
+                task.write_to_db()
+                return
             remote_pool_uuid = org_snap.lvol.pool_uuid
         else:  # replicate to target
             remote_node_uuid = db.get_storage_node_by_id(snapshot.lvol.replication_node_id)
