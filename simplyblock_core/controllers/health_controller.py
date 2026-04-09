@@ -142,22 +142,36 @@ def check_port_on_node(snode, port_id):
     fw_api = FirewallClient(snode, timeout=5, retry=2)
     command_output, _ = fw_api.get_firewall(snode.rpc_port)
     if command_output:
-        data = json.loads(command_output)
-        for item in data['nftables']:
-            if "rule" in item:
-                if item['rule']['table'] == "filter":
-                    rule_port = None
-                    action = None
-                    for t in item['rule']['expr']:
-                        if 'drop' in t:
-                            action = "drop"
-                        elif 'reject' in t:
-                            action = "reject"
-                        elif 'match' in t and 'left' in t['match'] and "payload" in t['match']['left'] and \
-                                'right' in t['match']:
-                            rule_port = t['match']['right']
-                    if rule_port and action and port_id == rule_port:
-                        return False
+        try:
+            data = json.loads(command_output)
+            for item in data['nftables']:
+                if "rule" in item:
+                    if item['rule']['table'] == "filter":
+                        rule_port = None
+                        action = None
+                        for t in item['rule']['expr']:
+                            if 'drop' in t:
+                                action = "drop"
+                            elif 'reject' in t:
+                                action = "reject"
+                            elif 'match' in t and 'left' in t['match'] and "payload" in t['match']['left'] and \
+                                    'right' in t['match']:
+                                rule_port = t['match']['right']
+                        if rule_port and action and port_id == rule_port:
+                            return False
+        except:
+            logger.info("Failed to parse firewall output as NFT, trying IPTables")
+            if type(command_output) is str:
+                command_output = [command_output]
+            for rules in command_output:
+                result = jc.parse('iptables', rules)
+                for chain in result:
+                    if chain['chain'] in ["INPUT", "OUTPUT"]:  # type: ignore
+                        for rule in chain['rules']:  # type: ignore
+                            if str(port_id) in rule['options']:  # type: ignore
+                                action = rule['target']  # type: ignore
+                                if action in ["DROP"]:
+                                    return False
 
     # check RDMA port block
     if snode.active_rdma:
