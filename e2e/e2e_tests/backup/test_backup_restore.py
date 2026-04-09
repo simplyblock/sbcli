@@ -479,7 +479,7 @@ class BackupTestBase(TestClusterBase):
 
     def _run_fio(self, mount: str, log_file: str = None, size: str = None,
                   runtime: int = 60):
-        """Run FIO on mount point and validate log."""
+        """Run FIO on mount point, wait for it to finish, and validate log."""
         size = size or self.fio_size
         log_file = log_file or f"{self.log_path}/fio_{_rand_suffix()}.log"
         self.ssh_obj.run_fio_test(
@@ -488,6 +488,23 @@ class BackupTestBase(TestClusterBase):
             bs="4K", nrfiles=4, iodepth=1,
             numjobs=2, time_based=True, runtime=runtime,
         )
+        # Wait for FIO to complete before returning — callers capture
+        # checksums immediately after this method, so all files must be
+        # fully written.
+        deadline = time.time() + runtime + 120
+        while time.time() < deadline:
+            out, _ = self.ssh_obj.exec_command(
+                node=self.fio_node,
+                command="pgrep -f 'fio.*bck_fio' || true",
+                supress_logs=True,
+            )
+            if not out.strip():
+                break
+            sleep_n_sec(5)
+        else:
+            self.logger.warning(
+                f"FIO bck_fio did not finish within {runtime + 120}s"
+            )
         self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
 
     # ── table parser ──────────────────────────────────────────────────────────
