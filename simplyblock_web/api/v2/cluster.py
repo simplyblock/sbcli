@@ -95,7 +95,10 @@ def update(cluster: Cluster, parameters: UpdatableClusterParameters):
 
 @instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster) -> Response:
-    cluster_ops.delete_cluster(cluster.get_id())
+    try:
+        cluster_ops.delete_cluster(cluster.get_id())
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
     return Response(status_code=204)
 
 
