@@ -1,9 +1,12 @@
 import logging
+import fdb
 
+from flask import jsonify
 from flask import Flask
 
 from simplyblock_web.auth_middleware import token_required
 from simplyblock_web import utils
+from simplyblock_core import constants
 
 from . import cluster
 from . import mgmt_node
@@ -39,3 +42,25 @@ def before_request():
 @api.route('/', methods=['GET'])
 def status():
     return utils.get_response("Live")
+
+
+@api.route('/health/fdb', methods=['GET'])
+def health_fdb():
+    try:
+        fdb.api_version(constants.KVD_DB_VERSION)
+
+        db = fdb.open(constants.KVD_DB_FILE_PATH)
+        tr = db.create_transaction()
+
+        tr.get(b"\x00")
+        tr.commit().wait()
+
+        return jsonify({
+            "fdb_connected": True
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "fdb_connected": False,
+            "error": str(e)
+        }), 503
