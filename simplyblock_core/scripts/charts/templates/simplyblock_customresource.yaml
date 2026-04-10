@@ -1,6 +1,6 @@
 {{- if .Values.simplyblock.cluster }}
-apiVersion: simplyblock.simplyblock.io/v1alpha1
-kind: SimplyBlockStorageCluster
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: StorageCluster
 metadata:
   name: {{ .Values.simplyblock.cluster.clusterName }}
   namespace: {{ .Release.Namespace }}
@@ -46,8 +46,8 @@ spec:
 
 ---
 {{- if .Values.simplyblock.pool }}
-apiVersion: simplyblock.simplyblock.io/v1alpha1
-kind: SimplyBlockPool
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: Pool
 metadata:
   name: {{ .Values.simplyblock.pool.name }}
   namespace: {{ .Release.Namespace }}
@@ -62,8 +62,8 @@ spec:
 
 ---
 {{- if .Values.simplyblock.lvol }}
-apiVersion: simplyblock.simplyblock.io/v1alpha1
-kind: SimplyBlockLvol
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: Lvol
 metadata:
   name: {{ .Values.simplyblock.lvol.name }}
   namespace: {{ .Release.Namespace }}
@@ -74,8 +74,8 @@ spec:
 
 ---
 {{- if .Values.simplyblock.storageNodes }}
-apiVersion: simplyblock.simplyblock.io/v1alpha1
-kind: SimplyBlockStorageNode
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: StorageNode
 metadata:
   name: {{ .Values.simplyblock.storageNodes.name }}
   namespace: {{ .Release.Namespace }}
@@ -136,8 +136,8 @@ spec:
 
 ---
 {{- if .Values.simplyblock.devices }}
-apiVersion: simplyblock.simplyblock.io/v1alpha1
-kind: SimplyBlockDevice
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: Device
 metadata:
   name: {{ .Values.simplyblock.devices.name }}
   namespace: {{ .Release.Namespace }}
@@ -147,8 +147,8 @@ spec:
 
 ---
 {{- if .Values.simplyblock.tasks }}
-apiVersion: simplyblock.simplyblock.io/v1alpha1
-kind: SimplyBlockTask
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: Task
 metadata:
   name: {{ .Values.simplyblock.tasks.name }}
   namespace: {{ .Release.Namespace }}
