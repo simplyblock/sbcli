@@ -7,8 +7,8 @@ metadata:
 spec:
   clusterName: {{ .Values.simplyblock.cluster.clusterName }}
 
-  {{- if .Values.simplyblock.cluster.MgmtIfname }}
-  MgmtIfname: {{ .Values.simplyblock.cluster.MgmtIfname }}
+  {{- if .Values.simplyblock.cluster.mgmtIfname }}
+  mgmtIfname: {{ .Values.simplyblock.cluster.mgmtIfname }}
   {{- end }}
 
   {{- if .Values.simplyblock.cluster.fabric }}
@@ -27,21 +27,14 @@ spec:
   strictNodeAntiAffinity: {{ .Values.simplyblock.cluster.strictNodeAntiAffinity }}
   {{- end }}
 
-  {{- if .Values.simplyblock.cluster.capWarn }}
-  capWarn: {{ .Values.simplyblock.cluster.capWarn }}
+  {{- if .Values.simplyblock.cluster.warningThreshold }}
+  warningThreshold: {{ .Values.simplyblock.cluster.warningThreshold }}
   {{- end }}
 
-  {{- if .Values.simplyblock.cluster.capCrit }}
-  capCrit: {{ .Values.simplyblock.cluster.capCrit }}
+  {{- if .Values.simplyblock.cluster.criticalThreshold }}
+  criticalThreshold: {{ .Values.simplyblock.cluster.criticalThreshold }}
   {{- end }}
 
-  {{- if .Values.simplyblock.cluster.provCapWarn }}
-  provCapWarn: {{ .Values.simplyblock.cluster.provCapWarn }}
-  {{- end }}
-
-  {{- if .Values.simplyblock.cluster.provCapCrit }}
-  provCapCrit: {{ .Values.simplyblock.cluster.provCapCrit }}
-  {{- end }}
 {{- end }}
 
 ---
@@ -86,12 +79,12 @@ spec:
   clusterImage: {{ .Values.simplyblock.storageNodes.clusterImage }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.MgmtIfname }}
-  MgmtIfname: {{ .Values.simplyblock.storageNodes.MgmtIfname }}
+  {{- if .Values.simplyblock.storageNodes.mgmtIfname }}
+  mgmtIfname: {{ .Values.simplyblock.storageNodes.mgmtIfname }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.MaxLogicalVolumeCount }}
-  MaxLogicalVolumeCount: {{ .Values.simplyblock.storageNodes.MaxLogicalVolumeCount }}
+  {{- if .Values.simplyblock.storageNodes.maxLogicalVolumeCount }}
+  maxLogicalVolumeCount: {{ .Values.simplyblock.storageNodes.maxLogicalVolumeCount }}
   {{- end }}
 
   {{- if .Values.simplyblock.storageNodes.maxSize }}

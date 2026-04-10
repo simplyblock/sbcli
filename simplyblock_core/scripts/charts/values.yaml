@@ -269,15 +269,13 @@ ingress:
 simplyblock:
   cluster:
     clusterName: simplyblock-cluster
-    MgmtIfname: eth0
+    mgmtIfname: eth0
     fabric: tcp
     isSingleNode: false
     enableNodeAffinity: false
     strictNodeAntiAffinity: false
-    capWarn: 80
-    capCrit: 90
-    provCapWarn: 120
-    provCapCrit: 150
+    warningThreshold: 80
+    criticalThreshold: 90
 
   pool:
     name: simplyblock-pool
@@ -289,8 +287,8 @@ simplyblock:
   storageNodes:
     name: simplyblock-node
     clusterImage: simplyblock/simplyblock:main-snapshot-replication
-    MgmtIfname: eth0
-    MaxLogicalVolumeCount: 10
+    mgmtIfname: eth0
+    maxLogicalVolumeCount: 10
     maxSize: 0
     partitions: 0
     corePercentage: 65
