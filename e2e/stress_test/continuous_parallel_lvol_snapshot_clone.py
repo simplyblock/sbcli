@@ -1,589 +1,3 @@
-# import os
-# import time
-# import threading
-# from collections import deque
-# from concurrent.futures import ThreadPoolExecutor
-
-# from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
-# from utils.common_utils import sleep_n_sec
-
-# try:
-#     import requests
-# except Exception:
-#     requests = None
-
-
-# class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
-#     """
-#     Continuous parallel stress until failure.
-
-#     Adds traceability WITHOUT changing sbcli_utils:
-#       - Every API call is wrapped to capture HTTP status/text when available (HTTPError.response).
-#       - Every task carries ctx: lvol_name/snap_name/snapshot_id/clone_name/client.
-#       - Summary prints ctx + api_error payload.
-#     """
-
-#     def __init__(self, **kwargs):
-#         super().__init__(**kwargs)
-#         self.test_name = "parallel_lvol_snapshot_clone_api_continuous"
-
-#         self.CREATE_INFLIGHT = 10
-#         self.DELETE_INFLIGHT = 15
-#         self.SNAPSHOT_INFLIGHT = 10
-#         self.CLONE_INFLIGHT = 10
-#         self.SNAPSHOT_DELETE_INFLIGHT = 10
-
-#         self.STOP_FILE = "/tmp/stop_api_stress"
-#         self.MAX_RUNTIME_SEC = None
-
-#         self.LVOL_SIZE = "10G"
-#         self.MOUNT_BASE = "/mnt/test_location"
-
-#         self._lock = threading.Lock()
-#         self._dq_lock = threading.Lock()
-#         self._sdq_lock = threading.Lock()
-#         self._stop_event = threading.Event()
-
-#         self._delete_queue = deque()       # {"name","id","client","mount_path","kind"}
-#         self._snap_delete_queue = deque()  # {"snap_name","snap_id"}
-
-#         # State protection
-#         # LVOL: snap_state pending|in_progress|done ; delete_state not_queued|queued|in_progress|done
-#         self._lvol_registry = {}
-#         # SNAP: clone_state pending|in_progress|done ; delete_state not_queued|queued|in_progress|done
-#         self._snap_registry = {}
-
-#         self._metrics = {
-#             "start_ts": None,
-#             "end_ts": None,
-#             "loops": 0,
-#             "max_workers": 0,
-#             "targets": {
-#                 "create_inflight": self.CREATE_INFLIGHT,
-#                 "delete_inflight": self.DELETE_INFLIGHT,
-#                 "snapshot_inflight": self.SNAPSHOT_INFLIGHT,
-#                 "clone_inflight": self.CLONE_INFLIGHT,
-#                 "snapshot_delete_inflight": self.SNAPSHOT_DELETE_INFLIGHT,
-#             },
-#             "attempts": {
-#                 "create_lvol": 0,
-#                 "delete_lvol": 0,
-#                 "create_snapshot": 0,
-#                 "delete_snapshot": 0,
-#                 "create_clone": 0,
-#                 "connect_mount_sanity": 0,
-#                 "unmount_disconnect": 0,
-#             },
-#             "success": {
-#                 "create_lvol": 0,
-#                 "delete_lvol": 0,
-#                 "create_snapshot": 0,
-#                 "delete_snapshot": 0,
-#                 "create_clone": 0,
-#                 "connect_mount_sanity": 0,
-#                 "unmount_disconnect": 0,
-#             },
-#             "failures": {
-#                 "create_lvol": 0,
-#                 "delete_lvol": 0,
-#                 "create_snapshot": 0,
-#                 "delete_snapshot": 0,
-#                 "create_clone": 0,
-#                 "connect_mount_sanity": 0,
-#                 "unmount_disconnect": 0,
-#                 "unknown": 0,
-#             },
-#             "counts": {
-#                 "lvols_created": 0,
-#                 "lvols_deleted": 0,
-#                 "snapshots_created": 0,
-#                 "snapshots_deleted": 0,
-#                 "clones_created": 0,
-#                 "clones_deleted": 0,
-#             },
-#             "peak_inflight": {"create": 0, "delete": 0, "snapshot": 0, "clone": 0, "snapshot_delete": 0},
-#             "failure_info": None,
-#         }
-
-#     # ----------------------------
-#     # Metrics
-#     # ----------------------------
-#     def _inc(self, bucket: str, key: str, n: int = 1):
-#         with self._lock:
-#             self._metrics[bucket][key] += n
-
-#     def _set_failure(self, op: str, exc: Exception, details: str = "", ctx: dict = None, api_err: dict = None):
-#         with self._lock:
-#             if self._metrics["failure_info"] is None:
-#                 self._metrics["failure_info"] = {
-#                     "op": op,
-#                     "exc": repr(exc),
-#                     "when": time.strftime("%Y-%m-%d %H:%M:%S"),
-#                     "details": details,
-#                     "ctx": ctx or {},
-#                     "api_error": api_err or {},
-#                 }
-#         self._stop_event.set()
-
-#     # ----------------------------
-#     # Extract API response WITHOUT sbcli changes
-#     # ----------------------------
-#     def _extract_api_error(self, e: Exception) -> dict:
-#         """
-#         Best-effort extraction of HTTP response info from exceptions.
-
-#         Works if sbcli_utils ultimately raises:
-#           - requests.exceptions.HTTPError with .response
-#           - custom exception containing a .response
-#           - or embeds response text in string
-#         """
-#         info = {"type": type(e).__name__, "msg": str(e)}
-
-#         # requests HTTPError
-#         if requests is not None:
-#             try:
-#                 if isinstance(e, requests.exceptions.HTTPError):
-#                     resp = getattr(e, "response", None)
-#                     if resp is not None:
-#                         info["status_code"] = getattr(resp, "status_code", None)
-#                         try:
-#                             info["text"] = resp.text
-#                         except Exception:
-#                             info["text"] = "<no-text>"
-#                         try:
-#                             info["json"] = resp.json()
-#                         except Exception:
-#                             pass
-#                         return info
-#             except Exception:
-#                 pass
-
-#         # generic .response on exception
-#         resp = getattr(e, "response", None)
-#         if resp is not None:
-#             info["status_code"] = getattr(resp, "status_code", None)
-#             try:
-#                 info["text"] = resp.text
-#             except Exception:
-#                 info["text"] = "<no-text>"
-#             try:
-#                 info["json"] = resp.json()
-#             except Exception:
-#                 pass
-#             return info
-
-#         return info
-
-#     def _pick_client(self, i: int) -> str:
-#         return self.client_machines[i % len(self.client_machines)]
-
-#     def _wait_lvol_id(self, lvol_name: str, timeout=300, interval=5) -> str:
-#         start = time.time()
-#         while time.time() - start < timeout:
-#             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
-#             if lvol_id:
-#                 return lvol_id
-#             sleep_n_sec(interval)
-#         raise TimeoutError(f"LVOL id not visible for {lvol_name} after {timeout}s")
-
-#     def _wait_snapshot_id(self, snap_name: str, timeout=300, interval=5) -> str:
-#         start = time.time()
-#         while time.time() - start < timeout:
-#             snap_id = self.sbcli_utils.get_snapshot_id(snap_name=snap_name)
-#             if snap_id:
-#                 return snap_id
-#             sleep_n_sec(interval)
-#         raise TimeoutError(f"Snapshot id not visible for {snap_name} after {timeout}s")
-
-#     # ----------------------------
-#     # API wrappers (NO sbcli changes)
-#     # ----------------------------
-#     def _api(self, op: str, ctx: dict, fn):
-#         """
-#         Wrap sbcli_utils calls:
-#           - On exception: capture best-effort response info and stop test.
-#         """
-#         try:
-#             return fn()
-#         except Exception as e:
-#             api_err = self._extract_api_error(e)
-#             self._inc("failures", op if op in self._metrics["failures"] else "unknown", 1)
-#             self._set_failure(op=op, exc=e, details="api call failed", ctx=ctx, api_err=api_err)
-#             raise
-
-#     # ----------------------------
-#     # IO sanity
-#     # ----------------------------
-#     def _connect_format_mount_sanity(self, client: str, lvol_name: str, lvol_id: str, tag: str) -> str:
-#         self._inc("attempts", "connect_mount_sanity", 1)
-
-#         connect_cmds = self.sbcli_utils.get_lvol_connect_str(lvol_name)
-#         if not connect_cmds:
-#             raise Exception(f"No connect strings returned for {lvol_name}")
-
-#         for cmd in connect_cmds:
-#             out, err = self.ssh_obj.exec_command(node=client, command=cmd)
-#             if err:
-#                 raise Exception(f"NVMe connect failed for {lvol_name} on {client}. err={err} out={out}")
-
-#         device = None
-#         for _ in range(25):
-#             device = self.ssh_obj.get_lvol_vs_device(node=client, lvol_id=lvol_id)
-#             if device:
-#                 break
-#             sleep_n_sec(2)
-#         if not device:
-#             raise Exception(f"Unable to resolve NVMe device for lvol_id={lvol_id} ({lvol_name}) on {client}")
-
-#         mount_path = f"{self.MOUNT_BASE}/{tag}_{lvol_name}"
-
-#         self.ssh_obj.format_disk(node=client, device=device, fs_type="ext4")
-#         self.ssh_obj.mount_path(node=client, device=device, mount_path=mount_path)
-
-#         sanity_file = f"{mount_path}/sanity.bin"
-#         self.ssh_obj.exec_command(node=client, command=f"sudo dd if=/dev/zero of={sanity_file} bs=1M count=8 status=none")
-#         self.ssh_obj.exec_command(node=client, command="sync")
-#         out, err = self.ssh_obj.exec_command(node=client, command=f"md5sum {sanity_file} | awk '{{print $1}}'")
-#         if err:
-#             raise Exception(f"md5sum failed on {client} for {sanity_file}: {err}")
-#         self.ssh_obj.exec_command(node=client, command=f"sudo rm -f {sanity_file}")
-
-#         self._inc("success", "connect_mount_sanity", 1)
-#         return mount_path
-
-#     def _enqueue_delete(self, name: str, lvol_id: str, client: str, mount_path: str, kind: str):
-#         with self._dq_lock:
-#             self._delete_queue.append({"name": name, "id": lvol_id, "client": client, "mount_path": mount_path, "kind": kind})
-
-#     def _enqueue_snapshot_delete(self, snap_name: str, snap_id: str):
-#         with self._sdq_lock:
-#             self._snap_delete_queue.append({"snap_name": snap_name, "snap_id": snap_id})
-
-#     def _unmount_and_disconnect(self, client: str, mount_path: str, lvol_name: str, lvol_id_hint: str = None):
-#         self._inc("attempts", "unmount_disconnect", 1)
-
-#         if mount_path:
-#             self.ssh_obj.unmount_path(node=client, device=mount_path)
-
-#         lvol_id = lvol_id_hint or self.sbcli_utils.get_lvol_id(lvol_name)
-#         if not lvol_id:
-#             raise Exception(f"Could not resolve lvol_id for disconnect: {lvol_name}")
-
-#         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-#         nqn = lvol_details[0]["nqn"]
-#         self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
-
-#         self._inc("success", "unmount_disconnect", 1)
-
-#     # ----------------------------
-#     # Tasks (each carries ctx and wraps API calls)
-#     # ----------------------------
-#     def _task_create_lvol(self, idx: int, lvol_name: str):
-#         self._inc("attempts", "create_lvol", 1)
-#         ctx = {"lvol_name": lvol_name, "idx": idx, "client": self._pick_client(idx)}
-#         self.logger.info(f"[create_lvol] {ctx}")
-
-#         self._api("create_lvol", ctx, lambda: self.sbcli_utils.add_lvol(
-#             lvol_name=lvol_name,
-#             pool_name=self.pool_name,
-#             size=self.LVOL_SIZE,
-#             distr_ndcs=self.ndcs,
-#             distr_npcs=self.npcs,
-#             distr_bs=self.bs,
-#             distr_chunk_bs=self.chunk_bs,
-#         ))
-
-#         lvol_id = self._wait_lvol_id(lvol_name)
-#         client = self._pick_client(idx)
-#         mount_path = self._connect_format_mount_sanity(client, lvol_name, lvol_id, tag="lvol")
-
-#         with self._lock:
-#             self._lvol_registry[lvol_name] = {
-#                 "name": lvol_name,
-#                 "id": lvol_id,
-#                 "client": client,
-#                 "mount_path": mount_path,
-#                 "snap_state": "pending",
-#                 "delete_state": "not_queued",
-#             }
-#             self._metrics["counts"]["lvols_created"] += 1
-
-#         self._enqueue_delete(name=lvol_name, lvol_id=lvol_id, client=client, mount_path=mount_path, kind="lvol")
-
-#         self._inc("success", "create_lvol", 1)
-#         return lvol_name, lvol_id
-
-#     def _task_create_snapshot(self, src_lvol_name: str, src_lvol_id: str, snap_name: str):
-#         self._inc("attempts", "create_snapshot", 1)
-#         ctx = {"src_lvol_name": src_lvol_name, "src_lvol_id": src_lvol_id, "snap_name": snap_name}
-#         self.logger.info(f"[create_snapshot] {ctx}")
-
-#         self._api("create_snapshot", ctx, lambda: self.sbcli_utils.add_snapshot(
-#             lvol_id=src_lvol_id,
-#             snapshot_name=snap_name,
-#         ))
-
-#         snap_id = self._wait_snapshot_id(snap_name)
-
-#         with self._lock:
-#             self._snap_registry[snap_name] = {
-#                 "snap_name": snap_name,
-#                 "snap_id": snap_id,
-#                 "src_lvol_name": src_lvol_name,
-#                 "clone_state": "pending",
-#                 "delete_state": "not_queued",
-#             }
-#             if src_lvol_name in self._lvol_registry:
-#                 self._lvol_registry[src_lvol_name]["snap_state"] = "done"
-#             self._metrics["counts"]["snapshots_created"] += 1
-
-#         self._inc("success", "create_snapshot", 1)
-#         return snap_name, snap_id
-
-#     def _task_create_clone(self, snap_name: str, snap_id: str, idx: int, clone_name: str):
-#         self._inc("attempts", "create_clone", 1)
-#         ctx = {"snap_name": snap_name, "snapshot_id": snap_id, "clone_name": clone_name, "client": self._pick_client(idx)}
-#         self.logger.info(f"[create_clone] {ctx}")
-
-#         self._api("create_clone", ctx, lambda: self.sbcli_utils.add_clone(
-#             snapshot_id=snap_id,
-#             clone_name=clone_name,
-#         ))
-
-#         clone_lvol_id = self._wait_lvol_id(clone_name)
-#         client = self._pick_client(idx)
-#         mount_path = self._connect_format_mount_sanity(client, clone_name, clone_lvol_id, tag="clone")
-
-#         with self._lock:
-#             self._metrics["counts"]["clones_created"] += 1
-#             if snap_name in self._snap_registry:
-#                 self._snap_registry[snap_name]["clone_state"] = "done"
-
-#         self._enqueue_delete(name=clone_name, lvol_id=clone_lvol_id, client=client, mount_path=mount_path, kind="clone")
-
-#         # enqueue snapshot delete after clone success
-#         with self._lock:
-#             meta = self._snap_registry.get(snap_name)
-#             if meta and meta["delete_state"] == "not_queued":
-#                 meta["delete_state"] = "queued"
-#                 self._enqueue_snapshot_delete(meta["snap_name"], meta["snap_id"])
-
-#         self._inc("success", "create_clone", 1)
-#         return clone_name, clone_lvol_id
-
-#     def _task_delete_volume(self, item: dict):
-#         self._inc("attempts", "delete_lvol", 1)
-#         ctx = {"name": item["name"], "id": item.get("id"), "kind": item.get("kind"), "client": item.get("client")}
-#         self.logger.info(f"[delete_lvol] {ctx}")
-
-#         name = item["name"]
-#         client = item["client"]
-#         mount_path = item.get("mount_path")
-#         kind = item.get("kind", "lvol")
-#         lvol_id = item.get("id")
-
-#         with self._lock:
-#             if kind == "lvol" and name in self._lvol_registry:
-#                 self._lvol_registry[name]["delete_state"] = "in_progress"
-
-#         self._unmount_and_disconnect(client=client, mount_path=mount_path, lvol_name=name, lvol_id_hint=lvol_id)
-#         self._api("delete_lvol", ctx, lambda: self.sbcli_utils.delete_lvol(lvol_name=name, skip_error=False))
-
-#         with self._lock:
-#             self._metrics["counts"]["lvols_deleted"] += 1
-#             if kind == "clone":
-#                 self._metrics["counts"]["clones_deleted"] += 1
-
-#         self._inc("success", "delete_lvol", 1)
-#         return name
-
-#     def _task_delete_snapshot(self, snap_name: str, snap_id: str):
-#         self._inc("attempts", "delete_snapshot", 1)
-#         ctx = {"snap_name": snap_name, "snap_id": snap_id}
-#         self.logger.info(f"[delete_snapshot] {ctx}")
-
-#         self._api("delete_snapshot", ctx, lambda: self.sbcli_utils.delete_snapshot(
-#             snap_id=snap_id,
-#             snap_name=snap_name,
-#             skip_error=False,
-#         ))
-
-#         with self._lock:
-#             self._metrics["counts"]["snapshots_deleted"] += 1
-#             if snap_name in self._snap_registry:
-#                 self._snap_registry[snap_name]["delete_state"] = "done"
-
-#         self._inc("success", "delete_snapshot", 1)
-#         return snap_name
-
-#     # ----------------------------
-#     # Scheduling
-#     # ----------------------------
-#     def _update_peaks(self, create_f, delete_f, snap_f, clone_f, snap_del_f):
-#         with self._lock:
-#             self._metrics["peak_inflight"]["create"] = max(self._metrics["peak_inflight"]["create"], len(create_f))
-#             self._metrics["peak_inflight"]["delete"] = max(self._metrics["peak_inflight"]["delete"], len(delete_f))
-#             self._metrics["peak_inflight"]["snapshot"] = max(self._metrics["peak_inflight"]["snapshot"], len(snap_f))
-#             self._metrics["peak_inflight"]["clone"] = max(self._metrics["peak_inflight"]["clone"], len(clone_f))
-#             self._metrics["peak_inflight"]["snapshot_delete"] = max(self._metrics["peak_inflight"]["snapshot_delete"], len(snap_del_f))
-
-#     def _harvest_fail_fast(self, fut_set: set):
-#         done = [f for f in fut_set if f.done()]
-#         for f in done:
-#             fut_set.remove(f)
-#             try:
-#                 f.result()
-#             except Exception:
-#                 return
-
-#     def _submit_creates(self, ex, create_f: set, idx_counter: dict):
-#         while (not self._stop_event.is_set()) and (len(create_f) < self.CREATE_INFLIGHT):
-#             idx = idx_counter["idx"]
-#             idx_counter["idx"] += 1
-#             lvol_name = f"lvl{generate_random_sequence(15)}_{idx}_{int(time.time())}"
-#             create_f.add(ex.submit(lambda i=idx, n=lvol_name: self._task_create_lvol(i, n)))
-
-#     def _submit_snapshots(self, ex, snap_f: set):
-#         while (not self._stop_event.is_set()) and (len(snap_f) < self.SNAPSHOT_INFLIGHT):
-#             candidate = None
-#             with self._lock:
-#                 for nm, meta in self._lvol_registry.items():
-#                     if meta["snap_state"] == "pending" and meta["delete_state"] == "not_queued":
-#                         meta["snap_state"] = "in_progress"
-#                         candidate = (meta["name"], meta["id"])
-#                         break
-#             if not candidate:
-#                 return
-#             lvol_name, lvol_id = candidate
-#             snap_name = f"snap{generate_random_sequence(15)}_{int(time.time())}"
-#             snap_f.add(ex.submit(lambda ln=lvol_name, lid=lvol_id, sn=snap_name: self._task_create_snapshot(ln, lid, sn)))
-
-#     def _submit_clones(self, ex, clone_f: set):
-#         while (not self._stop_event.is_set()) and (len(clone_f) < self.CLONE_INFLIGHT):
-#             candidate = None
-#             with self._lock:
-#                 for sn, meta in self._snap_registry.items():
-#                     if meta["clone_state"] == "pending":
-#                         meta["clone_state"] = "in_progress"
-#                         candidate = (meta["snap_name"], meta["snap_id"])
-#                         break
-#             if not candidate:
-#                 return
-#             snap_name, snap_id = candidate
-#             idx = int(time.time())
-#             clone_name = f"cln{generate_random_sequence(15)}_{idx}_{int(time.time())}"
-#             clone_f.add(ex.submit(lambda s=snap_name, sid=snap_id, i=idx, cn=clone_name: self._task_create_clone(s, sid, i, cn)))
-
-#     def _submit_deletes(self, ex, del_f: set):
-#         while (not self._stop_event.is_set()) and (len(del_f) < self.DELETE_INFLIGHT):
-#             with self._dq_lock:
-#                 if not self._delete_queue:
-#                     return
-#                 item = self._delete_queue.popleft()
-#             del_f.add(ex.submit(lambda it=item: self._task_delete_volume(it)))
-
-#     def _submit_snapshot_deletes(self, ex, sdel_f: set):
-#         while (not self._stop_event.is_set()) and (len(sdel_f) < self.SNAPSHOT_DELETE_INFLIGHT):
-#             with self._sdq_lock:
-#                 if not self._snap_delete_queue:
-#                     return
-#                 item = self._snap_delete_queue.popleft()
-#             sdel_f.add(ex.submit(lambda sn=item["snap_name"], sid=item["snap_id"]: self._task_delete_snapshot(sn, sid)))
-
-#     # ----------------------------
-#     # Summary
-#     # ----------------------------
-#     def _print_summary(self):
-#         with self._lock:
-#             self._metrics["end_ts"] = time.time()
-#             dur = self._metrics["end_ts"] - self._metrics["start_ts"] if self._metrics["start_ts"] else None
-
-#             self.logger.info("======== TEST SUMMARY (parallel continuous) ========")
-#             self.logger.info(f"Duration (sec): {dur:.1f}" if dur else "Duration (sec): n/a")
-#             self.logger.info(f"Loops: {self._metrics['loops']}")
-#             self.logger.info(f"Max workers: {self._metrics['max_workers']}")
-#             self.logger.info(f"Targets: {self._metrics['targets']}")
-#             self.logger.info(f"Peak inflight: {self._metrics['peak_inflight']}")
-#             self.logger.info(f"Counts: {self._metrics['counts']}")
-#             self.logger.info(f"Attempts: {self._metrics['attempts']}")
-#             self.logger.info(f"Success: {self._metrics['success']}")
-#             self.logger.info(f"Failures: {self._metrics['failures']}")
-#             self.logger.info(f"Failure info: {self._metrics['failure_info']}")
-#             self.logger.info("====================================================")
-
-#     # ----------------------------
-#     # Main
-#     # ----------------------------
-#     def run(self):
-#         self.logger.info("=== Starting TestParallelLvolSnapshotCloneAPI (continuous until failure) ===")
-
-#         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-#         sleep_n_sec(2)
-
-#         max_workers = (
-#             self.CREATE_INFLIGHT
-#             + self.DELETE_INFLIGHT
-#             + self.SNAPSHOT_INFLIGHT
-#             + self.CLONE_INFLIGHT
-#             + self.SNAPSHOT_DELETE_INFLIGHT
-#             + 10
-#         )
-
-#         with self._lock:
-#             self._metrics["start_ts"] = time.time()
-#             self._metrics["max_workers"] = max_workers
-
-#         create_f = set()
-#         delete_f = set()
-#         snap_f = set()
-#         clone_f = set()
-#         sdel_f = set()
-
-#         idx_counter = {"idx": 0}
-
-#         try:
-#             with ThreadPoolExecutor(max_workers=max_workers) as ex:
-#                 self._submit_creates(ex, create_f, idx_counter)
-
-#                 while not self._stop_event.is_set():
-#                     if os.path.exists(self.STOP_FILE):
-#                         self.logger.info(f"Stop file found: {self.STOP_FILE}. Stopping gracefully.")
-#                         break
-#                     if self.MAX_RUNTIME_SEC and (time.time() - self._metrics["start_ts"]) > self.MAX_RUNTIME_SEC:
-#                         self.logger.info("MAX_RUNTIME_SEC reached. Stopping gracefully.")
-#                         break
-
-#                     with self._lock:
-#                         self._metrics["loops"] += 1
-
-#                     self._submit_creates(ex, create_f, idx_counter)
-#                     self._submit_snapshots(ex, snap_f)
-#                     self._submit_clones(ex, clone_f)
-#                     self._submit_deletes(ex, delete_f)
-#                     self._submit_snapshot_deletes(ex, sdel_f)
-
-#                     self._update_peaks(create_f, delete_f, snap_f, clone_f, sdel_f)
-
-#                     self._harvest_fail_fast(create_f)
-#                     self._harvest_fail_fast(snap_f)
-#                     self._harvest_fail_fast(clone_f)
-#                     self._harvest_fail_fast(delete_f)
-#                     self._harvest_fail_fast(sdel_f)
-
-#                     sleep_n_sec(1)
-
-#         finally:
-#             self._print_summary()
-
-#         with self._lock:
-#             failure_info = self._metrics["failure_info"]
-
-#         if failure_info:
-#             raise Exception(f"Test stopped due to failure: {failure_info}")
-
-#         raise Exception("Test stopped without failure (graceful stop).")
-
-
 import os
 import time
 import threading
@@ -631,12 +45,14 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self.LVOL_DELETE_TREE_INFLIGHT = 5
 
         # Total inventory cap: lvols + snapshots + clones must not exceed this
-        self.TOTAL_INVENTORY_MAX = 100
-        # Start enqueuing deletes when total exceeds this (gives room to delete before hitting the cap)
-        self.TOTAL_DELETE_THRESHOLD = 70
+        self.TOTAL_INVENTORY_MAX = 150
+        # Start enqueuing deletes when total exceeds this
+        self.TOTAL_DELETE_THRESHOLD = 100
+        # Never delete below this many live (not-queued) lvols
+        self.MIN_LIVE_LVOLS = 5
 
         # LVOL sizing
-        self.LVOL_SIZE = "10G"
+        self.LVOL_SIZE = "5G"
 
         # Mount base
         self.MOUNT_BASE = "/mnt/test_location"
@@ -644,6 +60,9 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         # Optional stop controls
         self.STOP_FILE = "/tmp/stop_api_stress"
         self.MAX_RUNTIME_SEC = None
+
+        # Task timeout: cancel futures running longer than this (seconds)
+        self.TASK_TIMEOUT = 600
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -834,6 +253,14 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
     def _pick_client(self, i: int) -> str:
         return self.client_machines[i % len(self.client_machines)]
 
+    def _active_inventory_count(self):
+        """Count items not queued/in-progress for deletion."""
+        with self._lock:
+            lvols = sum(1 for lm in self._lvol_registry.values() if lm["delete_state"] == "not_queued")
+            snaps = sum(1 for sm in self._snap_registry.values() if sm["delete_state"] == "not_queued")
+            clones = sum(1 for cm in self._clone_registry.values() if cm["delete_state"] == "not_queued")
+            return lvols + snaps + clones
+
     def _wait_lvol_id(self, lvol_name: str, timeout=300, interval=10) -> str:
         sleep_n_sec(3)  # brief initial delay — lvol rarely visible immediately
         start = time.time()
@@ -973,7 +400,27 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
         lvol_id = self._wait_lvol_id(lvol_name)
         client = self._pick_client(idx)
-        mount_path = self._connect_format_mount_sanity(client, lvol_name, lvol_id, tag="lvol")
+
+        try:
+            mount_path = self._connect_format_mount_sanity(client, lvol_name, lvol_id, tag="lvol")
+        except Exception:
+            # Lvol exists on the cluster but connect/mount failed — register it
+            # with mount_path=None and immediately queue for deletion so it gets
+            # cleaned up instead of becoming an orphan.
+            self.logger.warning(f"[create_lvol] connect/mount failed for {lvol_name}; registering orphan and queuing delete")
+            with self._lock:
+                self._lvol_registry[lvol_name] = {
+                    "id": lvol_id,
+                    "client": client,
+                    "mount_path": None,
+                    "snap_state": "done",
+                    "delete_state": "queued",
+                    "snapshots": set(),
+                }
+                self._metrics["counts"]["lvols_created"] += 1
+                self._lvol_delete_tree_q.append(lvol_name)
+            self._inc("failures", "connect_mount_sanity", 1)
+            raise
 
         with self._lock:
             self._lvol_registry[lvol_name] = {
@@ -981,7 +428,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                 "client": client,
                 "mount_path": mount_path,
                 "snap_state": "pending",
-                "delete_state": "not_queued",   # IMPORTANT: do NOT queue delete immediately
+                "delete_state": "not_queued",
                 "snapshots": set(),
             }
             self._metrics["counts"]["lvols_created"] += 1
@@ -990,64 +437,99 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         return lvol_name, lvol_id
 
     def _task_create_snapshot(self, src_lvol_name: str, src_lvol_id: str, snap_name: str):
+        # Guard: re-check that parent lvol is still alive (may have been queued for
+        # deletion between submit time and execution time)
+        with self._lock:
+            lm = self._lvol_registry.get(src_lvol_name)
+            if not lm or lm["delete_state"] != "not_queued":
+                self.logger.info(f"[create_snapshot] Skipping — source lvol {src_lvol_name} is queued/in-progress for deletion")
+                if lm:
+                    lm["snap_state"] = "done"  # unblock delete tree wait
+                return None, None
+
         self._inc("attempts", "create_snapshot", 1)
 
         SYNC_DELETION_RETRY_MAX = 10
         sync_retries = 0
         ctx = {"src_lvol_name": src_lvol_name, "src_lvol_id": src_lvol_id, "snap_name": snap_name}
 
-        while True:
-            self.logger.info(f"[create_snapshot] ctx={ctx}")
-            try:
-                self.sbcli_utils.add_snapshot(
-                    lvol_id=src_lvol_id,
-                    snapshot_name=snap_name,
-                    retry=1,
-                )
-                break  # success — exit retry loop
+        try:
+            while True:
+                self.logger.info(f"[create_snapshot] ctx={ctx}")
+                try:
+                    self.sbcli_utils.add_snapshot(
+                        lvol_id=src_lvol_id,
+                        snapshot_name=snap_name,
+                        retry=1,
+                    )
+                    break  # success — exit retry loop
 
-            except Exception as e:
-                api_err = self._extract_api_error(e)
+                except Exception as e:
+                    api_err = self._extract_api_error(e)
 
-                if self._is_max_lvols_error(api_err):
+                    if self._is_max_lvols_error(api_err):
+                        self._inc("failures", "create_snapshot", 1)
+                        self.logger.warning(f"[max_lvols] op=create_snapshot ctx={ctx}: cluster hit max-lvol limit; triggering forced deletes and continuing")
+                        self._force_enqueue_deletes()
+                        raise
+
+                    if self._is_lvol_sync_deletion_error(api_err) and sync_retries < SYNC_DELETION_RETRY_MAX:
+                        sync_retries += 1
+                        self.logger.warning(f"[sync_deletion_retry] create_snapshot sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {snap_name}, waiting 5s")
+                        sleep_n_sec(5)
+                        continue
+
+                    # Retries exhausted or unrecognised error — fail the test
                     self._inc("failures", "create_snapshot", 1)
-                    self.logger.warning(f"[max_lvols] op=create_snapshot ctx={ctx}: cluster hit max-lvol limit; triggering forced deletes and continuing")
-                    self._force_enqueue_deletes()
+                    details = f"sync deletion retry exhausted after {sync_retries} retries" if self._is_lvol_sync_deletion_error(api_err) else "api call failed"
+                    self._set_failure(op="create_snapshot", exc=e, details=details, ctx=ctx, api_err=api_err)
                     raise
 
-                if self._is_lvol_sync_deletion_error(api_err) and sync_retries < SYNC_DELETION_RETRY_MAX:
-                    sync_retries += 1
-                    self.logger.warning(f"[sync_deletion_retry] create_snapshot sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {snap_name}, waiting 5s")
-                    sleep_n_sec(5)
-                    continue
+            snap_id = self._wait_snapshot_id(snap_name)
 
-                # Retries exhausted or unrecognised error — fail the test
-                self._inc("failures", "create_snapshot", 1)
-                details = f"sync deletion retry exhausted after {sync_retries} retries" if self._is_lvol_sync_deletion_error(api_err) else "api call failed"
-                self._set_failure(op="create_snapshot", exc=e, details=details, ctx=ctx, api_err=api_err)
-                raise
+            with self._lock:
+                self._snap_registry[snap_name] = {
+                    "snap_id": snap_id,
+                    "src_lvol_name": src_lvol_name,
+                    "clone_state": "pending",
+                    "delete_state": "not_queued",
+                    "clones": set(),
+                }
+                self._metrics["counts"]["snapshots_created"] += 1
 
-        snap_id = self._wait_snapshot_id(snap_name)
+                lm = self._lvol_registry.get(src_lvol_name)
+                if lm:
+                    lm["snapshots"].add(snap_name)
+                    lm["snap_state"] = "done"
 
-        with self._lock:
-            self._snap_registry[snap_name] = {
-                "snap_id": snap_id,
-                "src_lvol_name": src_lvol_name,
-                "clone_state": "pending",
-                "delete_state": "not_queued",
-                "clones": set(),
-            }
-            self._metrics["counts"]["snapshots_created"] += 1
+            self._inc("success", "create_snapshot", 1)
+            return snap_name, snap_id
 
-            lm = self._lvol_registry.get(src_lvol_name)
-            if lm:
-                lm["snapshots"].add(snap_name)
-                lm["snap_state"] = "done"
-
-        self._inc("success", "create_snapshot", 1)
-        return snap_name, snap_id
+        except Exception:
+            # Reset snap_state so the lvol can be re-snapshotted or deleted
+            # without a 60s stall in _task_delete_lvol_tree
+            with self._lock:
+                lm = self._lvol_registry.get(src_lvol_name)
+                if lm and lm["snap_state"] == "in_progress":
+                    lm["snap_state"] = "pending"
+            raise
 
     def _task_create_clone(self, snap_name: str, snap_id: str, idx: int, clone_name: str):
+        # Guard: re-check that snapshot and parent lvol are still alive
+        with self._lock:
+            sm = self._snap_registry.get(snap_name)
+            if not sm or sm["delete_state"] != "not_queued":
+                self.logger.info(f"[create_clone] Skipping — snapshot {snap_name} is queued/in-progress for deletion")
+                if sm:
+                    sm["clone_state"] = "done"  # unblock delete tree wait
+                return None, None
+            src_lvol = sm["src_lvol_name"]
+            lm = self._lvol_registry.get(src_lvol)
+            if lm and lm["delete_state"] != "not_queued":
+                self.logger.info(f"[create_clone] Skipping — parent lvol {src_lvol} is queued/in-progress for deletion")
+                sm["clone_state"] = "done"
+                return None, None
+
         self._inc("attempts", "create_clone", 1)
 
         BDEV_RETRY_MAX = 7
@@ -1056,72 +538,103 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         sync_retries = 0
         ctx = {"snap_name": snap_name, "snapshot_id": snap_id, "clone_name": clone_name, "client": self._pick_client(idx)}
 
-        while True:
-            self.logger.info(f"[create_clone] ctx={ctx}")
-            try:
-                self.sbcli_utils.add_clone(
-                    snapshot_id=snap_id,
-                    clone_name=clone_name,
-                    retry=1,
-                )
-                break  # success — exit retry loop
+        try:
+            while True:
+                self.logger.info(f"[create_clone] ctx={ctx}")
+                try:
+                    self.sbcli_utils.add_clone(
+                        snapshot_id=snap_id,
+                        clone_name=clone_name,
+                        retry=1,
+                    )
+                    break  # success — exit retry loop
 
-            except Exception as e:
-                api_err = self._extract_api_error(e)
+                except Exception as e:
+                    api_err = self._extract_api_error(e)
 
-                if self._is_max_lvols_error(api_err):
+                    if self._is_max_lvols_error(api_err):
+                        self._inc("failures", "create_clone", 1)
+                        self.logger.warning(f"[max_lvols] op=create_clone ctx={ctx}: cluster hit max-lvol limit; triggering forced deletes and continuing")
+                        self._force_enqueue_deletes()
+                        raise
+
+                    if self._is_lvol_sync_deletion_error(api_err) and sync_retries < SYNC_DELETION_RETRY_MAX:
+                        sync_retries += 1
+                        self.logger.warning(f"[sync_deletion_retry] create_clone sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {clone_name}, waiting 5s")
+                        sleep_n_sec(5)
+                        continue
+
+                    if self._is_bdev_error(api_err) and bdev_retries < BDEV_RETRY_MAX - 1:
+                        bdev_retries += 1
+                        clone_name = f"cln{generate_random_sequence(15)}_{idx}_{int(time.time())}"
+                        ctx["clone_name"] = clone_name
+                        self.logger.warning(f"[bdev_retry] create_clone bdev_retry {bdev_retries}/{BDEV_RETRY_MAX}: retrying with new name {clone_name}")
+                        sleep_n_sec(2)
+                        continue
+
+                    # Retries exhausted or unrecognised error — fail the test
                     self._inc("failures", "create_clone", 1)
-                    self.logger.warning(f"[max_lvols] op=create_clone ctx={ctx}: cluster hit max-lvol limit; triggering forced deletes and continuing")
-                    self._force_enqueue_deletes()
+                    if self._is_bdev_error(api_err):
+                        details = f"bdev creation failed after {bdev_retries + 1} attempts"
+                    elif self._is_lvol_sync_deletion_error(api_err):
+                        details = f"sync deletion retry exhausted after {sync_retries} retries"
+                    else:
+                        details = "api call failed"
+                    self._set_failure(op="create_clone", exc=e, details=details, ctx=ctx, api_err=api_err)
                     raise
 
-                if self._is_lvol_sync_deletion_error(api_err) and sync_retries < SYNC_DELETION_RETRY_MAX:
-                    sync_retries += 1
-                    self.logger.warning(f"[sync_deletion_retry] create_clone sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {clone_name}, waiting 5s")
-                    sleep_n_sec(5)
-                    continue
+            clone_lvol_id = self._wait_lvol_id(clone_name)
+            client = self._pick_client(idx)
 
-                if self._is_bdev_error(api_err) and bdev_retries < BDEV_RETRY_MAX - 1:
-                    bdev_retries += 1
-                    clone_name = f"cln{generate_random_sequence(15)}_{idx}_{int(time.time())}"
-                    ctx["clone_name"] = clone_name
-                    self.logger.warning(f"[bdev_retry] create_clone bdev_retry {bdev_retries}/{BDEV_RETRY_MAX}: retrying with new name {clone_name}")
-                    sleep_n_sec(2)
-                    continue
-
-                # Retries exhausted or unrecognised error — fail the test
-                self._inc("failures", "create_clone", 1)
-                if self._is_bdev_error(api_err):
-                    details = f"bdev creation failed after {bdev_retries + 1} attempts"
-                elif self._is_lvol_sync_deletion_error(api_err):
-                    details = f"sync deletion retry exhausted after {sync_retries} retries"
-                else:
-                    details = "api call failed"
-                self._set_failure(op="create_clone", exc=e, details=details, ctx=ctx, api_err=api_err)
+            try:
+                mount_path = self._connect_format_mount_sanity(client, clone_name, clone_lvol_id, tag="clone")
+            except Exception:
+                # Clone exists on the cluster but connect/mount failed — register it
+                # with mount_path=None and queue parent snapshot tree for deletion.
+                self.logger.warning(f"[create_clone] connect/mount failed for {clone_name}; registering orphan and queuing snap tree delete")
+                with self._lock:
+                    self._metrics["counts"]["clones_created"] += 1
+                    sm = self._snap_registry.get(snap_name)
+                    if sm:
+                        sm["clone_state"] = "done"
+                        sm["clones"].add(clone_name)
+                    self._clone_registry[clone_name] = {
+                        "id": clone_lvol_id,
+                        "client": client,
+                        "mount_path": None,
+                        "snap_name": snap_name,
+                        "delete_state": "not_queued",
+                    }
+                self._inc("failures", "connect_mount_sanity", 1)
                 raise
 
-        clone_lvol_id = self._wait_lvol_id(clone_name)
-        client = self._pick_client(idx)
-        mount_path = self._connect_format_mount_sanity(client, clone_name, clone_lvol_id, tag="clone")
+            with self._lock:
+                self._metrics["counts"]["clones_created"] += 1
 
-        with self._lock:
-            self._metrics["counts"]["clones_created"] += 1
+                sm = self._snap_registry.get(snap_name)
+                if sm:
+                    sm["clone_state"] = "done"
+                    sm["clones"].add(clone_name)
 
-            sm = self._snap_registry.get(snap_name)
-            if sm:
-                sm["clone_state"] = "done"
-                sm["clones"].add(clone_name)
+                self._clone_registry[clone_name] = {
+                    "id": clone_lvol_id,
+                    "client": client,
+                    "mount_path": mount_path,
+                    "snap_name": snap_name,
+                    "delete_state": "not_queued",
+                }
 
-            self._clone_registry[clone_name] = {
-                "id": clone_lvol_id,
-                "client": client,
-                "mount_path": mount_path,
-                "snap_name": snap_name,
-                "delete_state": "not_queued",
-            }
+            self._inc("success", "create_clone", 1)
+            return clone_name, clone_lvol_id
 
-        self._inc("success", "create_clone", 1)
-        return clone_name, clone_lvol_id
+        except Exception:
+            # Reset clone_state so the snapshot can be re-cloned or deleted
+            # without a 60s stall in _task_delete_snapshot_tree
+            with self._lock:
+                sm = self._snap_registry.get(snap_name)
+                if sm and sm["clone_state"] == "in_progress":
+                    sm["clone_state"] = "pending"
+            raise
 
     # ----------------------------
     # Delete primitives
@@ -1363,6 +876,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
         Strategy:
           - If total > TOTAL_DELETE_THRESHOLD: enqueue LVOL tree deletes (removes lvol+snap+clone in one go).
+          - Never reduce live (not-queued) lvols below MIN_LIVE_LVOLS.
           - Prefer lvols that have already been snapshotted (snap_state==done) so we exercise the full tree.
           - Fall back to any not-queued lvol if none with snapshots are available.
           - Also clean up orphan snapshots (whose parent lvol was already deleted).
@@ -1372,9 +886,14 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             if total <= self.TOTAL_DELETE_THRESHOLD:
                 return
 
+            # Count how many lvols are still alive (not queued for deletion)
+            live_lvols = sum(1 for lm in self._lvol_registry.values() if lm["delete_state"] == "not_queued")
+
             added = 0
             # Prefer lvols that have completed at least one snapshot cycle (fuller trees)
             for ln, lm in list(self._lvol_registry.items()):
+                if live_lvols - added <= self.MIN_LIVE_LVOLS:
+                    break  # preserve minimum live lvols
                 if lm["delete_state"] == "not_queued" and lm["snap_state"] == "done":
                     lm["delete_state"] = "queued"
                     self._lvol_delete_tree_q.append(ln)
@@ -1385,6 +904,8 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             # Fall back to any not-queued lvol (e.g., snapshot still pending)
             if added < self.LVOL_DELETE_TREE_INFLIGHT:
                 for ln, lm in list(self._lvol_registry.items()):
+                    if live_lvols - added <= self.MIN_LIVE_LVOLS:
+                        break  # preserve minimum live lvols
                     if lm["delete_state"] == "not_queued":
                         lm["delete_state"] = "queued"
                         self._lvol_delete_tree_q.append(ln)
@@ -1401,18 +922,18 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
     # ----------------------------
     # Scheduler submitters
     # ----------------------------
-    def _submit_creates(self, ex, create_f: set, idx_counter: dict):
+    def _submit_creates(self, ex, create_f: dict, idx_counter: dict):
         while (not self._stop_event.is_set()) and (len(create_f) < self.CREATE_INFLIGHT):
-            with self._lock:
-                total = len(self._lvol_registry) + len(self._snap_registry) + len(self._clone_registry)
-            if total >= self.TOTAL_INVENTORY_MAX:
+            active = self._active_inventory_count()
+            if active >= self.TOTAL_INVENTORY_MAX:
                 return  # at capacity; wait for deletes to free space
             idx = idx_counter["idx"]
             idx_counter["idx"] += 1
             lvol_name = f"lvl{generate_random_sequence(15)}_{idx}_{int(time.time())}"
-            create_f.add(ex.submit(lambda i=idx, n=lvol_name: self._task_create_lvol(i, n)))
+            f = ex.submit(lambda i=idx, n=lvol_name: self._task_create_lvol(i, n))
+            create_f[f] = time.time()
 
-    def _submit_snapshots(self, ex, snap_f: set):
+    def _submit_snapshots(self, ex, snap_f: dict):
         while (not self._stop_event.is_set()) and (len(snap_f) < self.SNAPSHOT_INFLIGHT):
             candidate = None
             with self._lock:
@@ -1426,9 +947,10 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
             lvol_name, lvol_id = candidate
             snap_name = f"snap{generate_random_sequence(15)}_{int(time.time())}"
-            snap_f.add(ex.submit(lambda ln=lvol_name, lid=lvol_id, sn=snap_name: self._task_create_snapshot(ln, lid, sn)))
+            f = ex.submit(lambda ln=lvol_name, lid=lvol_id, sn=snap_name: self._task_create_snapshot(ln, lid, sn))
+            snap_f[f] = time.time()
 
-    def _submit_clones(self, ex, clone_f: set):
+    def _submit_clones(self, ex, clone_f: dict):
         while (not self._stop_event.is_set()) and (len(clone_f) < self.CLONE_INFLIGHT):
             candidate = None
             with self._lock:
@@ -1449,23 +971,26 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             snap_name, snap_id = candidate
             idx = int(time.time())
             clone_name = f"cln{generate_random_sequence(15)}_{idx}_{int(time.time())}"
-            clone_f.add(ex.submit(lambda s=snap_name, sid=snap_id, i=idx, cn=clone_name: self._task_create_clone(s, sid, i, cn)))
+            f = ex.submit(lambda s=snap_name, sid=snap_id, i=idx, cn=clone_name: self._task_create_clone(s, sid, i, cn))
+            clone_f[f] = time.time()
 
-    def _submit_snapshot_delete_trees(self, ex, snap_del_f: set):
+    def _submit_snapshot_delete_trees(self, ex, snap_del_f: dict):
         while (not self._stop_event.is_set()) and (len(snap_del_f) < self.SNAPSHOT_DELETE_TREE_INFLIGHT):
             with self._lock:
                 if not self._snapshot_delete_tree_q:
                     return
                 sn = self._snapshot_delete_tree_q.popleft()
-            snap_del_f.add(ex.submit(lambda sn=sn: self._task_delete_snapshot_tree(sn)))
+            f = ex.submit(lambda sn=sn: self._task_delete_snapshot_tree(sn))
+            snap_del_f[f] = time.time()
 
-    def _submit_lvol_delete_trees(self, ex, lvol_del_f: set):
+    def _submit_lvol_delete_trees(self, ex, lvol_del_f: dict):
         while (not self._stop_event.is_set()) and (len(lvol_del_f) < self.LVOL_DELETE_TREE_INFLIGHT):
             with self._lock:
                 if not self._lvol_delete_tree_q:
                     return
                 ln = self._lvol_delete_tree_q.popleft()
-            lvol_del_f.add(ex.submit(lambda ln=ln: self._task_delete_lvol_tree(ln)))
+            f = ex.submit(lambda ln=ln: self._task_delete_lvol_tree(ln))
+            lvol_del_f[f] = time.time()
 
     def _update_peaks(self, create_f, snap_f, clone_f, snap_del_f, lvol_del_f):
         with self._lock:
@@ -1479,14 +1004,23 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                 self._metrics["peak_inflight"]["lvol_delete_tree"], len(lvol_del_f)
             )
 
-    def _harvest_fail_fast(self, fut_set: set):
-        done = [f for f in fut_set if f.done()]
+    def _harvest_fail_fast(self, fut_dict: dict):
+        now = time.time()
+        done = [f for f in fut_dict if f.done()]
         for f in done:
-            fut_set.remove(f)
+            del fut_dict[f]
             try:
                 f.result()
-            except Exception:
+            except Exception as exc:
+                self.logger.warning(f"[harvest] Future failed: {type(exc).__name__}: {exc}")
                 return
+
+        # Cancel futures that have been running longer than TASK_TIMEOUT
+        stale = [f for f, ts in fut_dict.items() if (now - ts) > self.TASK_TIMEOUT and not f.done()]
+        for f in stale:
+            f.cancel()
+            elapsed = now - fut_dict.pop(f)
+            self.logger.warning(f"[harvest] Cancelled stale future after {elapsed:.0f}s (timeout={self.TASK_TIMEOUT}s)")
 
     # ----------------------------
     # Summary
@@ -1507,12 +1041,49 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             self.logger.info(f"Success: {self._metrics['success']}")
             self.logger.info(f"Failures: {self._metrics['failures']}")
             self.logger.info(f"Failure info: {self._metrics['failure_info']}")
+
+            # Live inventory breakdown
             live_lvols = len(self._lvol_registry)
             live_snaps = len(self._snap_registry)
             live_clones = len(self._clone_registry)
             self.logger.info(
-                f"Live inventory now: lvols={live_lvols} snaps={live_snaps} clones={live_clones} total={live_lvols + live_snaps + live_clones} (max={self.TOTAL_INVENTORY_MAX})"
+                f"Live inventory now: lvols={live_lvols} snaps={live_snaps} clones={live_clones} "
+                f"total={live_lvols + live_snaps + live_clones} (max={self.TOTAL_INVENTORY_MAX})"
             )
+
+            # Delete queue sizes
+            lvol_del_queued = sum(1 for lm in self._lvol_registry.values() if lm["delete_state"] in ("queued", "in_progress"))
+            snap_del_queued = sum(1 for sm in self._snap_registry.values() if sm["delete_state"] in ("queued", "in_progress"))
+            clone_del_queued = sum(1 for cm in self._clone_registry.values() if cm["delete_state"] in ("queued", "in_progress"))
+            self.logger.info(
+                f"Pending deletes: lvols={lvol_del_queued} snaps={snap_del_queued} clones={clone_del_queued}"
+            )
+
+            # Validate counts vs registry
+            # Note: lvols_deleted includes clone deletions (each clone delete
+            # increments both lvols_deleted and clones_deleted), so subtract
+            # clones_deleted to get pure lvol deletions.
+            c = self._metrics["counts"]
+            expected_lvols = c["lvols_created"] - (c["lvols_deleted"] - c["clones_deleted"])
+            expected_snaps = c["snapshots_created"] - c["snapshots_deleted"]
+            expected_clones = c["clones_created"] - c["clones_deleted"]
+
+            if expected_lvols != live_lvols:
+                self.logger.warning(
+                    f"[summary] MISMATCH: expected_live_lvols={expected_lvols} but registry has {live_lvols} "
+                    f"(created={c['lvols_created']} deleted={c['lvols_deleted']})"
+                )
+            if expected_snaps != live_snaps:
+                self.logger.warning(
+                    f"[summary] MISMATCH: expected_live_snaps={expected_snaps} but registry has {live_snaps} "
+                    f"(created={c['snapshots_created']} deleted={c['snapshots_deleted']})"
+                )
+            if expected_clones != live_clones:
+                self.logger.warning(
+                    f"[summary] MISMATCH: expected_live_clones={expected_clones} but registry has {live_clones} "
+                    f"(created={c['clones_created']} deleted={c['clones_deleted']})"
+                )
+
             self.logger.info("===========================================================")
 
     # ----------------------------
@@ -1537,11 +1108,11 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             self._metrics["start_ts"] = time.time()
             self._metrics["max_workers"] = max_workers
 
-        create_f = set()
-        snap_f = set()
-        clone_f = set()
-        snap_del_f = set()
-        lvol_del_f = set()
+        create_f = {}   # Future -> submit_timestamp
+        snap_f = {}
+        clone_f = {}
+        snap_del_f = {}
+        lvol_del_f = {}
 
         idx_counter = {"idx": 0}
 
@@ -1582,6 +1153,16 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                     self._harvest_fail_fast(lvol_del_f)
 
                     sleep_n_sec(1)
+
+                # Cancel all pending futures so ThreadPoolExecutor.shutdown doesn't hang
+                self.logger.info("Cancelling remaining futures before shutdown...")
+                cancelled = 0
+                for f_dict in [create_f, snap_f, clone_f, snap_del_f, lvol_del_f]:
+                    for f in list(f_dict.keys()):
+                        if f.cancel():
+                            cancelled += 1
+                        f_dict.pop(f, None)
+                self.logger.info(f"Cancelled {cancelled} pending futures")
 
         finally:
             self._print_summary()
