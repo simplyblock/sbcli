@@ -2925,8 +2925,8 @@ def deploy_cleaner():
     scripts.deploy_cleaner()
 
 
-def clean_devices(config_path, format=True, force=False):
-    utils.clean_devices(config_path, format=format, force=force)
+def clean_devices(config_path, format=True, force=False, format_4k=False):
+    utils.clean_devices(config_path, format=format, force=force, format_4k=format_4k)
 
 
 def get_host_secret(node_id):

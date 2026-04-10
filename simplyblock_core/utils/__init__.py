@@ -1825,10 +1825,25 @@ def get_nvme_name_from_pci(pci_address):
     return None
 
 
+def get_nvme_namespace_from_pci(pci_address):
+    """Returns the actual namespace block device name (e.g. 'nvme6n2') for a PCI address,
+    by looking up the real namespace entry under the controller in sysfs."""
+    ctrl_path = f"/sys/bus/pci/devices/{pci_address}/nvme/nvme*"
+    ctrl_matches = glob.glob(ctrl_path)
+    if not ctrl_matches:
+        return None
+    ctrl_name = os.path.basename(ctrl_matches[0])  # e.g. 'nvme7'
+    ns_path = f"/sys/bus/pci/devices/{pci_address}/nvme/{ctrl_name}/nvme*n*"
+    ns_matches = glob.glob(ns_path)
+    if ns_matches:
+        return os.path.basename(ns_matches[0])  # e.g. 'nvme6n2'
+    return f"{ctrl_name}n1"  # fallback
+
+
 def format_device_with_4k(pci_device):
     try:
-        nvme_device = get_nvme_name_from_pci(pci_device)
-        nvme_device_path = f"/dev/{nvme_device}n1"
+        nvme_namespace = get_nvme_namespace_from_pci(pci_device)
+        nvme_device_path = f"/dev/{nvme_namespace}"
         clean_partitions(nvme_device_path)
         nvme_json_string = get_idns(nvme_device_path)
         lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
@@ -2456,17 +2471,30 @@ def get_idns(nvme_device: str):
 def is_namespace_4k_from_nvme_list(device_path: str) -> bool:
     """
     Returns True if nvme list JSON shows SectorSize == 4096 for the given DevicePath
-    (e.g. '/dev/nvme3n1').
+    (e.g. '/dev/nvme3n1'). Handles both the old flat format and the new nested format
+    (Devices -> Subsystems -> Controllers -> Namespaces) from newer nvme-cli versions.
     """
     try:
-        out = subprocess.check_output(["nvme", "list", "--output-format", "json"], text=True)
+        out = subprocess.check_output(["nvme", "list", "-v", "--output-format", "json"], text=True)
         data = json.loads(out)
+        # Strip /dev/ prefix for matching against NameSpace field (e.g. 'nvme6n2')
+        ns_name = os.path.basename(device_path)
 
-        for dev in data.get("Devices", []):
-            if dev.get("DevicePath") == device_path:
-                return int(dev.get("SectorSize", 0)) == 4096
+        for host in data.get("Devices", []):
+            # New nested format: Devices[].Subsystems[].Controllers[].Namespaces[]
+            for subsystem in host.get("Subsystems", []):
+                for controller in subsystem.get("Controllers", []):
+                    for ns in controller.get("Namespaces", []):
+                        if ns.get("NameSpace") == ns_name:
+                            return int(ns.get("SectorSize", 0)) == 4096
+                # Also check subsystem-level namespaces
+                for ns in subsystem.get("Namespaces", []):
+                    if ns.get("NameSpace") == ns_name:
+                        return int(ns.get("SectorSize", 0)) == 4096
+            # Old flat format: Devices[].DevicePath / SectorSize
+            if host.get("DevicePath") == device_path:
+                return int(host.get("SectorSize", 0)) == 4096
 
-        # Not found in list
         return False
 
     except subprocess.CalledProcessError:
@@ -2627,7 +2655,7 @@ def claim_devices_to_nvme(config_path=""):
     return nvme_devices_list
 
 
-def clean_devices(config_path, format, force):
+def clean_devices(config_path, format, force, format_4k=False):
     nvme_devices_list = claim_devices_to_nvme(config_path)
     try:
         json_string = get_nvme_list_verbose()
@@ -2659,6 +2687,8 @@ def clean_devices(config_path, format, force):
                 if mapping['PCI_Address'] in nvme_devices_list:
                     nvme_device_path = f"/dev/{mapping['NAMESPACE']}"
                     clean_partitions(nvme_device_path)
+                    if format_4k:
+                        format_device_with_4k(mapping['PCI_Address'])
 
     except json.JSONDecodeError as e:
         logger.error(f"Error decoding JSON: {e}")
