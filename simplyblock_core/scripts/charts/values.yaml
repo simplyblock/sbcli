@@ -274,8 +274,12 @@ simplyblock:
     isSingleNode: false
     enableNodeAffinity: false
     strictNodeAntiAffinity: false
-    warningThreshold: 80
-    criticalThreshold: 90
+    warningThreshold:
+      capacity: 80
+      provisionedCapacity: 80
+    criticalThreshold:
+      capacity: 90
+      provisionedCapacity: 90
 
   pool:
     name: simplyblock-pool

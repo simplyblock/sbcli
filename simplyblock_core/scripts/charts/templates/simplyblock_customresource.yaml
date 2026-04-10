@@ -28,11 +28,23 @@ spec:
   {{- end }}
 
   {{- if .Values.simplyblock.cluster.warningThreshold }}
-  warningThreshold: {{ .Values.simplyblock.cluster.warningThreshold }}
+  warningThreshold:
+    {{- if .Values.simplyblock.cluster.warningThreshold.capacity }}
+    capacity: {{ .Values.simplyblock.cluster.warningThreshold.capacity }}
+    {{- end }}
+    {{- if .Values.simplyblock.cluster.warningThreshold.provisionedCapacity }}
+    provisionedCapacity: {{ .Values.simplyblock.cluster.warningThreshold.provisionedCapacity }}
+    {{- end }}
   {{- end }}
 
   {{- if .Values.simplyblock.cluster.criticalThreshold }}
-  criticalThreshold: {{ .Values.simplyblock.cluster.criticalThreshold }}
+  criticalThreshold:
+    {{- if .Values.simplyblock.cluster.criticalThreshold.capacity }}
+    capacity: {{ .Values.simplyblock.cluster.criticalThreshold.capacity }}
+    {{- end }}
+    {{- if .Values.simplyblock.cluster.criticalThreshold.provisionedCapacity }}
+    provisionedCapacity: {{ .Values.simplyblock.cluster.criticalThreshold.provisionedCapacity }}
+    {{- end }}
   {{- end }}
 
 {{- end }}
