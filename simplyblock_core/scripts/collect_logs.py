@@ -44,6 +44,7 @@ import tarfile
 import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any
 
 try:
     import requests
@@ -493,7 +494,7 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
     # Use query_string wildcards so partial names work:
     #   "WebAppAPI"  matches "simplyblock_WebAppAPI.1.abc123"
     #   "spdk_8080"  matches "/spdk_8080"
-    must_clauses = [
+    must_clauses: list[Any] = [
         {"range": {ts_f: {"gte": from_ms, "lte": to_ms, "format": "epoch_millis"}}},
     ]
     if container_name:
