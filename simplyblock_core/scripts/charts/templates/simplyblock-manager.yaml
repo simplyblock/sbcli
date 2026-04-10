@@ -156,15 +156,15 @@ rules:
   - update
   - patch
 - apiGroups:
-  - simplyblock.simplyblock.io
+  - storage.simplyblock.io
   resources:
-  - simplyblockpools
-  - simplyblocklvols
-  - simplyblockstorageclusters
-  - simplyblockstoragenodes
-  - simplyblockdevices
-  - simplyblocktasks
-  - simplyblocksnapshotreplications
+  - pools
+  - lvols
+  - storageclusters
+  - storagenodes
+  - devices
+  - tasks
+  - snapshotreplications
   verbs:
   - create
   - delete
@@ -174,28 +174,28 @@ rules:
   - update
   - watch
 - apiGroups:
-  - simplyblock.simplyblock.io
+  - storage.simplyblock.io
   resources:
-  - simplyblockpools/finalizers
-  - simplyblocklvols/finalizers
-  - simplyblockstorageclusters/finalizers
-  - simplyblockstoragenodes/finalizers
-  - simplyblockdevices/finalizers
-  - simplyblocktasks/finalizers
-  - simplyblocksnapshotreplications/finalizers
+  - pools/finalizers
+  - lvols/finalizers
+  - storageclusters/finalizers
+  - storagenodes/finalizers
+  - devices/finalizers
+  - tasks/finalizers
+  - snapshotreplications/finalizers
   verbs:
   - update
   - delete
 - apiGroups:
-  - simplyblock.simplyblock.io
+  - storage.simplyblock.io
   resources:
-  - simplyblockpools/status
-  - simplyblocklvols/status
-  - simplyblockstorageclusters/status
-  - simplyblockstoragenodes/status
-  - simplyblockdevices/status
-  - simplyblocktasks/status
-  - simplyblocksnapshotreplications/status
+  - pools/status
+  - lvols/status
+  - storageclusters/status
+  - storagenodes/status
+  - devices/status
+  - tasks/status
+  - snapshotreplications/status
   verbs:
   - get
   - patch
@@ -215,4 +215,3 @@ subjects:
 - kind: ServiceAccount
   name: simplyblock-manager
   namespace: {{ .Release.Namespace }}
-  
