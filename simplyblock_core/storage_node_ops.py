@@ -1164,6 +1164,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
                     if node.api_endpoint == node_addr:
                         if ssd in node.ssd_pcie:
+                            if node.status == StorageNode.STATUS_IN_CREATION:
+                                logger.warning(
+                                    f"Node {node.get_id()} is in_creation status with SSD {ssd}, "
+                                    f"removing and deleting it")
+                                remove_storage_node(node.get_id(), force_remove=True)
+                                delete_storage_node(node.get_id(), force=True)
+                                break
                             logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
                             return False
 
