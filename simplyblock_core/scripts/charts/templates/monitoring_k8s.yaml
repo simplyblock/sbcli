@@ -1,4 +1,4 @@
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -65,7 +65,7 @@ spec:
             - name: GRAYLOG_ELASTICSEARCH_HOSTS
               value: "http://opensearch-cluster-master:9200"
             - name: GRAYLOG_MONGODB_URI
-              value: "mongodb://admin:{{ .Values.monitoring.secret }}@simplyblock-mongo-svc:27017/graylog"
+              value: "mongodb://admin:{{ .Values.observability.secret }}@simplyblock-mongo-svc:27017/graylog"
             - name: GRAYLOG_SKIP_PREFLIGHT_CHECKS
               value: "true"
             - name: GRAYLOG_ROTATION_STRATEGY
@@ -432,8 +432,6 @@ spec:
               value: "true"
             - name: GF_PATHS_PROVISIONING
               value: "/etc/grafana/provisioning"
-            - name: GF_INSTALL_PLUGINS
-              value: "grafana-opensearch-datasource"
             - name: GF_SERVER_ROOT_URL
               value: "http://localhost/grafana"
           volumeMounts:
