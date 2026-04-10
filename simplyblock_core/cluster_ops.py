@@ -521,6 +521,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         if not cluster_ip:
             cluster_ip = os.environ.get("HOST_IP")
         if not cluster_ip:
+            cluster_ip = utils.get_current_pod_host_ip(os.environ.get("K8S_NAMESPACE"))
+        if not cluster_ip:
             raise ValueError("cluster_ip is required for first-cluster bootstrap in kubernetes mode")
 
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)

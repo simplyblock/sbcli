@@ -2082,6 +2082,19 @@ def get_k8s_core_client():
     return client.CoreV1Api()
 
 
+def get_current_pod_host_ip(namespace: str | None = None) -> str | None:
+    pod_name = os.getenv("HOSTNAME")
+    if not pod_name:
+        return None
+
+    load_kube_config_with_fallback()
+    v1 = client.CoreV1Api()
+
+    ns = namespace or os.getenv("K8S_NAMESPACE") or "default"
+    pod = v1.read_namespaced_pod(name=pod_name, namespace=ns)
+    return pod.status.host_ip
+
+
 def all_pods_ready(k8s_core_v1, statefulset_name, namespace, expected_replicas):
     ready_pods = 0
     pods = k8s_core_v1.list_namespaced_pod(

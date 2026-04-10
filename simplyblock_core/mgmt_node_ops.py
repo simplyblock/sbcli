@@ -105,19 +105,12 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
             return False
 
         logger.info(f"Node IP: {dev_ip}")
-
-        hostname = utils.get_node_name_by_ip(dev_ip)
-        utils.label_node_as_mgmt_plane(hostname)
         db_connection = cluster_data['db_connection']
         db_controller = DBController()
         nodes = db_controller.get_mgmt_nodes()
         if not nodes:
             logger.error("No mgmt nodes was found in the cluster!")
             return False
-        for node in nodes:
-            if node.hostname == hostname:
-                logger.error("Node already exists in the cluster")
-                return False
 
     logger.info("Adding management node object")
     node_id = add_mgmt_node(dev_ip, mode, cluster_id)
@@ -225,10 +218,9 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
 
 def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     db_controller = DBController()
+    hostname = ""
     if mode == "docker":
         hostname = utils.get_hostname()
-    elif mode == "kubernetes":
-        hostname = utils.get_node_name_by_ip(mgmt_ip)
     try:
         node = db_controller.get_mgmt_node_by_hostname(hostname)
         if node:
@@ -300,4 +292,3 @@ def remove_mgmt_node(uuid):
         
     mgmt_events.mgmt_remove(snode)
     logging.info("done")
-
