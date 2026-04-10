@@ -140,7 +140,7 @@ class CLIWrapperBase:
         return True  # remove once CLI changed to exceptions
 
     def storage_node__clean_devices(self, sub_command, args):
-        storage_ops.clean_devices(args.config_path)
+        storage_ops.clean_devices(args.config_path, format_4k=args.format_4k)
         return True  # remove once CLI changed to exceptions
 
     def storage_node__add_node(self, sub_command, args):
