@@ -1,5 +1,5 @@
 name: Bootstrap K8s Cluster + Stress Run Until Failure
-run-name: "K8s Stress Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.K3S_MNODES }}"
+run-name: "K8s Stress Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.K3S_MNODES }} | ${{ inputs.TEST_CLASS }} | NDCS:${{ inputs.NDCS }} NPCS:${{ inputs.NPCS }}"
 
 on:
   workflow_dispatch:

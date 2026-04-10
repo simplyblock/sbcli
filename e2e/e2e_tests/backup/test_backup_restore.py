@@ -125,6 +125,17 @@ class BackupTestBase(TestClusterBase):
         self.mounted: list[tuple[str, str]] = [] # (node, mount_point)
         self.connected: list[str] = []           # lvol IDs that were NVMe-connected
 
+    # ── checksum / disconnect helpers ────────────────────────────────────────
+
+    def _get_checksums(self, node, mount):
+        """Find files in *mount* and return their checksums."""
+        files = self.ssh_obj.find_files(node, mount)
+        return self.ssh_obj.generate_checksums(node, files)
+
+    def _disconnect_lvol(self, lvol_id):
+        """Disconnect an NVMe lvol by ID."""
+        self.disconnect_lvol(lvol_id)
+
     # ── CLI helpers ───────────────────────────────────────────────────────────
 
     def _run(self, cmd: str, node: str = None) -> tuple[str, str]:
@@ -2813,11 +2824,11 @@ class TestBackupSecurityLvol(BackupTestBase):
         log_file = f"{self.log_path}/{lvol_name}_w.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
 
-        checksums = self.ssh_obj.get_checksums(self.fio_node, mount)
+        checksums = self._get_checksums(self.fio_node, mount)
         self.ssh_obj.unmount_path(self.fio_node, mount)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
         sleep_n_sec(2)
         self.logger.info("TC-BCK-150: PASSED")
@@ -2891,7 +2902,7 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
         self.ssh_obj.unmount_path(self.fio_node, mount)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
         self.logger.info("TC-BCK-155: PASSED")
 
@@ -2970,7 +2981,7 @@ class TestBackupPolicyMultipleOnSameLvol(BackupTestBase):
         self.ssh_obj.unmount_path(self.fio_node, mount)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
         self.logger.info("TC-BCK-159: PASSED")
 
@@ -3050,7 +3061,7 @@ class TestBackupPolicyLvolLevel(BackupTestBase):
         self.ssh_obj.unmount_path(self.fio_node, mount_a)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount_a]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_a_id)
+        self._disconnect_lvol(lvol_id=lvol_a_id)
         self.connected = [x for x in self.connected if x != lvol_a_id]
         self.logger.info("TC-BCK-164: PASSED")
 
@@ -3113,11 +3124,11 @@ class TestBackupResizedLvol(BackupTestBase):
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w1.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
-        checksums_v1 = self.ssh_obj.get_checksums(self.fio_node, mount)
+        checksums_v1 = self._get_checksums(self.fio_node, mount)
         self.ssh_obj.unmount_path(self.fio_node, mount)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
 
         snap_v1 = f"snprsz1{_rand_suffix()}"
@@ -3140,11 +3151,11 @@ class TestBackupResizedLvol(BackupTestBase):
             format_disk=False)
         log_file2 = f"{self.log_path}/{lvol_name}_w2.log"
         self._run_fio(lvol_name, mount2, log_file2, rw="write", runtime=20)
-        checksums_v2 = self.ssh_obj.get_checksums(self.fio_node, mount2)
+        checksums_v2 = self._get_checksums(self.fio_node, mount2)
         self.ssh_obj.unmount_path(self.fio_node, mount2)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount2]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
 
         snap_v2 = f"snprsz2{_rand_suffix()}"
@@ -3219,7 +3230,7 @@ class TestBackupListFields(BackupTestBase):
         self.ssh_obj.unmount_path(self.fio_node, mount)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
 
         snap_name = f"snplf{_rand_suffix()}"
@@ -3289,11 +3300,11 @@ class TestBackupUpgradeCompatibility(BackupTestBase):
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
-        checksums = self.ssh_obj.get_checksums(self.fio_node, mount)
+        checksums = self._get_checksums(self.fio_node, mount)
         self.ssh_obj.unmount_path(self.fio_node, mount)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
 
         snap_name = f"snpupg{_rand_suffix()}"
@@ -3373,7 +3384,7 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
         self.ssh_obj.unmount_path(self.fio_node, mount)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
 
         snap_name = f"snpedge{_rand_suffix()}"
@@ -3476,11 +3487,11 @@ class TestBackupSourceSwitch(BackupTestBase):
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w1.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
-        checksums_1 = self.ssh_obj.get_checksums(self.fio_node, mount)
+        checksums_1 = self._get_checksums(self.fio_node, mount)
         self.ssh_obj.unmount_path(self.fio_node, mount)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
 
         snap_1 = f"snpsw1{_rand_suffix()}"
@@ -3510,11 +3521,11 @@ class TestBackupSourceSwitch(BackupTestBase):
             format_disk=False)
         log_file2 = f"{self.log_path}/{lvol_name}_w2.log"
         self._run_fio(lvol_name, mount2, log_file2, rw="write", runtime=15)
-        checksums_2 = self.ssh_obj.get_checksums(self.fio_node, mount2)
+        checksums_2 = self._get_checksums(self.fio_node, mount2)
         self.ssh_obj.unmount_path(self.fio_node, mount2)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount2]
         sleep_n_sec(2)
-        self.sbcli_utils.disconnect_lvol(lvol_id=lvol_id)
+        self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
 
         snap_2 = f"snpsw2{_rand_suffix()}"

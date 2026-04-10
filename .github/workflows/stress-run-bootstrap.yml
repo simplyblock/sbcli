@@ -1,5 +1,5 @@
 name: Bootstrap Cluster + Stress Run Until Failure
-run-name: "Stress Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }}"
+run-name: "Stress Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }} | ${{ inputs.TEST_CLASS }} | NDCS:${{ inputs.BOOTSTRAP_DATA_CHUNKS }} NPCS:${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}"
 
 on:
   workflow_dispatch:

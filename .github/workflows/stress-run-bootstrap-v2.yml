@@ -1,5 +1,5 @@
 name: Bootstrap Cluster + Stress Run Until Failure (v2)
-run-name: "Stress Bootstrap v2 | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.LAB_CONFIG_PROFILE }}"
+run-name: "Stress Bootstrap v2 | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.LAB_CONFIG_PROFILE }} | ${{ inputs.TEST_CLASS }}"
 
 on:
   workflow_dispatch:

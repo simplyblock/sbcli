@@ -1,5 +1,5 @@
 name: Stress Run on existing cluster Until Failure
-run-name: "Stress | ${{ github.ref_name }} | ${{ inputs.MNODES }}"
+run-name: "Stress | ${{ github.ref_name }} | ${{ inputs.MNODES }} | ${{ inputs.TEST_CLASS }} | NDCS:${{ inputs.BOOTSTRAP_DATA_CHUNKS }} NPCS:${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}"
 
 on:
   workflow_dispatch:
