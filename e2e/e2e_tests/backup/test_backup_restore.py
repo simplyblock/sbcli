@@ -136,6 +136,19 @@ class BackupTestBase(TestClusterBase):
         """Disconnect an NVMe lvol by ID."""
         self.disconnect_lvol(lvol_id)
 
+    def _unmount_and_disconnect(self, node, mount, lvol_id):
+        """Unmount and disconnect a source lvol before connecting restored lvols.
+
+        XFS refuses to mount a filesystem while another with the same UUID is
+        already mounted.  Call this on the source lvol before connecting any
+        restored lvol to avoid UUID conflicts.
+        """
+        self.logger.info(f"Unmounting {mount} and disconnecting {lvol_id} (XFS safety)")
+        self.ssh_obj.unmount_path(node=node, device=mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        self._disconnect_lvol(lvol_id=lvol_id)
+        self.connected = [c for c in self.connected if c != lvol_id]
+
     # ── CLI helpers ───────────────────────────────────────────────────────────
 
     def _run(self, cmd: str, node: str = None) -> tuple[str, str]:
@@ -828,6 +841,9 @@ class TestBackupBasicPositive(BackupTestBase):
         assert not (err and "error" in err.lower()), \
             f"TC-BCK-009: policy-list failed: {err}"
 
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
         # --- TC-BCK-010: delete source snapshot → backup survives → restore → checksum ---
         self.logger.info("TC-BCK-010: delete source snapshot, restore backup, verify checksums")
         snap10_name = f"snap10_{_rand_suffix()}"
@@ -942,6 +958,9 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         self._wait_for_backup(backup_id)
         self.logger.info(f"TC-BCK-011: backup {backup_id} is done ✓")
 
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
         # --- TC-BCK-012: Restore with custom lvol-name ---
         restored_name = f"restored_{_rand_suffix()}"
         self.logger.info(f"TC-BCK-012: restore backup {backup_id} → {restored_name}")
@@ -970,18 +989,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         # --- TC-BCK-016: Disaster recovery — delete original lvol, restore ---
         self.logger.info("TC-BCK-016: disaster recovery path")
-        # Unmount + disconnect original before delete
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        if (self.fio_node, mount) in self.mounted:
-            self.mounted.remove((self.fio_node, mount))
-
-        orig_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-        if orig_details:
-            nqn = orig_details[0]["nqn"]
-            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
-        if lvol_id in self.connected:
-            self.connected.remove(lvol_id)
-
+        # Source was already unmounted+disconnected before TC-BCK-012
         self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
         if lvol_name in self.created_lvols:
             self.created_lvols.remove(lvol_name)
@@ -1411,6 +1419,9 @@ class TestBackupCryptoLvol(BackupTestBase):
         self._wait_for_backup(bk_id)
         self.logger.info(f"TC-BCK-051: backup {bk_id} is done ✓")
 
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, crypto_id)
+
         # --- TC-BCK-052: restore crypto backup → new lvol ---
         restored_name = f"crypto_rest_{_rand_suffix()}"
         self.logger.info(f"TC-BCK-052: restore crypto backup → {restored_name}")
@@ -1498,6 +1509,9 @@ class TestBackupCustomGeometry(BackupTestBase):
             self._wait_for_backup(bk_id)
             self.logger.info(f"TC-BCK-060: backup {bk_id} is done (ndcs={ndcs} npcs={npcs}) ✓")
 
+            # Disconnect source before restores — XFS refuses duplicate UUIDs
+            self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
             restored_name = f"geom_rest_{ndcs}_{npcs}_{_rand_suffix()}"
             self._restore_backup(bk_id, restored_name)
             self._wait_for_restore(restored_name)
@@ -1559,6 +1573,9 @@ class TestBackupDeleteAndRestore(BackupTestBase):
             self.logger.info(f"TC-BCK-077[{i}]: backup {bk_id} complete")
 
         self.logger.info(f"TC-BCK-077: chain of {len(collected_bk_ids)} backups built ✓")
+
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
 
         # ── TC-BCK-078: backup delete → backup list shows 0 for this lvol ─
         self.logger.info(f"TC-BCK-078: backup delete {lvol_id}")
@@ -2132,6 +2149,9 @@ class TestBackupDeltaChainPointInTime(BackupTestBase):
         bk3 = self._wait_for_backup_by_snap(snap3, "TC-BCK-110")
         self.logger.info(f"TC-BCK-110: v3 backup {bk3} ✓")
 
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
         # TC-BCK-111: restore bk1 → must have v1.txt only (no v2/v3)
         self.logger.info("TC-BCK-111: restore bk1 + verify only v1 state")
         r1 = f"pit_r1_{_rand_suffix()}"
@@ -2224,6 +2244,9 @@ class TestBackupEmptyLvol(BackupTestBase):
         self._create_snapshot(lvol_id, snap_name, backup=True)
         bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-114")
         self.logger.info(f"TC-BCK-114: empty lvol backup {bk_id} complete ✓")
+
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
 
         # TC-BCK-115: restore → new lvol visible
         self.logger.info("TC-BCK-115: restore empty-lvol backup")
@@ -2385,6 +2408,9 @@ class TestBackupPolicyAgeOnly(BackupTestBase):
         bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-125")
         self.logger.info(f"TC-BCK-125: age-policy backup {bk_id} complete ✓")
 
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
         # TC-BCK-126: detach policy + restore + verify checksums
         self._detach_policy(policy_id, "pool", pool_id)
         self.logger.info("TC-BCK-126: policy detached; restoring backup")
@@ -2456,6 +2482,9 @@ class TestBackupSnapshotClone(BackupTestBase):
         self._create_snapshot(clone_id, clone_snap, backup=True)
         bk_id = self._wait_for_backup_by_snap(clone_snap, "TC-BCK-129")
         self.logger.info(f"TC-BCK-129: clone backup {bk_id} complete ✓")
+
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, src_id)
 
         # TC-BCK-130: restore clone backup
         self.logger.info("TC-BCK-130: restore clone backup")
@@ -2537,6 +2566,9 @@ class TestBackupFilesystemXFS(BackupTestBase):
         bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-133")
         self.logger.info(f"TC-BCK-133: XFS backup {bk_id} complete ✓")
 
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
         # TC-BCK-134: restore backup + connect WITHOUT re-formatting
         self.logger.info("TC-BCK-134: restore XFS backup (no reformat on restore)")
         restored_name = f"xfs_rest_{_rand_suffix()}"
@@ -2599,6 +2631,9 @@ class TestBackupLargeLvol(BackupTestBase):
         assert bk_id, "TC-BCK-136: no backup_id for large lvol"
         self._wait_for_backup(bk_id, timeout=1200)
         self.logger.info(f"TC-BCK-136: large lvol backup {bk_id} complete ✓")
+
+        # Disconnect source before restores — XFS refuses duplicate UUIDs
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
 
         # TC-BCK-137: restore with extended timeout
         self.logger.info("TC-BCK-137: restore large lvol (extended timeout 1200s)")
