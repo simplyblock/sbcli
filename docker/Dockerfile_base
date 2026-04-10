@@ -5,7 +5,7 @@ RUN apt-get update ; apt-get upgrade -y
 
 RUN apt-get install -y \
     wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi iptables \
-    iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl kmod
+    iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl kmod kubectl
 
 
 RUN install -m 0755 -d /etc/apt/keyrings
@@ -23,6 +23,9 @@ RUN rm -rf /var/lib/apt/lists/*
 ARG TARGETPLATFORM
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         echo "ARM64 version"; \
+        wget https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_aarch64.deb; \
+        dpkg -i foundationdb-clients_7* ; \
+        rm -f foundationdb-clients_7* ; \
     else \
         echo "AMD64 version"; \
         wget https://github.com/apple/foundationdb/releases/download/7.3.56/foundationdb-clients_7.3.56-1_amd64.deb; \

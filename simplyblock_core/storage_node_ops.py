@@ -2364,7 +2364,6 @@ def restart_storage_node(
 
             logger.info("Setting node status to Online")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
-            _refresh_cluster_maps_after_node_recovery(snode)
 
             lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
             logger.info(f"Found {len(lvol_list)} lvols")
@@ -3506,20 +3505,19 @@ def set_node_status(node_id, status, reconnect_on_online=True):
         if snode.enable_ha_jm:
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.write_to_db(db_controller.kv_store)
-        for device in snode.nvme_devices:
-            distr_controller.send_dev_status_event(device, device.status, target_node=snode)
+
+        # Send device status events to update peers on device availability
+        for db_dev in snode.nvme_devices:
+            distr_controller.send_dev_status_event(db_dev, db_dev.status)
 
         for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
             if node.get_id() == snode.get_id():
                 continue
             if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                 try:
-                    # Re-read node from DB to avoid overwriting concurrent changes
                     node = db_controller.get_storage_node_by_id(node.get_id())
                     node.remote_devices = _connect_to_remote_devs(node)
                     node.write_to_db()
-                    for device in node.nvme_devices:
-                        distr_controller.send_dev_status_event(device, device.status, target_node=node)
                 except RuntimeError:
                     logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
                     continue
@@ -3545,7 +3543,6 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 if primary_node and primary_node.lvstore_status == "ready":
                     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                         try:
-                            # If this node is sec_2 for this primary, multipath to sec_1
                             failover_node = None
                             if sec_attr == 'lvstore_stack_secondary_2' and primary_node.secondary_node_id:
                                 try:
@@ -3670,13 +3667,19 @@ def recreate_lvstore_on_sec(secondary_node):
 
         # Block the other secondary/tertiary for this LVS (regardless of primary status).
         # When secondary restarts, block tertiary. When tertiary restarts, block secondary.
+        # Leadership drop only needed when primary is truly offline and sec1 is restarting
+        # (sec1 will become leader, so sibling must drop leadership first).
+        from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
+        primary_truly_offline = (not is_second_sec
+                                 and is_node_data_plane_disconnected_quorum(primary_node))
         other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.secondary_node_id_2]
                         if sid and sid != secondary_node.get_id()]
-        logger.info(f"[RESTART-DEBUG] Sibling blocking: other_sec_ids={[s[:8] for s in other_sec_ids]}")
+        logger.info(f"[RESTART-DEBUG] Sibling blocking: other_sec_ids={[s[:8] for s in other_sec_ids]} "
+                     f"primary_truly_offline={primary_truly_offline}")
         for other_sec_id in other_sec_ids:
             other_sec = db_controller.get_storage_node_by_id(other_sec_id)
             if other_sec and other_sec.status == StorageNode.STATUS_ONLINE:
-                logger.info(f"Blocking port and dropping leadership for jm_vuid {primary_node.jm_vuid} "
+                logger.info(f"Blocking port for jm_vuid {primary_node.jm_vuid} "
                             f"on sibling secondary {other_sec.get_id()}")
                 other_fw_api = FirewallClient(other_sec, timeout=5, retry=2)
                 other_sec_port_type = "udp" if other_sec.active_rdma else "tcp"
@@ -3688,8 +3691,12 @@ def recreate_lvstore_on_sec(secondary_node):
 
                 other_rpc = RPCClient(other_sec.mgmt_ip, other_sec.rpc_port,
                                       other_sec.rpc_username, other_sec.rpc_password)
-                other_rpc.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
-                other_rpc.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+
+                if primary_truly_offline:
+                    logger.info(f"Primary offline: dropping leadership on sibling {other_sec.get_id()}")
+                    other_rpc.bdev_lvol_set_leader(primary_node.lvstore, leader=False, bs_nonleadership=True)
+                    other_rpc.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+
                 logger.info(f"Checking for inflight IO from node: {other_sec.get_id()}")
                 for i in range(100):
                     is_inflight = other_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
@@ -3721,8 +3728,6 @@ def recreate_lvstore_on_sec(secondary_node):
                 secondary_node.create_secondary_hublvol(primary_node, cluster.nqn)
             except Exception as e:
                 logger.error("Error creating secondary hublvol: %s", e)
-
-        primary_truly_offline = not is_second_sec and primary_node.status == StorageNode.STATUS_OFFLINE
 
         if primary_truly_offline:
             # Verify lvstore recovered
