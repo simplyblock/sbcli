@@ -463,13 +463,19 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
+                cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
 
+    default_cluster = None
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
     clusters = db_controller.get_clusters()
-    if not clusters:
-        raise ValueError("No previous clusters found!")
+    if clusters:
+        default_cluster = clusters[0]
+    else:
+        logger.info("No previous clusters found")
 
     if name:
         for existing in clusters:
@@ -485,8 +491,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         if distr_npcs < 2:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
-    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
-    
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
@@ -497,13 +501,38 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.secret = utils.generate_string(20)
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
 
-    default_cluster = clusters[0]
-    cluster.mode = default_cluster.mode
-    cluster.db_connection = default_cluster.db_connection
-    cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
-    cluster.grafana_endpoint = default_cluster.grafana_endpoint
+    if default_cluster:
+        cluster.mode = default_cluster.mode
+        cluster.db_connection = default_cluster.db_connection
+        cluster.grafana_secret = grafana_secret if grafana_secret else default_cluster.grafana_secret
+        cluster.grafana_endpoint = default_cluster.grafana_endpoint
+    else:
+        cluster.mode = "kubernetes"
+        logger.info("Retrieving foundationdb connection string...")
+        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
+        cluster.db_connection = fdb_cluster_string
+        if monitoring_secret:
+            cluster.grafana_secret = monitoring_secret
+        elif enable_monitoring != "true":
+            cluster.grafana_secret = ""
+        else:
+            raise Exception("monitoring_secret is required")
+        cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
+        if not cluster_ip:
+            cluster_ip = "0.0.0.0"
 
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+        mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
+        if enable_monitoring == "true":
+            graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
+            os_endpoint = constants.OS_K8S_ENDPOINT
+            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+
+            _set_max_result_window(os_endpoint)
+
+            _add_graylog_input(graylog_endpoint, monitoring_secret)
+
+    if cluster.mode == "kubernetes":
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
@@ -515,6 +544,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
+    cluster.cr_name = cr_name
+    cluster.cr_namespace = cr_namespace
+    cluster.cr_plural = cr_plural
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
