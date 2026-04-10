@@ -7,8 +7,8 @@ metadata:
 spec:
   clusterName: {{ .Values.simplyblock.cluster.clusterName }}
 
-  {{- if .Values.simplyblock.cluster.mgmtIfc }}
-  mgmtIfc: {{ .Values.simplyblock.cluster.mgmtIfc }}
+  {{- if .Values.simplyblock.cluster.MgmtIfname }}
+  MgmtIfname: {{ .Values.simplyblock.cluster.MgmtIfname }}
   {{- end }}
 
   {{- if .Values.simplyblock.cluster.fabric }}
@@ -86,12 +86,12 @@ spec:
   clusterImage: {{ .Values.simplyblock.storageNodes.clusterImage }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.mgmtIfc }}
-  mgmtIfc: {{ .Values.simplyblock.storageNodes.mgmtIfc }}
+  {{- if .Values.simplyblock.storageNodes.MgmtIfname }}
+  MgmtIfname: {{ .Values.simplyblock.storageNodes.MgmtIfname }}
   {{- end }}
 
-  {{- if .Values.simplyblock.storageNodes.maxLVol }}
-  maxLVol: {{ .Values.simplyblock.storageNodes.maxLVol }}
+  {{- if .Values.simplyblock.storageNodes.MaxLogicalVolumeCount }}
+  MaxLogicalVolumeCount: {{ .Values.simplyblock.storageNodes.MaxLogicalVolumeCount }}
   {{- end }}
 
   {{- if .Values.simplyblock.storageNodes.maxSize }}
@@ -104,10 +104,6 @@ spec:
 
   {{- if .Values.simplyblock.storageNodes.corePercentage }}
   corePercentage: {{ .Values.simplyblock.storageNodes.corePercentage }}
-  {{- end }}
-
-  {{- if hasKey .Values.simplyblock.storageNodes "spdkDebug" }}
-  spdkDebug: {{ .Values.simplyblock.storageNodes.spdkDebug }}
   {{- end }}
 
   {{- if .Values.simplyblock.storageNodes.spdkImage }}

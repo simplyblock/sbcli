@@ -269,7 +269,7 @@ ingress:
 simplyblock:
   cluster:
     clusterName: simplyblock-cluster
-    mgmtIfc: eth0
+    MgmtIfname: eth0
     fabric: tcp
     isSingleNode: false
     enableNodeAffinity: false
@@ -289,8 +289,8 @@ simplyblock:
   storageNodes:
     name: simplyblock-node
     clusterImage: simplyblock/simplyblock:main-snapshot-replication
-    mgmtIfc: eth0
-    maxLVol: 10
+    MgmtIfname: eth0
+    MaxLogicalVolumeCount: 10
     maxSize: 0
     partitions: 0
     corePercentage: 65
