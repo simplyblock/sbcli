@@ -319,7 +319,6 @@ def get_backup_tests():
         # TestBackupCustomGeometry, # Will re-enable when we have a way to reliably test it in CI (currently requires manual setup of custom geometry pool)
         TestBackupDeleteAndRestore,
         # Extra coverage tests (TC-BCK-100..148)
-        TestBackupConcurrentIO,
         TestBackupMultipleRestores,
         TestBackupDeltaChainPointInTime,
         TestBackupEmptyLvol,
@@ -343,6 +342,7 @@ def get_backup_tests():
         TestBackupUpgradeCompatibility,
         TestBackupInterruptedBackup,
         TestBackupInterruptedRestore,
+        TestBackupConcurrentIO,
     ]
 
 

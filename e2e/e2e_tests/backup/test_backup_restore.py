@@ -1419,9 +1419,6 @@ class TestBackupCryptoLvol(BackupTestBase):
         self._wait_for_backup(bk_id)
         self.logger.info(f"TC-BCK-051: backup {bk_id} is done ✓")
 
-        # Disconnect source before restores — XFS refuses duplicate UUIDs
-        self._unmount_and_disconnect(self.fio_node, mount, crypto_id)
-
         # --- TC-BCK-052: restore crypto backup → new lvol ---
         restored_name = f"crypto_rest_{_rand_suffix()}"
         self.logger.info(f"TC-BCK-052: restore crypto backup → {restored_name}")
@@ -1574,9 +1571,6 @@ class TestBackupDeleteAndRestore(BackupTestBase):
 
         self.logger.info(f"TC-BCK-077: chain of {len(collected_bk_ids)} backups built ✓")
 
-        # Disconnect source before restores — XFS refuses duplicate UUIDs
-        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
-
         # ── TC-BCK-078: backup delete → backup list shows 0 for this lvol ─
         self.logger.info(f"TC-BCK-078: backup delete {lvol_id}")
         self._delete_backups(lvol_id)
@@ -1611,6 +1605,9 @@ class TestBackupDeleteAndRestore(BackupTestBase):
         fresh_bk_id = self._wait_for_backup_by_snap(fresh_snap, "TC-BCK-080")
         self.logger.info(f"TC-BCK-080: fresh backup {fresh_bk_id} after delete succeeded ✓")
 
+        # Disconnect source before connecting restored lvol (XFS UUID safety)
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
         fresh_restored = f"del_fresh_rst_{_rand_suffix()}"
         self._restore_backup(fresh_bk_id, fresh_restored)
         self._wait_for_restore(fresh_restored)
@@ -1622,6 +1619,9 @@ class TestBackupDeleteAndRestore(BackupTestBase):
         fr_files = self.ssh_obj.find_files(self.fio_node, fr_mount)
         self.ssh_obj.verify_checksums(self.fio_node, fr_files, original_checksums, by_name=True)
         self.logger.info("TC-BCK-080: fresh post-delete backup → restore → checksums match ✓")
+
+        # Clean up TC-BCK-080 restored lvol before TC-BCK-081 connects more
+        self._unmount_and_disconnect(self.fio_node, fr_mount, fresh_rst_id)
 
         # ── TC-BCK-081: Retention merge — restore from retained backups ─────
         # With versions=3 policy: create 5 backups → oldest 2 are pruned/merged
@@ -1666,6 +1666,8 @@ class TestBackupDeleteAndRestore(BackupTestBase):
             rst_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
             self.ssh_obj.verify_checksums(self.fio_node, rst_files, original_checksums, by_name=True)
             self.logger.info(f"TC-BCK-081: retained backup {bk_id} → restore → checksums match ✓")
+            # Clean up before connecting next restored lvol
+            self._unmount_and_disconnect(self.fio_node, rst_mount, rst_id)
 
         self.logger.info("=== TestBackupDeleteAndRestore PASSED ===")
 
