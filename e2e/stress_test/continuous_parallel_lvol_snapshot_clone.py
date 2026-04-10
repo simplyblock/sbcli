@@ -344,7 +344,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self._inc("attempts", "create_lvol", 1)
 
         BDEV_RETRY_MAX = 7
-        SYNC_DELETION_RETRY_MAX = 10
+        SYNC_DELETION_RETRY_MAX = 60  # 60 × 15s = 15 min
         bdev_retries = 0
         sync_retries = 0
         ctx = {"lvol_name": lvol_name, "idx": idx, "client": self._pick_client(idx)}
@@ -375,8 +375,8 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
                 if self._is_lvol_sync_deletion_error(api_err) and sync_retries < SYNC_DELETION_RETRY_MAX:
                     sync_retries += 1
-                    self.logger.warning(f"[sync_deletion_retry] create_lvol sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {lvol_name}, waiting 5s")
-                    sleep_n_sec(5)
+                    self.logger.warning(f"[sync_deletion_retry] create_lvol sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {lvol_name}, waiting 15s")
+                    sleep_n_sec(15)
                     continue
 
                 if self._is_bdev_error(api_err) and bdev_retries < BDEV_RETRY_MAX - 1:
@@ -387,12 +387,24 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                     sleep_n_sec(2)
                     continue
 
+                if self._is_lvol_sync_deletion_error(api_err):
+                    # Sync deletion blocks ALL operations on that node until
+                    # it completes.  Treat like max_lvols — non-fatal, trigger
+                    # forced deletes so the sync deletion clears faster, and
+                    # let the main loop retry later.
+                    self._inc("failures", "create_lvol", 1)
+                    self.logger.warning(
+                        f"[sync_deletion] create_lvol sync_retry exhausted "
+                        f"({sync_retries}/{SYNC_DELETION_RETRY_MAX}) for {lvol_name}; "
+                        f"triggering forced deletes and continuing"
+                    )
+                    self._force_enqueue_deletes()
+                    raise
+
                 # Retries exhausted or unrecognised error — fail the test
                 self._inc("failures", "create_lvol", 1)
                 if self._is_bdev_error(api_err):
                     details = f"bdev creation failed after {bdev_retries + 1} attempts"
-                elif self._is_lvol_sync_deletion_error(api_err):
-                    details = f"sync deletion retry exhausted after {sync_retries} retries"
                 else:
                     details = "api call failed"
                 self._set_failure(op="create_lvol", exc=e, details=details, ctx=ctx, api_err=api_err)
@@ -449,7 +461,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
         self._inc("attempts", "create_snapshot", 1)
 
-        SYNC_DELETION_RETRY_MAX = 10
+        SYNC_DELETION_RETRY_MAX = 60  # 60 × 15s = 15 min
         sync_retries = 0
         ctx = {"src_lvol_name": src_lvol_name, "src_lvol_id": src_lvol_id, "snap_name": snap_name}
 
@@ -475,14 +487,28 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
                     if self._is_lvol_sync_deletion_error(api_err) and sync_retries < SYNC_DELETION_RETRY_MAX:
                         sync_retries += 1
-                        self.logger.warning(f"[sync_deletion_retry] create_snapshot sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {snap_name}, waiting 5s")
-                        sleep_n_sec(5)
+                        self.logger.warning(f"[sync_deletion_retry] create_snapshot sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {snap_name}, waiting 15s")
+                        sleep_n_sec(15)
                         continue
 
-                    # Retries exhausted or unrecognised error — fail the test
+                    if self._is_lvol_sync_deletion_error(api_err):
+                        # Snapshot is tied to the parent lvol's node — if that
+                        # node has sync deletion we can't do anything here.
+                        # Non-fatal: trigger forced deletes and raise so the
+                        # outer except resets snap_state to "pending" and a
+                        # different lvol can be tried next loop iteration.
+                        self._inc("failures", "create_snapshot", 1)
+                        self.logger.warning(
+                            f"[sync_deletion] create_snapshot sync_retry exhausted "
+                            f"({sync_retries}/{SYNC_DELETION_RETRY_MAX}) for {snap_name}; "
+                            f"triggering forced deletes and continuing"
+                        )
+                        self._force_enqueue_deletes()
+                        raise
+
+                    # Unrecognised error — fail the test
                     self._inc("failures", "create_snapshot", 1)
-                    details = f"sync deletion retry exhausted after {sync_retries} retries" if self._is_lvol_sync_deletion_error(api_err) else "api call failed"
-                    self._set_failure(op="create_snapshot", exc=e, details=details, ctx=ctx, api_err=api_err)
+                    self._set_failure(op="create_snapshot", exc=e, details="api call failed", ctx=ctx, api_err=api_err)
                     raise
 
             snap_id = self._wait_snapshot_id(snap_name)
@@ -533,7 +559,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self._inc("attempts", "create_clone", 1)
 
         BDEV_RETRY_MAX = 7
-        SYNC_DELETION_RETRY_MAX = 10
+        SYNC_DELETION_RETRY_MAX = 60  # 60 × 15s = 15 min
         bdev_retries = 0
         sync_retries = 0
         ctx = {"snap_name": snap_name, "snapshot_id": snap_id, "clone_name": clone_name, "client": self._pick_client(idx)}
@@ -560,8 +586,8 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
                     if self._is_lvol_sync_deletion_error(api_err) and sync_retries < SYNC_DELETION_RETRY_MAX:
                         sync_retries += 1
-                        self.logger.warning(f"[sync_deletion_retry] create_clone sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {clone_name}, waiting 5s")
-                        sleep_n_sec(5)
+                        self.logger.warning(f"[sync_deletion_retry] create_clone sync_retry {sync_retries}/{SYNC_DELETION_RETRY_MAX} for {clone_name}, waiting 15s")
+                        sleep_n_sec(15)
                         continue
 
                     if self._is_bdev_error(api_err) and bdev_retries < BDEV_RETRY_MAX - 1:
@@ -572,12 +598,25 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                         sleep_n_sec(2)
                         continue
 
+                    if self._is_lvol_sync_deletion_error(api_err):
+                        # Clone is tied to its snapshot's node — if that node
+                        # has sync deletion we can't do anything here.
+                        # Non-fatal: trigger forced deletes and raise so the
+                        # outer except resets clone_state to "pending" and a
+                        # different snapshot can be tried next loop iteration.
+                        self._inc("failures", "create_clone", 1)
+                        self.logger.warning(
+                            f"[sync_deletion] create_clone sync_retry exhausted "
+                            f"({sync_retries}/{SYNC_DELETION_RETRY_MAX}) for {clone_name}; "
+                            f"triggering forced deletes and continuing"
+                        )
+                        self._force_enqueue_deletes()
+                        raise
+
                     # Retries exhausted or unrecognised error — fail the test
                     self._inc("failures", "create_clone", 1)
                     if self._is_bdev_error(api_err):
                         details = f"bdev creation failed after {bdev_retries + 1} attempts"
-                    elif self._is_lvol_sync_deletion_error(api_err):
-                        details = f"sync deletion retry exhausted after {sync_retries} retries"
                     else:
                         details = "api call failed"
                     self._set_failure(op="create_clone", exc=e, details=details, ctx=ctx, api_err=api_err)
