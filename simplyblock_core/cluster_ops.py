@@ -519,7 +519,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
             raise Exception("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
         if not cluster_ip:
-            cluster_ip = "0.0.0.0"
+            cluster_ip = os.environ.get("HOST_IP")
+        if not cluster_ip:
+            raise ValueError("cluster_ip is required for first-cluster bootstrap in kubernetes mode")
 
         mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
         if enable_monitoring == "true":
