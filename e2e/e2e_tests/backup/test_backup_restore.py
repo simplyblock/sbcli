@@ -2410,9 +2410,6 @@ class TestBackupPolicyAgeOnly(BackupTestBase):
         bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-125")
         self.logger.info(f"TC-BCK-125: age-policy backup {bk_id} complete ✓")
 
-        # Disconnect source before restores — XFS refuses duplicate UUIDs
-        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
-
         # TC-BCK-126: detach policy + restore + verify checksums
         self._detach_policy(policy_id, "pool", pool_id)
         self.logger.info("TC-BCK-126: policy detached; restoring backup")
@@ -2956,13 +2953,20 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
             sleep_n_sec(5)
 
         # TC-BCK-157: verify only 1 backup retained
-        self.logger.info("TC-BCK-157: Verifying only 1 backup retained …")
-        backups = self._list_backups()
-        lvol_backups = [
-            b for b in backups
-            if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
-        ]
-        self.logger.info(f"TC-BCK-157: Backups for lvol: {len(lvol_backups)}")
+        # Retention pruning is async — poll until the policy trims old backups
+        self.logger.info("TC-BCK-157: Waiting for retention pruning (versions=1) …")
+        deadline = time.time() + 120  # wait up to 2 min
+        lvol_backups = []
+        while time.time() < deadline:
+            backups = self._list_backups()
+            lvol_backups = [
+                b for b in backups
+                if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
+            ]
+            self.logger.info(f"TC-BCK-157: Backups for lvol: {len(lvol_backups)}")
+            if len(lvol_backups) <= 2:
+                break
+            sleep_n_sec(10)
         assert len(lvol_backups) <= 2, \
             f"versions=1 policy should keep ≤ 2 backups (delta + base), found {len(lvol_backups)}"
         self.logger.info("TC-BCK-157: PASSED")
@@ -3283,7 +3287,7 @@ class TestBackupListFields(BackupTestBase):
                       if any(bk_id in str(v) for v in b.values())), None)
         assert entry, f"Backup entry for {bk_id} not found in list"
         all_values = " ".join(str(v) for v in entry.values()).lower()
-        assert lvol_name in all_values or lvol_id in all_values, \
+        assert lvol_name.lower() in all_values or lvol_id.lower() in all_values, \
             f"Backup entry should reference lvol; entry={entry}"
         self.logger.info(f"TC-BCK-174: Required fields present: {entry} PASSED")
 
@@ -3455,7 +3459,7 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
         # TC-BCK-183: restore to same name as deleted source
         self.logger.info("TC-BCK-183: Restore to name of deleted lvol …")
         deleted_lvol_name = lvol_name
-        self.sbcli_utils.delete_lvol(lvol_id=lvol_id)
+        self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
         sleep_n_sec(3)
         self.created_lvols = [n for n in self.created_lvols if n != deleted_lvol_name]
         out, err = self._sbcli(

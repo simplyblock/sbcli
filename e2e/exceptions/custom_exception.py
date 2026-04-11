@@ -26,7 +26,7 @@ class MultipleExceptions(Exception):
                     messages.append(f"{case}: {exc}")
             else:
                 messages.append(f"{case}: {ex_info}")
-        return "\n".join(messages)
+        return " | ".join(messages)
 
 class LvolNotConnectException(Exception):
     def __init__(self, message) -> None:
