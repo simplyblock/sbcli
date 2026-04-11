@@ -1836,8 +1836,14 @@ def get_nvme_namespace_from_pci(pci_address):
     ns_path = f"/sys/bus/pci/devices/{pci_address}/nvme/{ctrl_name}/nvme*n*"
     ns_matches = glob.glob(ns_path)
     if ns_matches:
-        return os.path.basename(ns_matches[0])  # e.g. 'nvme6n2'
-    return f"{ctrl_name}n1"  # fallback
+        ns_name = os.path.basename(ns_matches[0])  # e.g. 'nvme6n2'
+        logger.debug(f"[get_nvme_namespace_from_pci] pci={pci_address} -> "
+                     f"controller={ctrl_name}, namespace={ns_name} (sysfs lookup)")
+        return ns_name
+    fallback = f"{ctrl_name}n1"
+    logger.debug(f"[get_nvme_namespace_from_pci] pci={pci_address} -> "
+                 f"controller={ctrl_name}, namespace={fallback} (fallback)")
+    return fallback
 
 
 def format_device_with_4k(pci_device):
@@ -2486,14 +2492,23 @@ def is_namespace_4k_from_nvme_list(device_path: str) -> bool:
                 for controller in subsystem.get("Controllers", []):
                     for ns in controller.get("Namespaces", []):
                         if ns.get("NameSpace") == ns_name:
-                            return int(ns.get("SectorSize", 0)) == 4096
+                            sector_size = int(ns.get("SectorSize", 0))
+                            logger.debug(f"[is_namespace_4k] using new nested format, "
+                                         f"device={device_path}, SectorSize={sector_size}")
+                            return sector_size == 4096
                 # Also check subsystem-level namespaces
                 for ns in subsystem.get("Namespaces", []):
                     if ns.get("NameSpace") == ns_name:
-                        return int(ns.get("SectorSize", 0)) == 4096
+                        sector_size = int(ns.get("SectorSize", 0))
+                        logger.debug(f"[is_namespace_4k] using new nested format (subsystem level), "
+                                     f"device={device_path}, SectorSize={sector_size}")
+                        return sector_size == 4096
             # Old flat format: Devices[].DevicePath / SectorSize
             if host.get("DevicePath") == device_path:
-                return int(host.get("SectorSize", 0)) == 4096
+                sector_size = int(host.get("SectorSize", 0))
+                logger.debug(f"[is_namespace_4k] using old flat format, "
+                             f"device={device_path}, SectorSize={sector_size}")
+                return sector_size == 4096
 
         return False
 
@@ -2510,7 +2525,7 @@ def format_nvme_device(nvme_device: str, lbaf_id: int):
         logger.debug(f"Device {nvme_device} already formatted with 4K...skipping")
         return
     command = ['nvme', 'format', nvme_device, f"--lbaf={lbaf_id}", '--force']
-    print(" ".join(command))
+    logger.debug(f"[format_nvme_device] running command: {' '.join(command)}")
     try:
         result = subprocess.run(
             command,
