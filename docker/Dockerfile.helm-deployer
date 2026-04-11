@@ -4,7 +4,7 @@ ARG TARGETARCH
 ARG SBCLI_BRANCH=""
 ARG CSI_BRANCH=""
 
-RUN apk add --no-cache git curl tar gcompat
+RUN apk add --no-cache git curl tar gcompat bash bash-completion
 
 # kubectl
 RUN KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt) && \
@@ -32,3 +32,8 @@ RUN if [ -n "$CSI_BRANCH" ]; then \
       git clone --branch "$CSI_BRANCH" --depth 1 \
         https://github.com/simplyblock/simplyblock-csi /opt/simplyblock-csi; \
     fi
+
+# kubectl and oc autocomplete
+RUN echo 'source <(kubectl completion bash)' >> /etc/profile.d/completions.sh && \
+    echo 'source <(oc completion bash)' >> /etc/profile.d/completions.sh && \
+    echo 'source /etc/profile.d/completions.sh' >> /root/.bashrc
