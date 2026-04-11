@@ -4,7 +4,7 @@ ARG TARGETARCH
 ARG SBCLI_BRANCH=""
 ARG CSI_BRANCH=""
 
-RUN apk add --no-cache git curl tar
+RUN apk add --no-cache git curl tar gcompat
 
 # kubectl
 RUN KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt) && \
