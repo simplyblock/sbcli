@@ -51,6 +51,11 @@ class FTT2NodeState:
         self.hublvols_created: Set[str] = set()    # lvstore names
         self.hublvols_connected: Set[str] = set()   # lvstore names
 
+        # NVMe controller path tracking: controller_name -> list of path dicts
+        # Each entry: {nqn, traddr, trsvcid, trtype, multipath}
+        # Used to verify: how many paths a controller has, whether multipath was requested
+        self.nvme_controller_paths: Dict[str, list] = {}
+
         # Port blocking: (port, port_type) -> {"blocker": "restart"|"fabric_error", "ts": float}
         self.blocked_ports: Dict[tuple, dict] = {}
 
@@ -68,6 +73,10 @@ class FTT2NodeState:
 
         # RPC call log: list of (timestamp, method, params)
         self.rpc_log: List[tuple] = []
+
+        # Error injection: method_name -> error_message
+        # Any method listed here will return an RPC error instead of its normal result.
+        self.failing_methods: Dict[str, str] = {}
 
         # Phase gate for concurrent operation tests (set by test code)
         self._phase_gate = None  # type: ignore
@@ -99,9 +108,11 @@ class FTT2NodeState:
         self.blocked_ports.clear()
         self.jm_connectivity.clear()
         self.inflight_io.clear()
+        self.nvme_controller_paths.clear()
         self.reachable = True
         self.fabric_up = True
         self.rpc_log.clear()
+        self.failing_methods.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -152,13 +163,13 @@ def _bdev_distrib_check_inflight_io(s: FTT2NodeState, p: dict):
 
 
 def _bdev_lvol_create_hublvol(s: FTT2NodeState, p: dict):
-    lvs_name = p.get('lvs', s.lvstore)
+    lvs_name = p.get('lvs', p.get('lvs_name', s.lvstore))
     s.hublvols_created.add(lvs_name)
     return str(_uuid_mod.uuid4())
 
 
 def _bdev_lvol_connect_hublvol(s: FTT2NodeState, p: dict):
-    lvs_name = p.get('lvs', s.lvstore)
+    lvs_name = p.get('lvs', p.get('lvs_name', s.lvstore))
     s.hublvols_connected.add(lvs_name)
     if lvs_name in s.lvstores:
         s.lvstores[lvs_name]['connect_state'] = True
@@ -241,7 +252,7 @@ def _bdev_lvol_get_lvstores(s, p):
 
 def _bdev_lvol_set_lvs_opts(s, p):
     s.lvs_opts = p
-    lvs_name = p.get('lvs', '')
+    lvs_name = p.get('lvs', p.get('lvs_name', ''))
     if lvs_name in s.lvstores:
         role = p.get('role', '')
         if role == 'primary':
@@ -351,10 +362,23 @@ def _nvmf_delete_subsystem(s, p):
 
 def _bdev_nvme_attach_controller(s, p):
     name = p.get('name', '')
-    s.nvme_controllers[name] = {
-        'name': name, 'nqn': p.get('subnqn', ''),
-        'traddr': p.get('traddr', ''), 'trsvcid': p.get('trsvcid', ''),
+    path = {
+        'nqn': p.get('subnqn', ''),
+        'traddr': p.get('traddr', ''),
+        'trsvcid': p.get('trsvcid', ''),
         'trtype': p.get('trtype', 'TCP'),
+        'multipath': p.get('multipath', 'disable'),
+    }
+    if name not in s.nvme_controller_paths:
+        s.nvme_controller_paths[name] = []
+    s.nvme_controller_paths[name].append(path)
+    s.nvme_controllers[name] = {
+        'name': name,
+        'nqn': path['nqn'],
+        'traddr': path['traddr'],
+        'trsvcid': path['trsvcid'],
+        'trtype': path['trtype'],
+        'ctrlrs': s.nvme_controller_paths[name],
     }
     return [f"{name}n1"]
 
@@ -362,8 +386,17 @@ def _bdev_nvme_attach_controller(s, p):
 def _bdev_nvme_controller_list(s, p):
     name = p.get('name')
     if name and name in s.nvme_controllers:
-        return [s.nvme_controllers[name]]
-    return list(s.nvme_controllers.values()) if not name else []
+        ctrl = s.nvme_controllers[name].copy()
+        ctrl['ctrlrs'] = s.nvme_controller_paths.get(name, [])
+        return [ctrl]
+    if name:
+        return []
+    result = []
+    for n, ctrl in s.nvme_controllers.items():
+        c = ctrl.copy()
+        c['ctrlrs'] = s.nvme_controller_paths.get(n, [])
+        result.append(c)
+    return result
 
 
 def _bdev_set_qos_limit(s, p):
@@ -545,6 +578,12 @@ class _FTT2RpcHandler(BaseHTTPRequestHandler):
         if gate is not None and gate.should_pause(method):
             gate.pause()
 
+        # Error injection: return configured error for specific methods
+        err_msg = server.node_state.failing_methods.get(method)
+        if err_msg:
+            self._send_error(-32602, err_msg, req_id)
+            return
+
         handler = _FTT2_DISPATCH.get(method)
         if handler is None:
             # Unknown method → success (null-op mock)
@@ -656,3 +695,30 @@ class FTT2MockRpcServer:
     def get_leadership(self, lvs_name: str) -> Optional[bool]:
         """Get current leadership state for an LVS."""
         return self.state.leadership.get(lvs_name)
+
+    # --- Error injection ---
+
+    def fail_method(self, method: str, error_msg: str = "Simulated RPC error"):
+        """Make the given RPC method return an error until cleared."""
+        with self.state.lock:
+            self.state.failing_methods[method] = error_msg
+
+    def clear_fail_method(self, method: str):
+        """Remove a previously injected error for the given method."""
+        with self.state.lock:
+            self.state.failing_methods.pop(method, None)
+
+    def clear_all_fail_methods(self):
+        """Remove all injected errors."""
+        with self.state.lock:
+            self.state.failing_methods.clear()
+
+    # --- Hublvol state queries ---
+
+    def hublvol_connected(self, lvs_name: str) -> bool:
+        """Return True if bdev_lvol_connect_hublvol was received for this LVS."""
+        return lvs_name in self.state.hublvols_connected
+
+    def hublvol_created(self, lvs_name: str) -> bool:
+        """Return True if bdev_lvol_create_hublvol was received for this LVS."""
+        return lvs_name in self.state.hublvols_created

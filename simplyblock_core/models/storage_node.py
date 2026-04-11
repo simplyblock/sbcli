@@ -321,7 +321,8 @@ class StorageNode(BaseNodeObject):
                         model_number=self.hublvol.model_number,
                         uuid=self.hublvol.uuid,
                         nguid=self.hublvol.nguid,
-                        port=self.hublvol.nvmf_port
+                        port=self.hublvol.nvmf_port,
+                        ana_state="optimized",
                 )
                 return True
             except RPCException:
