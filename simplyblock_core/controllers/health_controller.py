@@ -9,7 +9,7 @@ from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.snode_client import SNodeClient
@@ -298,12 +298,13 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
         passed = bool(ret)
         logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
 
+        is_sec2 = (node.lvstore_stack_tertiary == primary_node.get_id())
+
         if not passed and auto_fix and primary_node.lvstore_status == "ready" \
                 and primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
             try:
-                # If this node is tertiary for this primary, set up multipath to sec_1
+                # Full connect: optimized path to primary + non-optimized path to sec_1 for tertiary
                 failover_node = None
-                is_sec2 = (node.lvstore_stack_tertiary == primary_node.get_id())
                 if is_sec2 and primary_node.secondary_node_id:
                     try:
                         sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
@@ -318,6 +319,31 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
             passed = bool(ret)
             logger.info(f"Checking controller: {primary_node.hublvol.bdev_name} ... {passed}")
+        elif passed and is_sec2 and auto_fix and primary_node.secondary_node_id \
+                and primary_node.lvstore_status == "ready":
+            # Controller exists but may only have the optimized path; ensure secondary path is present
+            # ret is [{..., "ctrlrs": [path1, path2, ...]}, ...] — paths are inside ctrlrs
+            ctrlrs = ret[0].get("ctrlrs", []) if ret else []
+            if len(ctrlrs) < 2:
+                try:
+                    sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+                    if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                        for iface in sec1.data_nics:
+                            if sec1.active_rdma and iface.trtype == "RDMA":
+                                tr_type = "RDMA"
+                            elif not sec1.active_rdma and sec1.active_tcp and iface.trtype == "TCP":
+                                tr_type = "TCP"
+                            else:
+                                continue
+                            r = rpc_client.bdev_nvme_attach_controller(
+                                primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
+                                iface.ip4_address, primary_node.hublvol.nvmf_port,
+                                tr_type, multipath="multipath")
+                            if not r:
+                                logger.warning("Failed to add secondary hublvol path via %s", iface.ip4_address)
+                        logger.info("Added missing secondary hublvol path on tertiary %s", node.get_id())
+                except Exception as e:
+                    logger.error("Error adding secondary hublvol path: %s", e)
 
             node_bdev = {}
             ret = rpc_client.get_bdevs()
@@ -466,6 +492,24 @@ def _check_node_lvstore(
                                                     f"remote_{dev.alceml_bdev}", dev, node,
                                                     bdev_names=node_bdev_names, reattach=False)
                                                 if remote_bdev:
+                                                    new_remote_devices = []
+                                                    n = db_controller.get_storage_node_by_id(node.get_id())
+                                                    for rem_dev in n.remote_devices:
+                                                        if dev.get_id() == rem_dev.get_id():
+                                                            continue
+                                                        new_remote_devices.append(rem_dev)
+
+                                                    remote_device = RemoteDevice()
+                                                    remote_device.uuid = dev.uuid
+                                                    remote_device.alceml_name = dev.alceml_name
+                                                    remote_device.node_id = dev.node_id
+                                                    remote_device.size = dev.size
+                                                    remote_device.status = NVMeDevice.STATUS_ONLINE
+                                                    remote_device.nvmf_multipath = dev.nvmf_multipath
+                                                    remote_device.remote_bdev = remote_bdev
+                                                    new_remote_devices.append(remote_device)
+                                                    n.remote_devices = new_remote_devices
+                                                    n.write_to_db()
                                                     distr_controller.send_dev_status_event(dev, dev.status, node)
                                             except Exception as e:
                                                 logger.error(f"Failed to connect to {dev.get_id()}: {e}")
@@ -669,9 +713,29 @@ def check_node(node_id, with_devices=True):
                     lvstore_check &= _check_node_lvstore(lvstore_stack, second_node_1, stack_src_node=snode)
                     print("*" * 100)
                 lvstore_check &= _check_node_hublvol(snode)
+                # Ensure sec_1 has its secondary hublvol exposed (same NQN, non-optimized)
+                if second_node_1.status == StorageNode.STATUS_ONLINE:
+                    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+                    try:
+                        sec1_rpc = RPCClient(
+                            second_node_1.mgmt_ip, second_node_1.rpc_port,
+                            second_node_1.rpc_username, second_node_1.rpc_password, timeout=5, retry=1)
+                        if snode.hublvol and not sec1_rpc.subsystem_list(snode.hublvol.nqn):
+                            logger.info("Secondary hublvol NQN missing on sec_1 %s, recreating",
+                                        second_node_1.get_id())
+                            second_node_1.create_secondary_hublvol(snode, cluster.nqn)
+                    except Exception as e:
+                        logger.error("Error checking/recreating secondary hublvol on sec_1: %s", e)
                 if second_node_1.status == StorageNode.STATUS_ONLINE:
                     print("*" * 100)
-                    lvstore_check &= _check_sec_node_hublvol(second_node_1)
+                    lvstore_check &= _check_sec_node_hublvol(second_node_1, auto_fix=True)
+                # Check tertiary's hublvol paths (optimized to primary + non-optimized to sec_1)
+                if snode.tertiary_node_id:
+                    tert_node = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
+                    if tert_node and tert_node.status == StorageNode.STATUS_ONLINE:
+                        print("*" * 100)
+                        lvstore_check &= _check_sec_node_hublvol(
+                            tert_node, auto_fix=True, primary_node_id=snode.get_id())
 
     return is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
 

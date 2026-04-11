@@ -3732,7 +3732,15 @@ def set_node_status(node_id, status, reconnect_on_online=True):
                 if sec_node and snode.lvstore_status == "ready":
                     if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                         try:
-                            sec_node.connect_to_hublvol(snode, role=sec_role)
+                            failover_node = None
+                            if sec_role == "tertiary" and snode.secondary_node_id:
+                                try:
+                                    sec1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                                    if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+                                        failover_node = sec1
+                                except KeyError:
+                                    pass
+                            sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
                         except Exception as e:
                             logger.error("Error establishing hublvol: %s", e)
 
@@ -4382,21 +4390,36 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node):
         executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state="non_optimized")
     executor.shutdown(wait=True)
 
-    ### 10- make tertiary sibling connect to secondary's new hublvol (failover path)
-    # Per design: when secondary is restarted and creates its hublvol,
-    # the tertiary must connect to it as a failover path for multipath.
-    if not is_tertiary and primary_node.tertiary_node_id:
+    ### 10- add non-optimized path on tertiary to newly-restarted secondary's hublvol
+    # The secondary (snode) just created its secondary hublvol using the same NQN as the
+    # primary (leader_node). We attach snode's IPs to the tertiary's existing hublvoln1
+    # controller (which already holds the optimized path to leader_node) so the tertiary
+    # gains the non-optimized failover path without needing snode.hublvol to be set.
+    if not is_tertiary and primary_node.tertiary_node_id and leader_node.hublvol:
         tert_id = primary_node.tertiary_node_id
         if tert_id != snode.get_id() and tert_id != leader_node.get_id():
             tert_node = db_controller.get_storage_node_by_id(tert_id)
             if tert_node and not _check_peer_disconnected(tert_node, lvs_peer_ids=lvs_peer_ids):
                 try:
-                    # Tertiary connects to secondary's (snode's) hublvol as failover
-                    tert_node.connect_to_hublvol(snode, failover_node=None, role="tertiary")
-                    logger.info("Tertiary %s connected to secondary %s hublvol as failover path",
-                                tert_node.get_id(), snode.get_id())
+                    tert_rpc = tert_node.rpc_client()
+                    for iface in snode.data_nics:
+                        if snode.active_rdma and iface.trtype == "RDMA":
+                            tr_type = "RDMA"
+                        elif not snode.active_rdma and snode.active_tcp and iface.trtype == "TCP":
+                            tr_type = "TCP"
+                        else:
+                            continue
+                        ret = tert_rpc.bdev_nvme_attach_controller(
+                            leader_node.hublvol.bdev_name, leader_node.hublvol.nqn,
+                            iface.ip4_address, leader_node.hublvol.nvmf_port,
+                            tr_type, multipath="multipath")
+                        if not ret:
+                            logger.warning("Failed to add secondary hublvol path on tertiary %s via %s",
+                                           tert_node.get_id(), iface.ip4_address)
+                    logger.info("Added secondary %s hublvol path on tertiary %s for %s",
+                                snode.get_id(), tert_node.get_id(), primary_node.lvstore)
                 except Exception as e:
-                    logger.error("Error connecting tertiary to secondary hublvol: %s", e)
+                    logger.error("Error adding secondary hublvol path on tertiary: %s", e)
 
     # Clear restart phase for this LVS
     _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
