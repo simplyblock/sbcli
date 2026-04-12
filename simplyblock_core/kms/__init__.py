@@ -1,5 +1,6 @@
 import requests
 import logging
+from abc import ABC, abstractmethod
 from uuid import UUID
 
 from requests.adapters import HTTPAdapter
@@ -20,7 +21,10 @@ class KMSClientException(Exception):
         self.message = message
 
 
-class KMSClient:
+class 
+
+
+class HCPClient:
     def __init__(
         self,
         address: str,

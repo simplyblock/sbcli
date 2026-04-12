@@ -11,7 +11,7 @@ import uuid
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.kms_client import KMSClientException, create_kms_client
+from simplyblock_core.kms import KMSClientException, create_kms_client
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient

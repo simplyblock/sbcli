@@ -12,7 +12,7 @@ from typing import List, Tuple
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.kms_client import KMSClientException, create_kms_client
+from simplyblock_core.kms import KMSClientException, create_kms_client
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
