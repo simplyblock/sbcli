@@ -11,7 +11,7 @@ import uuid
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.kms_client import KMSClient
+from simplyblock_core.kms_client import KMSClient, KMSClientException
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient
@@ -100,16 +100,12 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     if cluster.deploy_kms:
         kms_client = KMSClient(cluster)
-        ret, err = kms_client.create_pool_key(pool.get_id())
-        if ret:
-            logger.info(ret)
-        if err:
-            logger.error(err)
-        ret, err = kms_client.update_pool_key(pool.get_id())
-        if ret:
-            logger.info(ret)
-        if err:
-            logger.error(err)
+        try:
+            kms_client.create_pool_key(pool)
+            kms_client.update_pool_key(pool)
+            logger.info("Created pool key")
+        except KMSClientException:
+            logger.eception("Failed to create pool key")
 
     return pool.get_id()
 
@@ -284,11 +280,11 @@ def delete_pool(uuid):
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.deploy_kms:
         kms_client = KMSClient(cluster)
-        ret, err = kms_client.delete_pool_key(pool.get_id())
-        if ret:
-            logger.info(ret)
-        if err:
-            logger.error(err)
+        try:
+            kms_client.delete_pool_key(pool)
+            logger.info("Deleted pool key")
+        except KMSClientException:
+            logger.exception("Failed to delete pool key")
 
     logger.info("Done")
     return True

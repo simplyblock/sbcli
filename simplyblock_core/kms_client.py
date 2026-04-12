@@ -1,12 +1,12 @@
-import json
-
 import requests
 import logging
 
 from requests.adapters import HTTPAdapter
+from requests.exceptions import HTTPError, RequestException
 from urllib3 import Retry
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.pool import Pool
 
 logger = logging.getLogger()
 
@@ -28,7 +28,7 @@ class KMSClient:
             self.ip_address = f"{mnode.mgmt_ip}:8200"
         else:
             self.ip_address = "simplyblock-kms:8200"
-        self.url = "http://%s/" % self.ip_address
+        self.url = f"http://{self.ip_address}/v1/"
         self.timeout = timeout
         self.session = requests.session()
         self.cluster_id = cluster.get_id()
@@ -41,82 +41,56 @@ class KMSClient:
     def _request(self, method, path, payload=None):
         try:
             logger.debug("Requesting path: %s, params: %s", self.url + path, payload)
-            data = None
-            params = None
-            if payload:
-                if method == "GET":
-                    params = payload
-                else:
-                    data = json.dumps(payload)
-
             response = self.session.request(
-                method, self.url + path, data=data, timeout=self.timeout, params=params
+                method,
+                self.url + path,
+                json=payload if method != "GET" else None,
+                params=payload if method == "GET" else None,
+                timeout=self.timeout,
             )
-        except Exception as e:
-            raise KMSClientException(str(e))
+            logger.debug(
+                "Response: status_code: %s, content: %s",
+                response.status_code,
+                response.content,
+            )
+            response.raise_for_status()
+            return response.json() if response.content else None
+        except HTTPError as e:
+            raise KMSClientException(
+                "Request failed, response indicates error: {response.json()['errors']}"
+            ) from e
+        except RequestException as e:
+            raise KMSClientException("Request failed") from e
 
-        logger.debug(
-            "Response: status_code: %s, content: %s",
-            response.status_code,
-            response.content,
+    def get_keys(self, key_name) -> dict:
+        return self._request("GET", f"{self.cluster_id}/{key_name}")
+
+    def save_keys(self, key: str, key1: str, key2: str) -> None:
+        self._request(
+            "POST",
+            f"{self.cluster_id}/{key}",
+            {"key1": key1, "key2": key2},
         )
-        ret_code = response.status_code
 
-        result = None
-        error = None
-        if ret_code == 204:
-            return True, None
+    def encrypt(self, key: str, plaintext: str) -> str:
+        return self._request("POST", f"transit/encrypt/{key}", {"plaintext": plaintext})
 
-        if ret_code == 200:
-            try:
-                decoded_data = response.json()
-            except Exception:
-                return response.content, None
+    def decrypt(self, key: str, ciphertext: str) -> str:
+        return self._request(
+            "POST", f"transit/decrypt/{key}", {"ciphertext": ciphertext}
+        )
 
-            result = decoded_data.get("data")
-            error = decoded_data.get("errors")
-            if result is not None or error is not None:
-                return result, error
-            else:
-                return data, None
-
-        if ret_code in [500, 400]:
-            raise KMSClientException("Invalid http status: %s" % ret_code)
-
-        if ret_code == 422:
-            raise KMSClientException(f"Request validation failed: '{response.text}'")
-
-        logger.error("Unknown http status: %s", ret_code)
-        return None, None
-
-    def get_keys(self, key_name):
-        return self._request("GET", f"v1/{self.cluster_id}/{key_name}")
-
-    def save_keys(self, key_name, key1, key2):
-        params = {
-            "key1": key1,
-            "key2": key2,
-        }
-        return self._request("POST", f"v1/{self.cluster_id}/{key_name}", params)
-
-    def encrypt(self, key_name, plaintext):
-        params = {"plaintext": plaintext}
-        return self._request("POST", f"v1/transit/encrypt/{key_name}", params)
-
-    def decrypt(self, key_name, ciphertext):
-        params = {"ciphertext": ciphertext}
-        return self._request("POST", f"v1/transit/decrypt/{key_name}", params)
-
-    def create_pool_key(self, pool_uuid):
+    def create_pool_key(self, pool: Pool) -> None:
         params = {"type": "aes256-gcm96", "exportable": False}
-        return self._request("POST", f"v1/transit/keys/{pool_uuid}", params)
+        self._request("POST", f"transit/keys/{pool.get_id()}", params)
 
-    def update_pool_key(self, pool_uuid):
-        params = {"deletion_allowed": True}
-        return self._request("POST", f"v1/transit/keys/{pool_uuid}/config", params)
+    def update_pool_key(self, pool: Pool) -> None:
+        self._request(
+            "POST", f"transit/keys/{pool.get_id()}/config", {"deletion_allowed": True}
+        )
 
-    def delete_pool_key(self, pool_uuid):
-        return self._request("DELETE", f"v1/transit/keys/{pool_uuid}")
+    def delete_pool_key(self, pool: Pool) -> None:
+        self._request("DELETE", f"transit/keys/{pool.get_id()}")
 
-    def delete_key(self, key_name):
-        return self._request("DELETE", f"v1/{self.cluster_id}/{key_name}")
+    def delete_key(self, key: str) -> None:
+        self._request("DELETE", f"{self.cluster_id}/{key}")
