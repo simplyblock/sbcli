@@ -12,7 +12,7 @@ from typing import List, Tuple
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.kms_client import KMSClient, KMSClientException
+from simplyblock_core.kms_client import KMSClientException, create_kms_client
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
@@ -103,7 +103,7 @@ def _create_crypto_lvol_kms(snode, lvol, cluster):
         logger.error(f"Failed to find LVol bdev {base_name}")
         return False
 
-    with KMSClient(cluster) as kms_client:
+    with create_kms_client(cluster) as kms_client:
         try:
             lvol_keys = kms_client.get_keys(name)
         except KMSClientException:
@@ -604,7 +604,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.top_bdev = lvol.crypto_bdev
 
         if cl.deploy_kms:
-            with KMSClient(cl) as kms_client:
+            with create_kms_client(cl) as kms_client:
                 try:
                     encrypted_key1 = kms_client.encrypt(pool.get_id(), crypto_key1)
                     encrypted_key2 = kms_client.encrypt(pool.get_id(), crypto_key2)
@@ -1253,7 +1253,7 @@ def delete_lvol(id_or_name, force_delete=False):
 
     cl = db_controller.get_cluster_by_id(snode.cluster_id)
     if cl.deploy_kms:
-        with KMSClient(cl) as kms_client:
+        with create_kms_client(cl) as kms_client:
             try:
                 kms_client.delete_key(lvol.crypto_bdev)
                 logger.info("Deleted lvol key")

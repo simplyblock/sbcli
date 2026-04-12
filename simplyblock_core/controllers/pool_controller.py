@@ -11,7 +11,7 @@ import uuid
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.kms_client import KMSClient, KMSClientException
+from simplyblock_core.kms_client import KMSClientException, create_kms_client
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient
@@ -99,7 +99,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     logger.info("Done")
 
     if cluster.deploy_kms:
-        with KMSClient(cluster) as kms_client:
+        with create_kms_client(cluster) as kms_client:
             try:
                 kms_client.create_pool_key(pool)
                 kms_client.update_pool_key(pool)
@@ -279,7 +279,7 @@ def delete_pool(uuid):
     pool.remove(db_controller.kv_store)
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.deploy_kms:
-        with KMSClient(cluster) as kms_client:
+        with create_kms_client(cluster) as kms_client:
             try:
                 kms_client.delete_pool_key(pool)
                 logger.info("Deleted pool key")

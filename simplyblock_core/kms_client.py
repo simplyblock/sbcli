@@ -1,11 +1,13 @@
 import requests
 import logging
+from uuid import UUID
 
 from requests.adapters import HTTPAdapter
 from requests.exceptions import HTTPError, RequestException
 from urllib3 import Retry
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.pool import Pool
 
 logger = logging.getLogger()
@@ -19,22 +21,21 @@ class KMSClientException(Exception):
 
 
 class KMSClient:
-    def __init__(self, cluster, timeout=300, retry=5):
-        db_controller = DBController()
-        if cluster.mode == "docker":
-            mnode = db_controller.get_mgmt_nodes(cluster.get_id())[0]
-            if not mnode:
-                raise KMSClientException("Cluster has no mgmt nodes")
-            self.ip_address = f"{mnode.mgmt_ip}:8200"
-        else:
-            self.ip_address = "simplyblock-kms:8200"
+    def __init__(
+        self,
+        address: str,
+        token: str,
+        cluster_id: UUID,
+        timeout: int = 300,
+        retry: int = 5,
+    ):
         self.url = f"http://{self.ip_address}/v1/"
         self.timeout = timeout
         self.session = requests.session()
-        self.cluster_id = cluster.get_id()
+        self.cluster_id = cluster_id
         self.session.verify = False
         self.session.headers["Content-Type"] = "application/json"
-        self.session.headers["Authorization"] = f"Bearer {cluster.kms_root_token}"
+        self.session.headers["Authorization"] = f"Bearer {token}"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
 
@@ -101,3 +102,16 @@ class KMSClient:
 
     def delete_key(self, key: str) -> None:
         self._request("DELETE", f"{self.cluster_id}/{key}")
+
+
+def create_kms_client(cluster: Cluster) -> KMSClient:
+    db_controller = DBController()
+    if cluster.mode == "docker":
+        mnode = db_controller.get_mgmt_nodes(cluster.get_id())[0]
+        if not mnode:
+            raise KMSClientException("Cluster has no mgmt nodes")
+        address = f"{mnode.mgmt_ip}:8200"
+    else:
+        address = "simplyblock-kms:8200"
+
+    return KMSClient(address, cluster.kms_root_token, cluster.get_id())
