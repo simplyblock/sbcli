@@ -12,7 +12,7 @@ from typing import List, Tuple
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.kms import KMSClientException, create_kms_client
+from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
@@ -103,19 +103,19 @@ def _create_crypto_lvol_kms(snode, lvol, cluster):
         logger.error(f"Failed to find LVol bdev {base_name}")
         return False
 
-    with create_kms_client(cluster) as kms_client:
+    with create_kms_connection(cluster) as kms:
         try:
-            lvol_keys = kms_client.get_keys(name)
-        except KMSClientException:
+            lvol_keys = kms.get_keys(name)
+        except KMSException:
             logger.error(f"Failed to get keys for lvol: {name} from KMS")
             if lvol.crypto_key1 and lvol.crypto_key2:
                 logger.warning(f"Using keys from DB for lvol: {name}")
                 return _create_crypto_lvol(rpc_client, name, base_name, lvol.crypto_key1, lvol.crypto_key2)
 
-        base64_key1 = kms_client.decrypt(lvol.pool_uuid, lvol_keys['key1'][0]['ciphertext'])
+        base64_key1 = kms.decrypt(lvol.pool_uuid, lvol_keys['key1'][0]['ciphertext'])
         original_key1 = base64_key1['plaintext']
 
-        base64_key2 = kms_client.decrypt(lvol.pool_uuid, lvol_keys['key2'][0]['ciphertext'])
+        base64_key2 = kms.decrypt(lvol.pool_uuid, lvol_keys['key2'][0]['ciphertext'])
         original_key2 = base64_key2['plaintext']
 
     key_name = f'key_{name}'
@@ -604,13 +604,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.top_bdev = lvol.crypto_bdev
 
         if cl.deploy_kms:
-            with create_kms_client(cl) as kms_client:
+            with create_kms_connection(cl) as kms:
                 try:
-                    encrypted_key1 = kms_client.encrypt(pool.get_id(), crypto_key1)
-                    encrypted_key2 = kms_client.encrypt(pool.get_id(), crypto_key2)
-                    kms_client.save_keys(lvol.crypto_bdev, encrypted_key1, encrypted_key2)
+                    encrypted_key1 = kms.encrypt(pool.get_id(), crypto_key1)
+                    encrypted_key2 = kms.encrypt(pool.get_id(), crypto_key2)
+                    kms.save_keys(lvol.crypto_bdev, encrypted_key1, encrypted_key2)
                     logger.info("Saved lvol keys")
-                except KMSClientException:
+                except KMSException:
                     logger.exception("Failed to save lvol keys")
         else:
             lvol.crypto_key1 = crypto_key1
@@ -1253,11 +1253,11 @@ def delete_lvol(id_or_name, force_delete=False):
 
     cl = db_controller.get_cluster_by_id(snode.cluster_id)
     if cl.deploy_kms:
-        with create_kms_client(cl) as kms_client:
+        with create_kms_connection(cl) as kms:
             try:
-                kms_client.delete_key(lvol.crypto_bdev)
+                kms.delete_key(lvol.crypto_bdev)
                 logger.info("Deleted lvol key")
-            except KMSClientException:
+            except KMSException:
                 logger.exception("Failed to delete lvol key")
     logger.info("Done")
     return True
