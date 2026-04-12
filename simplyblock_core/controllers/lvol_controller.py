@@ -104,7 +104,7 @@ def _create_crypto_lvol_kms(snode, lvol, cluster):
         logger.error(f"Failed to find LVol bdev {base_name}")
         return False
 
-    kms_client = KMSClient(cluster.get_id())
+    kms_client = KMSClient(cluster)
     lvol_keys, err = kms_client.get_keys(name)
     if not lvol_keys:
         logger.error(f"Failed to get keys for lvol: {name} from KMS")
@@ -604,7 +604,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.top_bdev = lvol.crypto_bdev
 
         if cl.deploy_kms:
-            kms_client = KMSClient(cl.get_id())
+            kms_client = KMSClient(cl)
             encrypted_key1 = kms_client.encrypt(pool.get_id(), crypto_key1)
             encrypted_key2 = kms_client.encrypt(pool.get_id(), crypto_key2)
             ret, err = kms_client.save_keys(lvol.crypto_bdev, encrypted_key1, encrypted_key2)
@@ -1253,7 +1253,7 @@ def delete_lvol(id_or_name, force_delete=False):
 
     cl = db_controller.get_cluster_by_id(snode.cluster_id)
     if cl.deploy_kms:
-        kms_client = KMSClient(cl.get_id())
+        kms_client = KMSClient(cl)
         ret, err = kms_client.delete_key(lvol.crypto_bdev)
         if ret:
             logger.info(ret)

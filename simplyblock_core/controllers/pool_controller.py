@@ -99,7 +99,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     logger.info("Done")
 
     if cluster.deploy_kms:
-        kms_client = KMSClient(cluster.get_id())
+        kms_client = KMSClient(cluster)
         ret, err = kms_client.create_pool_key(pool.get_id())
         if ret:
             logger.info(ret)
@@ -283,7 +283,7 @@ def delete_pool(uuid):
     pool.remove(db_controller.kv_store)
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.deploy_kms:
-        kms_client = KMSClient(cluster.get_id())
+        kms_client = KMSClient(cluster)
         ret, err = kms_client.delete_pool_key(pool.get_id())
         if ret:
             logger.info(ret)

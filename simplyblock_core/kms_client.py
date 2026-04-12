@@ -19,11 +19,10 @@ class KMSClientException(Exception):
 
 
 class KMSClient:
-    def __init__(self, cluster_id, timeout=300, retry=5):
+    def __init__(self, cluster, timeout=300, retry=5):
         db_controller = DBController()
-        cluster = db_controller.get_cluster_by_id(cluster_id)
         if cluster.mode == "docker":
-            mnode = db_controller.get_mgmt_nodes(cluster_id)[0]
+            mnode = db_controller.get_mgmt_nodes(cluster.get_id())[0]
             if not mnode:
                 raise KMSClientException("Cluster has no mgmt nodes")
             self.ip_address = f"{mnode.mgmt_ip}:8200"
@@ -32,7 +31,7 @@ class KMSClient:
         self.url = "http://%s/" % self.ip_address
         self.timeout = timeout
         self.session = requests.session()
-        self.cluster_id = cluster_id
+        self.cluster_id = cluster.get_id()
         self.session.verify = False
         self.session.headers["Content-Type"] = "application/json"
         self.session.headers["Authorization"] = f"Bearer {cluster.kms_root_token}"
