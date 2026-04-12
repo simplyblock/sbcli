@@ -38,6 +38,13 @@ class KMSClient:
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
 
+    def __enter__(self):
+        self.session.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self.session.__exit__(*args)
+
     def _request(self, method, path, payload=None):
         try:
             logger.debug("Requesting path: %s, params: %s", self.url + path, payload)

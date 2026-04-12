@@ -99,13 +99,13 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     logger.info("Done")
 
     if cluster.deploy_kms:
-        kms_client = KMSClient(cluster)
-        try:
-            kms_client.create_pool_key(pool)
-            kms_client.update_pool_key(pool)
-            logger.info("Created pool key")
-        except KMSClientException:
-            logger.eception("Failed to create pool key")
+        with KMSClient(cluster) as kms_client:
+            try:
+                kms_client.create_pool_key(pool)
+                kms_client.update_pool_key(pool)
+                logger.info("Created pool key")
+            except KMSClientException:
+                logger.eception("Failed to create pool key")
 
     return pool.get_id()
 
@@ -279,12 +279,12 @@ def delete_pool(uuid):
     pool.remove(db_controller.kv_store)
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.deploy_kms:
-        kms_client = KMSClient(cluster)
-        try:
-            kms_client.delete_pool_key(pool)
-            logger.info("Deleted pool key")
-        except KMSClientException:
-            logger.exception("Failed to delete pool key")
+        with KMSClient(cluster) as kms_client:
+            try:
+                kms_client.delete_pool_key(pool)
+                logger.info("Deleted pool key")
+            except KMSClientException:
+                logger.exception("Failed to delete pool key")
 
     logger.info("Done")
     return True
