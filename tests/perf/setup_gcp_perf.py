@@ -3,19 +3,25 @@
 setup_gcp_perf.py – GCP cluster deployer for simplyblock performance testing.
 
 Topology:
-  - 3 × C3D storage nodes, each with 3 NVMe local SSDs (375 GB each), same zone/subnet
+  - 5 × c3d-standard-8-lssd storage nodes, each with 1 bundled NVMe local SSD (375 GB),
+    all in the same zone and subnet
   - 1 × management node (same zone/subnet)
   - 1 × client node (same zone/subnet)
+  - Cluster: ndcs=1 npcs=1 FTT=1
 
-All storage nodes, mgmt, and client are placed in the same zone and subnetwork
-so NVMe-oF fabric traffic stays local.
+NVMe queue pair rationale:
+  - c3d-standard-8-lssd has 1 bundled SSD exposed as a separate PCI controller (NCQA=2)
+  - c3d-standard-30-lssd (2 SSDs) was tried but failed: each controller only supports NCQA=2
+    and simplyblock needs 3 queue pairs when 2 SSDs share a node (data alceml + JM alceml
+    + one more). With 1 SSD per node the 2 available queues are exactly sufficient.
+  - Attached NVMe SSDs (--local-ssd interface=NVME) on all other GCP machine types share
+    a single PCI controller with multiple namespaces — not supported by simplyblock SPDK.
 
 GCP local SSD notes:
   - Each NVMe local SSD is exactly 375 GB (size is fixed by GCP, not configurable)
-  - 3 SSDs per node = 3 × 375 GB = 1.125 TB per storage node
   - Local SSDs survive reboot but are lost on stop/start; fine for storage nodes
   - C3D instances only support NVME interface (not SCSI)
-  - Ensure your chosen ZONE supports C3D machine types (e.g. us-central1-a)
+  - Ensure your chosen ZONE supports C3D machine types (e.g. us-central1-b)
 
 Prerequisites:
   - gcloud CLI installed and authenticated:
@@ -32,15 +38,19 @@ import os
 import re
 import select
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+# On Windows, gcloud is a .cmd file and needs to be invoked via cmd /c
+_GCLOUD_CMD = ["cmd", "/c", "gcloud"] if sys.platform == "win32" else ["gcloud"]
 
 # ---------------------------------------------------------------------------
 # INPUT PARAMETERS — edit these before running
 # ---------------------------------------------------------------------------
 
-PROJECT_ID   = "your-gcp-project-id"         # gcloud project ID
-ZONE         = "us-central1-a"               # Must support C3D (c3d-standard-*)
+PROJECT_ID   = "devmichael"                   # gcloud project ID
+ZONE         = "us-central1-b"               # Must support C3D (c3d-standard-*)
 REGION       = ZONE.rsplit("-", 1)[0]         # Derived from ZONE (e.g. us-central1)
 SUBNET       = "default"                      # Subnetwork name in REGION
 NETWORK      = "default"                      # VPC network name
@@ -54,11 +64,11 @@ SSH_USER         = "sbadmin"                  # Linux user GCP creates from key 
 
 BRANCH   = "lvol-migration-fresh"
 MAX_LVOL = "50"
-IFACE    = "ens4"                             # Primary NIC name on GCP VMs
+IFACE    = "eth0"                             # Primary NIC name on GCP VMs (c3d instances use eth0)
 
-SN_COUNT        = 3
-LOCAL_SSD_COUNT = 3                           # × 375 GB NVMe per storage node
-SN_MACHINE_TYPE     = "c3d-standard-8"        # C3D — NVMe local SSD required
+SN_COUNT        = 5
+LOCAL_SSD_COUNT = 0                           # Bundled in machine type (c3d-standard-8-lssd = 1 × 375 GB)
+SN_MACHINE_TYPE     = "c3d-standard-8-lssd"  # C3D with 1 bundled NVMe local SSD (375 GB per node)
 MGMT_MACHINE_TYPE   = "n2-standard-4"
 CLIENT_MACHINE_TYPE = "n2-standard-8"
 
@@ -72,7 +82,7 @@ NAME_PREFIX  = "sb"
 
 def _gcloud(args, check=True, capture=True):
     """Run a gcloud command. Returns parsed JSON if output is JSON, else raw str."""
-    cmd = ["gcloud", "--project", PROJECT_ID, "--quiet"] + args
+    cmd = _GCLOUD_CMD + ["--project", PROJECT_ID, "--quiet"] + args
     result = subprocess.run(
         cmd, capture_output=capture, text=True,
         check=False,
@@ -105,41 +115,46 @@ def _ssh_key_metadata():
 # Firewall
 # ---------------------------------------------------------------------------
 
+def _gcloud_idempotent(args):
+    """Run a gcloud create command, silently succeeding if resource already exists."""
+    result = subprocess.run(
+        _GCLOUD_CMD + ["--project", PROJECT_ID, "--quiet"] + args,
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode == 0:
+        return
+    if "already exists" in result.stderr or "alreadyExists" in result.stderr:
+        return  # idempotent — rule already present from a previous run
+    print(f"  [gcloud] FAILED: {' '.join(args[:4])}")
+    if result.stderr:
+        print(f"  stderr: {result.stderr.strip()}")
+    raise RuntimeError(f"gcloud command failed (rc={result.returncode})")
+
+
 def ensure_firewall_rules():
     """Idempotently create firewall rules for the cluster tag."""
-    existing = _gcloud(["compute", "firewall-rules", "list",
-                        "--filter", f"targetTags:{CLUSTER_TAG}",
-                        "--format=json"], check=False) or []
-    existing_names = {r["name"] for r in (existing if isinstance(existing, list) else [])}
-
     ssh_rule = f"{NAME_PREFIX}-allow-ssh"
     internal_rule = f"{NAME_PREFIX}-allow-internal"
 
-    if ssh_rule not in existing_names:
-        print(f"  Creating firewall rule: {ssh_rule}")
-        _gcloud([
-            "compute", "firewall-rules", "create", ssh_rule,
-            "--network", NETWORK,
-            "--allow", "tcp:22",
-            "--target-tags", CLUSTER_TAG,
-            "--source-ranges", "0.0.0.0/0",
-            "--description", "Allow SSH to simplyblock cluster nodes",
-        ])
-    else:
-        print(f"  Firewall rule already exists: {ssh_rule}")
+    print(f"  Ensuring firewall rule: {ssh_rule}")
+    _gcloud_idempotent([
+        "compute", "firewall-rules", "create", ssh_rule,
+        "--network", NETWORK,
+        "--allow", "tcp:22",
+        "--target-tags", CLUSTER_TAG,
+        "--source-ranges", "0.0.0.0/0",
+        "--description", "Allow SSH to simplyblock cluster nodes",
+    ])
 
-    if internal_rule not in existing_names:
-        print(f"  Creating firewall rule: {internal_rule}")
-        _gcloud([
-            "compute", "firewall-rules", "create", internal_rule,
-            "--network", NETWORK,
-            "--allow", "all",
-            "--target-tags", CLUSTER_TAG,
-            "--source-tags", CLUSTER_TAG,
-            "--description", "Allow all traffic between simplyblock cluster nodes",
-        ])
-    else:
-        print(f"  Firewall rule already exists: {internal_rule}")
+    print(f"  Ensuring firewall rule: {internal_rule}")
+    _gcloud_idempotent([
+        "compute", "firewall-rules", "create", internal_rule,
+        "--network", NETWORK,
+        "--allow", "all",
+        "--target-tags", CLUSTER_TAG,
+        "--source-tags", CLUSTER_TAG,
+        "--description", "Allow all traffic between simplyblock cluster nodes",
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -154,8 +169,23 @@ def _local_ssd_flags(count):
     return flags
 
 
+def get_instance(name):
+    """Return existing instance dict or None if not found."""
+    result = _gcloud([
+        "compute", "instances", "describe", name,
+        "--zone", ZONE, "--format=json",
+    ], check=False)
+    if isinstance(result, dict):
+        return result
+    return None
+
+
 def launch_instance(name, machine_type, local_ssds=0, boot_disk_gb=50):
-    """Create a single GCP instance. Returns parsed instance dict."""
+    """Create a single GCP instance, or return existing one. Returns parsed instance dict."""
+    existing = get_instance(name)
+    if existing:
+        print(f"  {name} already exists — reusing.")
+        return existing
     print(f"  Launching {name} ({machine_type})...")
     cmd = [
         "compute", "instances", "create", name,
@@ -171,29 +201,43 @@ def launch_instance(name, machine_type, local_ssds=0, boot_disk_gb=50):
         "--format=json",
     ] + _local_ssd_flags(local_ssds)
     result = _gcloud(cmd)
-    # gcloud returns a list when creating instances
     instances = result if isinstance(result, list) else [result]
     return instances[0]
 
 
 def launch_instances_batch(names, machine_type, local_ssds=0, boot_disk_gb=50):
-    """Create multiple GCP instances in one gcloud call. Returns list of instance dicts."""
-    print(f"  Launching {len(names)} × {machine_type} instances: {names}")
-    cmd = [
-        "compute", "instances", "create", *names,
-        "--zone", ZONE,
-        "--machine-type", machine_type,
-        "--subnet", SUBNET,
-        "--image-project", IMAGE_PROJECT,
-        "--image-family", IMAGE_FAMILY,
-        "--boot-disk-size", f"{boot_disk_gb}GB",
-        "--boot-disk-type", "pd-ssd",
-        "--tags", CLUSTER_TAG,
-        "--metadata", _ssh_key_metadata(),
-        "--format=json",
-    ] + _local_ssd_flags(local_ssds)
-    result = _gcloud(cmd)
-    return result if isinstance(result, list) else [result]
+    """Create multiple GCP instances in one gcloud call, skipping existing ones."""
+    to_create = []
+    existing = {}
+    for name in names:
+        inst = get_instance(name)
+        if inst:
+            print(f"  {name} already exists — reusing.")
+            existing[name] = inst
+        else:
+            to_create.append(name)
+    results = list(existing.values())
+    if to_create:
+        print(f"  Launching {len(to_create)} × {machine_type} instances: {to_create}")
+        cmd = [
+            "compute", "instances", "create", *to_create,
+            "--zone", ZONE,
+            "--machine-type", machine_type,
+            "--subnet", SUBNET,
+            "--image-project", IMAGE_PROJECT,
+            "--image-family", IMAGE_FAMILY,
+            "--boot-disk-size", f"{boot_disk_gb}GB",
+            "--boot-disk-type", "pd-ssd",
+            "--tags", CLUSTER_TAG,
+            "--metadata", _ssh_key_metadata(),
+            "--format=json",
+        ] + _local_ssd_flags(local_ssds)
+        result = _gcloud(cmd)
+        created = result if isinstance(result, list) else [result]
+        results += created
+    # Return in original order
+    name_to_inst = {inst["name"]: inst for inst in results}
+    return [name_to_inst[n] for n in names]
 
 
 def get_instance_ips(instance_dict):
@@ -384,7 +428,7 @@ def main():
     # --- 5. Phase 1: Install sbcli on all setup nodes in parallel ---
     print("\n[5/7] Phase 1: Installing sbcli on all nodes...")
     install_cmds = [
-        "sudo dnf install git python3-pip nvme-cli -y",
+        "sudo dnf install git python3-pip nvme-cli pciutils -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
         f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
@@ -404,7 +448,7 @@ def main():
     ssh_exec(mgmt_pub_ip, [
         "sudo /usr/local/bin/sbctl -d cluster create"
         " --enable-node-affinity"
-        " --data-chunks-per-stripe 2"
+        " --data-chunks-per-stripe 1"
         " --parity-chunks-per-stripe 1"
         " --max-fault-tolerance 1"
     ], check=True)
@@ -461,7 +505,7 @@ def main():
             try:
                 ssh_exec(mgmt_pub_ip, [
                     f"sudo /usr/local/bin/sbctl -d sn add-node"
-                    f" {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 2"
+                    f" {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 3"
                 ], check=True)
                 break
             except RuntimeError:
