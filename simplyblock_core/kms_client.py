@@ -19,7 +19,6 @@ class KMSClientException(Exception):
 
 
 class KMSClient:
-
     def __init__(self, cluster_id, timeout=300, retry=5):
         db_controller = DBController()
         cluster = db_controller.get_cluster_by_id(cluster_id)
@@ -30,34 +29,38 @@ class KMSClient:
             self.ip_address = f"{mnode.mgmt_ip}:8200"
         else:
             self.ip_address = "simplyblock-kms:8200"
-        self.url = 'http://%s/' % self.ip_address
+        self.url = "http://%s/" % self.ip_address
         self.timeout = timeout
         self.session = requests.session()
         self.cluster_id = cluster_id
         self.session.verify = False
-        self.session.headers['Content-Type'] = "application/json"
-        self.session.headers['X-Vault-Token'] = cluster.kms_root_token
+        self.session.headers["Content-Type"] = "application/json"
+        self.session.headers["X-Vault-Token"] = cluster.kms_root_token
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
 
     def _request(self, method, path, payload=None):
         try:
-            logger.debug("Requesting path: %s, params: %s", self.url+path, payload)
+            logger.debug("Requesting path: %s, params: %s", self.url + path, payload)
             data = None
             params = None
             if payload:
-                if method == "GET" :
+                if method == "GET":
                     params = payload
                 else:
                     data = json.dumps(payload)
 
-            response = self.session.request(method, self.url+path, data=data,
-                                            timeout=self.timeout, params=params)
+            response = self.session.request(
+                method, self.url + path, data=data, timeout=self.timeout, params=params
+            )
         except Exception as e:
             raise KMSClientException(str(e))
 
-        logger.debug("Response: status_code: %s, content: %s",
-                     response.status_code, response.content)
+        logger.debug(
+            "Response: status_code: %s, content: %s",
+            response.status_code,
+            response.content,
+        )
         ret_code = response.status_code
 
         result = None
@@ -71,8 +74,8 @@ class KMSClient:
             except Exception:
                 return response.content, None
 
-            result = decoded_data.get('data')
-            error = decoded_data.get('errors')
+            result = decoded_data.get("data")
+            error = decoded_data.get("errors")
             if result is not None or error is not None:
                 return result, error
             else:
@@ -98,28 +101,19 @@ class KMSClient:
         return self._request("POST", f"v1/{self.cluster_id}/{key_name}", params)
 
     def encrypt(self, key_name, plaintext):
-        params = {
-            "plaintext": plaintext
-        }
+        params = {"plaintext": plaintext}
         return self._request("POST", f"v1/transit/encrypt/{key_name}", params)
 
     def decrypt(self, key_name, ciphertext):
-        params = {
-            "ciphertext": ciphertext
-        }
+        params = {"ciphertext": ciphertext}
         return self._request("POST", f"v1/transit/decrypt/{key_name}", params)
 
     def create_pool_key(self, pool_uuid):
-        params = {
-            "type": "aes256-gcm96",
-            "exportable": False
-        }
+        params = {"type": "aes256-gcm96", "exportable": False}
         return self._request("POST", f"v1/transit/keys/{pool_uuid}", params)
 
     def update_pool_key(self, pool_uuid):
-        params = {
-            "deletion_allowed": True
-        }
+        params = {"deletion_allowed": True}
         return self._request("POST", f"v1/transit/keys/{pool_uuid}/config", params)
 
     def delete_pool_key(self, pool_uuid):
