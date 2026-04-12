@@ -35,7 +35,7 @@ class KMSClient:
         self.cluster_id = cluster_id
         self.session.verify = False
         self.session.headers["Content-Type"] = "application/json"
-        self.session.headers["X-Vault-Token"] = cluster.kms_root_token
+        self.session.headers["Authorization"] = f"Bearer {cluster.kms_root_token}"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
 
