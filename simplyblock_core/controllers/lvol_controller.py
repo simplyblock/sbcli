@@ -105,18 +105,10 @@ def _create_crypto_lvol_kms(snode, lvol, cluster):
 
     with create_kms_connection(cluster) as kms:
         try:
-            lvol_keys = kms.get_keys(name)
+            original_key1, original_key2 = kms.get_data_encryption_keys(lvol.pool_uuid, name)
         except KMSException:
-            logger.error(f"Failed to get keys for lvol: {name} from KMS")
-            if lvol.crypto_key1 and lvol.crypto_key2:
-                logger.warning(f"Using keys from DB for lvol: {name}")
-                return _create_crypto_lvol(rpc_client, name, base_name, lvol.crypto_key1, lvol.crypto_key2)
-
-        base64_key1 = kms.decrypt(lvol.pool_uuid, lvol_keys['key1'][0]['ciphertext'])
-        original_key1 = base64_key1['plaintext']
-
-        base64_key2 = kms.decrypt(lvol.pool_uuid, lvol_keys['key2'][0]['ciphertext'])
-        original_key2 = base64_key2['plaintext']
+            logger.exception(f"Failed to get keys for lvol: {name} from KMS")
+            return False
 
     key_name = f'key_{name}'
     ret = rpc_client.lvol_crypto_key_create(key_name, original_key1, original_key2)
@@ -588,9 +580,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
     lvol.bdev_stack = [lvol_dict]
 
     if use_crypto:
-        crypto_key1 = utils.generate_hex_string(32)
-        crypto_key2 = utils.generate_hex_string(32)
-
         lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
         lvol.bdev_stack.append({
             "type": "crypto",
@@ -606,15 +595,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         if cl.deploy_kms:
             with create_kms_connection(cl) as kms:
                 try:
-                    encrypted_key1 = kms.encrypt(pool.get_id(), crypto_key1)
-                    encrypted_key2 = kms.encrypt(pool.get_id(), crypto_key2)
-                    kms.save_keys(lvol.crypto_bdev, encrypted_key1, encrypted_key2)
-                    logger.info("Saved lvol keys")
+                    kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
+                    logger.info("Created lvol keys")
                 except KMSException:
-                    logger.exception("Failed to save lvol keys")
+                    logger.exception("Failed to create lvol keys")
         else:
-            lvol.crypto_key1 = crypto_key1
-            lvol.crypto_key2 = crypto_key2
+            lvol.crypto_key1 = utils.generate_hex_string(32)
+            lvol.crypto_key2 = utils.generate_hex_string(32)
 
     # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
     # Security options are inherited from the pool
@@ -1255,7 +1242,7 @@ def delete_lvol(id_or_name, force_delete=False):
     if cl.deploy_kms:
         with create_kms_connection(cl) as kms:
             try:
-                kms.delete_key(lvol.crypto_bdev)
+                kms.delete_data_encryption_keys(lvol.crypto_bdev)
                 logger.info("Deleted lvol key")
             except KMSException:
                 logger.exception("Failed to delete lvol key")

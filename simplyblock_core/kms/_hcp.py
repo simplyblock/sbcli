@@ -1,3 +1,4 @@
+import operator
 import logging
 from uuid import UUID
 
@@ -5,8 +6,6 @@ import requests
 from requests.exceptions import HTTPError, RequestException
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
-
-from simplyblock_core.models import Pool
 
 from ._base import KMS
 from ._exceptions import KMSException
@@ -64,23 +63,31 @@ class HCPClient(KMS):
         except RequestException as e:
             raise KMSException("Request failed") from e
 
-    def get_keys(self, key_name) -> dict:
-        return self._request("GET", f"{self.cluster_id}/{key_name}")
+    def _create_data_encryption_key(self, kek_name: str) -> str:
+        return self._request("POST", f"transit/datakey/wrapped/{kek_name}")["data"]["ciphertext"]
 
-    def save_keys(self, key: str, key1: str, key2: str) -> None:
+    def create_data_encryption_keys(self, kek_name: str, name: str) -> None:
         self._request(
             "POST",
-            f"{self.cluster_id}/{key}",
-            {"key1": key1, "key2": key2},
+            f"{self.cluster_id}/{name}",
+            {
+                "key1": self._create_data_encryption_key(kek_name),
+                "key2": self._create_data_encryption_key(kek_name),
+            },
         )
 
-    def encrypt(self, key: str, plaintext: str) -> str:
-        return self._request("POST", f"transit/encrypt/{key}", {"plaintext": plaintext})
-
-    def decrypt(self, key: str, ciphertext: str) -> str:
+    def _decrypt(self, kek_name: str, ciphertext: str) -> str:
         return self._request(
-            "POST", f"transit/decrypt/{key}", {"ciphertext": ciphertext}
+            "POST", f"transit/decrypt/{kek_name}", {"ciphertext": ciphertext}
         )
+
+    def get_data_encryption_keys(self, kek_name: str, name: str) -> dict:
+        key_accessor = operator.attrgetter("key1", "key2")
+        encrypted_key1, encrypted_key2 = key_accessor(self._request("GET", f"{self.cluster_id}/{name}")["data"])
+        return self._decrypt(kek_name, encrypted_key1), self._decrypt(kek_name, encrypted_key2)
+
+    def delete_data_encryption_keys(self, name: str) -> None:
+        self._request("DELETE", f"{self.cluster_id}/{name}")
 
     def create_key_encryption_key(self, name: str) -> None:
         params = {"type": "aes256-gcm96", "exportable": False}
@@ -89,6 +96,3 @@ class HCPClient(KMS):
 
     def delete_key_encryption_key(self, name: str) -> None:
         self._request("DELETE", f"transit/keys/{name}")
-
-    def delete_key(self, key: str) -> None:
-        self._request("DELETE", f"{self.cluster_id}/{key}")
