@@ -116,7 +116,6 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__clean_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clean-devices', 'clean devices stored in /etc/simplyblock/sn_config_file (local run)')
         argument = subcommand.add_argument('--config-path', help='Config path to read stored nvme devices from', type=str, default='/etc/simplyblock/sn_config_file', dest='config_path', required=False)
-        argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K sector size', dest='format_4k', action='store_true')
 
     def init_storage_node__add_node(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a storage node by its IP address')
@@ -603,6 +602,12 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
+        self.init_volume__replication_start(subparser)
+        self.init_volume__replication_stop(subparser)
+        self.init_volume__replication_status(subparser)
+        self.init_volume__replication_trigger(subparser)
+        self.init_volume__suspend(subparser)
+        self.init_volume__resume(subparser)
         self.init_volume__clone_lvol(subparser)
         if self.developer_mode:
             self.init_volume__migrate(subparser)
@@ -610,12 +615,6 @@ class CLIWrapper(CLIWrapperBase):
             self.init_volume__migrate_list(subparser)
         if self.developer_mode:
             self.init_volume__migrate_cancel(subparser)
-        self.init_volume__replication_start(subparser)
-        self.init_volume__replication_stop(subparser)
-        self.init_volume__replication_status(subparser)
-        self.init_volume__replication_trigger(subparser)
-        self.init_volume__suspend(subparser)
-        self.init_volume__resume(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -741,11 +740,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
 
-    def init_volume__clone_lvol(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'clone-lvol', 'Create logical volume clone by taking a snapshot and then cloning it.')
-        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
-        subcommand.add_argument('clone_name', help='New lvol clone name', type=str)
-
     def init_volume__replication_start(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-start', 'Start snapshot replication taken from lvol')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
@@ -770,6 +764,11 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__resume(self, subparser):
         subcommand = self.add_sub_command(subparser, 'resume', 'Resume lvol subsystems')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__clone_lvol(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'clone-lvol', 'Create logical volume clone by taking a snapshot and then cloning it.')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('clone_name', help='New lvol clone name', type=str)
 
     def init_volume__migrate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate', 'Migrate a logical volume to a different storage node')
@@ -1349,6 +1348,18 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
+                elif sub_command in ['replication-start']:
+                    ret = self.volume__replication_start(sub_command, args)
+                elif sub_command in ['replication-stop']:
+                    ret = self.volume__replication_stop(sub_command, args)
+                elif sub_command in ['replication-status']:
+                    ret = self.volume__replication_status(sub_command, args)
+                elif sub_command in ['replication-trigger']:
+                    ret = self.volume__replication_trigger(sub_command, args)
+                elif sub_command in ['suspend']:
+                    ret = self.volume__suspend(sub_command, args)
+                elif sub_command in ['resume']:
+                    ret = self.volume__resume(sub_command, args)
                 elif sub_command in ['clone-lvol']:
                     ret = self.volume__clone_lvol(sub_command, args)
                 elif sub_command in ['migrate']:
@@ -1369,18 +1380,6 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.volume__migrate_cancel(sub_command, args)
-                elif sub_command in ['replication-start']:
-                    ret = self.volume__replication_start(sub_command, args)
-                elif sub_command in ['replication-stop']:
-                    ret = self.volume__replication_stop(sub_command, args)
-                elif sub_command in ['replication-status']:
-                    ret = self.volume__replication_status(sub_command, args)
-                elif sub_command in ['replication-trigger']:
-                    ret = self.volume__replication_trigger(sub_command, args)
-                elif sub_command in ['suspend']:
-                    ret = self.volume__suspend(sub_command, args)
-                elif sub_command in ['resume']:
-                    ret = self.volume__resume(sub_command, args)
                 else:
                     self.parser.print_help()
 
