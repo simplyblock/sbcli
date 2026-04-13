@@ -166,12 +166,12 @@ class CLIWrapperBase:
             num_partitions_per_dev = 0
         else:
             # Deprecated but still supported for backward compatibility.
-            print("WARNING: --journal-partition is deprecated, use --enable-journal-device instead")
             if args.partitions is None:
                 num_partitions_per_dev = 1
             elif args.partitions < 0 or args.partitions > 1:
                 self.parser.error("partitions must be either 0 or 1")
             else:
+                print("WARNING: --journal-partition is deprecated, use --enable-journal-device instead")
                 num_partitions_per_dev = args.partitions
 
         try:
