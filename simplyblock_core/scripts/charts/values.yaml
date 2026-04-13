@@ -15,11 +15,11 @@ observability:
 image:
   simplyblock: 
     repository: "simplyblock/simplyblock"
-    tag: "main-snapshot-replication"
+    tag: "main"
     pullPolicy: "Always"
   manager:
     repository: "simplyblock/simplyblock-manager"
-    tag: "snapshot_replication"
+    tag: "main"
     pullPolicy: "Always"
 
 tolerations:
