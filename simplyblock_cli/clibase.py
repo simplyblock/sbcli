@@ -153,7 +153,6 @@ class CLIWrapperBase:
 
         small_bufsize = args.small_bufsize
         large_bufsize = args.large_bufsize
-        num_partitions_per_dev = args.partitions
         jm_percent = args.jm_percent
 
         max_snap = args.max_snap
@@ -162,6 +161,13 @@ class CLIWrapperBase:
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
         format_4k = args.format_4k
+
+        if args.use_separate_journal_device:
+            num_partitions_per_dev = 0
+        else:
+            # Deprecated, but still supported for backward compatibility.
+            num_partitions_per_dev = args.partitions
+
         try:
             out = storage_ops.add_node(
                 cluster_id=cluster_id,
