@@ -1493,12 +1493,12 @@ class RPCClient:
             cluster_batch: batch size in clusters (default 1)
         Returns RPC result (truthy on success). Poll with bdev_lvol_transfer_stat.
         """
-        params = {
-            "s3_id": s3_id,
-            "snapshot_names": snapshot_names,
-            "cluster_batch": cluster_batch,
-        }
-        return self._request("bdev_lvol_s3_backup", params)
+        return self._request3(
+            "bdev_lvol_s3_backup",
+            s3_id=s3_id,
+            snapshot_names=snapshot_names,
+            cluster_batch=cluster_batch,
+        )
 
     # Backup/recovery/merge polling: use bdev_lvol_transfer_stat(lvol_name)
     # which reads lvol->transfer_status on the data plane. Works for backup
@@ -1508,14 +1508,14 @@ class RPCClient:
     def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None):
         """Merge two backups: keep s3_id and merge old_s3_id into it.
         This shortens the backup chain."""
-        params = {
+        kwargs = {
             "s3_id": s3_id,
             "old_s3_id": old_s3_id,
             "cluster_batch": cluster_batch,
         }
         if lvs_name:
-            params["lvs_name"] = lvs_name
-        return self._request("bdev_lvol_s3_merge", params)
+            kwargs["lvs_name"] = lvs_name
+        return self._request3("bdev_lvol_s3_merge", **kwargs)
 
     def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch):
         """Restore a chain of S3 backups into a new lvol.
@@ -1524,15 +1524,14 @@ class RPCClient:
             s3_ids: list of S3 backup IDs (uint32) forming the chain (oldest first)
             cluster_batch: batch size in clusters
         """
-        return self._request("bdev_lvol_s3_recovery", {
-            "lvol_name": lvol_name,
-            "cluster_batch": cluster_batch,
-            "s3_ids": s3_ids,
-        })
+        return self._request3(
+            "bdev_lvol_s3_recovery",
+            lvol_name=lvol_name,
+            cluster_batch=cluster_batch,
+            s3_ids=s3_ids,
+        )
 
     def bdev_lvol_s3_delete(self, s3_ids):
         """Delete all S3 backups for the given IDs (list of uint32)."""
         # RPC still missing on data plane — use dummy
-        return self._request("bdev_lvol_s3_delete", {
-            "s3_ids": s3_ids,
-        })
+        return self._request3("bdev_lvol_s3_delete", s3_ids=s3_ids)
