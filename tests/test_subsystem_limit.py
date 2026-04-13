@@ -219,13 +219,8 @@ class TestAddLvolHaSubsystemLimit(unittest.TestCase):
         self.assertEqual(subsys_count, 1)
         self.assertFalse(subsys_count > node.max_lvol)
 
-    def test_exact_boundary_rejected(self):
-        """Subsystem count exactly at max_lvol: >= check should reject.
-
-        Harmonised with the selector and the clone path so a node already at
-        the limit cannot accept a new subsystem regardless of which entry
-        point is taken.
-        """
+    def test_exact_boundary_not_rejected(self):
+        """Subsystem count exactly at max_lvol: > check should pass (not reject)."""
         node = _node("n1", max_lvol=3)
         lvols = [
             _lvol("v1", "n1", nqn="nqn:A"),
@@ -233,10 +228,10 @@ class TestAddLvolHaSubsystemLimit(unittest.TestCase):
             _lvol("v3", "n1", nqn="nqn:C"),
         ]
         subsys_count = self._count_subsystems(lvols)
-        self.assertTrue(subsys_count >= node.max_lvol)
+        self.assertFalse(subsys_count > node.max_lvol)
 
     def test_one_over_boundary_rejected(self):
-        """Subsystem count one above max_lvol: >= check should reject."""
+        """Subsystem count one above max_lvol: > check should reject."""
         node = _node("n1", max_lvol=2)
         lvols = [
             _lvol("v1", "n1", nqn="nqn:A"),
@@ -244,7 +239,7 @@ class TestAddLvolHaSubsystemLimit(unittest.TestCase):
             _lvol("v3", "n1", nqn="nqn:C"),
         ]
         subsys_count = self._count_subsystems(lvols)
-        self.assertTrue(subsys_count >= node.max_lvol)
+        self.assertTrue(subsys_count > node.max_lvol)
 
 
 # ===========================================================================
@@ -321,137 +316,38 @@ class TestSnapshotCloneSubsystemLimit(unittest.TestCase):
 
 
 # ===========================================================================
-# Tests verifying the boundary check is harmonised across all three sites
+# Tests verifying the boundary difference between add_lvol_ha and clone
 # ===========================================================================
 
-class TestBoundaryHarmonised(unittest.TestCase):
-    """All three subsystem-limit sites use ``>=`` against ``max_lvol``.
+class TestBoundaryDifference(unittest.TestCase):
+    """add_lvol_ha uses > while snapshot clone uses >=.
 
-    Previously add_lvol_ha used ``>`` while the selector and clone path used
-    ``>=`` — a node at the limit would be filtered out by the selector but
-    the post-selection guard would still permit a create. The behaviour is
-    now uniform.
+    This verifies the existing asymmetry is correctly preserved.
     """
 
+    def test_add_lvol_ha_allows_at_exact_boundary(self):
+        """add_lvol_ha: subsys_count == max_lvol should NOT reject (> check)."""
+        max_lvol = 3
+        lvols = [_lvol(f"v{i}", "n1", nqn=f"nqn:{i}") for i in range(3)]
+        subsys_count = len(set(lv.nqn for lv in lvols))
+        self.assertEqual(subsys_count, max_lvol)
+        self.assertFalse(subsys_count > max_lvol)
+
+    def test_snapshot_clone_rejects_at_exact_boundary(self):
+        """snapshot clone: subsys_count == max_lvol should reject (>= check)."""
+        max_lvol = 3
+        lvols = [_lvol(f"v{i}", "n1", nqn=f"nqn:{i}") for i in range(3)]
+        subsys_count = len(set(lv.nqn for lv in lvols))
+        self.assertEqual(subsys_count, max_lvol)
+        self.assertTrue(subsys_count >= max_lvol)
+
     def test_get_next_3_nodes_rejects_at_exact_boundary(self):
+        """_get_next_3_nodes: subsys_count == max_lvol should reject (>= check)."""
         max_lvol = 2
         lvols = [_lvol(f"v{i}", "n1", nqn=f"nqn:{i}") for i in range(2)]
         subsys_count = len(set(lv.nqn for lv in lvols))
         self.assertEqual(subsys_count, max_lvol)
         self.assertTrue(subsys_count >= max_lvol)
-
-    def test_add_lvol_ha_rejects_at_exact_boundary(self):
-        max_lvol = 3
-        lvols = [_lvol(f"v{i}", "n1", nqn=f"nqn:{i}") for i in range(3)]
-        subsys_count = len(set(lv.nqn for lv in lvols))
-        self.assertEqual(subsys_count, max_lvol)
-        self.assertTrue(subsys_count >= max_lvol)
-
-    def test_snapshot_clone_rejects_at_exact_boundary(self):
-        max_lvol = 3
-        lvols = [_lvol(f"v{i}", "n1", nqn=f"nqn:{i}") for i in range(3)]
-        subsys_count = len(set(lv.nqn for lv in lvols))
-        self.assertEqual(subsys_count, max_lvol)
-        self.assertTrue(subsys_count >= max_lvol)
-
-
-# ===========================================================================
-# Tests for stale-status filtering in _count_active_subsystems
-# ===========================================================================
-
-class TestInDeletionFiltering(unittest.TestCase):
-    """Lvols in IN_DELETION / IN_CREATION must not consume a subsystem slot.
-
-    Stale rows from a half-completed delete (or in-flight create) used to
-    inflate ``subsys_count`` and cause ``_get_next_3_nodes`` to fire
-    ``max_lvol`` rejection earlier than the actual subsystem load on the
-    node justified.
-    """
-
-    def test_count_excludes_in_deletion(self):
-        from simplyblock_core.controllers.lvol_controller import _count_active_subsystems
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-            _lvol("v3", "n1", nqn="nqn:C"),
-            _lvol("v4", "n1", nqn="nqn:D"),
-        ]
-        lvols[2].status = LVol.STATUS_IN_DELETION
-        lvols[3].status = LVol.STATUS_IN_CREATION
-
-        db = MagicMock()
-        db.get_lvols_by_node_id.return_value = lvols
-        self.assertEqual(_count_active_subsystems(db, "n1"), 2)
-
-    def test_get_next_3_nodes_does_not_count_stale_rows(self):
-        """A node at max_lvol with all stale rows should still be eligible."""
-        node = _node("n1", max_lvol=3)
-        lvols = [_lvol(f"v{i}", "n1", nqn=f"nqn:{i}") for i in range(3)]
-        for lv in lvols:
-            lv.status = LVol.STATUS_IN_DELETION
-        result = _call_get_next_3_nodes([node], lvols)
-        self.assertIn(node, result)
-
-    def test_get_next_3_nodes_partial_stale_keeps_eligibility(self):
-        """Stale rows must not push an otherwise-fitting node over the limit."""
-        node = _node("n1", max_lvol=3)
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-            _lvol("v3", "n1", nqn="nqn:C-stale"),
-        ]
-        lvols[2].status = LVol.STATUS_IN_DELETION
-        result = _call_get_next_3_nodes([node], lvols)
-        self.assertIn(node, result)
-
-
-# ===========================================================================
-# Tests for the no-eligible-node breakdown logged by _get_next_3_nodes
-# ===========================================================================
-
-class TestSkipReasonLogging(unittest.TestCase):
-    """When no node is eligible, the cause breakdown must be logged so the
-    caller's generic 'No nodes found with enough resources' error can be
-    correlated with the actual exclusion reason."""
-
-    def _run_capturing_logs(self, nodes, lvols_by_node, sync_del=False):
-        with patch("simplyblock_core.controllers.lvol_controller.DBController") as mock_db_cls:
-            from simplyblock_core.controllers.lvol_controller import _get_next_3_nodes, logger
-            db = MagicMock()
-            db.get_storage_nodes_by_cluster_id.return_value = nodes
-            if callable(lvols_by_node):
-                db.get_lvols_by_node_id.side_effect = lvols_by_node
-            else:
-                db.get_lvols_by_node_id.return_value = lvols_by_node
-            mock_db_cls.return_value = db
-            with patch.object(StorageNode, 'lvol_sync_del', return_value=sync_del):
-                with patch.object(logger, 'warning') as warn_mock:
-                    result = _get_next_3_nodes("cluster-1")
-                    return result, warn_mock
-
-    def test_logs_subsys_full_breakdown(self):
-        node = _node("n1", max_lvol=1)
-        lvols = [_lvol("v1", "n1", nqn="nqn:A")]
-        result, warn = self._run_capturing_logs([node], lvols)
-        self.assertEqual(result, [])
-        joined = " ".join(call.args[0] for call in warn.call_args_list)
-        self.assertIn("subsys_full=1", joined)
-        self.assertIn("offline=0", joined)
-        self.assertIn("sync_del=0", joined)
-
-    def test_logs_sync_del_breakdown(self):
-        node = _node("n1", max_lvol=10)
-        result, warn = self._run_capturing_logs([node], [], sync_del=True)
-        self.assertEqual(result, [])
-        joined = " ".join(call.args[0] for call in warn.call_args_list)
-        self.assertIn("sync_del=1", joined)
-
-    def test_logs_offline_breakdown(self):
-        node = _node("n1", max_lvol=10, status=StorageNode.STATUS_OFFLINE)
-        result, warn = self._run_capturing_logs([node], [])
-        self.assertEqual(result, [])
-        joined = " ".join(call.args[0] for call in warn.call_args_list)
-        self.assertIn("offline=1", joined)
 
 
 if __name__ == "__main__":

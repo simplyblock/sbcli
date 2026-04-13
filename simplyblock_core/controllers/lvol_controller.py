@@ -187,58 +187,26 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     return True, ""
 
 
-def _count_active_subsystems(db_controller, node_id):
-    """Count unique subsystems (NQNs) on a node, ignoring lvols whose state
-    means they are not consuming a real subsystem slot at present.
-
-    Excluded states: IN_DELETION (gone or going), IN_CREATION (not yet
-    realised on the target). Including them inflates subsys_count and makes
-    the max_lvol gate fire earlier than the actual subsystem load justifies
-    when a previous create/delete left a stale row in FDB.
-    """
-    excluded = (LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION)
-    return len({
-        lv.nqn for lv in db_controller.get_lvols_by_node_id(node_id)
-        if lv.status not in excluded
-    })
-
-
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     online_nodes = []
     node_stats = {}
-    skip_reasons = {"offline": 0, "subsys_full": 0, "sync_del": 0}
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
-        if node.status != node.STATUS_ONLINE:
-            skip_reasons["offline"] += 1
-            continue
-        subsys_count = _count_active_subsystems(db_controller, node.get_id())
-        if subsys_count >= node.max_lvol:
-            skip_reasons["subsys_full"] += 1
-            continue
-        if node.lvol_sync_del():
-            logger.warning(f"LVol sync delete task found on node: {node.get_id()}, skipping")
-            skip_reasons["sync_del"] += 1
-            continue
-        online_nodes.append(node)
-        node_st = {
-            "lvol": subsys_count+1
-        }
-        node_stats[node.get_id()] = node_st
-
-    if not online_nodes:
-        # Surface the skip breakdown on the logger so the caller's generic
-        # "No nodes found with enough resources" message can be correlated
-        # with the actual exclusion cause.
-        logger.warning(
-            "No eligible storage nodes for placement: "
-            f"offline={skip_reasons['offline']}, "
-            f"subsys_full={skip_reasons['subsys_full']}, "
-            f"sync_del={skip_reasons['sync_del']}"
-        )
+        if node.status == node.STATUS_ONLINE:
+            subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(node.get_id())))
+            if subsys_count >= node.max_lvol:
+                continue
+            if node.lvol_sync_del():
+                logger.warning(f"LVol sync delete task found on node: {node.get_id()}, skipping")
+                continue
+            online_nodes.append(node)
+            node_st = {
+                "lvol": subsys_count+1
+            }
+            node_stats[node.get_id()] = node_st
 
     if len(online_nodes) <= 1:
         return online_nodes
@@ -561,8 +529,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.npcs = cl.distr_npcs
         lvol.ndcs = cl.distr_ndcs
 
-    subsys_count = _count_active_subsystems(db_controller, host_node.get_id())
-    if subsys_count >= host_node.max_lvol:
+    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(host_node.get_id())))
+    if subsys_count > host_node.max_lvol:
         error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {subsys_count}"
         logger.error(error)
         return False, error
