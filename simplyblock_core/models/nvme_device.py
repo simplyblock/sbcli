@@ -47,6 +47,8 @@ class NVMeDevice(BaseModel):
     nvmf_nqn: str = ""
     nvmf_port: int = 0
     nvmf_multipath: bool = False
+    namespace_id: int = 0
+    namespace_name: str = ""
     pcie_address: str = ""
     physical_label: int = 0
     pt_bdev: str = ""
