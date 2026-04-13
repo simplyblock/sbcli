@@ -235,9 +235,9 @@ ingress:
   host: ""
   tlsSecret:
   controller:
-    hostNetwork: true
+    hostNetwork: false
     dnsPolicy: ClusterFirstWithHostNet
-    replicaCount: 2
+    replicaCount: 1
     image:
       registry: "quay.io/simplyblock-io"
       image: ingress-nginx-controller
