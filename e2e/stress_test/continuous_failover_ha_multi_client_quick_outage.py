@@ -566,7 +566,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
             iteration += 1
 
 
-class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
+class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
     """
     Improved successor to RandomRapidFailoverNoGap.  All V1 infrastructure
     (bootstrap, FIO management, snapshot/clone, outage logging) is reused.
@@ -1219,7 +1219,7 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
     # ── Override 5: run — read cluster config then delegate ──────────────────
 
     def run(self):
-        self.logger.info("[V2] Starting RandomRapidFailoverNoGapV2")
+        self.logger.info("[V2] Starting RandomRapidFailoverNoGapV2WithMigration")
 
         cluster_details = self.sbcli_utils.get_cluster_details()
 
@@ -1311,9 +1311,9 @@ class RandomRapidFailoverNoGapV2(RandomRapidFailoverNoGap):
             iteration += 1
 
 
-class RandomRapidFailoverNoGapV2NoMigration(RandomRapidFailoverNoGapV2):
+class RandomRapidFailoverNoGapV2NoMigration(RandomRapidFailoverNoGapV2WithMigration):
     """
-    Identical to RandomRapidFailoverNoGapV2 but with migration disabled.
+    Identical to RandomRapidFailoverNoGapV2WithMigration but with migration disabled.
 
     Before any test activity the Docker Swarm service
     ``app_TasksRunnerMigration`` is scaled to 0 replicas so that migration
