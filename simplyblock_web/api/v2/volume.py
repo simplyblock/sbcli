@@ -1,4 +1,4 @@
-from typing import Annotated, List, Literal, Optional, Tuple, Union
+from typing import Annotated, List, Literal, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -50,6 +50,7 @@ class _CreateParams(BaseModel):
     max_namespace_per_subsys: int = 1
     do_replicate: bool = False
     replication_cluster_id: Optional[str] = None
+    encrypt: bool = False
 
 
 class _CloneParams(BaseModel):
@@ -75,7 +76,7 @@ def add(
             name=data.name,
             size=data.size,
             pool_id_or_name=pool.get_id(),
-            use_crypto=data.crypto_key is not None,
+            use_crypto=data.encrypt,
             max_size=0,
             max_rw_iops=data.max_rw_iops,
             max_rw_mbytes=data.max_rw_mbytes,

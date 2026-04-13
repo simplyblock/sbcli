@@ -107,7 +107,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
             kms.create_key_encryption_key(pool.get_id())
             logger.info("Created pool key")
         except KMSException:
-            logger.eception("Failed to create pool key")
+            logger.exception("Failed to create pool key")
 
     return pool.get_id()
 

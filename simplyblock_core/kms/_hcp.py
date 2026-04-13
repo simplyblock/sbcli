@@ -1,4 +1,3 @@
-import operator
 import logging
 from uuid import UUID
 
@@ -22,7 +21,7 @@ class HCPClient(KMS):
         timeout: int = 300,
         retry: int = 5,
     ):
-        self.url = f"http://{self.ip_address}/v1/"
+        self.url = f"http://{address}/v1/"
         self.timeout = timeout
         self.session = requests.session()
         self.cluster_id = cluster_id
@@ -68,29 +67,33 @@ class HCPClient(KMS):
             "ciphertext"
         ]
 
-    def create_data_encryption_keys(self, kek_name: str, name: str) -> None:
-        self._request(
-            "POST",
-            f"{self.cluster_id}/{name}",
-            {
-                "key1": self._create_data_encryption_key(kek_name),
-                "key2": self._create_data_encryption_key(kek_name),
-            },
-        )
+    def _encrypt(self, kek_name: str, plaintext: str) -> str:
+        return self._request(
+            "POST", f"transit/encrypt/{kek_name}", {"plaintext": plaintext}
+        )["data"]["ciphertext"]
 
     def _decrypt(self, kek_name: str, ciphertext: str) -> str:
         return self._request(
             "POST", f"transit/decrypt/{kek_name}", {"ciphertext": ciphertext}
+        )["data"]["plaintext"]
+
+    def create_data_encryption_keys(self, kek_name: str, name: str) -> None:
+        self._request(
+            "POST",
+            f"{self.cluster_id}/{name}",
+            {"keys": [self._create_data_encryption_key(kek_name), self._create_data_encryption_key(kek_name)]},
         )
 
-    def get_data_encryption_keys(self, kek_name: str, name: str) -> dict:
-        key_accessor = operator.attrgetter("key1", "key2")
-        encrypted_key1, encrypted_key2 = key_accessor(
-            self._request("GET", f"{self.cluster_id}/{name}")["data"]
+    def import_data_encryption_keys(self, kek_name: str, name: str, keys: tuple[str, str]) -> None:
+        self._request(
+            "POST",
+            f"{self.cluster_id}/{name}",
+            {"keys": [self._encrypt(kek_name, keys[0]), self._encrypt(kek_name, keys[1])]},
         )
-        return self._decrypt(kek_name, encrypted_key1), self._decrypt(
-            kek_name, encrypted_key2
-        )
+
+    def get_data_encryption_keys(self, kek_name: str, name: str) -> tuple[str, str]:
+        encrypted_key1, encrypted_key2 = self._request("GET", f"{self.cluster_id}/{name}")["data"]["keys"]
+        return (self._decrypt(kek_name, encrypted_key1), self._decrypt(kek_name, encrypted_key2))
 
     def delete_data_encryption_keys(self, name: str) -> None:
         self._request("DELETE", f"{self.cluster_id}/{name}")

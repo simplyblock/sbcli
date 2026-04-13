@@ -318,8 +318,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
-                allowed_hosts=None,
-                do_replicate=False, replication_cluster_id=None):
+                allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None):
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -590,7 +589,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
         with create_kms_connection(cl) as kms:
             try:
-                kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
+                if crypto_key is None:
+                    kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
+                else:
+                    kms.import_data_encryption_keys(pool.get_id(), lvol.crypto_bdev, crypto_key)
                 logger.info("Created lvol keys")
             except KMSException:
                 logger.exception("Failed to create lvol keys")

@@ -3169,7 +3169,7 @@ def configure_kms_on_k8s(cluster):
                 break
 
         if not pod_name:
-            logger.error(f"No KMS pod found")
+            logger.error("No KMS pod found")
             return
 
         exec_command = ['/bin/sh', '-c', 'vault operator init -key-shares=1 -key-threshold=1 -format=json']
@@ -3195,7 +3195,7 @@ def configure_kms_on_k8s(cluster):
         exec_command = ['/bin/sh', '-c', f'vault secrets enable -path={cluster.uuid} -version=1 kv']
         resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
         logger.debug(resp)
-        exec_command = ['/bin/sh', '-c', f'vault secrets enable transit']
+        exec_command = ['/bin/sh', '-c', 'vault secrets enable transit']
         resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
         logger.debug(resp)
 
