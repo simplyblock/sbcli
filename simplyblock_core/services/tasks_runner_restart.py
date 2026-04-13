@@ -42,6 +42,28 @@ def _validate_no_task_node_restart(cluster_id, node_id):
     return True
 
 
+def _reset_if_transient(node_id):
+    """Roll the node back to STATUS_OFFLINE if a partial shutdown/restart
+    left it stuck in an intermediate CP state. Without this, a failed
+    attempt leaves the node pinned in STATUS_IN_SHUTDOWN or STATUS_RESTARTING,
+    which (a) blocks future restart attempts via the mutual-exclusion guard,
+    and (b) causes peers' cluster_map health checks to fail cluster-wide.
+    """
+    try:
+        node = db.get_storage_node_by_id(node_id)
+    except KeyError:
+        return
+    if node.status in (StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_RESTARTING):
+        logger.warning(
+            f"Node {node_id} left in {node.status} after failed restart attempt; "
+            f"resetting to OFFLINE so it can be retried cleanly"
+        )
+        try:
+            storage_node_ops.set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+        except Exception as exc:
+            logger.error(f"Failed to reset node {node_id} to OFFLINE: {exc}")
+
+
 def task_runner(task):
     if task.function_name == JobSchedule.FN_DEV_RESTART:
         return task_runner_device(task)
@@ -193,39 +215,65 @@ def task_runner_node(task):
         return False
 
 
+    shutdown_succeeded = False
     try:
-        # shutting down node
-        logger.info(f"Shutdown node {node.get_id()}")
-        ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-        if ret:
-            logger.info("Node shutdown succeeded")
+        try:
+            # shutting down node
+            logger.info(f"Shutdown node {node.get_id()}")
+            ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+            if ret:
+                logger.info("Node shutdown succeeded")
+                shutdown_succeeded = True
+            else:
+                logger.error("Node shutdown returned False; will retry after reset")
+            time.sleep(3)
+        except Exception as e:
+            logger.error(e)
+            return False
+
+        # Skip the restart step if shutdown did not succeed — restarting on top
+        # of a half-shutdown node produced the in_restart hang we're guarding
+        # against. Let the outer retry reattempt the whole cycle.
+        if not shutdown_succeeded:
+            task.retry += 1
+            task.write_to_db(db.kv_store)
+            return False
+
+        try:
+            # resetting node
+            logger.info(f"Restart node {node.get_id()}")
+            ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
+            if ret:
+                logger.info("Node restart succeeded")
+        except Exception as e:
+            logger.error(e)
+            return False
+
         time.sleep(3)
-    except Exception as e:
-        logger.error(e)
-        return False
+        node = db.get_storage_node_by_id(task.node_id)
+        if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
+            logger.info(f"Node is online: {node.get_id()}")
+            task.function_result = "done"
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db(db.kv_store)
+            return True
 
-    try:
-        # resetting node
-        logger.info(f"Restart node {node.get_id()}")
-        ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
-        if ret:
-            logger.info("Node restart succeeded")
-    except Exception as e:
-        logger.error(e)
-        return False
-
-    time.sleep(3)
-    node = db.get_storage_node_by_id(task.node_id)
-    if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
-        logger.info(f"Node is online: {node.get_id()}")
-        task.function_result = "done"
-        task.status = JobSchedule.STATUS_DONE
+        task.retry += 1
         task.write_to_db(db.kv_store)
-        return True
-
-    task.retry += 1
-    task.write_to_db(db.kv_store)
-    return False
+        return False
+    finally:
+        # On any non-success exit from the shutdown/restart sequence, make sure
+        # we don't leave the node pinned in STATUS_IN_SHUTDOWN or
+        # STATUS_RESTARTING — both are terminal traps if the task doesn't
+        # reach STATUS_ONLINE.
+        try:
+            post_node = db.get_storage_node_by_id(task.node_id)
+            if post_node.status != StorageNode.STATUS_ONLINE:
+                _reset_if_transient(task.node_id)
+        except KeyError:
+            pass
+        except Exception as exc:
+            logger.error(f"Post-task status reset check failed: {exc}")
 
 
 logger.info("Starting Tasks runner...")
