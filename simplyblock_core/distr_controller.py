@@ -289,7 +289,18 @@ def parse_distr_cluster_map(map_string, nodes=None, devices=None):
             }
             try:
                 node_status = nodes[node_id].status
-                if node_status == StorageNode.STATUS_SCHEDULABLE:
+                # Canonicalise CP states whose data-plane representation is
+                # "node not serving" — SPDK cluster maps reflect the last
+                # reachability event, which is offline/unreachable during
+                # CP-side restart or shutdown transitions. Treating these as
+                # strict mismatches caused peers' health checks to flip
+                # Health=False cluster-wide while one node was stuck in a
+                # transient state.
+                if node_status in (
+                    StorageNode.STATUS_SCHEDULABLE,
+                    StorageNode.STATUS_RESTARTING,
+                    StorageNode.STATUS_IN_SHUTDOWN,
+                ):
                     node_status = StorageNode.STATUS_UNREACHABLE
                 data["Desired Status"] = node_status
                 if node_status == status:
