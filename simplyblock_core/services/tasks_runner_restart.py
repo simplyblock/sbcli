@@ -6,6 +6,7 @@ from simplyblock_core.controllers import device_controller, health_controller, t
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 
 
 logger = utils.get_logger(__name__)
@@ -42,26 +43,80 @@ def _validate_no_task_node_restart(cluster_id, node_id):
     return True
 
 
+def _ensure_spdk_killed(node):
+    """Best-effort kill of the SPDK process on the node before we mark it
+    OFFLINE. Without this, flipping the status to OFFLINE while SPDK is still
+    running produces a DB-vs-data-plane split: the DB says the node is not
+    serving, but SPDK is actually still serving IO — and a subsequent
+    restart_storage_node would spin up a second SPDK on top.
+
+    Returns True if we are confident the data plane is not serving (SPDK
+    killed successfully, or the node API is unreachable which implies the
+    process is also unreachable). Returns False only when the node API is
+    reachable but spdk_process_kill raised — in that narrow case we don't
+    know for sure whether SPDK is gone, so the caller should leave the DB
+    state as-is and let a later attempt retry.
+    """
+    if not health_controller._check_node_api(node.mgmt_ip):
+        # Node API is down; the SPDK process on the same host is not reachable
+        # to serve IO either. Safe to proceed.
+        logger.info(
+            f"Node {node.get_id()} API unreachable at {node.mgmt_ip}:5000; "
+            f"assuming SPDK is not serving"
+        )
+        return True
+    try:
+        logger.info(f"Killing SPDK on node {node.get_id()} (rpc_port={node.rpc_port})")
+        SNodeClient(node.api_endpoint, timeout=10, retry=5).spdk_process_kill(
+            node.rpc_port, node.cluster_id)
+        return True
+    except SNodeClientException as exc:
+        logger.error(
+            f"Failed to kill SPDK on {node.get_id()}: {exc}; "
+            f"leaving DB state unchanged to avoid split-brain"
+        )
+        return False
+    except Exception as exc:
+        # Other transport errors — treat as unreachable (process also unreachable).
+        logger.warning(
+            f"spdk_process_kill transport error on {node.get_id()}: {exc}; "
+            f"assuming SPDK is not serving"
+        )
+        return True
+
+
 def _reset_if_transient(node_id):
     """Roll the node back to STATUS_OFFLINE if a partial shutdown/restart
     left it stuck in an intermediate CP state. Without this, a failed
     attempt leaves the node pinned in STATUS_IN_SHUTDOWN or STATUS_RESTARTING,
     which (a) blocks future restart attempts via the mutual-exclusion guard,
     and (b) causes peers' cluster_map health checks to fail cluster-wide.
+
+    Before flipping to OFFLINE we confirm the SPDK process is not running
+    on the node's host — otherwise we'd risk a split-brain where the DB
+    says OFFLINE but SPDK is still serving IO.
     """
     try:
         node = db.get_storage_node_by_id(node_id)
     except KeyError:
         return
-    if node.status in (StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_RESTARTING):
-        logger.warning(
-            f"Node {node_id} left in {node.status} after failed restart attempt; "
-            f"resetting to OFFLINE so it can be retried cleanly"
+    if node.status not in (StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_RESTARTING):
+        return
+    logger.warning(
+        f"Node {node_id} left in {node.status} after failed restart attempt; "
+        f"verifying SPDK is not serving before resetting to OFFLINE"
+    )
+    if not _ensure_spdk_killed(node):
+        logger.error(
+            f"Could not confirm SPDK is down on {node_id}; refusing to flip to "
+            f"OFFLINE to avoid split-brain. Next retry will attempt again."
         )
-        try:
-            storage_node_ops.set_node_status(node_id, StorageNode.STATUS_OFFLINE)
-        except Exception as exc:
-            logger.error(f"Failed to reset node {node_id} to OFFLINE: {exc}")
+        return
+    try:
+        storage_node_ops.set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+        logger.info(f"Node {node_id} reset to OFFLINE (SPDK confirmed down)")
+    except Exception as exc:
+        logger.error(f"Failed to reset node {node_id} to OFFLINE: {exc}")
 
 
 def task_runner(task):
