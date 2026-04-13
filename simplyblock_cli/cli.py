@@ -122,7 +122,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         subcommand.add_argument('node_addr', help='Address of storage node api to add, like <node-ip>:5000', type=str)
         subcommand.add_argument('ifname', help='Management interface name', type=str)
-        argument = subcommand.add_argument('--journal-partition', help='**Deprecated:** use `--enable-separate-journal-device` instead.1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3%% of total available raw disk space."', type=int, default=1, dest='partitions')
+        argument = subcommand.add_argument('--journal-partition', help='**Deprecated:** use `--use-separate-journal-device` instead.1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3%% of total available raw disk space."', type=int, default=1, dest='partitions')
         argument = subcommand.add_argument('--use-separate-journal-device', help='Use a separate (the smallest) NVMe device of the node for the journal. Otherwise, the journal uses a maximum of 3%% of total available raw disk space across all NVMe devices.', dest='use_separate_journal_device', action='store_true')
         argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K', dest='format_4k', action='store_true')
         if self.developer_mode:

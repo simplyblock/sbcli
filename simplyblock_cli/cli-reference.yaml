@@ -160,7 +160,7 @@ commands:
             type: str
           - name: "--journal-partition"
             help: |
-              **Deprecated:** use `--enable-separate-journal-device` instead.
+              **Deprecated:** use `--use-separate-journal-device` instead.
               
               1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3% of total available raw disk space."
             dest: partitions
