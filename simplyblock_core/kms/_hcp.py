@@ -82,17 +82,13 @@ class HCPClient(KMS):
             "POST", f"transit/decrypt/{key}", {"ciphertext": ciphertext}
         )
 
-    def create_pool_key(self, pool: Pool) -> None:
+    def create_key_encryption_key(self, name: str) -> None:
         params = {"type": "aes256-gcm96", "exportable": False}
-        self._request("POST", f"transit/keys/{pool.get_id()}", params)
+        self._request("POST", f"transit/keys/{name}", params)
+        self._request("POST", f"transit/keys/{name}/config", {"deletion_allowed": True})
 
-    def update_pool_key(self, pool: Pool) -> None:
-        self._request(
-            "POST", f"transit/keys/{pool.get_id()}/config", {"deletion_allowed": True}
-        )
-
-    def delete_pool_key(self, pool: Pool) -> None:
-        self._request("DELETE", f"transit/keys/{pool.get_id()}")
+    def delete_key_encryption_key(self, name: str) -> None:
+        self._request("DELETE", f"transit/keys/{name}")
 
     def delete_key(self, key: str) -> None:
         self._request("DELETE", f"{self.cluster_id}/{key}")

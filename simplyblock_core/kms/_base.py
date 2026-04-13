@@ -1,7 +1,5 @@
 from abc import ABC, abstractmethod
 
-from simplyblock_core.models.pool import Pool
-
 
 class KMS(ABC):
     @abstractmethod
@@ -14,13 +12,10 @@ class KMS(ABC):
     def decrypt(self, key: str, ciphertext: str) -> str: ...
 
     @abstractmethod
-    def create_pool_key(self, pool: Pool) -> None: ...
+    def create_key_encryption_key(self, name: str) -> None: ...
 
     @abstractmethod
-    def update_pool_key(self, pool: Pool) -> None: ...
-
-    @abstractmethod
-    def delete_pool_key(self, pool: Pool) -> None: ...
+    def delete_key_encryption_key(self, name: str) -> None: ...
 
     @abstractmethod
     def delete_key(self, key: str) -> None: ...
