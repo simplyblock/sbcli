@@ -449,12 +449,13 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
     if not target_node.lvstore:
         return None, f"Target node {restore_node_id} has no lvstore (S3 bdev requires lvstore)"
 
+    original_lvol = db_controller.get_lvol_by_id(backup.lvol_id)
     logger.info(f"Backup allowed hosts: {backup.allowed_hosts}")
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,
         pool_id_or_name=pool_id_or_name,
-        use_crypto=False,
+        use_crypto=bool(original_lvol.crypto_bdev),
         max_size=0,
         max_rw_iops=0,
         max_rw_mbytes=0,
@@ -462,6 +463,8 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
         max_w_mbytes=0,
         host_id_or_name=restore_node_id,
         ha_type="default",
+        crypto_key1=original_lvol.crypto_key1,
+        crypto_key2=original_lvol.crypto_key2,
         use_comp=False,
         distr_vuid=0,
         lvol_priority_class=0,

@@ -80,7 +80,7 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
 
 
 def _add_graylog_input(cluster_ip, password):
-    base_url = f"http://{cluster_ip}/graylog/api"
+    base_url = f"{cluster_ip}/api"
     input_url = f"{base_url}/system/inputs"
 
     retries = 30
@@ -161,7 +161,7 @@ def _add_graylog_input(cluster_ip, password):
 
 def _set_max_result_window(cluster_ip, max_window=100000):
 
-    url_existing_indices = f"http://{cluster_ip}/opensearch/_all/_settings"
+    url_existing_indices = f"{cluster_ip}/_all/_settings"
 
     retries = 30
     reachable=False
@@ -188,7 +188,7 @@ def _set_max_result_window(cluster_ip, max_window=100000):
         logger.error(f"Failed to update settings for existing indices: {response.text}")
         return False
 
-    url_template = f"http://{cluster_ip}/opensearch/_template/all_indices_template"
+    url_template = f"{cluster_ip}/_template/all_indices_template"
     payload_template = json.dumps({
         "index_patterns": ["*"],
         "settings": {
@@ -297,8 +297,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dev_ip:
             raise ValueError("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
 
-        current_node = utils.get_node_name_by_ip(dev_ip)
-        utils.label_node_as_mgmt_plane(current_node)
 
     if not cli_pass:
         cli_pass = utils.generate_string(10)
@@ -330,12 +328,16 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.fabric_tcp = protocols["tcp"]
     cluster.fabric_rdma = protocols["rdma"]
     cluster.is_single_node = is_single_node
-    if grafana_endpoint:
-        cluster.grafana_endpoint = grafana_endpoint
-    elif ingress_host_source == "hostip":
-        cluster.grafana_endpoint = f"http://{dev_ip}/grafana"
+    if ingress_host_source == "hostip":
+        base = dev_ip
     else:
-        cluster.grafana_endpoint = f"http://{dns_name}/grafana"
+        base = dns_name
+
+    graylog_endpoint = f"http://{base}/graylog"
+    os_endpoint      = f"http://{base}/opensearch"
+    default_grafana  = f"http://{base}/grafana"
+
+    cluster.grafana_endpoint = grafana_endpoint or default_grafana
     cluster.deploy_kms = bool(deploy_kms)
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
@@ -389,9 +391,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if ingress_host_source == "hostip":
             dns_name = dev_ip
 
-        _set_max_result_window(dns_name)
+        _set_max_result_window(os_endpoint)
 
-        _add_graylog_input(dns_name, monitoring_secret)
+        _add_graylog_input(graylog_endpoint, monitoring_secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
 
@@ -444,13 +446,20 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
+                cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
 
+
+    default_cluster = None
+    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
     clusters = db_controller.get_clusters()
-    if not clusters:
-        raise ValueError("No previous clusters found!")
+    if clusters:
+        default_cluster = clusters[0]
+    else:
+        logger.info("No previous clusters found")
 
     if name:
         for existing in clusters:
@@ -477,14 +486,40 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.secret = utils.generate_string(20)
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
+    if default_cluster:
+        cluster.mode = default_cluster.mode
+        cluster.db_connection = default_cluster.db_connection
+        cluster.grafana_secret = grafana_secret if grafana_secret else default_cluster.grafana_secret
+        cluster.grafana_endpoint = default_cluster.grafana_endpoint
+    else:
+        # creating first cluster on k8s
+        cluster.mode = "kubernetes"
+        logger.info("Retrieving foundationdb connection string...")
+        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
+        cluster.db_connection = fdb_cluster_string
+        if monitoring_secret:
+            cluster.grafana_secret = monitoring_secret
+        elif enable_monitoring != "true":
+            cluster.grafana_secret = ""
+        else:
+            raise Exception("monitoring_secret is required")
+        cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
+        if not cluster_ip:
+            cluster_ip = "0.0.0.0"
 
-    default_cluster = clusters[0]
-    cluster.mode = default_cluster.mode
-    cluster.db_connection = default_cluster.db_connection
-    cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
-    cluster.grafana_endpoint = default_cluster.grafana_endpoint
+        # add mgmt node object
+        mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
+        if enable_monitoring == "true":
+            graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
+            os_endpoint = constants.OS_K8S_ENDPOINT
+            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+            _set_max_result_window(os_endpoint)
+
+            _add_graylog_input(graylog_endpoint, monitoring_secret)
+
+    if cluster.mode == "kubernetes":
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
@@ -496,6 +531,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
+    cluster.cr_name = cr_name
+    cluster.cr_namespace = cr_namespace
+    cluster.cr_plural = cr_plural
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
@@ -520,7 +558,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
-    qos_controller.add_class("Default", 100, cluster.get_id())
 
     return cluster.get_id()
 
@@ -579,7 +616,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
-    used_nodes_as_sec = []
+    used_nodes_as_sec: t.List[str] = []
     used_nodes_as_sec_2: t.List[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
@@ -870,6 +907,7 @@ def list() -> t.List[dict]:
             "#storage": len(st),
             "Mod": f"{cl.distr_ndcs}x{cl.distr_npcs}",
             "Status": status.upper(),
+            "Replicate": cl.snapshot_replication_target_cluster,
         })
     return data
 
@@ -1466,4 +1504,31 @@ def set(cl_id, attr, value) -> bool:
         logger.info(f"Setting {attr} to {value}")
         setattr(cluster, attr, value)
         cluster.write_to_db()
+    return True
+
+
+def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> bool:
+    db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(source_cl_id)
+    if not cluster:
+        raise ValueError(f"Cluster not found: {source_cl_id}")
+
+    target_cluster = db_controller.get_cluster_by_id(target_cl_id)
+    if not target_cluster:
+        raise ValueError(f"Target cluster not found: {target_cl_id}")
+
+    logger.info("Updating Cluster replication target")
+    cluster.snapshot_replication_target_cluster = target_cl_id
+    if target_pool:
+        pool = db_controller.get_pool_by_id(target_pool)
+        if not pool:
+            raise ValueError(f"Pool not found: {target_pool}")
+        if pool.status != Pool.STATUS_ACTIVE:
+            raise ValueError(f"Pool not active: {target_pool}")
+        cluster.snapshot_replication_target_pool = target_pool
+
+    if timeout and timeout > 0:
+        cluster.snapshot_replication_timeout = timeout
+    cluster.write_to_db()
+    logger.info("Done")
     return True

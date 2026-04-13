@@ -1,0 +1,34 @@
+name: Docker Alpine Tools Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@master
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: hamdysimplyblock
+          password: ${{ secrets.DOCKER_PASS }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & Push
+        run: |
+          docker buildx create --name mybuilder --bootstrap --use
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -t simplyblock/alpine-tools:3.21.3 \
+            -f docker/Dockerfile.alpine-tools \
+            . --push
+
+          echo "::notice title=Docker.com::simplyblock/alpine-tools:3.21.3"

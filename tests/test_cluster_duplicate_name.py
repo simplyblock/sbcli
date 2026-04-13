@@ -72,7 +72,6 @@ def _cluster(uuid="cluster-1", name="test-cluster"):
 class TestAddClusterDuplicateName(unittest.TestCase):
 
     def _call(self, name):
-        from simplyblock_core import cluster_ops
         return cluster_ops.add_cluster(
             blk_size=4096,
             page_size_in_blocks=2,
@@ -153,7 +152,6 @@ class TestAddClusterDuplicateName(unittest.TestCase):
 class TestCreateClusterDuplicateName(unittest.TestCase):
 
     def _call(self, name, existing_clusters=None):
-        from simplyblock_core import cluster_ops
         with patch("simplyblock_core.cluster_ops.db_controller") as mock_db, \
              patch("simplyblock_core.cluster_ops.scripts"), \
              patch("simplyblock_core.cluster_ops.utils") as mock_utils:
@@ -228,7 +226,6 @@ class TestSetNameDuplicateName(unittest.TestCase):
         mock_db.get_cluster_by_id.return_value = target
         mock_db.get_clusters.return_value = [target, other]
 
-        from simplyblock_core import cluster_ops
         with self.assertRaises(ValueError) as ctx:
             cluster_ops.set_name("cluster-1", "taken-name")
 
@@ -242,7 +239,6 @@ class TestSetNameDuplicateName(unittest.TestCase):
         mock_db.get_clusters.return_value = [target]
         mock_db.kv_store = MagicMock()
 
-        from simplyblock_core import cluster_ops
         cluster_ops.set_name("cluster-1", "my-cluster")  # must not raise
 
     @patch("simplyblock_core.cluster_ops.cluster_events")
@@ -254,7 +250,6 @@ class TestSetNameDuplicateName(unittest.TestCase):
         mock_db.get_clusters.return_value = [target, other]
         mock_db.kv_store = MagicMock()
 
-        from simplyblock_core import cluster_ops
         result = cluster_ops.set_name("cluster-1", "brand-new-name")
 
         self.assertEqual(result.cluster_name, "brand-new-name")
@@ -273,7 +268,6 @@ class TestChangeClusterNameDuplicateName(unittest.TestCase):
         mock_db.get_cluster_by_id.return_value = target
         mock_db.get_clusters.return_value = [target, other]
 
-        from simplyblock_core import cluster_ops
         with self.assertRaises(ValueError) as ctx:
             cluster_ops.change_cluster_name("cluster-1", "taken-name")
 
@@ -287,7 +281,6 @@ class TestChangeClusterNameDuplicateName(unittest.TestCase):
         mock_db.get_clusters.return_value = [target]
         mock_db.kv_store = MagicMock()
 
-        from simplyblock_core import cluster_ops
         cluster_ops.change_cluster_name("cluster-1", "my-cluster")  # must not raise
 
     @patch("simplyblock_core.cluster_ops.cluster_events")
@@ -299,7 +292,6 @@ class TestChangeClusterNameDuplicateName(unittest.TestCase):
         mock_db.get_clusters.return_value = [target, other]
         mock_db.kv_store = MagicMock()
 
-        from simplyblock_core import cluster_ops
         cluster_ops.change_cluster_name("cluster-1", "unique-name")
 
         self.assertEqual(target.cluster_name, "unique-name")

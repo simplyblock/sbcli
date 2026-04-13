@@ -1,0 +1,217 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-manager
+  labels:
+    control-plane: simplyblock-manager
+    app: simplyblock-manager
+spec:
+  selector:
+    matchLabels:
+      app: simplyblock-manager
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        control-plane: simplyblock-manager
+        app: simplyblock-manager
+    spec:
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      serviceAccountName: simplyblock-manager
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}    
+      containers:
+        - image: "{{ .Values.image.manager.repository }}:{{ .Values.image.manager.tag }}"
+          imagePullPolicy: "{{ .Values.image.manager.pullPolicy }}"
+          name: manager
+          env:
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            privileged: false
+      terminationGracePeriodSeconds: 10
+
+################# ROLE AND ROLE BINDING ##############################
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: simplyblock-manager
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: simplyblock-manager-clusterrole
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - events
+  - persistentvolumeclaims
+  - pods
+  - pods/exec
+  - namespaces
+  - secrets
+  - services
+  - serviceaccounts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - daemonsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+- apiGroups:
+  - "rbac.authorization.k8s.io"
+  resources:
+  - roles
+  - clusterroles
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+- apiGroups:
+  - "rbac.authorization.k8s.io"
+  resources:
+  - rolebindings
+  - clusterrolebindings
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+- apiGroups:
+  - storage.simplyblock.io
+  resources:
+  - pools
+  - lvols
+  - storageclusters
+  - storagenodes
+  - devices
+  - tasks
+  - snapshotreplications
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - storage.simplyblock.io
+  resources:
+  - pools/finalizers
+  - lvols/finalizers
+  - storageclusters/finalizers
+  - storagenodes/finalizers
+  - devices/finalizers
+  - tasks/finalizers
+  - snapshotreplications/finalizers
+  verbs:
+  - update
+  - delete
+- apiGroups:
+  - storage.simplyblock.io
+  resources:
+  - pools/status
+  - lvols/status
+  - storageclusters/status
+  - storagenodes/status
+  - devices/status
+  - tasks/status
+  - snapshotreplications/status
+  verbs:
+  - get
+  - patch
+  - update
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  creationTimestamp: null
+  name: simplyblock-manager-clusterrolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: simplyblock-manager-clusterrole
+subjects:
+- kind: ServiceAccount
+  name: simplyblock-manager
+  namespace: {{ .Release.Namespace }}

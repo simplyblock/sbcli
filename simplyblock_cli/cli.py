@@ -122,7 +122,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str)
         subcommand.add_argument('node_addr', help='Address of storage node api to add, like <node-ip>:5000', type=str)
         subcommand.add_argument('ifname', help='Management interface name', type=str)
-        argument = subcommand.add_argument('--journal-partition', help='1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space.', type=int, default=1, dest='partitions')
+        argument = subcommand.add_argument('--journal-partition', help='**Deprecated:** use `--enable-journal-device` instead.1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3%% of total available raw disk space."', type=int, dest='partitions', choices=[0,1,])
+        argument = subcommand.add_argument('--enable-journal-device', help='Enables the use of a separate (the smallest) NVMe device of the node for the journal. Otherwise, the journal uses a maximum of 3%% of total available raw disk space across all NVMe devices.', default=False, dest='enable_journal_device', action='store_true')
         argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K', dest='format_4k', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device', type=int, default=3, dest='jm_percent')
@@ -377,6 +378,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_cluster__set(subparser)
         self.init_cluster__change_name(subparser)
+        self.init_cluster__add_replication(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -572,6 +574,13 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('name', help='Name', type=str)
 
+    def init_cluster__add_replication(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add-replication', 'Assigns the snapshot replication target cluster')
+        subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('target_cluster_id', help='Target Cluster id', type=str).completer = self._completer_get_cluster_list
+        argument = subcommand.add_argument('--timeout', help='Snapshot replication network timeout', type=int, default=3600, dest='timeout')
+        argument = subcommand.add_argument('--target-pool', help='Target cluster pool ID or name', type=str, dest='target_pool')
+
 
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical volume commands', aliases=['lvol',])
@@ -595,6 +604,12 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
+        self.init_volume__replication_start(subparser)
+        self.init_volume__replication_stop(subparser)
+        self.init_volume__replication_status(subparser)
+        self.init_volume__replication_trigger(subparser)
+        self.init_volume__suspend(subparser)
+        self.init_volume__resume(subparser)
         self.init_volume__clone_lvol(subparser)
         if self.developer_mode:
             self.init_volume__migrate(subparser)
@@ -629,6 +644,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='Erasure coding schema parameter k (distributed raid), default: 1', type=int, default=0, dest='ndcs')
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='Erasure coding schema parameter n (distributed raid), default: 1', type=int, default=0, dest='npcs')
+        argument = subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
         argument = subcommand.add_argument('--allowed-hosts', help='Path to JSON file with host NQNs allowed to access this volume\'s subsystem', type=str, dest='allowed_hosts')
 
     def init_volume__add_host(self, subparser):
@@ -723,6 +739,31 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__inflate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume')
         subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+
+    def init_volume__replication_start(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-start', 'Start snapshot replication taken from lvol')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+        argument = subcommand.add_argument('--replication-cluster-id', help='Cluster ID of the replication target cluster', type=str, dest='replication_cluster_id')
+
+    def init_volume__replication_stop(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-stop', 'Stop snapshot replication taken from lvol')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__replication_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists replication status')
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
+
+    def init_volume__replication_trigger(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-trigger', 'Start replication for lvol')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__suspend(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'suspend', 'Suspend lvol subsystems')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__resume(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'resume', 'Resume lvol subsystems')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
 
     def init_volume__clone_lvol(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clone-lvol', 'Create logical volume clone by taking a snapshot and then cloning it.')
@@ -845,7 +886,13 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__add(subparser)
         self.init_snapshot__list(subparser)
         self.init_snapshot__delete(subparser)
+        self.init_snapshot__check(subparser)
         self.init_snapshot__clone(subparser)
+        self.init_snapshot__replication_status(subparser)
+        self.init_snapshot__delete_replication_only(subparser)
+        self.init_snapshot__get(subparser)
+        if self.developer_mode:
+            self.init_snapshot__set(subparser)
         self.init_snapshot__backup(subparser)
 
 
@@ -858,17 +905,41 @@ class CLIWrapper(CLIWrapperBase):
     def init_snapshot__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all snapshots')
         argument = subcommand.add_argument('--all', help='List soft deleted snapshots', dest='all', action='store_true')
+        argument = subcommand.add_argument('--cluster-id', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
+        argument = subcommand.add_argument('--with-details', help='List snapshots with replicate and chaining details', dest='with_details', action='store_true')
 
     def init_snapshot__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a snapshot')
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         argument = subcommand.add_argument('--force', help='Force remove', dest='force', action='store_true')
 
+    def init_snapshot__check(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'check', 'Check a snapshot health')
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
+
     def init_snapshot__clone(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clone', 'Provisions a new logical volume from an existing snapshot')
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
+
+    def init_snapshot__replication_status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists snapshots replication status')
+        subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
+
+    def init_snapshot__delete_replication_only(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'delete-replication-only', 'Delete replicated version of a snapshot')
+        subcommand.add_argument('snapshot_id', help='Snapshot UUID', type=str)
+
+    def init_snapshot__get(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get', 'Gets a snapshot information')
+        subcommand.add_argument('snapshot_id', help='Snapshot UUID', type=str)
+
+    def init_snapshot__set(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set', 'set snapshot db value')
+        subcommand.add_argument('snapshot_id', help='snapshot id', type=str)
+        subcommand.add_argument('attr_name', help='attr_name', type=str)
+        subcommand.add_argument('attr_value', help='attr_value', type=str)
 
     def init_snapshot__backup(self, subparser):
         subcommand = self.add_sub_command(subparser, 'backup', 'Create an S3 backup of an existing snapshot')
@@ -1223,6 +1294,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.cluster__set(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
+                elif sub_command in ['add-replication']:
+                    ret = self.cluster__add_replication(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1275,6 +1348,18 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
+                elif sub_command in ['replication-start']:
+                    ret = self.volume__replication_start(sub_command, args)
+                elif sub_command in ['replication-stop']:
+                    ret = self.volume__replication_stop(sub_command, args)
+                elif sub_command in ['replication-status']:
+                    ret = self.volume__replication_status(sub_command, args)
+                elif sub_command in ['replication-trigger']:
+                    ret = self.volume__replication_trigger(sub_command, args)
+                elif sub_command in ['suspend']:
+                    ret = self.volume__suspend(sub_command, args)
+                elif sub_command in ['resume']:
+                    ret = self.volume__resume(sub_command, args)
                 elif sub_command in ['clone-lvol']:
                     ret = self.volume__clone_lvol(sub_command, args)
                 elif sub_command in ['migrate']:
@@ -1340,8 +1425,22 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__list(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.snapshot__delete(sub_command, args)
+                elif sub_command in ['check']:
+                    ret = self.snapshot__check(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
+                elif sub_command in ['replication-status']:
+                    ret = self.snapshot__replication_status(sub_command, args)
+                elif sub_command in ['delete-replication-only']:
+                    ret = self.snapshot__delete_replication_only(sub_command, args)
+                elif sub_command in ['get']:
+                    ret = self.snapshot__get(sub_command, args)
+                elif sub_command in ['set']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.snapshot__set(sub_command, args)
                 elif sub_command in ['backup']:
                     ret = self.snapshot__backup(sub_command, args)
                 else:

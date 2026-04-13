@@ -27,33 +27,35 @@ def print_stats():
         try:
             time.sleep(3)
             t = time.time_ns()
-            read_line_time_diff_max = max(list(read_line_time_diff.values()))
-            read_line_time_diff_avg = int(sum(list(read_line_time_diff.values()))/len(read_line_time_diff))
-            last_3_sec = []
-            for k,v in read_line_time_diff.items():
-                if k > t - 3*1000*1000*1000:
-                    last_3_sec.append(v)
-            if len(last_3_sec) > 0:
-                read_line_time_diff_avg_last_3_sec = int(sum(last_3_sec)/len(last_3_sec))
-            else:
-                read_line_time_diff_avg_last_3_sec = 0
-            logger.info(f"Periodic stats: {t}: read_line_time: max={read_line_time_diff_max} ns, avg={read_line_time_diff_avg} ns, last_3s_avg={read_line_time_diff_avg_last_3_sec} ns")
-            if len(read_line_time_diff) > 10000:
-                read_line_time_diff.clear()
+            if len(read_line_time_diff) > 0:
+                read_line_time_diff_max = max(list(read_line_time_diff.values()))
+                read_line_time_diff_avg = int(sum(list(read_line_time_diff.values()))/len(read_line_time_diff))
+                last_3_sec = []
+                for k,v in read_line_time_diff.items():
+                    if k > t - 3*1000*1000*1000:
+                        last_3_sec.append(v)
+                if len(last_3_sec) > 0:
+                    read_line_time_diff_avg_last_3_sec = int(sum(last_3_sec)/len(last_3_sec))
+                else:
+                    read_line_time_diff_avg_last_3_sec = 0
+                logger.info(f"Periodic stats: {t}: read_line_time: max={read_line_time_diff_max} ns, avg={read_line_time_diff_avg} ns, last_3s_avg={read_line_time_diff_avg_last_3_sec} ns")
+                if len(read_line_time_diff) > 10000:
+                    read_line_time_diff.clear()
 
-            recv_from_spdk_time_max = max(list(recv_from_spdk_time_diff.values()))
-            recv_from_spdk_time_avg = int(sum(list(recv_from_spdk_time_diff.values()))/len(recv_from_spdk_time_diff))
-            last_3_sec = []
-            for k,v in recv_from_spdk_time_diff.items():
-                if k > t - 3*1000*1000*1000:
-                    last_3_sec.append(v)
-            if len(last_3_sec) > 0:
-                recv_from_spdk_time_avg_last_3_sec = int(sum(last_3_sec)/len(last_3_sec))
-            else:
-                recv_from_spdk_time_avg_last_3_sec = 0
-            logger.info(f"Periodic stats: {t}: recv_from_spdk_time: max={recv_from_spdk_time_max} ns, avg={recv_from_spdk_time_avg} ns, last_3s_avg={recv_from_spdk_time_avg_last_3_sec} ns")
-            if len(recv_from_spdk_time_diff) > 10000:
-                recv_from_spdk_time_diff.clear()
+            if len(recv_from_spdk_time_diff) > 0:
+                recv_from_spdk_time_max = max(list(recv_from_spdk_time_diff.values()))
+                recv_from_spdk_time_avg = int(sum(list(recv_from_spdk_time_diff.values()))/len(recv_from_spdk_time_diff))
+                last_3_sec = []
+                for k,v in recv_from_spdk_time_diff.items():
+                    if k > t - 3*1000*1000*1000:
+                        last_3_sec.append(v)
+                if len(last_3_sec) > 0:
+                    recv_from_spdk_time_avg_last_3_sec = int(sum(last_3_sec)/len(last_3_sec))
+                else:
+                    recv_from_spdk_time_avg_last_3_sec = 0
+                logger.info(f"Periodic stats: {t}: recv_from_spdk_time: max={recv_from_spdk_time_max} ns, avg={recv_from_spdk_time_avg} ns, last_3s_avg={recv_from_spdk_time_avg_last_3_sec} ns")
+                if len(recv_from_spdk_time_diff) > 10000:
+                    recv_from_spdk_time_diff.clear()
         except Exception as e:
             logger.error(e)
 
