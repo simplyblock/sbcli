@@ -162,11 +162,17 @@ class CLIWrapperBase:
         ha_jm_count = args.ha_jm_count
         format_4k = args.format_4k
 
-        if args.use_separate_journal_device:
+        if args.enable_journal_device:
             num_partitions_per_dev = 0
         else:
-            # Deprecated, but still supported for backward compatibility.
-            num_partitions_per_dev = args.partitions
+            # Deprecated but still supported for backward compatibility.
+            print("WARNING: --journal-partition is deprecated, use --enable-journal-device instead")
+            if args.partitions is None:
+                num_partitions_per_dev = 1
+            elif args.partitions < 0 or args.partitions > 1:
+                self.parser.error("partitions must be either 0 or 1")
+            else:
+                num_partitions_per_dev = args.partitions
 
         try:
             out = storage_ops.add_node(
