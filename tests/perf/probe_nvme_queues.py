@@ -182,7 +182,7 @@ def probe(machine_type, local_ssds):
 
     # Launch
     try:
-        print(f"  [1/4] Launching...")
+        print("  [1/4] Launching...")
         ext_ip = launch(name, machine_type, local_ssds)
         print(f"  External IP: {ext_ip}")
     except RuntimeError as e:
@@ -191,13 +191,13 @@ def probe(machine_type, local_ssds):
 
     try:
         # Wait for SSH
-        print(f"  [2/4] Waiting for SSH...")
+        print("  [2/4] Waiting for SSH...")
         if not wait_ssh(ext_ip):
             raise RuntimeError("SSH timed out")
-        print(f"  SSH ready.")
+        print("  SSH ready.")
 
         # Run probe
-        print(f"  [3/4] Running probe...")
+        print("  [3/4] Running probe...")
         rc, out, err = ssh_run(ext_ip, PROBE_CMDS)
         if rc != 0:
             print(f"  Probe failed (rc={rc}): {err[:200]}")
@@ -219,7 +219,7 @@ def probe(machine_type, local_ssds):
     finally:
         print(f"  [4/4] Deleting {name}...")
         delete(name)
-        print(f"  Deleted.")
+        print("  Deleted.")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
