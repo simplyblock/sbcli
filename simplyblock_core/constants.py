@@ -162,7 +162,7 @@ SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
-CR_GROUP = "simplyblock.simplyblock.io"
+CR_GROUP = "storage.simplyblock.io"
 CR_VERSION  = "v1alpha1"
 
 GRAFANA_K8S_ENDPOINT = "http://simplyblock-grafana:3000"
