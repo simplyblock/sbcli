@@ -160,16 +160,20 @@ commands:
             type: str
           - name: "--journal-partition"
             help: |
-              **Deprecated:** use `--use-separate-journal-device` instead.
+              **Deprecated:** use `--enable-journal-device` instead.
               
               1: auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3% of total available raw disk space."
             dest: partitions
             type: int
             default: 1
-          - name: "--use-separate-journal-device"
-            help: "Use a separate (the smallest) NVMe device of the node for the journal. Otherwise, the journal uses a maximum of 3% of total available raw disk space across all NVMe devices."
-            dest: use_separate_journal_device
+            choices:
+              - 0
+              - 1
+          - name: "--enable-journal-device"
+            help: "Enables the use of a separate (the smallest) NVMe device of the node for the journal. Otherwise, the journal uses a maximum of 3% of total available raw disk space across all NVMe devices."
+            dest: enable_journal_device
             type: bool
+            default: false
             action: store_true
           - name: "--format-4k"
             help: "Force format nvme devices with 4K"
