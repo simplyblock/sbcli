@@ -76,26 +76,7 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
     return key_names
 
 
-
-def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
-    ret = rpc_client.get_bdevs(base_name)
-    if not ret:
-        logger.error(f"Failed to find LVol bdev {base_name}")
-        return False
-
-    key_name = f'key_{name}'
-    ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
-    if not ret:
-        logger.error("failed to create crypto key")
-        return False
-    ret = rpc_client.lvol_crypto_create(name, base_name, key_name)
-    if not ret:
-        logger.error(f"failed to create crypto LVol {name}")
-        return False
-    return ret
-
-def _create_crypto_lvol_kms(snode, lvol, cluster):
-    rpc_client = snode.rpc_client()
+def _create_crypto_lvol(rpc_client, lvol, cluster):
     name = lvol.crypto_bdev
     base_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     ret = rpc_client.get_bdevs(base_name)
@@ -120,6 +101,7 @@ def _create_crypto_lvol_kms(snode, lvol, cluster):
         logger.error(f"failed to create crypto LVol {name}")
         return False
     return ret
+
 
 def _create_compress_lvol(rpc_client, base_bdev_name):
     pm_path = constants.PMEM_DIR
@@ -592,16 +574,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
 
-        if cl.deploy_kms:
-            with create_kms_connection(cl) as kms:
-                try:
-                    kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
-                    logger.info("Created lvol keys")
-                except KMSException:
-                    logger.exception("Failed to create lvol keys")
-        else:
-            lvol.crypto_key1 = utils.generate_hex_string(32)
-            lvol.crypto_key2 = utils.generate_hex_string(32)
+        with create_kms_connection(cl) as kms:
+            try:
+                kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
+                logger.info("Created lvol keys")
+            except KMSException:
+                logger.exception("Failed to create lvol keys")
 
     # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
     # Security options are inherited from the pool
@@ -749,11 +727,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
         elif type == "crypto":
             db_controller = DBController()
             cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-            if cluster.deploy_kms:
-                ret = _create_crypto_lvol_kms(snode, lvol, cluster)
-            else:
-                ret = _create_crypto_lvol(rpc_client, lvol.crypto_bdev, f"{lvol.lvs_name}/{lvol.lvol_bdev}",
-                                          lvol.crypto_key1, lvol.crypto_key2)
+            ret = _create_crypto_lvol(rpc_client, lvol, cluster)
 
         elif type == "bdev_lvstore":
             ret = rpc_client.create_lvstore(**params)
@@ -885,15 +859,10 @@ def is_node_leader(snode, lvs_name):
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     db_controller = DBController()
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-    base=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
     if "crypto" in lvol.lvol_type:
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        if cluster.deploy_kms:
-            ret = _create_crypto_lvol_kms(snode, lvol, cluster)
-        else:
-            ret = _create_crypto_lvol(
-                rpc_client, lvol.crypto_bdev, base, lvol.crypto_key1, lvol.crypto_key2)
+        ret = _create_crypto_lvol(rpc_client, lvol, cluster)
         if not ret:
             msg=f"Failed to create crypto lvol on node {snode.get_id()}"
             logger.error(msg)
@@ -1239,13 +1208,14 @@ def delete_lvol(id_or_name, force_delete=False):
             pass # already deleted
 
     cl = db_controller.get_cluster_by_id(snode.cluster_id)
-    if cl.deploy_kms:
-        with create_kms_connection(cl) as kms:
-            try:
-                kms.delete_data_encryption_keys(lvol.crypto_bdev)
-                logger.info("Deleted lvol key")
-            except KMSException:
-                logger.exception("Failed to delete lvol key")
+
+    with create_kms_connection(cl) as kms:
+        try:
+            kms.delete_data_encryption_keys(lvol.crypto_bdev)
+            logger.info("Deleted lvol key")
+        except KMSException:
+            logger.exception("Failed to delete lvol key")
+
     logger.info("Done")
     return True
 

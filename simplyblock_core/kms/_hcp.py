@@ -64,7 +64,9 @@ class HCPClient(KMS):
             raise KMSException("Request failed") from e
 
     def _create_data_encryption_key(self, kek_name: str) -> str:
-        return self._request("POST", f"transit/datakey/wrapped/{kek_name}")["data"]["ciphertext"]
+        return self._request("POST", f"transit/datakey/wrapped/{kek_name}")["data"][
+            "ciphertext"
+        ]
 
     def create_data_encryption_keys(self, kek_name: str, name: str) -> None:
         self._request(
@@ -83,8 +85,12 @@ class HCPClient(KMS):
 
     def get_data_encryption_keys(self, kek_name: str, name: str) -> dict:
         key_accessor = operator.attrgetter("key1", "key2")
-        encrypted_key1, encrypted_key2 = key_accessor(self._request("GET", f"{self.cluster_id}/{name}")["data"])
-        return self._decrypt(kek_name, encrypted_key1), self._decrypt(kek_name, encrypted_key2)
+        encrypted_key1, encrypted_key2 = key_accessor(
+            self._request("GET", f"{self.cluster_id}/{name}")["data"]
+        )
+        return self._decrypt(kek_name, encrypted_key1), self._decrypt(
+            kek_name, encrypted_key2
+        )
 
     def delete_data_encryption_keys(self, name: str) -> None:
         self._request("DELETE", f"{self.cluster_id}/{name}")

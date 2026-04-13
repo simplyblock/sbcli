@@ -98,13 +98,12 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     pool_events.pool_add(pool)
     logger.info("Done")
 
-    if cluster.deploy_kms:
-        with create_kms_connection(cluster) as kms:
-            try:
-                kms.create_key_encryption_key(pool.get_id())
-                logger.info("Created pool key")
-            except KMSException:
-                logger.eception("Failed to create pool key")
+    with create_kms_connection(cluster) as kms:
+        try:
+            kms.create_key_encryption_key(pool.get_id())
+            logger.info("Created pool key")
+        except KMSException:
+            logger.eception("Failed to create pool key")
 
     return pool.get_id()
 
@@ -277,13 +276,13 @@ def delete_pool(uuid):
     pool_events.pool_remove(pool)
     pool.remove(db_controller.kv_store)
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
-    if cluster.deploy_kms:
-        with create_kms_connection(cluster) as kms:
-            try:
-                kms.delete_key_encryption_key(pool)
-                logger.info("Deleted pool key")
-            except KMSException:
-                logger.exception("Failed to delete pool key")
+
+    with create_kms_connection(cluster) as kms:
+        try:
+            kms.delete_key_encryption_key(pool)
+            logger.info("Deleted pool key")
+        except KMSException:
+            logger.exception("Failed to delete pool key")
 
     logger.info("Done")
     return True
