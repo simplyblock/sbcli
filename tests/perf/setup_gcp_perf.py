@@ -36,7 +36,6 @@ Prerequisites:
 import json
 import os
 import re
-import select
 import subprocess
 import sys
 import time
@@ -376,7 +375,7 @@ def get_sn_uuids(mgmt_ip):
 
 def main():
     print("=" * 60)
-    print(f"Deploying simplyblock cluster on GCP")
+    print("Deploying simplyblock cluster on GCP")
     print(f"  Project : {PROJECT_ID}")
     print(f"  Zone    : {ZONE}")
     print(f"  Subnet  : {SUBNET}")
