@@ -607,15 +607,19 @@ def _prepare_cluster_devices_partitions(snode, devices):
             partitioned_devices = _search_for_partitions(snode.rpc_client(), nvme)
             if len(partitioned_devices) != (1 + snode.num_partitions_per_dev):
                 logger.info(f"Creating partitions for {nvme.nvme_bdev}")
-                t = threading.Thread(
-                    target=_create_device_partitions,
-                    args=(snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
-                          snode.jm_percent, snode.partition_size, index+1,))
-                thread_list.append(t)
-                t.start()
 
     for thread in thread_list:
         thread.join()
+
+    for index, nvme in enumerate(devices_to_partition):
+        partitioned_devices = _search_for_partitions(snode.rpc_client(), nvme)
+        if len(partitioned_devices) == (1 + snode.num_partitions_per_dev):
+            continue
+        if not _create_device_partitions(
+                snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
+                snode.jm_percent, snode.partition_size, index + 1):
+            logger.error("Failed to create partitions")
+            return False
 
     thread_list = []
     for nvme in devices_to_partition:
@@ -1280,6 +1284,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         minimum_sys_memory = node_config.get("sys_memory")
         max_lvol = node_config.get("max_lvol")
         ssd_pcie = node_config.get("ssd_pcis")
+        ssd_nvme_names = node_config.get("ssd_nvmes") or []
 
         if ssd_pcie:
             for ssd in ssd_pcie:
@@ -1337,10 +1342,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         results = None
         l_cores = node_config.get("l-cores")
         spdk_cpu_mask = node_config.get("cpu_mask")
+        if format_4k:
+            if ssd_nvme_names:
+                for nvme_name in ssd_nvme_names:
+                    snode_api.format_device_with_4k(nvme_name=nvme_name)
+            else:
+                for ssd in ssd_pcie:
+                    snode_api.format_device_with_4k(device_pci=ssd)
         for ssd in ssd_pcie:
-            if format_4k:
-                snode_api.format_device_with_4k(ssd)
-                snode_api.bind_device_to_spdk(ssd)
             snode_api.bind_device_to_spdk(ssd)
 
         if not spdk_proxy_image:
@@ -1450,6 +1459,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         snode.namespace = namespace
         snode.ssd_pcie = ssd_pcie
+        snode.ssd_nvme_names = ssd_nvme_names
         snode.hostname = hostname
         snode.host_nqn = subsystem_nqn
         snode.subsystem = subsystem_nqn
@@ -1855,12 +1865,15 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             snode_api = SNodeClient(snode.api_endpoint, timeout=20)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             snode_api.leave_swarm()
-            pci_address = []
+            deleted_namespaces = set()
             for dev in snode.nvme_devices:
-                if dev.pcie_address not in pci_address:
-                    ret = snode_api.delete_dev_gpt_partitions(dev.pcie_address)
+                if dev.is_partition:
+                    continue
+                namespace_name = getattr(dev, "namespace_name", "") or dev.device_name
+                if namespace_name and namespace_name not in deleted_namespaces:
+                    ret = snode_api.delete_dev_gpt_partitions(nvme_name=namespace_name)
                     logger.debug(ret)
-                    pci_address.append(dev.pcie_address)
+                    deleted_namespaces.add(namespace_name)
     except Exception as e:
         logger.exception(e)
 
@@ -2258,14 +2271,23 @@ def restart_storage_node(
                              NVMeDevice.STATUS_REMOVED]:
             removed_devices.append(db_dev)
             continue
-        if db_dev.serial_number in devices_sn_dict.keys():
+        found_dev = devices_sn_dict.get(db_dev.serial_number)
+        if not found_dev and not getattr(db_dev, "namespace_name", ""):
+            for candidate in nvme_devs:
+                if candidate.pcie_address == db_dev.pcie_address and candidate.namespace_id in [0, 1]:
+                    found_dev = candidate
+                    break
+
+        if found_dev:
             logger.info(f"Device found: {db_dev.get_id()}, status {db_dev.status}")
-            found_dev = devices_sn_dict[db_dev.serial_number]
             if not db_dev.is_partition and not found_dev.is_partition:
                 db_dev.device_name = found_dev.device_name
                 db_dev.nvme_bdev = found_dev.nvme_bdev
                 db_dev.nvme_controller = found_dev.nvme_controller
+                db_dev.namespace_id = found_dev.namespace_id
+                db_dev.namespace_name = found_dev.namespace_name
                 db_dev.pcie_address = found_dev.pcie_address
+                db_dev.serial_number = found_dev.serial_number
 
             # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
             #     db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
@@ -2284,9 +2306,15 @@ def restart_storage_node(
         known_devices_sn.append(jm_dev_sn)
 
     for dev in nvme_devs:
-        if dev.serial_number == jm_dev_sn:
+        if dev.serial_number == jm_dev_sn or (
+                jm_dev_sn and not getattr(snode.jm_device, "namespace_name", "")
+                and dev.pcie_address == snode.jm_device.pcie_address
+                and dev.namespace_id in [0, 1]):
             logger.info(f"JM device found: {snode.jm_device.get_id()}")
             snode.jm_device.nvme_bdev = dev.nvme_bdev
+            snode.jm_device.namespace_id = dev.namespace_id
+            snode.jm_device.namespace_name = dev.namespace_name
+            snode.jm_device.serial_number = dev.serial_number
 
         elif dev.serial_number not in known_devices_sn:
             logger.info(f"New device found: {dev.get_id()}")

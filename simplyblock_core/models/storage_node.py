@@ -84,6 +84,7 @@ class StorageNode(BaseNodeObject):
     partitions_count: int = 0  # Unused
     poller_cpu_cores: List[int] = []
     ssd_pcie: List = []
+    ssd_nvme_names: List[str] = []
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""

@@ -164,16 +164,24 @@ class SNodeClient:
         }
         return self._request("POST", "make_gpt_partitions", params)
 
-    def delete_dev_gpt_partitions(self, device_pci):
-        params = {"device_pci": device_pci}
+    def delete_dev_gpt_partitions(self, device_pci=None, nvme_name=None):
+        params = {}
+        if device_pci:
+            params["device_pci"] = device_pci
+        if nvme_name:
+            params["nvme_name"] = nvme_name
         return self._request("POST", "delete_dev_gpt_partitions", params)
 
     def bind_device_to_nvme(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_nvme", params)
 
-    def format_device_with_4k(self, device_pci):
-        params = {"device_pci": device_pci}
+    def format_device_with_4k(self, device_pci=None, nvme_name=None):
+        params = {}
+        if device_pci:
+            params["device_pci"] = device_pci
+        if nvme_name:
+            params["nvme_name"] = nvme_name
         return self._request("POST", "format_device_with_4k", params)
 
     def bind_device_to_spdk(self, device_pci):

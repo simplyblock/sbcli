@@ -153,7 +153,14 @@ class RPCPortParams(BaseModel):
 
 
 class DeviceParams(BaseModel):
-    device_pci: PCIAddress
+    device_pci: Optional[PCIAddress] = None
+    nvme_name: Optional[str] = Field(default=None, pattern=r'^nvme\d+n\d+$')
+
+    @model_validator(mode='after')
+    def verify_selector(self):
+        if not self.device_pci and not self.nvme_name:
+            raise ValueError("Either device_pci or nvme_name must be provided")
+        return self
 
 
 class NVMEConnectParams(BaseModel):

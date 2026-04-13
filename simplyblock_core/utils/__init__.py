@@ -566,6 +566,18 @@ def calculate_minimum_sys_memory(ssd_list):
     return int(minimum_sys_memory)
 
 
+def get_node_storage_selectors(node):
+    return list(node.get("ssd_nvmes") or node.get("ssd_pcis") or [])
+
+
+def get_node_storage_device_count(node):
+    return len(get_node_storage_selectors(node))
+
+
+def _dedupe_preserve_order(items):
+    return list(dict.fromkeys(items))
+
+
 def calculate_spdk_memory(minimum_hp_memory, minimum_sys_memory, free_sys_memory, huge_total_memory):
     total_free_memory = free_sys_memory + huge_total_memory
     if total_free_memory < (minimum_hp_memory + minimum_sys_memory):
@@ -1217,20 +1229,31 @@ def addNvmeDevices(rpc_client, snode, devs):
             nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
             model_number = nvme_driver_data['ctrlr_data']['model_number']
             total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
+            namespace_name = nvme_dict['name']
+            namespace_id = 0
+            if "ns_data" in nvme_driver_data and nvme_driver_data["ns_data"].get("id") is not None:
+                namespace_id = int(nvme_driver_data["ns_data"]["id"])
+
+            if snode.ssd_nvme_names and namespace_name not in snode.ssd_nvme_names:
+                continue
 
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
-                if "ns_data" in nvme_driver_data:
-                    serial_number = nvme_driver_data['pci_address'] + nvme_driver_data['ns_data']['id']
+                if namespace_id:
+                    serial_number = f"{nvme_driver_data['pci_address']}:{namespace_id}"
                 else:
-                    logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
+                    logger.error(f"No namespace ID found for device: {nvme_driver_data['pci_address']}")
+            elif namespace_id and (len(nvme_bdevs) > 1 or namespace_id != 1):
+                serial_number = f"{serial_number}:{namespace_id}"
 
             devices.append(
                 NVMeDevice({
                     'uuid': str(uuid.uuid4()),
-                    'device_name': nvme_dict['name'],
+                    'device_name': namespace_name,
                     'size': total_size,
                     'physical_label': next_physical_label,
+                    'namespace_id': namespace_id,
+                    'namespace_name': namespace_name,
                     'pcie_address': nvme_driver_data['pci_address'],
                     'model_id': model_number,
                     'serial_number': serial_number,
@@ -1346,10 +1369,49 @@ def get_nvme_pci_devices():
         return [], []
 
 
+def _list_nvme_namespaces():
+    nvme_base_path = '/sys/class/nvme/'
+    namespace_entries = {}
+    if not os.path.isdir(nvme_base_path):
+        return namespace_entries
+
+    for controller in os.listdir(nvme_base_path):
+        if not re.fullmatch(r"nvme\d+", controller):
+            continue
+        try:
+            controller_symlink = os.path.join(nvme_base_path, controller)
+            real_path = os.path.realpath(controller_symlink)
+
+            with open(os.path.join(real_path, 'address'), 'r') as f:
+                pci_address = f.read().strip()
+            with open(os.path.join(real_path, 'numa_node'), 'r') as f:
+                numa_node = f.read().strip()
+
+            pattern = re.compile(rf"^{re.escape(controller)}n\d+$")
+            for entry in os.listdir(real_path):
+                if not pattern.match(entry):
+                    continue
+                match = re.search(r"n(\d+)$", entry)
+                namespace_entries[entry] = {
+                    "pci_address": pci_address,
+                    "numa_node": numa_node,
+                    "namespace_name": entry,
+                    "namespace_id": int(match.group(1)) if match else 0,
+                    "controller_name": controller,
+                }
+        except Exception:
+            continue
+
+    return namespace_entries
+
+
 def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names):
     pci_addresses, blocked_devices = get_nvme_pci_devices()
     ssd_pci_set = set(pci_addresses)
     claim_devices_to_nvme()
+    namespace_entries = _list_nvme_namespaces()
+    explicit_allowed_pcis = set()
+    explicit_allowed_names = set()
 
     # Normalize SSD PCI addresses and user PCI list
     if pci_allowed:
@@ -1365,16 +1427,25 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
             pci_addresses = user_pci_set & ssd_pci_set
         else:
             pci_addresses = list(user_pci_set)
+        explicit_allowed_pcis = set(pci_addresses)
         for pci in pci_addresses:
             pci_utils.ensure_driver(pci, 'nvme', override=True)
         logger.debug(f"Found nvme devices are {pci_addresses}")
     elif device_model and size_range:
         pci_addresses = query_nvme_ssd_by_model_and_size(device_model, size_range)
         logger.debug(f"Found nvme devices are {pci_addresses}")
-        pci_allowed = pci_addresses
+        explicit_allowed_pcis = set(pci_addresses)
     elif nvme_names:
-        pci_addresses = query_nvme_ssd_by_namespace_names(nvme_names)
-        pci_allowed = pci_addresses
+        explicit_allowed_names = set(nvme_names)
+        missing_names = explicit_allowed_names - set(namespace_entries.keys())
+        if missing_names:
+            logger.warn(f"Invalid NVMe namespace names: {', '.join(sorted(missing_names))}")
+        pci_addresses = sorted({
+            entry["pci_address"]
+            for name, entry in namespace_entries.items()
+            if name in explicit_allowed_names
+        })
+        explicit_allowed_pcis = set(pci_addresses)
     elif pci_blocked:
         user_pci_set = set(
             addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
@@ -1385,34 +1456,29 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
 
     for pci in pci_addresses:
         pci_utils.ensure_driver(pci, 'nvme')
-    nvme_base_path = '/sys/class/nvme/'
-    nvme_devices = [dev for dev in os.listdir(nvme_base_path) if dev.startswith('nvme')]
     nvmes = {}
-    for dev in nvme_devices:
+    for dev_name, entry in namespace_entries.items():
         try:
-            dev_name = os.path.basename(dev)
-            pattern = re.compile(rf"^{re.escape(dev_name)}n\d+$")
-            device_symlink = os.path.join(nvme_base_path, dev)
-
-            # Resolve the real path to get the actual device path
-            real_path = os.path.realpath(device_symlink)
-
-            # Read the PCI address from the 'address' file
-            address_file = os.path.join(real_path, 'address')
-            with open(address_file, 'r') as f:
-                pci_address = f.read().strip()
-            if any(pattern.match(block_device) for block_device in blocked_devices):
-                if pci_address not in pci_allowed:
-                    logger.debug(f"device {dev_name} is busy.. skipping")
-                    continue
-                logger.warning(f"PCI {pci_address} passed as allowed PCI, even it has partitions.. Formatting it now")
-            # Read the NUMA node information
-            numa_node_file = os.path.join(real_path, 'numa_node')
-            with open(numa_node_file, 'r') as f:
-                numa_node = f.read().strip()
+            pci_address = entry["pci_address"]
             if pci_address not in pci_addresses:
                 continue
-            nvmes[dev_name] = {"pci_address": pci_address, "numa_node": numa_node}
+
+            if explicit_allowed_names and dev_name not in explicit_allowed_names:
+                continue
+
+            if dev_name in blocked_devices:
+                if pci_address not in explicit_allowed_pcis and dev_name not in explicit_allowed_names:
+                    logger.debug(f"device {dev_name} is busy.. skipping")
+                    continue
+                logger.warning(f"Namespace {dev_name} was explicitly selected despite existing partitions or mounts")
+
+            nvmes[dev_name] = {
+                "pci_address": pci_address,
+                "numa_node": entry["numa_node"],
+                "namespace_name": dev_name,
+                "namespace_id": entry["namespace_id"],
+                "controller_name": entry["controller_name"],
+            }
         except Exception:
             continue
     return nvmes
@@ -1422,12 +1488,20 @@ def get_total_capacity_of_nvme_devices(pci_lst):
     json_string = get_nvme_list_verbose()
     data = json.loads(json_string)
     total_capacity = 0
+    selectors = set(pci_lst or [])
+    counted = set()
     for device_entry in data.get('Devices', []):
         for subsystem in device_entry.get('Subsystems', []):
             for controller in subsystem.get('Controllers', []):
                 address = controller.get("Address")
-                if len(controller.get("Namespaces")) > 0 and address in pci_lst:
-                    total_capacity = controller.get("Namespaces")[0].get("PhysicalSize")
+                for namespace in controller.get("Namespaces", []) or []:
+                    namespace_name = namespace.get("NameSpace")
+                    key = (address, namespace_name)
+                    if key in counted:
+                        continue
+                    if address in selectors or namespace_name in selectors:
+                        total_capacity += int(namespace.get("PhysicalSize") or 0)
+                        counted.add(key)
 
     return int(total_capacity)
 
@@ -1645,9 +1719,9 @@ def regenerate_config(new_config, old_config, force=False):
         if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
             logger.error("The socket is changed, please rerun sbcli configure without upgrade firstly")
             return False
-        number_of_alcemls = len(new_config["nodes"][i]["ssd_pcis"])
+        number_of_alcemls = get_node_storage_device_count(new_config["nodes"][i])
         if (old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or
-                len(old_config["nodes"][i]["ssd_pcis"]) != len(new_config["nodes"][i]["ssd_pcis"]) or force):
+                get_node_storage_device_count(old_config["nodes"][i]) != get_node_storage_device_count(new_config["nodes"][i]) or force):
             try:
                 isolated_cores = hexa_to_cpu_list(new_config["nodes"][i]["cpu_mask"])
             except ValueError:
@@ -1678,6 +1752,7 @@ def regenerate_config(new_config, old_config, force=False):
             number_of_distribs = 12
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
+        old_config["nodes"][i]["ssd_nvmes"] = new_config["nodes"][i].get("ssd_nvmes", [])
         old_config["nodes"][i]["nic_ports"] = new_config["nodes"][i]["nic_ports"]
         for nic in old_config["nodes"][i]["nic_ports"]:
             if nic not in all_nics:
@@ -1694,7 +1769,7 @@ def regenerate_config(new_config, old_config, force=False):
         old_config["nodes"][i]["small_pool_count"] = small_pool_count
         old_config["nodes"][i]["large_pool_count"] = large_pool_count
         old_config["nodes"][i]["huge_page_memory"] = minimum_hp_memory
-        minimum_sys_memory = calculate_minimum_sys_memory(old_config["nodes"][i]["ssd_pcis"])
+        minimum_sys_memory = calculate_minimum_sys_memory(get_node_storage_selectors(old_config["nodes"][i]))
         old_config["nodes"][i]["sys_memory"] = minimum_sys_memory
 
     memory_details = node_utils.get_memory_details()
@@ -1704,7 +1779,7 @@ def regenerate_config(new_config, old_config, force=False):
     total_required_memory = 0
     all_isolated_cores = set()
     for node in old_config["nodes"]:
-        if len(node["ssd_pcis"]) == 0:
+        if get_node_storage_device_count(node) == 0:
             logger.error(f"There are no enough SSD devices on numa node {node['socket']}")
             return False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
@@ -1733,7 +1808,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             "There are no enough SSD devices on system, you may run 'sbctl sn clean-devices', to clean devices stored in /etc/simplyblock/sn_config_file")
         return False, False
     if force:
-        nvme_devices = " ".join([f"/dev/{d}n1" for d in nvmes.keys()])
+        nvme_devices = " ".join([f"/dev/{d}" for d in nvmes.keys()])
         logger.warning(f"Formating Nvme devices {nvme_devices}")
         answer = input("Type YES/Y to continue: ").strip().lower()
         if answer not in ("yes", "y"):
@@ -1741,11 +1816,21 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             exit(1)
         logger.info("OK, continuing formating...")
         for nvme_device in nvmes.keys():
-            nvme_device_path = f"/dev/{nvme_device}n1"
+            nvme_device_path = f"/dev/{nvme_device}"
             clean_partitions(nvme_device_path)
             nvme_json_string = get_idns(nvme_device_path)
             lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
             format_nvme_device(nvme_device_path, lbaf_id)
+
+    nvme_controllers = {}
+    for nvme_name, val in nvmes.items():
+        pci = val["pci_address"]
+        nvme_controllers.setdefault(pci, {
+            "pci_address": pci,
+            "numa_node": int(val["numa_node"]),
+            "namespace_names": [],
+        })
+        nvme_controllers[pci]["namespace_names"].append(nvme_name)
 
     for nid in sockets_to_use:
         if nid in cores_by_numa:
@@ -1761,7 +1846,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         else:
             system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nics"].append(nic)
 
-    for nvme, val in nvmes.items():
+    for val in nvme_controllers.values():
         pci = val["pci_address"]
         numa = int(val["numa_node"])
         pci_utils.unbind_driver(pci)
@@ -1772,12 +1857,12 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
 
     nvme_by_numa: dict = {nid: [] for nid in sockets_to_use}
     nvme_numa_neg1 = []
-    for nvme_name, val in nvmes.items():
+    for pci, val in nvme_controllers.items():
         numa = int(val["numa_node"])
         if numa in sockets_to_use:
-            nvme_by_numa[numa].append(nvme_name)
+            nvme_by_numa[numa].append(pci)
         elif int(numa) == -1:
-            nvme_numa_neg1.append(nvme_name)
+            nvme_numa_neg1.append(pci)
 
     total_nodes = nodes_per_socket * len(sockets_to_use)
     all_nvmes_per_node: list = [[] for _ in range(total_nodes)]
@@ -1822,6 +1907,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6])
                 },
                 "ssd_pcis": [],
+                "ssd_nvmes": [],
                 "nic_ports": system_info[nid]["nics"]
             }
             number_of_distribs = 2
@@ -1833,11 +1919,15 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["number_of_distribs"] = number_of_distribs
 
             nvme_neg1_list = all_nvmes_neg1_per_node[node_index]
-            for nvme_name in nvme_neg1_list:
-                node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
-            for nvme_name in nvme_per_core_group[idx]:
-                node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
-            number_of_alcemls = len(node_info["ssd_pcis"])
+            for pci in nvme_neg1_list:
+                node_info["ssd_pcis"].append(pci)
+                node_info["ssd_nvmes"].extend(nvme_controllers[pci]["namespace_names"])
+            for pci in nvme_per_core_group[idx]:
+                node_info["ssd_pcis"].append(pci)
+                node_info["ssd_nvmes"].extend(nvme_controllers[pci]["namespace_names"])
+            node_info["ssd_pcis"] = _dedupe_preserve_order(node_info["ssd_pcis"])
+            node_info["ssd_nvmes"] = _dedupe_preserve_order(node_info["ssd_nvmes"])
+            number_of_alcemls = len(node_info["ssd_nvmes"])
             node_info["number_of_alcemls"] = number_of_alcemls
             small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
                                                                       len(core_group["isolated"]),
@@ -1850,7 +1940,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["max_lvol"] = max_lvol
             node_info["max_size"] = max_prov
             node_info["huge_page_memory"] = max(minimum_hp_memory, max_prov)
-            minimum_sys_memory = calculate_minimum_sys_memory(node_info["ssd_pcis"])
+            minimum_sys_memory = calculate_minimum_sys_memory(get_node_storage_selectors(node_info))
             node_info["sys_memory"] = minimum_sys_memory
             all_nodes.append(node_info)
             node_index += 1
@@ -1861,7 +1951,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     total_required_memory = 0
     all_isolated_cores = set()
     for node in all_nodes:
-        if len(node["ssd_pcis"]) == 0:
+        if get_node_storage_device_count(node) == 0:
             logger.error(f"There are no enough SSD devices on numa node {node['socket']}")
             return False, False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
@@ -1888,10 +1978,21 @@ def get_nvme_name_from_pci(pci_address):
     return None
 
 
-def format_device_with_4k(pci_device):
-    try:
+def get_nvme_device_path(pci_device=None, nvme_name=None):
+    if nvme_name:
+        return f"/dev/{nvme_name}"
+    if pci_device:
         nvme_device = get_nvme_name_from_pci(pci_device)
-        nvme_device_path = f"/dev/{nvme_device}n1"
+        if nvme_device:
+            return f"/dev/{nvme_device}n1"
+    return None
+
+
+def format_device_with_4k(pci_device=None, nvme_name=None):
+    try:
+        nvme_device_path = get_nvme_device_path(pci_device, nvme_name)
+        if not nvme_device_path:
+            raise ValueError("Failed to resolve NVMe device path")
         clean_partitions(nvme_device_path)
         nvme_json_string = get_idns(nvme_device_path)
         lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
@@ -1968,6 +2069,11 @@ def validate_node_config(node):
             logger.error(f"Missing required SSD field '{ssd}' in node: {node.get('socket')}")
             return False
 
+    for nvme_name in node.get("ssd_nvmes", []):
+        if not is_valid_nvme_namespace_name(nvme_name):
+            logger.error(f"Invalid NVMe namespace '{nvme_name}' in node: {node.get('socket')}")
+            return False
+
     if not node["isolated"]:
         logger.error(f"'isolated' list is empty in node: {node.get('socket')}")
         return False
@@ -1981,6 +2087,10 @@ def validate_node_config(node):
 def is_valid_pci_address(address):
     pattern = r'^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$'
     return re.fullmatch(pattern, address) is not None
+
+
+def is_valid_nvme_namespace_name(name):
+    return re.fullmatch(r'^nvme\d+n\d+$', name) is not None
 
 
 def get_system_cores():
