@@ -1880,6 +1880,43 @@ def restart_storage_node(
         small_bufsize=0, large_bufsize=0,
         force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
         force_lvol_recreate=False, spdk_proxy_image=None):
+    """Wrapper that guarantees the node is reset to OFFLINE if the restart
+    fails after the RESTARTING status has been set.  Without this, any
+    ``return False`` inside the inner logic leaves the node pinned in
+    STATUS_RESTARTING, which blocks all future restart attempts."""
+    result = False
+    try:
+        result = _restart_storage_node_impl(
+            node_id, max_lvol=max_lvol, max_snap=max_snap, max_prov=max_prov,
+            spdk_image=spdk_image, set_spdk_debug=set_spdk_debug,
+            small_bufsize=small_bufsize, large_bufsize=large_bufsize,
+            force=force, node_ip=node_ip, reattach_volume=reattach_volume,
+            clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
+            force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image)
+    except Exception:
+        logger.exception("restart_storage_node raised unexpectedly")
+    finally:
+        if not result:
+            try:
+                db_ctrl = DBController()
+                post_node = db_ctrl.get_storage_node_by_id(node_id)
+                if post_node.status == StorageNode.STATUS_RESTARTING:
+                    logger.warning(
+                        f"Restart of {node_id} failed; resetting from "
+                        f"RESTARTING → OFFLINE to unblock future attempts"
+                    )
+                    set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+            except Exception as cleanup_exc:
+                logger.error(f"Failed to reset node {node_id} after failed restart: {cleanup_exc}")
+    return result
+
+
+def _restart_storage_node_impl(
+        node_id, max_lvol=0, max_snap=0, max_prov=0,
+        spdk_image=None, set_spdk_debug=None,
+        small_bufsize=0, large_bufsize=0,
+        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        force_lvol_recreate=False, spdk_proxy_image=None):
     db_controller = DBController()
     logger.info("Restarting storage node")
     try:
