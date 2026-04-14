@@ -1113,6 +1113,18 @@ class RPCClient:
             "bs_nonleadership": bs_nonleadership,
         })
 
+    def bdev_lvol_set_lvs_signal(self, lvs):
+        """Send a fabric-level signal to an LVS to drop leadership.
+
+        Used when a peer node's management interface is unavailable but its
+        data plane is still healthy.  The signal travels through the hublvol
+        fabric connection from THIS node to the peer, causing the peer's
+        SPDK to drop LVS leadership without needing a management RPC to the
+        peer.
+        """
+        params = {"uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs}
+        return self._request("bdev_lvol_set_lvs_signal", params)
+
     def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid, priority_class=0):
         params = {
             "lvol_name": name,

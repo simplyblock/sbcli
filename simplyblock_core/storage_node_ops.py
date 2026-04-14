@@ -1916,12 +1916,8 @@ def restart_storage_node(
     logger.info("Pre-restart check: FDB transaction to verify no peer in restart/shutdown")
     acquired, reason = db_controller.try_set_node_restarting(snode.cluster_id, node_id)
     if not acquired:
-        if force:
-            logger.warning(f"Pre-restart check blocked ({reason}), proceeding with force")
-            set_node_status(node_id, StorageNode.STATUS_RESTARTING)
-        else:
-            logger.error(f"Cannot restart {node_id}: {reason}")
-            return False
+        logger.error(f"Cannot restart {node_id}: {reason}")
+        return False
     snode = db_controller.get_storage_node_by_id(node_id)
 
     if node_ip:
@@ -3945,17 +3941,20 @@ def find_leader_with_failover(all_nodes, lvs_name):
                      leader.get_id())
         return None, []
 
-    # Force leadership change via fabric signal
+    # Force leadership change via fabric signal: send bdev_lvol_set_lvs_signal
+    # FROM failover_target through the fabric TO the leader (whose mgmt is down
+    # but data plane is healthy). The signal tells the leader's SPDK to drop
+    # leadership for this LVS.
     try:
         rpc = RPCClient(failover_target.mgmt_ip, failover_target.rpc_port,
                         failover_target.rpc_username, failover_target.rpc_password,
                         timeout=5, retry=2)
-        rpc.bdev_distrib_drop_leadership_remote(leader.jm_vuid, leader.get_id())
+        rpc.bdev_lvol_set_lvs_signal(lvs_name)
         time.sleep(2)
-        logger.info("Forced leadership change from %s to %s",
-                    leader.get_id(), failover_target.get_id())
+        logger.info("Sent bdev_lvol_set_lvs_signal(%s) from %s to leader %s via fabric",
+                    lvs_name, failover_target.get_id(), leader.get_id())
     except Exception as e:
-        logger.error("Failed to force leadership change: %s", e)
+        logger.error("Failed to send fabric signal for leadership change: %s", e)
         return None, []
 
     new_non_leaders = [n for n in all_nodes if n.get_id() != failover_target.get_id()]
@@ -4133,7 +4132,7 @@ def _check_hublvol_connected(snode, peer_node):
         return False
 
 
-def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid):
+def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid, lvs_name=None):
     """Handle RPC failure to a peer during restart, per design decision tree.
 
     Called when RPCs to a previously-connected peer fail/timeout.
@@ -4144,35 +4143,42 @@ def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid):
       - If connected → only mgmt plane unreachable, go to step 2
     Step 2: Check if unreachable node is leader
       - If NOT leader → skip that node
-      - If IS leader → send drop_leadership_remote RPC (fabric-level signal),
-        wait 2 seconds, continue
+      - If IS leader → send ``bdev_lvol_set_lvs_signal`` from snode through
+        the fabric to the peer. This tells the peer's SPDK to drop
+        leadership for the given LVS. Only relevant when the peer's data
+        plane is healthy (hublvol connected). Wait 2 seconds for the
+        signal to take effect, then continue.
 
     Returns:
         "skip" - node can be safely skipped
         "leader_dropped" - leadership was dropped via fabric, can continue
-        "abort" - must abort restart (fabric connected but mgmt unresponsive, is leader)
+        "abort" - must abort restart (fabric connected but signal failed)
     """
     if not _check_hublvol_connected(snode, peer_node):
         logger.info("Peer %s hublvol disconnected after RPC failure, skipping", peer_node.get_id())
         return "skip"
 
-    # Hublvol is connected — only mgmt plane is down
-    # Try to drop leadership remotely via fabric signal
+    # Hublvol is connected — only mgmt plane is down, data plane healthy.
+    # Send a fabric-level signal FROM snode TO the peer to drop leadership.
+    if not lvs_name:
+        logger.error("_handle_rpc_failure_on_peer: lvs_name required for fabric signal")
+        return "abort"
     try:
         rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port,
                                snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
-        ret = rpc_client.bdev_distrib_drop_leadership_remote(lvs_jm_vuid, peer_node.get_id())
+        ret = rpc_client.bdev_lvol_set_lvs_signal(lvs_name)
         if ret:
-            logger.info("Sent drop_leadership_remote to %s via fabric, waiting 2s",
-                        peer_node.get_id())
+            logger.info("Sent bdev_lvol_set_lvs_signal(%s) from %s to peer %s via fabric, waiting 2s",
+                        lvs_name, snode.get_id(), peer_node.get_id())
             time.sleep(2)
             return "leader_dropped"
         else:
-            logger.info("Peer %s is not leader, safely skipping", peer_node.get_id())
+            logger.info("bdev_lvol_set_lvs_signal(%s) returned False — peer %s may not be leader, skipping",
+                        lvs_name, peer_node.get_id())
             return "skip"
     except Exception as e:
-        logger.error("Failed to handle RPC failure for peer %s: %s — aborting restart",
-                     peer_node.get_id(), e)
+        logger.error("Failed to send fabric signal to peer %s for LVS %s: %s — aborting restart",
+                     peer_node.get_id(), lvs_name, e)
         return "abort"
 
 
@@ -4541,7 +4547,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
                 logger.info("Current leader for %s is %s", lvs_name, sec_node.get_id())
                 break
         except Exception as e:
-            rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid)
+            rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid, lvs_name=lvs_name)
             if rpc_result == "abort":
                 raise Exception(f"Abort restart: peer {sec_node.get_id()} fabric-connected but mgmt unresponsive")
             disconnected_peers.add(sec_node.get_id())
@@ -4562,7 +4568,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
                 jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(
                     current_leader.jm_vuid)
         except Exception as e:
-            rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid)
+            rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid, lvs_name=lvs_name)
             if rpc_result == "abort":
                 raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
             disconnected_peers.add(current_leader.get_id())
@@ -4629,7 +4635,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
                 logger.error(msg)
                 storage_events.jm_repl_tasks_found(current_leader, lvs_jm_vuid)
         except Exception as e:
-            rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid)
+            rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid, lvs_name=lvs_name)
             if rpc_result == "abort":
                 raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
             disconnected_peers.add(current_leader.get_id())
@@ -4676,7 +4682,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
                         f"Timeout while checking for inflight IO after 10 seconds on node {sec_node.get_id()}")
         except Exception as e:
             # RPC failed on connected peer — use hublvol disconnect check (Method 2)
-            rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid)
+            rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid, lvs_name=lvs_name)
             if rpc_result == "abort":
                 raise Exception(f"Abort restart: peer {sec_node.get_id()} fabric-connected but mgmt unresponsive")
             disconnected_peers.add(sec_node.get_id())
