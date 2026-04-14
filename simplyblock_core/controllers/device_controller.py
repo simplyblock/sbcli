@@ -152,6 +152,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
         device_obj.testing_bdev = test_name
         nvme_bdev = test_name
 
+    storage_node_ops._ensure_device_namespace_metadata(device_obj, snode)
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
 
@@ -183,39 +184,31 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     else:
         logger.info(f"bdev already exists {pt_name}")
 
-    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
+    subsystem_nqn, ip_list = storage_node_ops._ensure_device_subsystem(rpc_client, snode)
     namespace_found = False
-    subsys_found = False
     ret = rpc_client.subsystem_list(subsystem_nqn)
-    if ret :
-        subsys_found = True
-        if ret[0]["namespaces"]:
-            for ns in ret[0]["namespaces"]:
-                if ns['name'] == pt_name:
-                    namespace_found = True
-                    break
-
-    if not subsys_found:
-        logger.info("Creating subsystem %s", subsystem_nqn)
-        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
-        for iface in snode.data_nics:
-            if iface.ip4_address:
-                ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
-                device_obj.nvmf_ip = iface.ip4_address
+    if ret and ret[0]["namespaces"]:
+        for ns in ret[0]["namespaces"]:
+            if ns.get('name') == pt_name or (device_obj.ns_id and ns.get('nsid') == device_obj.ns_id):
+                namespace_found = True
                 break
-    else:
-        logger.info(f"subsystem already exists {subsys_found}")
 
     if not namespace_found:
-        logger.info(f"Adding {pt_name} to the subsystem")
-        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name)
+        logger.info(f"Adding {pt_name} to the shared subsystem")
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, alceml_id, nsid=device_obj.ns_id)
     else:
-        logger.info(f"bdev already added to subsys {pt_name}")
+        logger.info(f"bdev already added to shared subsystem {pt_name}")
 
     device_obj.alceml_bdev = alceml_name
     device_obj.alceml_name = alceml_name
     device_obj.pt_bdev = pt_name
     device_obj.nvmf_nqn = subsystem_nqn
+    device_obj.export_subsystem_nqn = subsystem_nqn
+    device_obj.remote_ctrl_name = storage_node_ops._device_remote_controller_name(snode)
+    if len(ip_list) > 1:
+        device_obj.nvmf_ip = ",".join(ip_list)
+    elif ip_list:
+        device_obj.nvmf_ip = ip_list[0]
     device_obj.nvmf_port = snode.nvmf_port
     return True
 
@@ -405,7 +398,13 @@ def device_remove(device_id, force=True):
             for al in b['aliases']:
                 node_bdev[al] = b
 
-    if rpc_client.subsystem_list(device.nvmf_nqn):
+    if device.export_subsystem_nqn and device.ns_id:
+        logger.info("Removing device namespace from shared subsystem")
+        ret = rpc_client.nvmf_subsystem_remove_ns(device.export_subsystem_nqn, device.ns_id)
+        if ret is False and not force:
+            logger.error(f"Failed to remove namespace {device.ns_id} from subsystem: {device.export_subsystem_nqn}")
+            return False
+    elif rpc_client.subsystem_list(device.nvmf_nqn):
         logger.info("Removing device subsystem")
         ret = rpc_client.subsystem_delete(device.nvmf_nqn)
         if not ret:

@@ -57,7 +57,10 @@ class NVMeDevice(BaseModel):
     size: int = -1
     testing_bdev: str = ""
     connecting_from_node: str = ""
+    export_subsystem_nqn: str = ""
+    ns_id: int = 0
     previous_status: str = ""
+    remote_ctrl_name: str = ""
 
     def __change_dev_connection_to(self, connecting_from_node):
         from simplyblock_core.db_controller import DBController
@@ -94,6 +97,8 @@ class RemoteDevice(BaseModel):
     remote_bdev: str = ""
     alceml_name: str = ""
     node_id: str = ""
+    remote_ctrl_name: str = ""
+    remote_nsid: int = 0
     size: int = -1
     nvmf_multipath: bool = False
 

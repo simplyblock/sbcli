@@ -189,6 +189,93 @@ def get_sn_uuids(mgmt_ip):
     return uuids
 
 
+def fetch_cluster_topology(mgmt_ip, cluster_uuid):
+    script = f"""sudo python3 - <<'PY'
+import json
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.storage_node import StorageNode
+
+
+def normalize_ref(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and value:
+        first = value[0]
+        if isinstance(first, str):
+            return first
+        if isinstance(first, dict):
+            for key in ("node_id", "uuid", "id"):
+                if first.get(key):
+                    return first[key]
+    if isinstance(value, dict):
+        for key in ("node_id", "uuid", "id"):
+            if value.get(key):
+                return value[key]
+    return ""
+
+
+db = DBController()
+cluster = db.get_cluster_by_id({cluster_uuid!r})
+nodes = db.get_storage_nodes_by_cluster_id({cluster_uuid!r}) or []
+by_id = {{node.get_id(): node for node in nodes}}
+
+node_items = []
+lvstores = {{}}
+
+for node in nodes:
+    sec_ref = normalize_ref(
+        getattr(node, "lvstore_stack_secondary", "")
+        or getattr(node, "lvstore_stack_secondary_1", "")
+    )
+    tert_ref = normalize_ref(
+        getattr(node, "lvstore_stack_tertiary", "")
+        or getattr(node, "lvstore_stack_secondary_2", "")
+    )
+
+    node_lvs = []
+    if getattr(node, "lvstore", ""):
+        node_lvs.append({{"name": node.lvstore, "role": "primary"}})
+    if sec_ref and sec_ref in by_id and getattr(by_id[sec_ref], "lvstore", ""):
+        node_lvs.append({{"name": by_id[sec_ref].lvstore, "role": "secondary"}})
+    if tert_ref and tert_ref in by_id and getattr(by_id[tert_ref], "lvstore", ""):
+        node_lvs.append({{"name": by_id[tert_ref].lvstore, "role": "tertiary"}})
+
+    node_items.append(
+        {{
+            "uuid": node.get_id(),
+            "hostname": getattr(node, "hostname", ""),
+            "management_ip": getattr(node, "mgmt_ip", ""),
+            "lvs": node_lvs,
+            "lvs_display": [f"{{item['name']}} ({{item['role']}})" for item in node_lvs],
+        }}
+    )
+
+    lvs_name = getattr(node, "lvstore", "")
+    if not lvs_name:
+        continue
+
+    hublvol = getattr(node, "hublvol", None)
+    hublvol_nqn = getattr(hublvol, "nqn", "") or StorageNode.hublvol_nqn_for_lvstore(
+        cluster.nqn, lvs_name
+    )
+    lvstores[lvs_name] = {{
+        "hublvol_nqn": hublvol_nqn,
+        "client_port": node.get_lvol_subsys_port(lvs_name),
+        "hublvol_port": node.get_hublvol_port(lvs_name),
+    }}
+
+result = {{
+    "cluster_uuid": cluster.uuid,
+    "cluster_nqn": cluster.nqn,
+    "nodes": node_items,
+    "lvstores": dict(sorted(lvstores.items())),
+}}
+print(json.dumps(result, indent=2))
+PY"""
+    output = ssh_exec(mgmt_ip, [script], get_output=True, check=True)[0]
+    return json.loads(output)
+
+
 def create_aws_clients(count, instance_type):
     session = boto3.Session()
     ec2_res = session.resource('ec2')
@@ -450,6 +537,8 @@ def main():
             "security_group_id": inst.security_groups[0]['GroupId'] if inst.security_groups else None
         })
 
+    topology = fetch_cluster_topology(mgmt_ip, cluster_uuid)
+
     final_metadata = {
         "mgmt": {
             "instance_id": mgmt_instances[0].id,
@@ -464,6 +553,7 @@ def main():
         "subnet_id": SUBNET_ID,
         "target_group": STORAGE_SG_ID,
         "cluster_uuid": cluster_uuid,
+        "topology": topology,
         "user": USER,
         "key_path": KEY_PATH
     }

@@ -1,5 +1,6 @@
 # coding=utf-8
 import time
+import re
 from typing import List
 from uuid import uuid4
 
@@ -38,6 +39,7 @@ class StorageNode(BaseNodeObject):
     cpu_hz: int = 0
     ctrl_secret: str = ""
     data_nics: List[IFace] = []
+    device_subsystem_nqn: str = ""
     distrib_cpu_cores: List[int] = []
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
@@ -118,6 +120,75 @@ class StorageNode(BaseNodeObject):
     socket: int = 0
     firewall_port: int = 5001
     spdk_proxy_image: str = ""
+
+    def get_device_subsystem_nqn(self):
+        if self.device_subsystem_nqn:
+            return self.device_subsystem_nqn
+        if self.subsystem:
+            return f"{self.subsystem}:devices"
+        return ""
+
+    def get_device_remote_controller_name(self):
+        return f"remote_{self.get_id()}"
+
+    @staticmethod
+    def get_stable_device_namespace_id(device_id):
+        return int.from_bytes(device_id.encode("utf-8"), "little", signed=False) % 2147483646 + 1
+
+    def normalize_device_namespace_metadata(self):
+        changed = False
+
+        if not self.device_subsystem_nqn and self.subsystem:
+            self.device_subsystem_nqn = self.get_device_subsystem_nqn()
+            changed = True
+
+        shared_subsystem_nqn = self.get_device_subsystem_nqn()
+        used_ns_ids = set()
+        for device in self.nvme_devices:
+            if device.status == NVMeDevice.STATUS_JM:
+                continue
+
+            if not device.export_subsystem_nqn and device.nvmf_nqn and device.nvmf_nqn == shared_subsystem_nqn:
+                device.export_subsystem_nqn = shared_subsystem_nqn
+                changed = True
+
+            if not device.export_subsystem_nqn:
+                continue
+
+            desired_ctrl_name = self.get_device_remote_controller_name()
+            if device.remote_ctrl_name != desired_ctrl_name:
+                device.remote_ctrl_name = desired_ctrl_name
+                changed = True
+
+            desired_nsid = device.ns_id
+            if desired_nsid <= 0 or desired_nsid in used_ns_ids:
+                desired_nsid = self.get_stable_device_namespace_id(device.get_id())
+                while desired_nsid in used_ns_ids:
+                    desired_nsid += 1
+                    if desired_nsid > 2147483646:
+                        desired_nsid = 1
+                if device.ns_id != desired_nsid:
+                    device.ns_id = desired_nsid
+                    changed = True
+            used_ns_ids.add(device.ns_id)
+
+        for remote_device in self.remote_devices:
+            if remote_device.remote_bdev:
+                match = re.match(r"^(.*)n(\d+)$", remote_device.remote_bdev)
+                if match:
+                    ctrl_name, ns_id = match.groups()
+                    ns_id = int(ns_id)
+                    if not remote_device.remote_ctrl_name:
+                        remote_device.remote_ctrl_name = ctrl_name
+                        changed = True
+                    if remote_device.remote_nsid != ns_id:
+                        remote_device.remote_nsid = ns_id
+                        changed = True
+            elif remote_device.remote_ctrl_name and remote_device.remote_nsid > 0:
+                remote_device.remote_bdev = f"{remote_device.remote_ctrl_name}n{remote_device.remote_nsid}"
+                changed = True
+
+        return changed
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.

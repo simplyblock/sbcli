@@ -50,8 +50,18 @@ class DBController(metaclass=Singleton):
         except Exception as e:
             print(e)
 
+    def _normalize_storage_nodes_namespace_metadata(self, nodes, persist=False):
+        normalized_nodes = []
+        for node in nodes:
+            changed = node.normalize_device_namespace_metadata()
+            if changed and persist and self.kv_store:
+                node.write_to_db(self.kv_store)
+            normalized_nodes.append(node)
+        return normalized_nodes
+
     def get_storage_nodes(self) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
+        ret = self._normalize_storage_nodes_namespace_metadata(ret)
         ret = sorted(ret, key=lambda x: x.create_dt)
         return ret
 
@@ -61,6 +71,7 @@ class DBController(metaclass=Singleton):
         for n in ret:
             if n.cluster_id == cluster_id:
                 nodes.append(n)
+        nodes = self._normalize_storage_nodes_namespace_metadata(nodes)
         return sorted(nodes, key=lambda x: x.create_dt)
 
     def get_storage_nodes_by_system_id(self, system_id) -> List[StorageNode]:
@@ -81,7 +92,15 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store, id)
         if len(ret) == 0:
             raise KeyError(f'StorageNode {id} not found')
-        return ret[0]
+        return self._normalize_storage_nodes_namespace_metadata(ret)[0]
+
+    def backfill_device_namespace_metadata(self, cluster_id=None):
+        if cluster_id:
+            nodes = StorageNode().read_from_db(self.kv_store)
+            nodes = [node for node in nodes if node.cluster_id == cluster_id]
+        else:
+            nodes = StorageNode().read_from_db(self.kv_store)
+        self._normalize_storage_nodes_namespace_metadata(nodes, persist=True)
 
     def get_storage_device_by_id(self, id) -> NVMeDevice:
         nodes = self.get_storage_nodes()

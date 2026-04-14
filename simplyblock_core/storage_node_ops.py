@@ -42,6 +42,62 @@ from simplyblock_core.utils import pull_docker_image_with_retry
 logger = utils.get_logger(__name__)
 
 
+def _device_remote_controller_name(snode: StorageNode) -> str:
+    return snode.get_device_remote_controller_name()
+
+
+def _ensure_device_namespace_metadata(nvme: NVMeDevice, snode: StorageNode):
+    nvme.export_subsystem_nqn = snode.get_device_subsystem_nqn()
+    nvme.remote_ctrl_name = _device_remote_controller_name(snode)
+    if nvme.ns_id > 0:
+        return
+
+    namespace_seed = snode.get_stable_device_namespace_id(nvme.get_id())
+    used_ns_ids = {
+        dev.ns_id
+        for dev in snode.nvme_devices
+        if dev.get_id() != nvme.get_id() and dev.ns_id > 0
+    }
+    while namespace_seed in used_ns_ids:
+        namespace_seed += 1
+        if namespace_seed > 2147483646:
+            namespace_seed = 1
+    nvme.ns_id = namespace_seed
+
+
+def _ensure_device_subsystem(rpc_client: RPCClient, snode: StorageNode):
+    subsystem_nqn = snode.get_device_subsystem_nqn()
+    if not subsystem_nqn:
+        raise RuntimeError(f"Missing device subsystem NQN for node {snode.get_id()}")
+
+    ret = rpc_client.subsystem_list(subsystem_nqn)
+    if ret:
+        subsystem = ret[0]
+    else:
+        logger.info("creating shared device subsystem %s", subsystem_nqn)
+        ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', snode.get_id())
+        if not ret and not rpc_client.subsystem_list(subsystem_nqn):
+            raise RuntimeError(f"Failed to create shared device subsystem: {subsystem_nqn}")
+        subsystem = (rpc_client.subsystem_list(subsystem_nqn) or [{}])[0]
+
+    existing_listeners = {
+        (listener.get("trtype"), listener.get("traddr"), str(listener.get("trsvcid")))
+        for listener in subsystem.get("listen_addresses", [])
+    }
+    ip_list = []
+    for iface in snode.data_nics:
+        if not iface.ip4_address:
+            continue
+        listener_key = (iface.trtype, iface.ip4_address, str(snode.nvmf_port))
+        if listener_key not in existing_listeners:
+            logger.info("adding listener for %s on IP %s", subsystem_nqn, iface.ip4_address)
+            rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
+            existing_listeners.add(listener_key)
+        ip_list.append(iface.ip4_address)
+
+    return subsystem_nqn, ip_list
+
+
 def _reapply_allowed_hosts(lvol, snode, rpc_client):
     """Re-register allowed hosts (with DHCHAP keys) on a subsystem after recreation."""
     from simplyblock_core.controllers.lvol_controller import _register_dhchap_keys_on_node, _get_dhchap_group
@@ -160,10 +216,16 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     """
 
     logger.info(f'Connecting to {name}')
-    for bdev in bdev_names:
-        if bdev.startswith(name):
-            logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
-            return bdev
+    expected_bdev = health_controller.get_remote_device_bdev_name(device)
+    if not reattach:
+        for bdev in bdev_names:
+            if bdev == expected_bdev:
+                logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
+                return bdev
+        for bdev in bdev_names:
+            if bdev.startswith(name):
+                logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
+                return bdev
 
     rpc_client = node.rpc_client()
     # check connection status
@@ -203,6 +265,17 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
         #    time.sleep(1)
 
     # only if the controller is really gone we try to reattach it
+    if reattach and rpc_client.bdev_nvme_controller_list(name):
+        logger.info("Reattaching controller %s to refresh namespaces", name)
+        rpc_client.bdev_nvme_detach_controller(name)
+        for _ in range(10):
+            if not rpc_client.bdev_nvme_controller_list(name):
+                break
+            time.sleep(1)
+        else:
+            device.release_device_connection()
+            raise RuntimeError(f"Failed to detach controller: {name}")
+
     if not rpc_client.bdev_nvme_controller_list(name):
         bdev_name = None
 
@@ -220,7 +293,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
         for ip in device.nvmf_ip.split(","):
             ret = rpc_client.bdev_nvme_attach_controller(
-                name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
+                name, health_controller.get_device_export_nqn(device), ip, device.nvmf_port, tr_type,
                 multipath=device.nvmf_multipath)
             if not bdev_name and ret and isinstance(ret, list):
                 bdev_name = ret[0]
@@ -478,6 +551,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
 
 def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     db_controller = DBController()
+    _ensure_device_namespace_metadata(nvme, snode)
     nvme_bdev = nvme.nvme_bdev
     if snode.enable_test_device:
         test_name = f"{nvme.nvme_bdev}_test"
@@ -511,21 +585,21 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return None
 
-    subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
-    logger.info("creating subsystem %s", subsystem_nqn)
-    ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
-    ip_list = []
-    for iface in snode.data_nics:
-        if iface.ip4_address:
-            logger.info("adding listener for %s on IP %s" % (subsystem_nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(subsystem_nqn, iface.trtype, iface.ip4_address, snode.nvmf_port)
-            ip_list.append(iface.ip4_address)
+    subsystem_nqn, ip_list = _ensure_device_subsystem(rpc_client, snode)
+    subsystem = (rpc_client.subsystem_list(subsystem_nqn) or [{}])[0]
+    namespace_found = False
+    for namespace in subsystem.get("namespaces", []):
+        if namespace.get("name") == pt_name or (
+                nvme.ns_id and namespace.get("nsid") == nvme.ns_id):
+            namespace_found = True
+            break
 
-    logger.info(f"add {pt_name} to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, alceml_id)
-    if not ret:
-        logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
-        return None
+    if not namespace_found:
+        logger.info("add %s to shared subsystem %s with nsid %s", pt_name, subsystem_nqn, nvme.ns_id)
+        ret = rpc_client.nvmf_subsystem_add_ns(subsystem_nqn, pt_name, alceml_id, nsid=nvme.ns_id)
+        if not ret:
+            logger.error(f"Failed to add: {pt_name} to the subsystem: {subsystem_nqn}")
+            return None
 
     if len(ip_list) > 1:
         IP = ",".join(ip_list)
@@ -538,6 +612,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     nvme.pt_bdev = pt_name
     nvme.alceml_name = alceml_name
     nvme.nvmf_nqn = subsystem_nqn
+    nvme.export_subsystem_nqn = subsystem_nqn
     nvme.nvmf_ip = IP
     nvme.nvmf_port = snode.nvmf_port
     nvme.io_error = False
@@ -715,6 +790,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password, timeout=5 * 60)
+    _ensure_device_subsystem(rpc_client, snode)
 
     thread_list = []
     for index, nvme in enumerate(snode.nvme_devices):
@@ -871,13 +947,14 @@ def _connect_to_remote_devs(
         allowed_dev_statuses.append(NVMeDevice.STATUS_UNAVAILABLE)
 
     devices_to_connect = []
-    connect_threads = []
     nodes = db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id)
     # connect to remote devs
     for node_index, node in enumerate(nodes):
         if node.get_id() == this_node.get_id() or node.status not in allowed_node_statuses:
             continue
         logger.info(f"Connecting to node {node.get_id()}")
+        shared_devices = []
+        legacy_devices = []
         for index, dev in enumerate(node.nvme_devices):
 
             if dev.status not in allowed_dev_statuses:
@@ -886,22 +963,35 @@ def _connect_to_remote_devs(
 
             if not dev.alceml_bdev:
                 raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
-            devices_to_connect.append(dev)
-            t = threading.Thread(
-                target=connect_device,
-                args=(f"remote_{dev.alceml_bdev}", dev, this_node, node_bdev_names, reattach,))
-            connect_threads.append(t)
-            t.start()
+            if dev.export_subsystem_nqn and dev.ns_id:
+                shared_devices.append(dev)
+            else:
+                legacy_devices.append(dev)
 
-    for t in connect_threads:
-        t.join()
+        if shared_devices:
+            representative = shared_devices[0]
+            try:
+                connect_device(_device_remote_controller_name(node), representative, this_node, node_bdev_names, reattach)
+            except RuntimeError:
+                logger.error(f"Failed to connect to shared device subsystem on node {node.get_id()}")
+            devices_to_connect.extend(shared_devices)
+
+        for dev in legacy_devices:
+            devices_to_connect.append(dev)
+            try:
+                connect_device(f"remote_{dev.alceml_bdev}", dev, this_node, node_bdev_names, reattach)
+            except RuntimeError:
+                logger.error(f'Failed to connect to {dev.get_id()}')
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
         node_bdev_names = [b['name'] for b in node_bdevs]
 
     def _find_remote_bdev(dev):
-        expected_prefix = f"remote_{dev.alceml_bdev}"
+        expected_bdev = health_controller.get_remote_device_bdev_name(dev)
+        if expected_bdev in node_bdev_names:
+            return expected_bdev
+        expected_prefix = health_controller.get_remote_device_controller_name(dev)
         for bdev in node_bdev_names:
             if bdev.startswith(expected_prefix):
                 return bdev
@@ -916,6 +1006,8 @@ def _connect_to_remote_devs(
         remote_bdev.size = dev.size
         remote_bdev.status = NVMeDevice.STATUS_ONLINE
         remote_bdev.nvmf_multipath = dev.nvmf_multipath
+        remote_bdev.remote_ctrl_name = health_controller.get_remote_device_controller_name(dev)
+        remote_bdev.remote_nsid = dev.ns_id or 1
         remote_bdev.remote_bdev = _find_remote_bdev(dev)
         for _ in range(10):
             if remote_bdev.remote_bdev:
@@ -946,7 +1038,7 @@ def _connect_to_remote_devs(
                 continue
             if dev.status not in allowed_dev_statuses:
                 continue
-            expected_bdev = f"remote_{dev.alceml_bdev}n1"
+            expected_bdev = health_controller.get_remote_device_bdev_name(dev)
             if expected_bdev not in node_bdev_names:
                 continue
             remote_bdev = RemoteDevice()
@@ -956,6 +1048,8 @@ def _connect_to_remote_devs(
             remote_bdev.size = dev.size
             remote_bdev.status = NVMeDevice.STATUS_ONLINE
             remote_bdev.nvmf_multipath = dev.nvmf_multipath
+            remote_bdev.remote_ctrl_name = health_controller.get_remote_device_controller_name(dev)
+            remote_bdev.remote_nsid = dev.ns_id or 1
             remote_bdev.remote_bdev = expected_bdev
             remote_devices.append(remote_bdev)
             remote_device_ids.add(dev.get_id())
@@ -992,7 +1086,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
                 NVMeDevice.STATUS_CANNOT_ALLOCATE,
             ]:
                 continue
-            expected_bdev = f"remote_{dev.alceml_bdev}n1"
+            expected_bdev = health_controller.get_remote_device_bdev_name(dev)
             if expected_bdev not in node_bdev_names:
                 continue
             remote_dev = remote_by_id.get(dev.get_id())
@@ -1000,6 +1094,8 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
                 if remote_dev.remote_bdev != expected_bdev or remote_dev.status != NVMeDevice.STATUS_ONLINE:
                     remote_dev.remote_bdev = expected_bdev
                     remote_dev.status = NVMeDevice.STATUS_ONLINE
+                    remote_dev.remote_ctrl_name = health_controller.get_remote_device_controller_name(dev)
+                    remote_dev.remote_nsid = dev.ns_id or 1
                     changed = True
             else:
                 remote_dev = RemoteDevice()
@@ -1009,6 +1105,8 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
                 remote_dev.size = dev.size
                 remote_dev.status = NVMeDevice.STATUS_ONLINE
                 remote_dev.nvmf_multipath = dev.nvmf_multipath
+                remote_dev.remote_ctrl_name = health_controller.get_remote_device_controller_name(dev)
+                remote_dev.remote_nsid = dev.ns_id or 1
                 remote_dev.remote_bdev = expected_bdev
                 fresh_node.remote_devices.append(remote_dev)
                 remote_by_id[dev.get_id()] = remote_dev
@@ -1453,6 +1551,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.hostname = hostname
         snode.host_nqn = subsystem_nqn
         snode.subsystem = subsystem_nqn
+        snode.device_subsystem_nqn = snode.get_device_subsystem_nqn()
         snode.data_nics = data_nics
         snode.mgmt_ip = mgmt_ip
         snode.primary_ip = mgmt_ip

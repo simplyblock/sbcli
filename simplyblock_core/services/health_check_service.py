@@ -135,7 +135,7 @@ def check_node(snode):
 
             logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
 
-            passed &= health_controller.check_subsystem(device.nvmf_nqn, nqns=subsystems)
+            passed &= health_controller.check_device_export(device, source_node=snode, nqns=subsystems)
 
             set_device_health_check(snode.cluster_id, device, passed)
             if device.status == NVMeDevice.STATUS_ONLINE:
@@ -150,7 +150,19 @@ def check_node(snode):
             org_dev = db.get_storage_device_by_id(remote_device.get_id())
             org_node = db.get_storage_node_by_id(remote_device.node_id)
             if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
+                org_node_rpc = RPCClient(
+                    org_node.mgmt_ip, org_node.rpc_port,
+                    org_node.rpc_username, org_node.rpc_password,
+                    timeout=3, retry=2)
+                org_subsystems = {
+                    subsystem['nqn']: subsystem
+                    for subsystem in (org_node_rpc.subsystem_list() or [])
+                }
+                remote_state = health_controller.inspect_remote_device_connection(
+                    org_dev, snode, remote_device=remote_device, rpc_client=rpc_client,
+                    bdev_names=node_bdev_names, source_node=org_node,
+                    source_rpc_client=org_node_rpc, source_subsystems=org_subsystems)
+                if remote_state["controller_present"] and remote_state["namespace_present"]:
                     connected_devices.append(remote_device.get_id())
                     continue
 
@@ -159,10 +171,22 @@ def check_node(snode):
                     continue
 
                 try:
-                    storage_node_ops.connect_device(
-                        f"remote_{org_dev.alceml_bdev}", org_dev, snode,
-                        bdev_names=list(node_bdev_names), reattach=False,
-                    )
+                    if not remote_state["controller_present"]:
+                        storage_node_ops.connect_device(
+                            remote_state["controller_name"], org_dev, snode,
+                            bdev_names=list(node_bdev_names), reattach=False,
+                        )
+                    elif remote_state["source_export_present"] is False:
+                        logger.error(
+                            "Source namespace export missing for device %s; skipping local controller refresh",
+                            org_dev.get_id())
+                        node_remote_devices_check = False
+                        continue
+                    else:
+                        storage_node_ops.connect_device(
+                            remote_state["controller_name"], org_dev, snode,
+                            bdev_names=list(node_bdev_names), reattach=True,
+                        )
                     connected_devices.append(org_dev.get_id())
                 except RuntimeError:
                     logger.error(f"Failed to connect to device: {org_dev.get_id()}")

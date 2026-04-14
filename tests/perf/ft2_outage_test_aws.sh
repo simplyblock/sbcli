@@ -65,13 +65,61 @@ run_client() {
 
 cleanup() {
     log "Cleaning up..."
-    # Kill all fio processes on client
-    run_client "sudo pkill -f fio" 2>&1 || true
+    stop_fio_all
     # Disconnect all nvme on client
     run_client "sudo nvme disconnect-all" 2>&1 || true
     log "Cleanup done"
 }
 trap cleanup EXIT
+
+stop_fio_all() {
+    log "Stopping fio on client..."
+    run_client "sudo pkill -f 'fio --name=test_'" 2>&1 || true
+    sleep 2
+}
+
+start_fio_all() {
+    log "=== Start fio on client ==="
+    FIO_COUNT=${#NVME_DEVICES[@]}
+    if [ "$FIO_COUNT" -lt 1 ]; then
+        log "ERROR: No NVMe devices available on client for fio"
+        return 1
+    fi
+
+    for i in "${!NVME_DEVICES[@]}"; do
+        dev="${NVME_DEVICES[$i]}"
+        log "  Starting fio on $dev..."
+        run_client "sudo rm -f /tmp/fio_${i}.log /tmp/fio_iops_${i}*"
+        run_client "sudo fio --name=test_$i \
+            --filename=$dev \
+            --ioengine=libaio \
+            --direct=1 \
+            --rw=randrw \
+            --rwmixread=70 \
+            --bs=4k \
+            --iodepth=4 \
+            --numjobs=4 \
+            --max_latency=15000000 \
+            --time_based \
+            --runtime=$FIO_RUNTIME \
+            --output=/tmp/fio_${i}.log \
+            --write_iops_log=/tmp/fio_iops_${i} \
+            --log_avg_msec=1000 \
+            </dev/null &>/dev/null &"
+        log "    Started fio job $i"
+    done
+
+    sleep 5
+
+    FIO_RUNNING=$(run_client "pgrep -fc 'fio --name=test_'" 2>/dev/null || echo "0")
+    log "  Fio processes on client: $FIO_RUNNING"
+    if [ "$FIO_RUNNING" -lt "$FIO_COUNT" ]; then
+        log "ERROR: Expected $FIO_COUNT fio processes on client, found $FIO_RUNNING"
+        return 1
+    fi
+    log "  Fio running"
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # Phase 1: Get cluster info
@@ -181,41 +229,9 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 4: Start long-running fio on client
 # ---------------------------------------------------------------------------
-log "=== Phase 4: Start fio on client ==="
-FIO_COUNT=${#NVME_DEVICES[@]}
-
-for i in "${!NVME_DEVICES[@]}"; do
-    dev="${NVME_DEVICES[$i]}"
-    log "  Starting fio on $dev..."
-    run_client "sudo fio --name=test_$i \
-        --filename=$dev \
-        --ioengine=libaio \
-        --direct=1 \
-        --rw=randrw \
-        --rwmixread=70 \
-        --bs=4k \
-        --iodepth=4 \
-        --numjobs=4 \
-        --max_latency=15000000 \
-        --time_based \
-        --runtime=$FIO_RUNTIME \
-        --output=/tmp/fio_${i}.log \
-        --write_iops_log=/tmp/fio_iops_${i} \
-        --log_avg_msec=1000 \
-        </dev/null &>/dev/null &"
-    log "    Started fio job $i"
-done
-
-sleep 5
-
-# Verify fio processes running on client
-FIO_RUNNING=$(run_client "pgrep -c fio" 2>/dev/null || echo "0")
-log "  Fio processes on client: $FIO_RUNNING"
-if [ "$FIO_RUNNING" -lt 1 ]; then
-    log "ERROR: No fio processes running on client!"
+if ! start_fio_all; then
     exit 1
 fi
-log "  Fio running"
 
 # ---------------------------------------------------------------------------
 # Phase 5: Outage iterations
@@ -245,7 +261,7 @@ outage_node() {
             ;;
         shutdown)
             log "    Graceful shutdown $node_uuid on $ip..."
-            sbctl -d sn shutdown "$node_uuid" --force 2>&1
+            sbctl -d sn shutdown "$node_uuid" 2>&1
             sleep "$duration"
             log "    Restarting $node_uuid..."
             for _attempt in 1 2 3 4 5; do
@@ -281,7 +297,7 @@ for n in json.load(sys.stdin):
                 sbctl -d sn restart "$uuid" --force 2>&1 || true
             elif [ "$node_status" = "unreachable" ]; then
                 run_remote "$ip" "sudo iptables -F" 2>&1 || true
-                sbctl -d sn shutdown "$uuid" --force 2>&1 || true
+                sbctl -d sn shutdown "$uuid" 2>&1 || true
                 sleep 3
                 sbctl -d sn restart "$uuid" --force 2>&1 || true
             fi
@@ -322,9 +338,9 @@ wait_cluster_active() {
 
 check_fio_alive() {
     local count
-    count=$(run_client "pgrep -c fio" 2>/dev/null || echo "0")
-    if [ "$count" -lt 1 ]; then
-        log "  ERROR: No fio processes on client!"
+    count=$(run_client "pgrep -fc 'fio --name=test_'" 2>/dev/null || echo "0")
+    if [ "$count" -lt "$FIO_COUNT" ]; then
+        log "  ERROR: Expected $FIO_COUNT fio processes on client, found $count"
         for i in $(seq 0 $((FIO_COUNT - 1))); do
             run_client "tail -5 /tmp/fio_${i}.log" 2>&1 || true
         done
@@ -387,12 +403,20 @@ while true; do
         exit 1
     fi
 
-    # --- Wait for cluster ACTIVE and not rebalancing ---
+    # --- Stop fio to accelerate migration, then wait for cluster ACTIVE ---
+    stop_fio_all
     if ! wait_cluster_active; then
         log "  FATAL: Cluster did not reach ACTIVE. Aborting."
         sbctl -d cluster list 2>&1
         sbctl -d sn list 2>&1
         exit 1
+    fi
+
+    if [ "$ITERATIONS" -eq 0 ] || [ "$iter" -lt "$ITERATIONS" ]; then
+        if ! start_fio_all; then
+            log "  FATAL: Failed to restart fio after migration wait."
+            exit 1
+        fi
     fi
 
     sbctl -d sn list 2>&1
@@ -406,6 +430,5 @@ done
 
 log ""
 log "=== ALL $iter ITERATIONS PASSED ==="
-log "Stopping fio on client..."
-run_client "sudo pkill -f fio" 2>&1 || true
+stop_fio_all
 log "Done"

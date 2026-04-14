@@ -62,6 +62,118 @@ def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None) -> bool:
     return bool(listeners) and bool(namespaces)
 
 
+def get_device_export_nqn(device, source_node=None) -> str:
+    if device.export_subsystem_nqn:
+        return device.export_subsystem_nqn
+    if source_node and source_node.get_device_subsystem_nqn():
+        return source_node.get_device_subsystem_nqn()
+    return device.nvmf_nqn
+
+
+def is_shared_device_export(device, source_node=None) -> bool:
+    if device.export_subsystem_nqn:
+        return True
+    if source_node and source_node.get_device_subsystem_nqn():
+        return device.nvmf_nqn == source_node.get_device_subsystem_nqn()
+    return False
+
+
+def get_remote_device_controller_name(device, remote_device=None) -> str:
+    if remote_device and remote_device.remote_ctrl_name:
+        return remote_device.remote_ctrl_name
+    if is_shared_device_export(device) and device.remote_ctrl_name:
+        return device.remote_ctrl_name
+    return f"remote_{device.alceml_bdev}"
+
+
+def get_remote_device_bdev_name(device, remote_device=None) -> str:
+    if remote_device and remote_device.remote_bdev:
+        return remote_device.remote_bdev
+
+    controller_name = get_remote_device_controller_name(device, remote_device=remote_device)
+    ns_id = 0
+    if remote_device and remote_device.remote_ctrl_name and remote_device.remote_nsid:
+        ns_id = remote_device.remote_nsid
+    elif is_shared_device_export(device) and device.ns_id:
+        ns_id = device.ns_id
+
+    if ns_id:
+        return f"{controller_name}n{ns_id}"
+    return f"remote_{device.alceml_bdev}n1"
+
+
+def check_device_export(device, *, source_node=None, rpc_client=None, nqns=None) -> bool:
+    nqn = get_device_export_nqn(device, source_node=source_node)
+    if not nqn:
+        logger.error("Checking device export ... NQN missing")
+        return False
+
+    uses_shared_subsystem = is_shared_device_export(device, source_node=source_node)
+
+    ns_uuid = device.uuid if uses_shared_subsystem else None
+    return check_subsystem(nqn, rpc_client=rpc_client, nqns=nqns, ns_uuid=ns_uuid)
+
+
+def check_remote_device_controller(device, target_node, *, remote_device=None, rpc_client=None) -> bool:
+    controller_name = get_remote_device_controller_name(device, remote_device=remote_device)
+    if rpc_client is None:
+        rpc_client = RPCClient(
+            target_node.mgmt_ip, target_node.rpc_port,
+            target_node.rpc_username, target_node.rpc_password, timeout=5, retry=1)
+
+    controller_info = rpc_client.bdev_nvme_controller_list(controller_name)
+    present = bool(controller_info)
+    logger.log(DEBUG if present else ERROR,
+               f"Checking controller: {controller_name} ... " + ('ok' if present else 'failed'))
+    if controller_info:
+        for controller in controller_info[0].get('ctrlrs', []):
+            trid = controller.get('trid', {})
+            if trid:
+                logger.info(f"IP Address: {trid.get('traddr')}:{trid.get('trsvcid')}")
+            if "alternate_trids" in controller:
+                for alt in controller["alternate_trids"]:
+                    logger.info(f"IP Address: {alt.get('traddr')}:{alt.get('trsvcid')}")
+    return present
+
+
+def check_remote_device_namespace(device, *, remote_device=None, rpc_client=None, bdev_names=None) -> bool:
+    bdev_name = get_remote_device_bdev_name(device, remote_device=remote_device)
+    present = check_bdev(bdev_name, rpc_client=rpc_client, bdev_names=bdev_names)
+    if present and device.nvmf_multipath:
+        bdev_info = (
+            bdev_names.get(bdev_name)
+            if isinstance(bdev_names, dict)
+            else (rpc_client.get_bdevs(bdev_name)[0] if rpc_client else None)
+        )
+        if bdev_info and "driver_specific" in bdev_info and "mp_policy" in bdev_info["driver_specific"]:
+            logger.info(f"multipath policy: {bdev_info['driver_specific']['mp_policy']}")
+    return present
+
+
+def inspect_remote_device_connection(
+        device, target_node, *, remote_device=None, rpc_client=None, bdev_names=None,
+        source_node=None, source_rpc_client=None, source_subsystems=None):
+    controller_name = get_remote_device_controller_name(device, remote_device=remote_device)
+    namespace_name = get_remote_device_bdev_name(device, remote_device=remote_device)
+    controller_present = check_remote_device_controller(
+        device, target_node, remote_device=remote_device, rpc_client=rpc_client)
+    namespace_present = check_remote_device_namespace(
+        device, remote_device=remote_device, rpc_client=rpc_client, bdev_names=bdev_names)
+
+    source_export_present = None
+    if source_node and (controller_present and not namespace_present):
+        source_export_present = check_device_export(
+            device, source_node=source_node, rpc_client=source_rpc_client, nqns=source_subsystems)
+
+    return {
+        "controller_name": controller_name,
+        "namespace_name": namespace_name,
+        "controller_present": controller_present,
+        "namespace_present": namespace_present,
+        "source_export_present": source_export_present,
+    }
+
+
 def check_cluster(cluster_id):
     db_controller = DBController()
     st = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
@@ -489,7 +601,7 @@ def _check_node_lvstore(
                                             StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
                                             try:
                                                 remote_bdev = storage_node_ops.connect_device(
-                                                    f"remote_{dev.alceml_bdev}", dev, node,
+                                                    get_remote_device_controller_name(dev), dev, node,
                                                     bdev_names=node_bdev_names, reattach=False)
                                                 if remote_bdev:
                                                     new_remote_devices = []
@@ -506,6 +618,8 @@ def _check_node_lvstore(
                                                     remote_device.size = dev.size
                                                     remote_device.status = NVMeDevice.STATUS_ONLINE
                                                     remote_device.nvmf_multipath = dev.nvmf_multipath
+                                                    remote_device.remote_ctrl_name = get_remote_device_controller_name(dev)
+                                                    remote_device.remote_nsid = dev.ns_id or 1
                                                     remote_device.remote_bdev = remote_bdev
                                                     new_remote_devices.append(remote_device)
                                                     n.remote_devices = new_remote_devices
@@ -792,7 +906,7 @@ def check_device(device_id):
 
         logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack)-problems)}/{len(bdevs_stack)})")
 
-        passed &= check_subsystem(device.nvmf_nqn, rpc_client=rpc_client)
+        passed &= check_device_export(device, source_node=snode, rpc_client=rpc_client)
 
         # if device.status == NVMeDevice.STATUS_ONLINE:
         #     logger.info("Checking other node's connection to this device...")
@@ -832,24 +946,20 @@ def check_remote_device(device_id, target_node=None):
                 continue
             logger.info(f"Checking device: {device_id}")
             rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
-            name = f'remote_{device.alceml_bdev}n1'
-            bdev_info = rpc_client.get_bdevs(name)
-            logger.log(DEBUG if bdev_info else ERROR, f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
-            result &= bool(bdev_info)
-            controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{device.alceml_bdev}')
-            if controller_info:
-                addr = controller_info[0]['ctrlrs'][0]['trid']['traddr']
-                port = controller_info[0]['ctrlrs'][0]['trid']['trsvcid']
-                logger.info(f"IP Address: {addr}:{port}")
-
-            if device.nvmf_multipath:
-                if controller_info and "alternate_trids" in controller_info[0]['ctrlrs'][0]:
-                    addr = controller_info[0]['ctrlrs'][0]['alternate_trids'][0]['traddr']
-                    port = controller_info[0]['ctrlrs'][0]['alternate_trids'][0]['trsvcid']
-                    logger.info(f"IP Address: {addr}:{port}")
-
-                if bdev_info:
-                    logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
+            remote_device = next((rd for rd in node.remote_devices if rd.get_id() == device_id), None)
+            source_rpc_client = RPCClient(
+                snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+            source_subsystems = {
+                subsystem['nqn']: subsystem
+                for subsystem in (source_rpc_client.subsystem_list() or [])
+            }
+            remote_state = inspect_remote_device_connection(
+                device, node, remote_device=remote_device, rpc_client=rpc_client,
+                source_node=snode, source_rpc_client=source_rpc_client, source_subsystems=source_subsystems)
+            if remote_state["controller_present"] and not remote_state["namespace_present"] \
+                    and remote_state["source_export_present"] is False:
+                logger.error("Remote controller exists but source namespace export is missing for device %s", device_id)
+            result &= remote_state["controller_present"] and remote_state["namespace_present"]
 
     return result
 

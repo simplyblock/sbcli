@@ -29,13 +29,15 @@ def _get_target_remote_device(node_obj, device_id):
 
 def _is_target_remote_controller_healthy(device_obj, event_node_obj):
     remote_dev = _get_target_remote_device(event_node_obj, device_obj.get_id())
-    remote_bdev = None
     if remote_dev and remote_dev.remote_bdev:
         remote_bdev = remote_dev.remote_bdev
     else:
-        remote_bdev = f"remote_{device_obj.alceml_bdev}n1"
+        remote_bdev = distr_controller._get_remote_device_bdev_name(device_obj)
 
-    ctrl_name = remote_bdev[:-2] if remote_bdev.endswith("n1") else remote_bdev
+    if remote_dev and remote_dev.remote_ctrl_name:
+        ctrl_name = remote_dev.remote_ctrl_name
+    else:
+        ctrl_name = distr_controller._get_remote_device_ctrl_name(device_obj)
     ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(ctrl_name)
     if not ret:
         return False

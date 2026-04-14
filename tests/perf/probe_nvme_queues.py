@@ -20,6 +20,7 @@ Cost:     each probe runs a small VM for ~3-5 minutes.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -41,10 +42,19 @@ _GCLOUD_CMD = ["cmd", "/c", "gcloud"] if sys.platform == "win32" else ["gcloud"]
 # Key requirement: SSDs must appear as separate PCI controllers (not namespaces
 # on a shared controller), AND NCQR >= 3.
 CANDIDATES = [
-    ("n1-standard-8",   2),   # 1st-gen: historically each local SSD = separate PCI controller
-    ("c2-standard-4",   2),   # Compute-optimized, might use separate controllers
-    ("c2d-standard-4",  2),   # AMD compute-optimized variant
-    ("c3-standard-4",   1),   # c3 only allows 1 local SSD, test queue count anyway
+    ("n1-standard-2",        1),
+    ("n2-standard-2",        1),
+    ("n2d-standard-2",       1),
+    ("c2-standard-4",        1),
+    ("c2d-standard-2",       1),
+    ("c3-standard-4-lssd",    1),
+    ("c3d-standard-8-lssd",   1),
+    ("c3d-standard-16-lssd",  1),
+    ("c4-standard-4-lssd",    1),
+    ("c4-standard-8-lssd",    1),
+    ("c4a-standard-4-lssd",   1),
+    ("c4d-standard-8-lssd",   1),
+    ("c4d-standard-16-lssd",  1),
 ]
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -77,9 +87,50 @@ def _ssh_meta():
     return f"ssh-keys={SSH_USER}:{_read_pub_key()}"
 
 
+KNOWN_LOCAL_SSD_COUNTS = {
+    "n1-standard-2": 1,
+    "n2-standard-2": 1,
+    "n2d-standard-2": 1,
+    "c2-standard-4": 1,
+    "c2d-standard-2": 1,
+    "c3-standard-4-lssd": 1,
+    "c3d-standard-8": 0,
+    "c3d-standard-8-lssd": 1,
+    "c3d-standard-16-lssd": 1,
+    "c3d-standard-30-lssd": 2,
+    "c3d-standard-60-lssd": 4,
+    "c3d-standard-90-lssd": 8,
+    "c4-standard-4-lssd": 1,
+    "c4-standard-8-lssd": 1,
+    "c4a-standard-4-lssd": 1,
+    "c4d-standard-8-lssd": 1,
+    "c4d-standard-16-lssd": 1,
+}
+
+
+def _normalize_machine_type(machine_type):
+    return machine_type.strip()
+
+
+def _validate_candidate(machine_type, local_ssds):
+    expected = KNOWN_LOCAL_SSD_COUNTS.get(machine_type)
+    if expected is not None and expected != local_ssds:
+        raise ValueError(
+            f"{machine_type} requires {expected} local SSD(s), "
+            f"but CANDIDATES requests {local_ssds}"
+        )
+
+
+def _boot_disk_type(machine_type):
+    if machine_type.startswith(("c4-", "c4a-", "c4d-")):
+        return "hyperdisk-balanced"
+    return "pd-ssd"
+
+
 # ── instance lifecycle ────────────────────────────────────────────────────────
 
 def launch(name, machine_type, local_ssds):
+    machine_type = _normalize_machine_type(machine_type)
     cmd = [
         "compute", "instances", "create", name,
         "--zone", ZONE,
@@ -87,7 +138,7 @@ def launch(name, machine_type, local_ssds):
         "--image-project", IMAGE_PROJECT,
         "--image-family", IMAGE_FAMILY,
         "--boot-disk-size", "20GB",
-        "--boot-disk-type", "pd-ssd",
+        "--boot-disk-type", _boot_disk_type(machine_type),
         "--tags", CLUSTER_TAG,
         "--metadata", _ssh_meta(),
         "--format=json",
@@ -174,9 +225,11 @@ done
 
 
 def probe(machine_type, local_ssds):
+    machine_type = _normalize_machine_type(machine_type)
+    _validate_candidate(machine_type, local_ssds)
     name = "probe-nvme-" + machine_type.replace("-", "")
     print(f"\n{'='*60}")
-    print(f"  Probing: {machine_type}  ({local_ssds} attached NVMe SSDs)")
+    print(f"  Probing: {machine_type}  ({local_ssds} NVMe local SSDs)")
     print(f"  Instance: {name}")
     print(f"{'='*60}")
 
@@ -203,18 +256,35 @@ def probe(machine_type, local_ssds):
             print(f"  Probe failed (rc={rc}): {err[:200]}")
         print(out)
 
-        # Parse NCQR
-        ncqr_values = []
+        # Parse queue counts from the runtime "Number of Queues" feature output.
+        controller_models = {}
+        in_nvme_list = False
         current_dev = None
+        queue_values = []
+
         for line in out.splitlines():
+            if line.startswith("=== nvme list ==="):
+                in_nvme_list = True
+                continue
+            if in_nvme_list and line.startswith("==="):
+                in_nvme_list = False
+            if in_nvme_list:
+                match = re.match(r"^(/dev/nvme\d+n\d+)\s+\S+\s+\S+\s+(\S+)", line)
+                if match:
+                    namespace_dev, model = match.groups()
+                    controller_dev = re.sub(r"n\d+$", "", namespace_dev)
+                    controller_models[controller_dev] = model
+
             if line.startswith("--- /dev/nvme"):
                 current_dev = line.strip("- ")
-            if "ncqr" in line:
-                # e.g. "ncqr      : 2"
-                val = line.split(":")[-1].strip()
-                ncqr_values.append((current_dev, val))
+                continue
 
-        return {"machine_type": machine_type, "ncqr": ncqr_values, "output": out}
+            match = re.search(r"NCQA\):\s*(\d+)", line)
+            if match and current_dev:
+                model = controller_models.get(current_dev, "")
+                queue_values.append((current_dev, match.group(1), model))
+
+        return {"machine_type": machine_type, "queues": queue_values, "output": out}
 
     finally:
         print(f"  [4/4] Deleting {name}...")
@@ -231,23 +301,28 @@ def main():
 
     results = []
     for machine_type, local_ssds in CANDIDATES:
-        r = probe(machine_type, local_ssds)
+        try:
+            r = probe(machine_type, local_ssds)
+        except Exception as e:
+            r = {"machine_type": machine_type.strip(), "error": str(e)}
         results.append(r)
 
     print("\n" + "="*60)
     print("SUMMARY")
     print("="*60)
-    print(f"{'Machine type':<28}  {'Controller':<15}  {'NCQR':<6}  {'OK (>=3)?'}")
+    print(f"{'Machine type':<28}  {'Controller':<15}  {'NCQA':<6}  {'OK (>=3)?'}")
     print("-"*70)
     for r in results:
         mt = r["machine_type"]
         if "error" in r:
             print(f"{mt:<28}  FAILED: {r['error'][:30]}")
             continue
-        if not r.get("ncqr"):
-            print(f"{mt:<28}  (no NCQR data found)")
+        local_queues = [(dev, q) for dev, q, model in r.get("queues", [])
+                        if "pd" not in model.lower()]
+        if not local_queues:
+            print(f"{mt:<28}  (no local-SSD queue data found)")
             continue
-        for dev, ncqr in r["ncqr"]:
+        for dev, ncqr in local_queues:
             try:
                 n = int(ncqr)
                 ok = "YES ✓" if n >= 3 else f"NO  ✗ (only {n})"
@@ -257,8 +332,11 @@ def main():
 
     print()
     suitable = [r["machine_type"] for r in results
-                if not r.get("error") and r.get("ncqr")
-                and all(int(v) >= 3 for _, v in r["ncqr"] if v.isdigit())]
+                if not r.get("error")
+                and r.get("queues")
+                and all(int(v) >= 3
+                        for _, v, model in r["queues"]
+                        if v.isdigit() and "pd" not in model.lower())]
     if suitable:
         print(f"Suitable machine types: {', '.join(suitable)}")
     else:

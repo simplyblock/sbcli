@@ -13,6 +13,28 @@ from simplyblock_core.db_controller import DBController
 logger = logging.getLogger()
 
 
+def _get_remote_device_ctrl_name(device):
+    if device.export_subsystem_nqn and device.remote_ctrl_name:
+        return device.remote_ctrl_name
+    return f"remote_{device.alceml_bdev}"
+
+
+def _get_remote_device_bdev_name(device):
+    controller_name = _get_remote_device_ctrl_name(device)
+    if device.export_subsystem_nqn and device.ns_id:
+        return f"{controller_name}n{device.ns_id}"
+    return f"{controller_name}n1"
+
+
+def _get_controller_name_from_remote_device(remote_device):
+    if remote_device.remote_ctrl_name:
+        return remote_device.remote_ctrl_name
+    remote_bdev = remote_device.remote_bdev
+    if remote_bdev and "n" in remote_bdev:
+        return remote_bdev.rsplit("n", 1)[0]
+    return ""
+
+
 def _remote_device_from_device(device, status, remote_bdev=None):
     remote_device = RemoteDevice()
     remote_device.uuid = device.uuid
@@ -21,7 +43,9 @@ def _remote_device_from_device(device, status, remote_bdev=None):
     remote_device.size = device.size
     remote_device.status = status
     remote_device.nvmf_multipath = device.nvmf_multipath
-    remote_device.remote_bdev = remote_bdev or f"remote_{device.alceml_bdev}n1"
+    remote_device.remote_ctrl_name = _get_remote_device_ctrl_name(device)
+    remote_device.remote_nsid = device.ns_id or 1
+    remote_device.remote_bdev = remote_bdev or _get_remote_device_bdev_name(device)
     return remote_device
 
 
@@ -40,7 +64,9 @@ def _persist_target_device_event(device, status, target_node):
             if rem_dev.get_id() == device.get_id():
                 rem_dev.status = status
                 if not rem_dev.remote_bdev and status == NVMeDevice.STATUS_ONLINE:
-                    rem_dev.remote_bdev = f"remote_{device.alceml_bdev}n1"
+                    rem_dev.remote_ctrl_name = _get_remote_device_ctrl_name(device)
+                    rem_dev.remote_nsid = device.ns_id or 1
+                    rem_dev.remote_bdev = _get_remote_device_bdev_name(device)
                 found = True
             new_remote_devices.append(rem_dev)
         if not found and status == NVMeDevice.STATUS_ONLINE:
@@ -178,8 +204,14 @@ def disconnect_device(device):
         rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
         for rem_dev in node.remote_devices:
             if rem_dev.get_id() == device.get_id():
-                ctrl_name = rem_dev.remote_bdev[:-2]
-                rpc_client.bdev_nvme_detach_controller(ctrl_name)
+                ctrl_name = _get_controller_name_from_remote_device(rem_dev)
+                shared_with_other_devices = any(
+                    _get_controller_name_from_remote_device(other_dev) == ctrl_name
+                    and other_dev.get_id() != rem_dev.get_id()
+                    for other_dev in node.remote_devices
+                )
+                if ctrl_name and not shared_with_other_devices:
+                    rpc_client.bdev_nvme_detach_controller(ctrl_name)
             else:
                 new_remote_devices.append(rem_dev)
         node.remote_devices = new_remote_devices
@@ -214,7 +246,7 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                         dev_status = dev.status
                         break
             if not name:
-                name = f"remote_{dev.alceml_bdev}n1"
+                name = _get_remote_device_bdev_name(dev)
                 if dev_status == NVMeDevice.STATUS_ONLINE:
                     dev_status = NVMeDevice.STATUS_UNAVAILABLE
             logger.debug(f"Device: {dev.get_id()}, status: {dev_status}, bdev_name: {name}")
@@ -405,7 +437,7 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
         if target_node.get_id() == dnode.get_id():
             name = device.alceml_bdev
         else:
-            name = f"remote_{device.alceml_bdev}n1"
+            name = _get_remote_device_bdev_name(device)
 
         cl_map = {
             "UUID_node": dnode.get_id(),
