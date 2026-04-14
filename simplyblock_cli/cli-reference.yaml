@@ -275,7 +275,7 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "--force"
-            help: "Force delete storage node from DB. Ensure that you know what you do."
+            help: "Force delete storage node from DB. Ensure you know what you're doing."
             dest: force_remove
             type: bool
             action: store_true
