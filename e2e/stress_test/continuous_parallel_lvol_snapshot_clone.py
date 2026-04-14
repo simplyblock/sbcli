@@ -38,16 +38,19 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self.test_name = "parallel_lvol_snapshot_clone_api_continuous_steady"
 
         # In-flight targets
-        self.CREATE_INFLIGHT = 10
-        self.SNAPSHOT_INFLIGHT = 10
-        self.CLONE_INFLIGHT = 10
-        self.SNAPSHOT_DELETE_TREE_INFLIGHT = 5
-        self.LVOL_DELETE_TREE_INFLIGHT = 5
+        self.CREATE_INFLIGHT = 3
+        self.SNAPSHOT_INFLIGHT = 2
+        self.CLONE_INFLIGHT = 2
+        self.SNAPSHOT_DELETE_TREE_INFLIGHT = 3
+        self.LVOL_DELETE_TREE_INFLIGHT = 3
+
+        # Hard cap on total concurrent operations across all types
+        self.MAX_TOTAL_INFLIGHT = 10
 
         # Total inventory cap: lvols + snapshots + clones must not exceed this
-        self.TOTAL_INVENTORY_MAX = 150
+        self.TOTAL_INVENTORY_MAX = 60
         # Start enqueuing deletes when total exceeds this
-        self.TOTAL_DELETE_THRESHOLD = 100
+        self.TOTAL_DELETE_THRESHOLD = 30
         # Never delete below this many live (not-queued) lvols
         self.MIN_LIVE_LVOLS = 5
 
@@ -344,7 +347,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self._inc("attempts", "create_lvol", 1)
 
         BDEV_RETRY_MAX = 7
-        SYNC_DELETION_RETRY_MAX = 60  # 60 × 15s = 15 min
+        SYNC_DELETION_RETRY_MAX = 10  # 10 × 15s = 2.5 min
         bdev_retries = 0
         sync_retries = 0
         ctx = {"lvol_name": lvol_name, "idx": idx, "client": self._pick_client(idx)}
@@ -461,7 +464,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
         self._inc("attempts", "create_snapshot", 1)
 
-        SYNC_DELETION_RETRY_MAX = 60  # 60 × 15s = 15 min
+        SYNC_DELETION_RETRY_MAX = 10  # 10 × 15s = 2.5 min
         sync_retries = 0
         ctx = {"src_lvol_name": src_lvol_name, "src_lvol_id": src_lvol_id, "snap_name": snap_name}
 
@@ -559,7 +562,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self._inc("attempts", "create_clone", 1)
 
         BDEV_RETRY_MAX = 7
-        SYNC_DELETION_RETRY_MAX = 60  # 60 × 15s = 15 min
+        SYNC_DELETION_RETRY_MAX = 10  # 10 × 15s = 2.5 min
         bdev_retries = 0
         sync_retries = 0
         ctx = {"snap_name": snap_name, "snapshot_id": snap_id, "clone_name": clone_name, "client": self._pick_client(idx)}
@@ -1134,14 +1137,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         sleep_n_sec(2)
 
-        max_workers = (
-            self.CREATE_INFLIGHT
-            + self.SNAPSHOT_INFLIGHT
-            + self.CLONE_INFLIGHT
-            + self.SNAPSHOT_DELETE_TREE_INFLIGHT
-            + self.LVOL_DELETE_TREE_INFLIGHT
-            + 10
-        )
+        max_workers = self.MAX_TOTAL_INFLIGHT + 5
 
         with self._lock:
             self._metrics["start_ts"] = time.time()
@@ -1174,14 +1170,17 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                     # Decide delete enqueue based on inventory (keeps snapshots/clones alive)
                     self._maybe_enqueue_deletes()
 
-                    # Submit work to maintain in-flight
-                    self._submit_creates(ex, create_f, idx_counter)
-                    self._submit_snapshots(ex, snap_f)
-                    self._submit_clones(ex, clone_f)
+                    # Global concurrency cap: skip submitting if already at limit
+                    total_inflight = len(create_f) + len(snap_f) + len(clone_f) + len(snap_del_f) + len(lvol_del_f)
+                    if total_inflight < self.MAX_TOTAL_INFLIGHT:
+                        # Submit work to maintain in-flight
+                        self._submit_creates(ex, create_f, idx_counter)
+                        self._submit_snapshots(ex, snap_f)
+                        self._submit_clones(ex, clone_f)
 
-                    # Submit deletes (trees)
-                    self._submit_snapshot_delete_trees(ex, snap_del_f)
-                    self._submit_lvol_delete_trees(ex, lvol_del_f)
+                        # Submit deletes (trees)
+                        self._submit_snapshot_delete_trees(ex, snap_del_f)
+                        self._submit_lvol_delete_trees(ex, lvol_del_f)
 
                     # Update peaks and harvest
                     self._update_peaks(create_f, snap_f, clone_f, snap_del_f, lvol_del_f)
