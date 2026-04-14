@@ -379,6 +379,7 @@ class CLIWrapper(CLIWrapperBase):
             self.init_cluster__set(subparser)
         self.init_cluster__change_name(subparser)
         self.init_cluster__add_replication(subparser)
+        self.init_cluster__collect_logs(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -578,6 +579,18 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('target_cluster_id', help='Target Cluster id', type=str).completer = self._completer_get_cluster_list
         argument = subcommand.add_argument('--timeout', help='Snapshot replication network timeout', type=int, default=3600, dest='timeout')
         argument = subcommand.add_argument('--target-pool', help='Target cluster pool ID or name', type=str, dest='target_pool')
+
+    def init_cluster__collect_logs(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'collect-logs', 'Collect simplyblock container logs for a given time window.')
+        subcommand.add_argument('start_time', help='Start of the collection window (UTC assumed if no timezone given). Formats: "2024-01-15T10:00:00"  or  "2024-01-15 10:00:00"', type=str)
+        subcommand.add_argument('duration_minutes', help='Duration in minutes.', type=str)
+        argument = subcommand.add_argument('--output-dir', help='Directory to write the output tarball (default: current directory).', type=str, default='.', dest='output_dir')
+        argument = subcommand.add_argument('--use-opensearch', help='Query OpenSearch directly via scroll API instead of the Graylog REST API. Useful for very large result sets or when Graylog is unreachable.', default=False, dest='use_opensearch', action='store_true')
+        argument = subcommand.add_argument('--cluster-id', help='Target a specific cluster UUID (default: first cluster returned by sbctl).', type=str, dest='cluster_id')
+        argument = subcommand.add_argument('--mgmt-ip', help='Override the management-node IP used to reach Graylog / OpenSearch.', type=str, dest='mgmt_ip')
+        argument = subcommand.add_argument('--monitoring-secret', help='Graylog / OpenSearch password to use instead of the cluster secret. When provided this takes precedence over the cluster secret.', type=str, dest='monitoring_secret')
+        argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to collect CSI / storage-node DS pod logs from (default: simplyblock). Pass an empty string to skip kubectl collection.', type=str, default='simplyblock', dest='namespace')
+        argument = subcommand.add_argument('--diagnose', help='Print a diagnostic report from OpenSearch (indices, field names, sample documents, container names present in the time window) and exit without collecting logs. Use this when collections return 0 to understand the actual data layout.  Implies --use-opensearch.', dest='diagnose', action='store_true')
 
 
     def init_volume(self):
@@ -1289,6 +1302,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__change_name(sub_command, args)
                 elif sub_command in ['add-replication']:
                     ret = self.cluster__add_replication(sub_command, args)
+                elif sub_command in ['collect-logs']:
+                    ret = self.cluster__collect_logs(sub_command, args)
                 else:
                     self.parser.print_help()
 
