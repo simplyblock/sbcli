@@ -41,9 +41,11 @@ _db_ctrl_mock.DBController = MagicMock()
 sys.modules.setdefault("fdb", MagicMock())
 sys.modules.setdefault("fdb.tuple", MagicMock())
 
-# Replace db_controller with a stub that exposes a real Singleton class so
-# the conftest autouse fixture works, and a mock DBController for tests.
-sys.modules["simplyblock_core.db_controller"] = _db_ctrl_mock
+# NOTE: Do NOT replace sys.modules["simplyblock_core.db_controller"] — doing
+# so permanently poisons the DBController singleton for the entire pytest
+# session, causing test_backup, test_dual_ft_e2e, migration tests and others
+# to fail with MagicMock serialization errors. The fdb stubs above are
+# sufficient to allow the import below.
 
 # Now we can safely import simplyblock_core pieces.
 from simplyblock_core import cluster_ops  # noqa: E402  (needed so @patch can resolve the target)
