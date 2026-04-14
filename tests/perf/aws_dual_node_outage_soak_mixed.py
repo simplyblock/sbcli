@@ -938,10 +938,27 @@ class SoakRunner:
 
         # Issue sbctl restart only for methods that leave the node in a
         # "shutdown" state that the CP won't recover on its own.
-        if self._needs_manual_restart(method1):
-            self.sbctl(f"sn restart {node1}", timeout=300)
-        if self._needs_manual_restart(method2):
-            self.sbctl(f"sn restart {node2}", timeout=300)
+        # Retry with backoff: when the other node in the pair used an
+        # auto-recover method (container_kill / host_reboot), it may
+        # still be in_shutdown or in_restart when we try to restart the
+        # manually-recovered peer — the per-cluster guard rejects
+        # concurrent restarts. Retrying gives the auto-recovering node
+        # time to come back.
+        for node_id, method in [(node1, method1), (node2, method2)]:
+            if not self._needs_manual_restart(method):
+                continue
+            deadline = time.time() + self.args.restart_timeout
+            while True:
+                try:
+                    self.sbctl(f"sn restart {node_id}", timeout=300)
+                    break
+                except Exception as e:
+                    if time.time() >= deadline:
+                        raise
+                    self.logger.log(
+                        f"Restart of {node_id} failed ({e}), "
+                        f"retrying in 15s (peer may still be recovering)")
+                    time.sleep(15)
 
         # For auto-recovery methods, allow a longer wait window since the host
         # has to reboot / the container has to come back under its supervisor.
