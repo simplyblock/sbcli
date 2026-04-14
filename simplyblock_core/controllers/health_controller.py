@@ -518,8 +518,7 @@ def _check_node_lvstore(
                                             logger.warning(f"Node is offline or unreachable, setting device unavailable: {dev.get_id()}")
                                             device_controller.device_set_unavailable(dev.get_id())
                                         else:
-                                            if dev_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                                                distr_controller.send_dev_status_event(dev, dev.status, node)
+                                            distr_controller.send_dev_status_event(dev, dev.status, node)
 
                                 if result['Kind'] == "Node":
                                     n = db_controller.get_storage_node_by_id(result['UUID'])

@@ -129,21 +129,6 @@ def exec_port_allow_task(task):
     for db_dev in node.nvme_devices:
         distr_controller.send_dev_status_event(db_dev, db_dev.status, node)
 
-    # Replay node-status and device-status events for ALL other nodes to
-    # this recovering node's distribs. During a network outage, this node
-    # missed events that other nodes produced (e.g. a peer's graceful
-    # shutdown set its devices to unavailable, but the event never reached
-    # this node's distrib cluster map). Replaying now brings the map up to
-    # date before the consistency check below.
-    logger.info("Replaying cluster-wide status events to recovering node")
-    all_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
-    for peer in all_nodes:
-        if peer.get_id() == node.get_id():
-            continue
-        distr_controller.send_node_status_event(peer, peer.status, target_node=node)
-        for peer_dev in peer.nvme_devices:
-            distr_controller.send_dev_status_event(peer_dev, peer_dev.status, target_node=node)
-
     logger.info("Finished sending device status and now waiting 5s for JMs to connect")
     time.sleep(5)
 
