@@ -195,56 +195,57 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
         if lock:
             had_lock = _acquire_lvol_mutation_lock(host_node)
 
-        if primary_node:
-            rpc_client = RPCClient(
-                primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
-
-            logger.info("Creating Snapshot bdev")
-            ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
-            if not ret:
-                return False, f"Failed to create snapshot on node: {snode.get_id()}"
-
-            snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
-            if snap_bdev:
-                snap_uuid = snap_bdev[0]['uuid']
-                blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
-                cluster_size = cluster.page_size_in_blocks
-                num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
-                used_size = int(num_allocated_clusters*cluster_size)
-            else:
-                return False, f"Failed to create snapshot on node: {snode.get_id()}"
-
-        for sec in secondary_nodes:
-            # Per design: gate snapshot registration around restart port block.
-            from simplyblock_core.storage_node_ops import wait_or_delay_for_restart_gate, queue_for_restart_drain
-            gate = wait_or_delay_for_restart_gate(sec.get_id(), lvol.lvs_name)
-            if gate == "delay":
-                queue_for_restart_drain(
-                    sec.get_id(), lvol.lvs_name,
-                    lambda s=sec: RPCClient(s.mgmt_ip, s.rpc_port, s.rpc_username,
-                                            s.rpc_password).bdev_lvol_snapshot_register(
-                        f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid),
-                    f"register snapshot {snap_bdev_name} on {sec.get_id()[:8]}")
-                continue
-
-            sec_rpc_client = RPCClient(
-                sec.mgmt_ip, sec.rpc_port, sec.rpc_username, sec.rpc_password)
-
-            ret = sec_rpc_client.bdev_lvol_snapshot_register(
-                f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
-            if not ret:
-                msg = f"Failed to register snapshot on node: {sec.get_id()}"
-                logger.error(msg)
-                logger.info(f"Removing snapshot from {primary_node.get_id()}")
+        try:
+            if primary_node:
                 rpc_client = RPCClient(
                     primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
-                ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
-                if not ret:
-                    logger.error(f"Failed to delete snap from node: {snode.get_id()}")
-                return False, msg
 
-        if lock:
-            _release_lvol_mutation_lock(host_node, had_lock)
+                logger.info("Creating Snapshot bdev")
+                ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+                if not ret:
+                    return False, f"Failed to create snapshot on node: {snode.get_id()}"
+
+                snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
+                if snap_bdev:
+                    snap_uuid = snap_bdev[0]['uuid']
+                    blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+                    cluster_size = cluster.page_size_in_blocks
+                    num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+                    used_size = int(num_allocated_clusters*cluster_size)
+                else:
+                    return False, f"Failed to create snapshot on node: {snode.get_id()}"
+
+            for sec in secondary_nodes:
+                # Per design: gate snapshot registration around restart port block.
+                from simplyblock_core.storage_node_ops import wait_or_delay_for_restart_gate, queue_for_restart_drain
+                gate = wait_or_delay_for_restart_gate(sec.get_id(), lvol.lvs_name)
+                if gate == "delay":
+                    queue_for_restart_drain(
+                        sec.get_id(), lvol.lvs_name,
+                        lambda s=sec: RPCClient(s.mgmt_ip, s.rpc_port, s.rpc_username,
+                                                s.rpc_password).bdev_lvol_snapshot_register(
+                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid),
+                        f"register snapshot {snap_bdev_name} on {sec.get_id()[:8]}")
+                    continue
+
+                sec_rpc_client = RPCClient(
+                    sec.mgmt_ip, sec.rpc_port, sec.rpc_username, sec.rpc_password)
+
+                ret = sec_rpc_client.bdev_lvol_snapshot_register(
+                    f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
+                if not ret:
+                    msg = f"Failed to register snapshot on node: {sec.get_id()}"
+                    logger.error(msg)
+                    logger.info(f"Removing snapshot from {primary_node.get_id()}")
+                    rpc_client = RPCClient(
+                        primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
+                    ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
+                    if not ret:
+                        logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+                    return False, msg
+        finally:
+            if lock:
+                _release_lvol_mutation_lock(host_node, had_lock)
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
@@ -712,24 +713,25 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         if lock:
             had_lock = _acquire_lvol_mutation_lock(host_node)
 
-        if primary_node:
-            lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
-            if error:
-                logger.error(error)
-                lvol.remove(db_controller.kv_store)
-                return False, error
-            lvol.lvol_uuid = lvol_bdev['uuid']
-            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+        try:
+            if primary_node:
+                lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
+                if error:
+                    logger.error(error)
+                    lvol.remove(db_controller.kv_store)
+                    return False, error
+                lvol.lvol_uuid = lvol_bdev['uuid']
+                lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-        for sec in secondary_nodes:
-            lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, sec, is_primary=False)
-            if error:
-                logger.error(error)
-                lvol.remove(db_controller.kv_store)
-                return False, error
-
-        if lock and had_lock:
-            _release_lvol_mutation_lock(host_node, had_lock)
+            for sec in secondary_nodes:
+                lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, sec, is_primary=False)
+                if error:
+                    logger.error(error)
+                    lvol.remove(db_controller.kv_store)
+                    return False, error
+        finally:
+            if lock:
+                _release_lvol_mutation_lock(host_node, had_lock)
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
