@@ -583,7 +583,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__collect_logs(self, subparser):
         subcommand = self.add_sub_command(subparser, 'collect-logs', 'Collect simplyblock container logs for a given time window.')
         subcommand.add_argument('start_time', help='Start of the collection window (UTC assumed if no timezone given). Formats: "2024-01-15T10:00:00"  or  "2024-01-15 10:00:00"', type=str)
-        subcommand.add_argument('duration_minutes', help='Duration in minutes.', type=str)
+        subcommand.add_argument('duration_minutes', help='Duration in minutes.', type=int)
         argument = subcommand.add_argument('--output-dir', help='Directory to write the output tarball (default: current directory).', type=str, default='.', dest='output_dir')
         argument = subcommand.add_argument('--use-opensearch', help='Query OpenSearch directly via scroll API instead of the Graylog REST API. Useful for very large result sets or when Graylog is unreachable.', default=False, dest='use_opensearch', action='store_true')
         argument = subcommand.add_argument('--cluster-id', help='Target a specific cluster UUID (default: first cluster returned by sbctl).', type=str, dest='cluster_id')

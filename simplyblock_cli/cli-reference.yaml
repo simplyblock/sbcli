@@ -1510,7 +1510,7 @@ commands:
           - name: "duration_minutes"
             help: "Duration in minutes."
             dest: duration_minutes
-            type: str
+            type: int
           - name: "--output-dir"
             help: "Directory to write the output tarball (default: current directory)."
             dest: output_dir
