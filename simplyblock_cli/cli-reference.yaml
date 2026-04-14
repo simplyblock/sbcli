@@ -1008,10 +1008,6 @@ commands:
               Network interface name from client to use for logical volume connection.
             dest: client_data_nic
             type: str
-          - name: "--host-sec"
-            help: "Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)."
-            dest: host_sec
-            type: str
           - name: "--max-fault-tolerance"
             help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`."
             dest: max_fault_tolerance
@@ -2050,10 +2046,6 @@ commands:
             dest: qos_host
             type: str
             required: false
-          - name: "--sec-options"
-            help: "Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated). Applied to all volumes in the pool."
-            dest: sec_options
-            type: str
           - name: "--dhchap"
             help: "Enable DH-HMAC-CHAP authentication for all volumes in the pool."
             dest: dhchap

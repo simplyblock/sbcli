@@ -39,7 +39,6 @@ class StoragePoolParams(BaseModel):
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
-    sec_options: Optional[Dict[str, bool]] = None
     dhchap: bool = False
     cr_name: str = ""
     cr_namespace: str = ""
@@ -59,7 +58,6 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
         parameters.name, parameters.pool_max, parameters.volume_max_size, parameters.max_rw_iops, parameters.max_rw_mbytes,
         parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id(),
         parameters.cr_name, parameters.cr_namespace, parameters.cr_plural,
-        sec_options=parameters.sec_options,
         dhchap=parameters.dhchap,
     )
 

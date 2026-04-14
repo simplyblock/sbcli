@@ -422,7 +422,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         argument = subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
-        argument = subcommand.add_argument('--host-sec', help='Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups).', type=str, dest='host_sec')
         argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`.', type=int, default=1, dest='max_fault_tolerance', choices=[1,2,])
         argument = subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
@@ -820,7 +819,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second.', type=int, dest='max_r_mbytes')
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second.', type=int, dest='max_w_mbytes')
         argument = subcommand.add_argument('--qos-host', help='The node id for QoS pool.', type=str, dest='qos_host', required=False)
-        argument = subcommand.add_argument('--sec-options', help='Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated). Applied to all volumes in the pool.', type=str, dest='sec_options')
         argument = subcommand.add_argument('--dhchap', help='Enable DH-HMAC-CHAP authentication for all volumes in the pool.', default=False, dest='dhchap', action='store_true')
 
     def init_storage_pool__set(self, subparser):
