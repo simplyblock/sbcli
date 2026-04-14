@@ -107,6 +107,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
     logger.info("Done")
     return pool.get_id()
 
+
 def add_host_to_pool(pool_id, host_nqn):
     """Add a host NQN to the pool's allowed_hosts list.
 

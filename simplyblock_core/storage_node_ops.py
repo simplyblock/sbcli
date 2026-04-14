@@ -1450,16 +1450,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         # 3- set nvme config
         if snode.pollers_mask:
-            dhchap_digests = None
-            dhchap_dhgroups = None
-            pools = db_controller.get_pools(cluster_id)
-            if any(getattr(p, 'dhchap', False) for p in pools):
-                dhchap_digests = constants.DHCHAP_DIGESTS
-                dhchap_dhgroups = [constants.DHCHAP_DHGROUP]
             ret = rpc_client.nvmf_set_config(
                 snode.pollers_mask,
-                dhchap_digests=dhchap_digests,
-                dhchap_dhgroups=dhchap_dhgroups,
+                dhchap_digests=constants.DHCHAP_DIGESTS,
+                dhchap_dhgroups=[constants.DHCHAP_DHGROUP],
             )
             if not ret:
                 logger.error("Failed to set pollers mask")
@@ -2073,16 +2067,10 @@ def restart_storage_node(
 
     # 3- set nvme config
     if snode.pollers_mask:
-        dhchap_digests = None
-        dhchap_dhgroups = None
-        pools = db_controller.get_pools(snode.cluster_id)
-        if any(getattr(p, 'dhchap', False) for p in pools):
-            dhchap_digests = constants.DHCHAP_DIGESTS
-            dhchap_dhgroups = [constants.DHCHAP_DHGROUP]
         ret = rpc_client.nvmf_set_config(
             snode.pollers_mask,
-            dhchap_digests=dhchap_digests,
-            dhchap_dhgroups=dhchap_dhgroups,
+            dhchap_digests=constants.DHCHAP_DIGESTS,
+            dhchap_dhgroups=[constants.DHCHAP_DHGROUP],
         )
         if not ret:
             logger.error("Failed to set pollers mask")
