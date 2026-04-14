@@ -4248,13 +4248,19 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node):
             lvol_list.append(lv)
 
     ### 1- create distribs and raid
-    # Set restart phase: pre_block — sync deletes and registrations can still complete
+    # Set restart phase: pre_block — sync deletes and registrations can still complete.
+    # IMPORTANT: every exit path after this point MUST clear the phase (either by
+    # reaching the normal clear at the end, or via the except/finally below).
+    # A stale pre_block causes check_non_leader_for_operation to return "skip"
+    # for this LVS indefinitely, silently blocking all new volume subsystem
+    # creation on this node.
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_PRE_BLOCK, db_controller)
 
     ret, err = _create_bdev_stack(snode, primary_node.lvstore_stack, primary_node=primary_node)
     if err:
         logger.error(f"Failed to recreate non-leader lvstore on node {snode.get_id()}")
         logger.error(err)
+        _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
         primary_node.lvstore_status = "ready"
         primary_node.write_to_db()
         return False
@@ -4621,6 +4627,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
     if err:
         logger.error(f"Failed to recreate lvstore on node {snode.get_id()}")
         logger.error(err)
+        _set_restart_phase(snode, lvs_name, "", db_controller)
         return False
 
     rpc_client = RPCClient(
