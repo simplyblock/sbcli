@@ -45,7 +45,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self.LVOL_DELETE_TREE_INFLIGHT = 3
 
         # Hard cap on total concurrent operations across all types
-        self.MAX_TOTAL_INFLIGHT = 10
+        self.MAX_TOTAL_INFLIGHT = 5
 
         # Total inventory cap: lvols + snapshots + clones must not exceed this
         self.TOTAL_INVENTORY_MAX = 60
