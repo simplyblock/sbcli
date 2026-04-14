@@ -27,3 +27,19 @@ spec:
   - port: 4501
     targetPort: 4501
     protocol: TCP
+
+{{- if .Values.kms.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-kms
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: simplyblock-kms
+  ports:
+  - name: http
+    port: 8200
+    targetPort: 8200
+{{- end }}

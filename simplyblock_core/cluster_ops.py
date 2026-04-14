@@ -6,7 +6,6 @@ import socket
 import subprocess
 import time
 import uuid
-import textwrap
 import typing as t
 
 import docker
@@ -223,7 +222,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
-                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
+                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic, deploy_kms=True,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None) -> str:
 
@@ -252,6 +251,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
+    db_connection = None
     if mode == "docker":
         if not ifname:
             ifname = "eth0"
@@ -337,6 +337,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     default_grafana  = f"http://{base}/grafana"
 
     cluster.grafana_endpoint = grafana_endpoint or default_grafana
+    cluster.deploy_kms = bool(deploy_kms)
     cluster.enable_node_affinity = enable_node_affinity
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
@@ -369,7 +370,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Deploying swarm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
         scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
+                             log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint,
+                             str(disable_monitoring), str(cluster.deploy_kms))
         logger.info("Deploying swarm stack > Done")
 
         logger.info("Configuring DB...")
@@ -381,11 +383,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
         db_connection = fdb_cluster_string
-        
+
         logger.info("Patching prometheus configmap...")
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
-    if not disable_monitoring:
         if ingress_host_source == "hostip":
             dns_name = dev_ip
 
@@ -394,8 +395,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         _add_graylog_input(graylog_endpoint, monitoring_secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
+    else:
+        assert False, "Unreachable"
 
-    cluster.db_connection = db_connection
+    cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
 
@@ -404,6 +407,14 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster_events.cluster_create(cluster)
 
     mgmt_node_ops.add_mgmt_node(dev_ip, mode, cluster.uuid)
+
+    # configure kms vault
+    if cluster.deploy_kms:
+        if mode == "docker":
+            utils.configure_kms_on_docker(cluster, dev_ip)
+        elif mode == "kubernetes":
+            utils.configure_kms_on_k8s(cluster)
+        cluster.write_to_db(db_controller.kv_store)
 
     logger.info("New Cluster has been created")
     logger.info(cluster.uuid)
@@ -432,35 +443,6 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
     # Remove the mount point directory
     subprocess.check_call(["sudo", "rm", "-rf", mount_point])
     logger.info(f"Removed mount point: {mount_point}")
-
-
-def _run_fio(mount_point) -> None:
-    if not os.path.exists(mount_point):
-        os.makedirs(mount_point, exist_ok=True)
-
-    try:
-        fio_config = textwrap.dedent(f"""
-            [test]
-            ioengine=aiolib
-            direct=1
-            iodepth=4
-            readwrite=randrw
-            bs=4K
-            nrfiles=4
-            size=1G
-            verify=md5
-            numjobs=3
-            directory={mount_point}
-        """).strip()
-        config_file = "fio.cfg"
-        with open(config_file, "w") as f:
-            f.write(fio_config)
-
-        logger.info(subprocess.check_output(["sudo", "fio", config_file], text=True))
-    finally:
-        if os.path.exists(config_file):
-            os.remove(config_file)
-            logger.info("fio configuration file removed.")
 
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
@@ -495,7 +477,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
-    
+
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())

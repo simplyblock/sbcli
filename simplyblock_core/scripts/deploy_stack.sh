@@ -14,18 +14,19 @@ export RETENTION_PERIOD=$8
 export LOG_LEVEL=$9
 export GRAFANA_ENDPOINT=${10}
 export DISABLE_MONITORING=${11}
+export DEPLOY_KMS=${12}
 export DIR="$(dirname "$(realpath "$0")")"
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
 then
-   FDB_CLUSTER_FILE_CONTENTS=$(tail /etc/foundationdb/fdb.cluster -n 1)
-   export FDB_CLUSTER_FILE_CONTENTS=$FDB_CLUSTER_FILE_CONTENTS
+    FDB_CLUSTER_FILE_CONTENTS=$(tail /etc/foundationdb/fdb.cluster -n 1)
+    export FDB_CLUSTER_FILE_CONTENTS=$FDB_CLUSTER_FILE_CONTENTS
 fi
 
 if [[ "$LOG_DELETION_INTERVAL" == *d ]]; then
-   export MAX_NUMBER_OF_INDICES=${LOG_DELETION_INTERVAL%d}
+    export MAX_NUMBER_OF_INDICES=${LOG_DELETION_INTERVAL%d}
 elif [[ "$LOG_DELETION_INTERVAL" == *h || "$LOG_DELETION_INTERVAL" == *m ]]; then
-   export MAX_NUMBER_OF_INDICES=1
+    export MAX_NUMBER_OF_INDICES=1
 else
     echo "Invalid LOG_DELETION_INTERVAL format. Please use a value ending in 'd', 'h', or 'm'."
     exit 1
@@ -37,8 +38,10 @@ if [[ "${DISABLE_MONITORING,,}" == "false" ]]; then
    docker stack deploy --compose-file="$DIR"/docker-compose-swarm-monitoring.yml monitoring
 fi
 
-# wait for the services to become online
-bash "$DIR"/stack_deploy_wait.sh monitoring
+
+if [[ "${DEPLOY_KMS,,}" == "true" ]]; then
+    docker stack deploy --compose-file="$DIR"/docker-compose-kms.yml kms
+fi
 
 docker stack deploy --compose-file="$DIR"/docker-compose-swarm.yml app
 

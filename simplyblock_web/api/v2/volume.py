@@ -1,4 +1,4 @@
-from typing import Annotated, List, Literal, Optional, Tuple, Union
+from typing import Annotated, List, Literal, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -34,7 +34,6 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDT
 class _CreateParams(BaseModel):
     name: str
     size: util.Size
-    crypto_key: Optional[Tuple[str, str]] = None
     max_rw_iops: util.Unsigned = 0
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
@@ -51,6 +50,7 @@ class _CreateParams(BaseModel):
     max_namespace_per_subsys: int = 1
     do_replicate: bool = False
     replication_cluster_id: Optional[str] = None
+    encrypt: bool = False
 
 
 class _CloneParams(BaseModel):
@@ -76,7 +76,7 @@ def add(
             name=data.name,
             size=data.size,
             pool_id_or_name=pool.get_id(),
-            use_crypto=data.crypto_key is not None,
+            use_crypto=data.encrypt,
             max_size=0,
             max_rw_iops=data.max_rw_iops,
             max_rw_mbytes=data.max_rw_mbytes,
@@ -84,8 +84,6 @@ def add(
             max_w_mbytes=data.max_w_mbytes,
             host_id_or_name=data.host_id,
             ha_type=data.ha_type if data.ha_type is not None else 'default',
-            crypto_key1=data.crypto_key[0] if data.crypto_key is not None else None,
-            crypto_key2=data.crypto_key[1] if data.crypto_key is not None else None,
             use_comp=False,
             distr_vuid=0,
             lvol_priority_class=data.priority_class,

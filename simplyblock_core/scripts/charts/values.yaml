@@ -1,3 +1,6 @@
+kms:
+  enabled: true
+
 observability:
   enabled: true
   secret: "sWbpOgba1bKnCfcPkVQi"
@@ -15,7 +18,7 @@ observability:
 image:
   simplyblock: 
     repository: "simplyblock/simplyblock"
-    tag: "main"
+    tag: "new-main-kms"
     pullPolicy: "Always"
   manager:
     repository: "simplyblock/simplyblock-manager"
@@ -27,11 +30,11 @@ tolerations:
   list:
   - operator: Exists
     effect:
-    key: 
+    key:
     value:
 nodeSelector:
   create: false
-  key: 
+  key:
   value:
 
 ports:
@@ -108,8 +111,8 @@ opensearch:
       memory: "3Gi"
 
   extraEnvs:
-    # - name: OPENSEARCH_JAVA_OPTS
-    #   value: "-Xms1g -Xmx1g"
+#    - name: OPENSEARCH_JAVA_OPTS
+#      value: "-Xms1g -Xmx1g"
     - name: bootstrap.memory_lock
       value: "true"
     - name: action.auto_create_index

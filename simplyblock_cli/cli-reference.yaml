@@ -1039,6 +1039,12 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--no-kms"
+            help: "Disable KMS deployment and integration"
+            dest: no_kms
+            type: bool
+            default: false
+            action: store_true
       - name: add
         help: "Adds a new cluster."
         arguments:
@@ -1547,14 +1553,6 @@ commands:
             dest: encrypt
             type: bool
             action: store_true
-          - name: "--crypto-key1"
-            help: "The hex value of key1 to be used for logical volume encryption."
-            dest: crypto_key1
-            type: str
-          - name: "--crypto-key2"
-            help: "The hex value of key2 to be used for logical volume encryption."
-            dest: crypto_key2
-            type: str
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second."
             dest: max_rw_iops

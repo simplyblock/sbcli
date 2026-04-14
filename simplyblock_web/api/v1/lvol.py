@@ -139,16 +139,9 @@ def add_lvol():
     rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)
     r_mbytes = utils.get_int_value_or_default(cl_data, "max_r_mbytes", 0)
     w_mbytes = utils.get_int_value_or_default(cl_data, "max_w_mbytes", 0)
-    # max_size = utils.get_int_value_or_default(cl_data, "max_size", 0)
 
     encryption = utils.get_value_or_default(cl_data, "crypto", False)
-
     ha_type = utils.get_value_or_default(cl_data, "ha_type", "default")
-
-    fabric = utils.get_value_or_default(cl_data, "fabric", "TCP")
-
-    crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
-    crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
     host_id = utils.get_value_or_default(cl_data, "host_id", None)
     lvol_priority_class = utils.get_value_or_default(cl_data, "lvol_priority_class", 0)
     namespace = utils.get_value_or_default(cl_data, "namespace", None)
@@ -175,8 +168,6 @@ def add_lvol():
 
         host_id_or_name=host_id,
         ha_type=ha_type,
-        crypto_key1=crypto_key1,
-        crypto_key2=crypto_key2,
 
         use_comp=False,
         distr_vuid=0,

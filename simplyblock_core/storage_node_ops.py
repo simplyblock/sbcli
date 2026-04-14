@@ -4077,26 +4077,24 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
         snode.rpc_username, snode.rpc_password, timeout=10, retry=2)
 
     if "crypto" in lvol.lvol_type:
-        base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-        ret = lvol_controller._create_crypto_lvol(
-            rpc_client, lvol.crypto_bdev, base, lvol.crypto_key1, lvol.crypto_key2)
-        if not ret:
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        if not lvol_controller._create_crypto_lvol(rpc_client, lvol, cluster):
             msg = f"Failed to create crypto lvol on node {snode.get_id()}"
             logger.error(msg)
             return False, msg
 
     logger.info("Add BDev to subsystem "+f"{lvol.vuid:016X}")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
+    rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
     # Use per-lvstore port for this lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(
+            rpc_client.listeners_create(
                 lvol.nqn, iface.trtype, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
         elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
             logger.info("adding listener for %s on IP %s, fabric TCP" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(
+            rpc_client.listeners_create(
                 lvol.nqn, "TCP", iface.ip4_address, listener_port, ana_state=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())

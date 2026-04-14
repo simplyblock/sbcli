@@ -740,3 +740,73 @@ spec:
         - name: config
           configMap:
             name: simplyblock-fluent-bit-config
+{{- if .Values.kms.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simplyblock-kms
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simplyblock-kms
+  template:
+    metadata:
+      labels:
+        app: simplyblock-kms
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: simplyblock-kms
+        image: "hashicorp/vault:1.13.3"
+        imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
+        command: ["/bin/sh", "/usr/local/bin/docker-entrypoint.sh", "server"]
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          capabilities:
+            add: [ "IPC_LOCK" ]
+        env:
+        - name: VAULT_ADDR
+          value: "http://simplyblock-kms:8200"
+        - name : VAULT_LOCAL_CONFIG
+          value: |
+                {
+                  "storage": {
+                    "file": {
+                      "path": "/vault/data"
+                    }
+                  },
+                  "listener": [
+                    {
+                      "tcp": {
+                        "address": "0.0.0.0:8200",
+                        "tls_disable": true
+                      }
+                    }
+                  ],
+                  "default_lease_ttl": "168h",
+                  "max_lease_ttl": "720h",
+                  "ui": true,
+                  "api_addr": "http://0.0.0.0:8200"
+                }
+        volumeMounts:
+        - name: kms-data
+          mountPath: /vault/data
+          readOnly: false
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "600m"
+            memory: "1Gi"
+      volumes:
+      - name: kms-data
+        hostPath:
+          path: /var/simplyblock/kms/data
+          type: DirectoryOrCreate
+{{- end }}
