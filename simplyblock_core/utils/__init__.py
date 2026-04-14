@@ -11,7 +11,7 @@ import subprocess
 import sys
 import uuid
 import time
-import socket
+from datetime import datetime, timezone
 from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
 from docker import DockerClient
 from kubernetes import client, config
@@ -199,16 +199,8 @@ def get_k8s_node_ip():
         logger.error("No mgmt nodes was found in the cluster!")
         return False
 
-    mgmt_ips = [node.mgmt_ip for node in nodes]
-
-    for ip in mgmt_ips:
-        try:
-            with socket.create_connection((ip, 10250), timeout=2):
-                return ip
-        except Exception as e:
-            print(e)
-            raise e
-    return False
+    for node in nodes:
+        return node.mgmt_ip
 
 
 def dict_agg(data, mean=False, keys=None):
@@ -447,23 +439,26 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
 
     assigned = {}
     if (len(vcpu_list) < 12):
-        vcpu = reserve_n(4)
-        assigned["app_thread_core"] = vcpu[0:1]
-        assigned["jm_cpu_core"] = vcpu[1:2]
-        assigned["jc_singleton_core"] = vcpu[2:3]
-        assigned["alceml_cpu_cores"] = vcpu[3:4]
-    elif (len(vcpu_list) < 22):
         vcpu = reserve_n(5)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
+        assigned["alceml_cpu_cores"] = vcpu[3:4]
+        assigned["lvol_poller_core"] = vcpu[4:5]
+    elif (len(vcpu_list) < 22):
+        vcpu = reserve_n(6)
+        assigned["app_thread_core"] = vcpu[0:1]
+        assigned["jm_cpu_core"] = vcpu[1:2]
+        assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:5]
+        assigned["lvol_poller_core"] = vcpu[5:6]
     else:
-        vcpus = reserve_n(3+alceml_count)
+        vcpus = reserve_n(4+alceml_count)
         assigned["app_thread_core"] = vcpus[0:1]
         assigned["jm_cpu_core"] = vcpus[1:2]
         assigned["jc_singleton_core"] = vcpus[2:3]
-        assigned["alceml_cpu_cores"] = vcpus[3:3+alceml_count]
+        assigned["lvol_poller_core"] = vcpus[3:4]
+        assigned["alceml_cpu_cores"] = vcpus[4:4+alceml_count]
     dp = int(len(remaining) / 2)
     if 17 > dp >= 12:
         poller_n = len(remaining) - 12
@@ -495,7 +490,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned.get("alceml_cpu_cores", []),
         assigned.get("alceml_worker_cpu_cores", []),
         assigned.get("distrib_cpu_cores", []),
-        assigned.get("jc_singleton_core", [])
+        assigned.get("jc_singleton_core", []),
+        assigned.get("lvol_poller_core", []),
     )
 
 
@@ -746,7 +742,10 @@ def nearest_upper_power_of_2(n):
 
 
 def strfdelta(tdelta):
-    remainder = int(tdelta.total_seconds())
+    return strfdelta_seconds(int(tdelta.total_seconds()))
+
+
+def strfdelta_seconds(remainder: int) -> str:
     possible_fields = ('W', 'D', 'H', 'M', 'S')
     constants = {'W': 604800, 'D': 86400, 'H': 3600, 'M': 60, 'S': 1}
     values = {}
@@ -1437,8 +1436,7 @@ def calculate_unisolated_cores(cores, cores_percentage=0):
     total = len(cores)
     if cores_percentage:
         n = math.ceil(total * (100 - cores_percentage) / 100)
-        n_even = (n + 1) // 2 * 2
-        return n_even
+        return n
     if total <= 10:
         return 2
     if total <= 20:
@@ -1446,8 +1444,7 @@ def calculate_unisolated_cores(cores, cores_percentage=0):
     if total <= 28:
         return 4
     n = math.ceil(total * 0.15)
-    n_even = (n + 1) // 2 * 2
-    return n_even
+    return n
 
 
 def get_core_indexes(core_to_index, list_of_cores):
@@ -1666,7 +1663,8 @@ def regenerate_config(new_config, old_config, force=False):
                 "alceml_cpu_cores": get_core_indexes(core_to_index, distribution[3]),
                 "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
                 "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
-                "jc_singleton_core": get_core_indexes(core_to_index, distribution[6])}
+                "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
+                "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
 
         isolated_cores = old_config["nodes"][i]["isolated"]
         number_of_distribs = 2
@@ -1819,7 +1817,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     # "alceml_worker_cpu_cores": get_core_indexes(core_group["core_to_index"],
                     #                                            core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
-                    "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6])
+                    "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6]),
+                    "lvol_poller_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][7])
                 },
                 "ssd_pcis": [],
                 "nic_ports": system_info[nid]["nics"]
@@ -1888,10 +1887,31 @@ def get_nvme_name_from_pci(pci_address):
     return None
 
 
+def get_nvme_namespace_from_pci(pci_address):
+    """Returns the actual namespace block device name (e.g. 'nvme6n2') for a PCI address,
+    by looking up the real namespace entry under the controller in sysfs."""
+    ctrl_path = f"/sys/bus/pci/devices/{pci_address}/nvme/nvme*"
+    ctrl_matches = glob.glob(ctrl_path)
+    if not ctrl_matches:
+        return None
+    ctrl_name = os.path.basename(ctrl_matches[0])  # e.g. 'nvme7'
+    ns_path = f"/sys/bus/pci/devices/{pci_address}/nvme/{ctrl_name}/nvme*n*"
+    ns_matches = glob.glob(ns_path)
+    if ns_matches:
+        ns_name = os.path.basename(ns_matches[0])  # e.g. 'nvme6n2'
+        logger.debug(f"[get_nvme_namespace_from_pci] pci={pci_address} -> "
+                     f"controller={ctrl_name}, namespace={ns_name} (sysfs lookup)")
+        return ns_name
+    fallback = f"{ctrl_name}n1"
+    logger.debug(f"[get_nvme_namespace_from_pci] pci={pci_address} -> "
+                 f"controller={ctrl_name}, namespace={fallback} (fallback)")
+    return fallback
+
+
 def format_device_with_4k(pci_device):
     try:
-        nvme_device = get_nvme_name_from_pci(pci_device)
-        nvme_device_path = f"/dev/{nvme_device}n1"
+        nvme_namespace = get_nvme_namespace_from_pci(pci_device)
+        nvme_device_path = f"/dev/{nvme_namespace}"
         clean_partitions(nvme_device_path)
         nvme_json_string = get_idns(nvme_device_path)
         lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
@@ -2216,6 +2236,286 @@ def load_kube_config_with_fallback():
         config.load_kube_config()
 
 
+def patch_cr_status(
+        *,
+        group: str,
+        version: str,
+        plural: str,
+        namespace: str,
+        name: str,
+        status_patch: dict,
+):
+    """
+    Patch the status subresource of a Custom Resource.
+
+    status_patch example:
+        {"<KEY>": "<VALUE", "<KEY>": <VALUE>}
+    """
+
+    load_kube_config_with_fallback()
+
+    api = client.CustomObjectsApi()
+
+    body = {
+        "status": status_patch
+    }
+
+    try:
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body=body,
+        )
+    except ApiException as e:
+        logger.error(
+            f"Failed to patch status for {name}: {e.reason} {e.body}"
+        )
+
+
+def patch_cr_node_status(
+        *,
+        group: str,
+        version: str,
+        plural: str,
+        namespace: str,
+        name: str,
+        node_uuid: str,
+        node_mgmt_ip: str,
+        updates: Optional[Dict[str, Any]] = None,
+        remove: bool = False,
+):
+    """
+    Patch status.nodes[*] fields for a specific node identified by UUID.
+
+    Operations:
+      - Update a node (by uuid or mgmtIp)
+      - Remove a node (by uuid or mgmtIp)
+
+    updates example:
+        {"health": "true"}
+        {"status": "offline"}
+        {"capacity": {"sizeUsed": 1234}}
+    """
+    load_kube_config_with_fallback()
+    api = client.CustomObjectsApi()
+
+    try:
+        cr = api.get_namespaced_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+        )
+
+        status_nodes = cr.get("status", {}).get("nodes", [])
+        if not status_nodes:
+            raise RuntimeError("CR has no status.nodes")
+
+        spec_worker_nodes = cr.get("spec", {}).get("workerNodes", [])
+
+        found = False
+        new_status_nodes = []
+        removed_hostname = None
+
+        for node in status_nodes:
+            match = (
+                    node.get("uuid") == node_uuid or
+                    node.get("mgmtIp") == node_mgmt_ip
+            )
+
+            if match:
+                found = True
+                removed_hostname = node.get("hostname")
+
+                if remove:
+                    continue
+
+                if updates:
+                    node.update(updates)
+
+            new_status_nodes.append(node)
+
+        if not found:
+            raise RuntimeError(
+                f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
+            )
+
+        if remove and removed_hostname:
+            new_worker_nodes = [
+                n for n in spec_worker_nodes if n != removed_hostname
+            ]
+
+            api.patch_namespaced_custom_object(
+                group=group,
+                version=version,
+                namespace=namespace,
+                plural=plural,
+                name=name,
+                body={
+                    "spec": {
+                        "workerNodes": new_worker_nodes
+                    }
+                },
+            )
+
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body={
+                "status": {
+                    "nodes": new_status_nodes
+                }
+            },
+        )
+
+    except ApiException as e:
+        logger.error(
+            f"Failed to patch node for {name}: {e.reason} {e.body}"
+        )
+
+
+def patch_cr_lvol_status(
+        *,
+        group: str,
+        version: str,
+        plural: str,
+        namespace: str,
+        name: str,
+        lvol_uuid: Optional[str] = None,
+        updates: Optional[Dict[str, Any]] = None,
+        remove: bool = False,
+        add: Optional[Dict[str, Any]] = None,
+):
+    """
+    Patch status.lvols[*] for an LVOL CustomResource.
+
+    Operations:
+      - Update an existing LVOL (by uuid)
+      - Remove an LVOL (by uuid)
+      - Add a new LVOL entry
+
+    Parameters:
+      lvol_uuid:
+        UUID of the lvol entry to update or remove
+
+      updates:
+        Dict of fields to update on the matched lvol
+        Example:
+          {"status": "offline", "health": False}
+
+      remove:
+        If True, remove the lvol identified by lvol_uuid
+
+      add:
+        Full lvol dict to append to status.lvols
+    """
+
+    load_kube_config_with_fallback()
+    api = client.CustomObjectsApi()
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    try:
+        cr = api.get_namespaced_custom_object(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+        )
+
+        status = cr.get("status", {})
+        lvols = status.get("lvols", []) or []
+
+        changed = False
+
+        # ---- ADD ----
+        if add is not None:
+            add = dict(add)
+            add.setdefault("createDt", now)
+            add["updateDt"] = now
+            lvols.append(add)
+            changed = True
+
+        # ---- UPDATE / REMOVE ----
+        if lvol_uuid:
+            found = False
+            new_lvols = []
+
+            for lvol in lvols:
+                if lvol.get("uuid") == lvol_uuid:
+                    found = True
+
+                    if remove:
+                        changed = True
+                        continue
+
+                    if updates:
+                        updated_lvol = dict(lvol)
+                        updated_lvol.update(updates)
+                        updated_lvol["updateDt"] = now
+                        new_lvols.append(updated_lvol)
+                        changed = True
+                        continue
+
+                new_lvols.append(lvol)
+
+            if not found:
+                if remove:
+                    logger.warning(
+                        "Skipping LVOL removal from CR status because LVOL was not found",
+                        extra={
+                            "cr_name": name,
+                            "namespace": namespace,
+                            "lvol_uuid": lvol_uuid,
+                        },
+                    )
+                    return
+
+                if updates:
+                    logger.warning(
+                        "Skipping LVOL status update because LVOL was not found",
+                        extra={
+                            "cr_name": name,
+                            "namespace": namespace,
+                            "lvol_uuid": lvol_uuid,
+                            "updates": updates,
+                        },
+                    )
+                    return
+
+            lvols = new_lvols
+
+        if not changed:
+            return
+
+        body = {
+            "status": {
+                "lvols": lvols
+            }
+        }
+
+        api.patch_namespaced_custom_object_status(
+            group=group,
+            version=version,
+            namespace=namespace,
+            plural=plural,
+            name=name,
+            body=body,
+        )
+
+    except ApiException as e:
+        logger.error(
+            f"Failed to patch lvol status for {name}: {e.reason} {e.body}"
+        )
+
 def get_node_name_by_ip(target_ip: str) -> str:
     load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
@@ -2519,17 +2819,39 @@ def get_idns(nvme_device: str):
 def is_namespace_4k_from_nvme_list(device_path: str) -> bool:
     """
     Returns True if nvme list JSON shows SectorSize == 4096 for the given DevicePath
-    (e.g. '/dev/nvme3n1').
+    (e.g. '/dev/nvme3n1'). Handles both the old flat format and the new nested format
+    (Devices -> Subsystems -> Controllers -> Namespaces) from newer nvme-cli versions.
     """
     try:
-        out = subprocess.check_output(["nvme", "list", "--output-format", "json"], text=True)
+        out = subprocess.check_output(["nvme", "list", "-v", "--output-format", "json"], text=True)
         data = json.loads(out)
+        # Strip /dev/ prefix for matching against NameSpace field (e.g. 'nvme6n2')
+        ns_name = os.path.basename(device_path)
 
-        for dev in data.get("Devices", []):
-            if dev.get("DevicePath") == device_path:
-                return int(dev.get("SectorSize", 0)) == 4096
+        for host in data.get("Devices", []):
+            # New nested format: Devices[].Subsystems[].Controllers[].Namespaces[]
+            for subsystem in host.get("Subsystems", []):
+                for controller in subsystem.get("Controllers", []):
+                    for ns in controller.get("Namespaces", []):
+                        if ns.get("NameSpace") == ns_name:
+                            sector_size = int(ns.get("SectorSize", 0))
+                            logger.debug(f"[is_namespace_4k] using new nested format, "
+                                         f"device={device_path}, SectorSize={sector_size}")
+                            return sector_size == 4096
+                # Also check subsystem-level namespaces
+                for ns in subsystem.get("Namespaces", []):
+                    if ns.get("NameSpace") == ns_name:
+                        sector_size = int(ns.get("SectorSize", 0))
+                        logger.debug(f"[is_namespace_4k] using new nested format (subsystem level), "
+                                     f"device={device_path}, SectorSize={sector_size}")
+                        return sector_size == 4096
+            # Old flat format: Devices[].DevicePath / SectorSize
+            if host.get("DevicePath") == device_path:
+                sector_size = int(host.get("SectorSize", 0))
+                logger.debug(f"[is_namespace_4k] using old flat format, "
+                             f"device={device_path}, SectorSize={sector_size}")
+                return sector_size == 4096
 
-        # Not found in list
         return False
 
     except subprocess.CalledProcessError:
@@ -2545,7 +2867,7 @@ def format_nvme_device(nvme_device: str, lbaf_id: int):
         logger.debug(f"Device {nvme_device} already formatted with 4K...skipping")
         return
     command = ['nvme', 'format', nvme_device, f"--lbaf={lbaf_id}", '--force']
-    print(" ".join(command))
+    logger.debug(f"[format_nvme_device] running command: {' '.join(command)}")
     try:
         result = subprocess.run(
             command,
@@ -2690,7 +3012,7 @@ def claim_devices_to_nvme(config_path=""):
     return nvme_devices_list
 
 
-def clean_devices(config_path, format, force):
+def clean_devices(config_path, format, force, format_4k=False):
     nvme_devices_list = claim_devices_to_nvme(config_path)
     try:
         json_string = get_nvme_list_verbose()
@@ -2722,10 +3044,11 @@ def clean_devices(config_path, format, force):
                 if mapping['PCI_Address'] in nvme_devices_list:
                     nvme_device_path = f"/dev/{mapping['NAMESPACE']}"
                     clean_partitions(nvme_device_path)
+                    if format_4k:
+                        format_device_with_4k(mapping['PCI_Address'])
 
     except json.JSONDecodeError as e:
         logger.error(f"Error decoding JSON: {e}")
-
 
 def create_rpc_socket_mount():
     try:

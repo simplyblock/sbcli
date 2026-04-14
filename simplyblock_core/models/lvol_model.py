@@ -13,6 +13,7 @@ class LVol(BaseModel):
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'
     STATUS_RESTORING = 'restoring'
+    STATUS_DELETED = 'deleted'
 
     _STATUS_CODE_MAP = {
         STATUS_ONLINE: 1,
@@ -20,6 +21,7 @@ class LVol(BaseModel):
         STATUS_IN_DELETION: 3,
         STATUS_IN_CREATION: 4,
         STATUS_RESTORING: 5,
+        STATUS_DELETED: 6,
     }
 
     base_bdev: str = ""
@@ -70,6 +72,9 @@ class LVol(BaseModel):
     npcs: int = 0
     allowed_hosts: List[dict] = []
     delete_snap_on_lvol_delete: bool = False
+    do_replicate: bool = False
+    replication_node_id: str = ""
+    from_source: bool = True
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)

@@ -25,3 +25,4 @@ jsonschema
 fastapi
 uvicorn
 prometheus_api_client
+paramiko
