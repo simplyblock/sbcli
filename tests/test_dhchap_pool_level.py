@@ -17,7 +17,7 @@ Covers:
 
 import inspect
 import unittest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +462,6 @@ class TestLvolInheritsDhchapFromPool(unittest.TestCase):
 
     def test_lvol_allowed_hosts_set_from_pool(self):
         """When pool.dhchap=True, add_lvol_ha populates lvol.allowed_hosts from pool."""
-        from simplyblock_core.models.lvol_model import LVol
 
         pool = _make_dhchap_pool(hosts=["nqn:host-a", "nqn:host-b"])
 

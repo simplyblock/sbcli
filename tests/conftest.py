@@ -6,6 +6,8 @@ conftest.py – shared fixtures for all tests in tests/.
 import sys
 import types
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Stub out native/unavailable dependencies before any simplyblock import so
 # that unit tests can run without a FoundationDB installation or a running
@@ -24,8 +26,6 @@ def _stub(name, **attrs):
 if 'fdb' not in sys.modules:
     _fdb = _stub('fdb', open=lambda *a, **kw: None)
     _stub('fdb.tuple')
-
-import pytest
 
 
 @pytest.fixture(autouse=True)
