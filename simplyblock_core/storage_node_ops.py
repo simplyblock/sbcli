@@ -4040,25 +4040,32 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
     # 4. RPC failing but fabric connected
     logger.warning("Non-leader %s RPC failing but fabric connected", node_id[:8])
 
-    if not leader_op_completed:
-        # BEFORE leader operation: reject upfront
-        return "reject"
-
-    # AFTER leader operation already completed:
-    # Check FTT — can we kill this node without violating guarantees?
+    # Check FTT — can we tolerate this node being unresponsive?
     if all_nodes:
         cluster = db_controller.get_cluster_by_id(node.cluster_id)
         max_ft = getattr(cluster, 'max_fault_tolerance', 1)
         disconnected_count = _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids)
-        # The node we're considering killing is fabric-connected but RPC-unresponsive.
-        # Killing it would add 1 to the disconnected count.
         if disconnected_count + 1 > max_ft:
-            # FTT would be violated — cannot kill, must queue and retry
+            # FTT would be violated — cannot proceed or kill
+            if not leader_op_completed:
+                logger.warning("Non-leader %s RPC failing, FTT would be violated "
+                              "(disconnected=%d, max_ft=%d) — rejecting before leader op",
+                              node_id[:8], disconnected_count, max_ft)
+                return "reject"
             logger.warning("Cannot kill node %s: would violate FTT (disconnected=%d, max_ft=%d)",
                           node_id[:8], disconnected_count, max_ft)
             return "queue"
 
-        # FTT allows — kill node, wait for restart
+        if not leader_op_completed:
+            # FTT allows — queue the registration for this non-leader and
+            # let the leader operation proceed. The non-leader's
+            # registration will be retried once it becomes RPC-responsive.
+            logger.info("Non-leader %s RPC failing but FTT tolerates it "
+                       "(disconnected=%d, max_ft=%d) — queueing, leader op can proceed",
+                       node_id[:8], disconnected_count, max_ft)
+            return "queue"
+
+        # AFTER leader operation: FTT allows — kill node, wait for restart
         logger.info("Killing node %s (FTT allows: disconnected=%d, max_ft=%d)",
                     node_id[:8], disconnected_count, max_ft)
         return "kill_and_wait"
