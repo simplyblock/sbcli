@@ -981,6 +981,14 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             with self._lock:
                 for lvol_name, lm in self._lvol_registry.items():
                     if lm["delete_state"] == "not_queued" and lm["snap_state"] == "pending":
+                        # Skip if any snapshot of this lvol has a clone creation in flight
+                        has_busy_clone = any(
+                            sm["clone_state"] == "in_progress"
+                            for sm in self._snap_registry.values()
+                            if sm["src_lvol_name"] == lvol_name
+                        )
+                        if has_busy_clone:
+                            continue  # clone in flight on this lvol — would cause sync contention
                         lm["snap_state"] = "in_progress"
                         candidate = (lvol_name, lm["id"])
                         break
@@ -1004,6 +1012,8 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                     lm = self._lvol_registry.get(sm["src_lvol_name"])
                     if lm and lm["delete_state"] != "not_queued":
                         continue  # parent lvol is scheduled/in-progress for deletion
+                    if lm and lm["snap_state"] == "in_progress":
+                        continue  # parent lvol has a snapshot creation in flight — would cause sync contention
                     sm["clone_state"] = "in_progress"
                     candidate = (sn, sm["snap_id"])
                     break
