@@ -290,15 +290,19 @@ def list_pools(is_json, cluster_id=None):
     db_controller = DBController()
     pools = db_controller.get_pools(cluster_id)
     data = []
+    all_lvols = db_controller.get_lvols() or []
     for pool in pools:
-        lvs = db_controller.get_lvols_by_pool_id(pool.get_id()) or []
+        lvols_count = 0
+        for lvol in all_lvols:
+            if lvol.pool_uuid == pool.get_id():
+                lvols_count += 1
         data.append({
             "UUID": pool.get_id(),
             "Name": pool.pool_name,
             "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id())),
             "Max size": utils.humanbytes(pool.pool_max_size),
             "LVol Max Size": utils.humanbytes(pool.lvol_max_size),
-            "LVols": f"{len(lvs)}",
+            "LVols": f"{lvols_count}",
             "QOS": f"{pool.has_qos()}",
             "QOS Host": f"{pool.qos_host}",
             "Security": ", ".join(sorted(pool.sec_options.keys())) if pool.sec_options else "none",
