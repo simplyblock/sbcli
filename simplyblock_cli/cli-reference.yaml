@@ -1393,7 +1393,6 @@ commands:
             type: str
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes."
-        private: true
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
@@ -1402,7 +1401,6 @@ commands:
             completer: _completer_get_cluster_list
       - name: graceful-startup
         help: "Initiates a graceful startup of a cluster's storage nodes."
-        private: true
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
