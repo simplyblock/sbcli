@@ -547,7 +547,7 @@ class TestBackupSnapshot(unittest.TestCase):
 
 class TestDBControllerBackupChainLocks(unittest.TestCase):
 
-    @patch("simplyblock_core.db_controller.fdb.transactional")
+    @patch("simplyblock_core.db_controller.fdb.transactional", create=True)
     def test_acquire_backup_chain_locks_uses_unbound_method_with_db_handle(self, mock_transactional):
         db = object.__new__(DBController)
         db.kv_store = MagicMock()
@@ -561,7 +561,7 @@ class TestDBControllerBackupChainLocks(unittest.TestCase):
         mock_transactional.assert_called_once_with(DBController._acquire_backup_chain_locks_tx)
         wrapped.assert_called_once_with(db, db.kv_store, ["snap-1", "snap-2"], "snap-2", "lvol-1")
 
-    @patch("simplyblock_core.db_controller.fdb.transactional")
+    @patch("simplyblock_core.db_controller.fdb.transactional", create=True)
     def test_release_backup_chain_locks_uses_unbound_method_with_db_handle(self, mock_transactional):
         db = object.__new__(DBController)
         db.kv_store = MagicMock()

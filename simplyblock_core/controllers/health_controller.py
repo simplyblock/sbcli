@@ -159,7 +159,7 @@ def check_port_on_node(snode, port_id):
                                 rule_port = t['match']['right']
                         if rule_port and action and port_id == rule_port:
                             return False
-        except:
+        except Exception:
             logger.info("Failed to parse firewall output as NFT, trying IPTables")
             if type(command_output) is str:
                 command_output = [command_output]

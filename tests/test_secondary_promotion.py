@@ -165,8 +165,10 @@ class TestSecondaryPromotion(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
     @patch("simplyblock_core.storage_node_ops.DBController")
+    @patch("simplyblock_core.services.storage_node_monitor.is_node_data_plane_disconnected_quorum",
+           return_value=True)
     def test_promotes_secondary_when_primary_offline(
-            self, mock_db_cls, mock_create_stack, mock_rpc_cls,
+            self, mock_quorum, mock_db_cls, mock_create_stack, mock_rpc_cls,
             mock_fw, mock_tcp_events, mock_storage_events,
             mock_health, mock_executor_cls, mock_add_lvol):
         from simplyblock_core.storage_node_ops import recreate_lvstore_on_sec
@@ -196,6 +198,7 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
         mock_rpc.get_bdevs.return_value = [{"name": "lvol-uuid-vol-1", "aliases": []}]
         mock_rpc.jc_suspend_compression.return_value = (True, None)
+        mock_rpc.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc_cls.return_value = mock_rpc
 
         secondary.rpc_client = MagicMock(return_value=mock_rpc)
