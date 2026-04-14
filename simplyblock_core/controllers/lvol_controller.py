@@ -26,18 +26,62 @@ from simplyblock_core.snode_client import SNodeClient
 logger = lg.getLogger()
 
 
-def _get_dhchap_group(cluster):
+def _get_dhchap_group(cluster, pool=None):
     """Return the DH group to set on the target subsystem for DH-HMAC-CHAP.
 
-    Uses the first group from cluster.tls_config.dhchap_dhgroups if configured,
+    For pool-level DHCHAP the fixed DHCHAP_DHGROUP constant is used.
+    Falls back to cluster.tls_config for legacy cluster-level config,
     otherwise returns 'null' (HMAC-CHAP only, no DH key exchange).
     """
+    if pool and getattr(pool, 'dhchap', False):
+        return constants.DHCHAP_DHGROUP
     if cluster and cluster.tls and cluster.tls_config:
         params = cluster.tls_config.get("params", cluster.tls_config)
         groups = params.get("dhchap_dhgroups") or []
         if groups:
             return groups[0]
     return "null"
+
+
+def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
+    """Write pool-level DHCHAP key files to a storage node and register in SPDK keyring.
+
+    All LVols in a DHCHAP pool share one key pair stored on the pool.
+    Key names are pool-scoped so a single registration serves all LVols.
+
+    Returns a dict with 'dhchap_key' and 'dhchap_ctrlr_key' keyring names,
+    or an empty dict on failure.
+    """
+    snode_api = SNodeClient(snode.api_endpoint)
+    safe_pool = pool.get_id().replace("-", "_")
+    key_names = {}
+
+    for key_type, key_value in (
+        ("dhchap_key", pool.dhchap_key),
+        ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key),
+    ):
+        if not key_value:
+            continue
+        key_name = f"pool_{safe_pool}_{key_type}"
+        result, error = snode_api.write_key_file(key_name, key_value)
+        if error:
+            logger.error("Failed to write pool key %s on node %s: %s",
+                         key_name, snode.get_id(), error)
+            continue
+        key_path = result
+        ret, err = rpc_client._request2("keyring_file_add_key",
+                                        {"name": key_name, "path": key_path})
+        if not ret and err:
+            if err.get("code") == -17:
+                logger.info("Pool key %s already in SPDK keyring on node %s, reusing",
+                            key_name, snode.get_id())
+            else:
+                logger.error("Failed to register pool key %s in SPDK keyring on node %s: %s",
+                             key_name, snode.get_id(), err.get("message", err))
+                continue
+        key_names[key_type] = key_name
+
+    return key_names
 
 
 def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
@@ -589,12 +633,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.crypto_key2 = crypto_key2
 
     # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
-    # Security options are inherited from the pool
-    if allowed_hosts and not namespace:
-        host_entries = _build_host_entries(allowed_hosts, pool.sec_options or None)
-        if isinstance(host_entries, tuple):
-            return host_entries  # (False, error_message)
-        lvol.allowed_hosts = host_entries
+    if not namespace:
+        if pool.dhchap:
+            # Pool-level DHCHAP: inherit allowed hosts from pool (no per-host key generation)
+            lvol.allowed_hosts = [{"nqn": h} for h in pool.allowed_hosts]
+        elif allowed_hosts:
+            # Legacy per-lvol host restriction with pool.sec_options key generation
+            host_entries = _build_host_entries(allowed_hosts, pool.sec_options or None)
+            if isinstance(host_entries, tuple):
+                return host_entries  # (False, error_message)
+            lvol.allowed_hosts = host_entries
 
     lvol.write_to_db(db_controller.kv_store)
 
@@ -793,21 +841,38 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         if lvol.allowed_hosts:
             db_ctrl = DBController()
             cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-            dhchap_group = _get_dhchap_group(cluster)
+            pool = None
+            if lvol.pool_uuid:
+                try:
+                    pool = db_ctrl.get_pool_by_id(lvol.pool_uuid)
+                except KeyError:
+                    pass
+            dhchap_group = _get_dhchap_group(cluster, pool)
+            pool_key_names = {}
+            if pool and pool.dhchap:
+                pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
             for host_entry in lvol.allowed_hosts:
                 logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
-                has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
-                if has_keys:
-                    key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+                if pool and pool.dhchap:
                     rpc_client.subsystem_add_host(
                         lvol.nqn, host_entry["nqn"],
-                        psk=key_names.get("psk"),
-                        dhchap_key=key_names.get("dhchap_key"),
-                        dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                        dhchap_key=pool_key_names.get("dhchap_key"),
+                        dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
                         dhchap_group=dhchap_group,
                     )
                 else:
-                    rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
+                    has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+                    if has_keys:
+                        key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+                        rpc_client.subsystem_add_host(
+                            lvol.nqn, host_entry["nqn"],
+                            psk=key_names.get("psk"),
+                            dhchap_key=key_names.get("dhchap_key"),
+                            dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                            dhchap_group=dhchap_group,
+                        )
+                    else:
+                        rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
         if is_primary or lvol.node_id == snode.get_id():
             ana_state = "optimized"
@@ -887,21 +952,38 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     if lvol.allowed_hosts:
         db_ctrl = DBController()
         cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-        dhchap_group = _get_dhchap_group(cluster)
+        pool = None
+        if lvol.pool_uuid:
+            try:
+                pool = db_ctrl.get_pool_by_id(lvol.pool_uuid)
+            except KeyError:
+                pass
+        dhchap_group = _get_dhchap_group(cluster, pool)
+        pool_key_names = {}
+        if pool and pool.dhchap:
+            pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
         for host_entry in lvol.allowed_hosts:
             logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
-            has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
-            if has_keys:
-                key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+            if pool and pool.dhchap:
                 rpc_client.subsystem_add_host(
                     lvol.nqn, host_entry["nqn"],
-                    psk=key_names.get("psk"),
-                    dhchap_key=key_names.get("dhchap_key"),
-                    dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                    dhchap_key=pool_key_names.get("dhchap_key"),
+                    dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
                     dhchap_group=dhchap_group,
                 )
             else:
-                rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
+                has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+                if has_keys:
+                    key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+                    rpc_client.subsystem_add_host(
+                        lvol.nqn, host_entry["nqn"],
+                        psk=key_names.get("psk"),
+                        dhchap_key=key_names.get("dhchap_key"),
+                        dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                        dhchap_group=dhchap_group,
+                    )
+                else:
+                    rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
@@ -2707,8 +2789,10 @@ def _build_host_entries(allowed_hosts, sec_options=None):
 def add_host_to_lvol(lvol_id, host_nqn):
     """Add an allowed host to a volume's subsystem.
 
-    Security options are inherited from the volume's pool.
-    Returns a dict with the host NQN and any auto-generated keys, or (False, error).
+    For DHCHAP pools the pool's shared key pair is used automatically.
+    For non-DHCHAP pools, security options are inherited from pool.sec_options.
+    Returns a dict with the host NQN (and any per-host keys for non-DHCHAP pools),
+    or (False, error_message) on failure.
     """
     db_controller = DBController()
     try:
@@ -2722,53 +2806,71 @@ def add_host_to_lvol(lvol_id, host_nqn):
         if h["nqn"] == host_nqn:
             return False, f"Host {host_nqn} is already allowed"
 
-    # Get sec_options from the pool
-    sec_options = None
+    # Resolve pool
+    pool = None
     if lvol.pool_uuid:
         try:
             pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-            sec_options = pool.sec_options or None
         except KeyError:
             pass
 
     entry = {"nqn": host_nqn}
-    if sec_options:
-        ok, err = utils.validate_sec_options(sec_options)
-        if not ok:
-            return False, err
-        if "dhchap_key" in sec_options:
-            entry["dhchap_key"] = utils.generate_dhchap_key()
-        if "dhchap_ctrlr_key" in sec_options:
-            entry["dhchap_ctrlr_key"] = utils.generate_dhchap_key()
-        if "psk" in sec_options:
-            entry["psk"] = utils.generate_psk_key()
 
-    # Apply to all nodes where the subsystem exists
-    has_keys = any(entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
-    # Resolve DH group from cluster config (LVol has no cluster_id, get from first node)
-    dhchap_group = "null"
-    if has_keys and lvol.nodes:
-        first_node = db_controller.get_storage_node_by_id(lvol.nodes[0])
-        cluster = db_controller.get_cluster_by_id(first_node.cluster_id)
-        dhchap_group = _get_dhchap_group(cluster)
-    for node_id in lvol.nodes:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        if has_keys:
-            key_names = _register_dhchap_keys_on_node(snode, host_nqn, entry, rpc_client)
+    if pool and pool.dhchap:
+        # Pool-level DHCHAP: use pool's shared key pair, no per-host key generation
+        dhchap_group = constants.DHCHAP_DHGROUP
+        for node_id in lvol.nodes:
+            snode = db_controller.get_storage_node_by_id(node_id)
+            if snode.status != StorageNode.STATUS_ONLINE:
+                continue
+            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
             ret = rpc_client.subsystem_add_host(
                 lvol.nqn, host_nqn,
-                psk=key_names.get("psk"),
-                dhchap_key=key_names.get("dhchap_key"),
-                dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                dhchap_key=pool_key_names.get("dhchap_key"),
+                dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
                 dhchap_group=dhchap_group,
             )
-        else:
-            ret = rpc_client.subsystem_add_host(lvol.nqn, host_nqn)
-        if not ret:
-            return False, f"Failed to add host {host_nqn} on node {node_id}"
+            if not ret:
+                return False, f"Failed to add host {host_nqn} on node {node_id}"
+    else:
+        # Legacy per-host key generation from pool.sec_options
+        sec_options = pool.sec_options if pool else None
+        if sec_options:
+            ok, err = utils.validate_sec_options(sec_options)
+            if not ok:
+                return False, err
+            if "dhchap_key" in sec_options:
+                entry["dhchap_key"] = utils.generate_dhchap_key()
+            if "dhchap_ctrlr_key" in sec_options:
+                entry["dhchap_ctrlr_key"] = utils.generate_dhchap_key()
+            if "psk" in sec_options:
+                entry["psk"] = utils.generate_psk_key()
+
+        has_keys = any(entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+        dhchap_group = "null"
+        if has_keys and lvol.nodes:
+            first_node = db_controller.get_storage_node_by_id(lvol.nodes[0])
+            cluster = db_controller.get_cluster_by_id(first_node.cluster_id)
+            dhchap_group = _get_dhchap_group(cluster)
+        for node_id in lvol.nodes:
+            snode = db_controller.get_storage_node_by_id(node_id)
+            if snode.status != StorageNode.STATUS_ONLINE:
+                continue
+            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            if has_keys:
+                key_names = _register_dhchap_keys_on_node(snode, host_nqn, entry, rpc_client)
+                ret = rpc_client.subsystem_add_host(
+                    lvol.nqn, host_nqn,
+                    psk=key_names.get("psk"),
+                    dhchap_key=key_names.get("dhchap_key"),
+                    dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                    dhchap_group=dhchap_group,
+                )
+            else:
+                ret = rpc_client.subsystem_add_host(lvol.nqn, host_nqn)
+            if not ret:
+                return False, f"Failed to add host {host_nqn} on node {node_id}"
 
     lvol.allowed_hosts.append(entry)
     lvol.write_to_db(db_controller.kv_store)

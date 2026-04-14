@@ -242,6 +242,10 @@ LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3  # max recursive "shrink" snapshot rounds
 VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
 VALID_DHCHAP_DHGROUPS = ["null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"]
 
+# Fixed pool-level DHCHAP settings: all main digests and weakest DH group only
+DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
+DHCHAP_DHGROUP = "ffdhe2048"
+
 # Default port ranges (configurable per-cluster via Cluster model fields)
 NVMF_BASE_PORT = 4420         # Base port for ALL NVMe-oF listeners (lvol, hublvol, device)
 RPC_BASE_PORT = 8080          # Base port for SPDK JSON-RPC

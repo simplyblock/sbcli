@@ -584,9 +584,6 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical volume commands.', aliases=['lvol',])
         self.init_volume__add(subparser)
-        self.init_volume__add_host(subparser)
-        self.init_volume__remove_host(subparser)
-        self.init_volume__get_secret(subparser)
         self.init_volume__qos_set(subparser)
         self.init_volume__list(subparser)
         if self.developer_mode:
@@ -646,22 +643,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `0`.', type=int, default=0, dest='ndcs')
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `0`.', type=int, default=0, dest='npcs')
         argument = subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
-        argument = subcommand.add_argument('--allowed-hosts', help='Path to JSON file with host NQNs allowed to access this volume\'s subsystem.', type=str, dest='allowed_hosts')
-
-    def init_volume__add_host(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'add-host', 'Add an allowed host NQN to a volume\'s subsystem.')
-        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
-        subcommand.add_argument('host_nqn', help='The host NQN to allow access.', type=str)
-
-    def init_volume__remove_host(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'remove-host', 'Remove an allowed host NQN from a volume\'s subsystem.')
-        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
-        subcommand.add_argument('host_nqn', help='The host NQN to remove.', type=str)
-
-    def init_volume__get_secret(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'get-secret', 'Get security credentials for a host on a volume.')
-        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
-        subcommand.add_argument('host_nqn', help='The host NQN to get credentials for.', type=str)
 
     def init_volume__qos_set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'qos-set', 'Changes QoS settings for an active logical volume.')
@@ -824,6 +805,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_pool__disable(subparser)
         self.init_storage_pool__get_capacity(subparser)
         self.init_storage_pool__get_io_stats(subparser)
+        self.init_storage_pool__add_host(subparser)
+        self.init_storage_pool__remove_host(subparser)
 
 
     def init_storage_pool__add(self, subparser):
@@ -838,6 +821,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second.', type=int, dest='max_w_mbytes')
         argument = subcommand.add_argument('--qos-host', help='The node id for QoS pool.', type=str, dest='qos_host', required=False)
         argument = subcommand.add_argument('--sec-options', help='Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated). Applied to all volumes in the pool.', type=str, dest='sec_options')
+        argument = subcommand.add_argument('--dhchap', help='Enable DH-HMAC-CHAP authentication for all volumes in the pool.', default=False, dest='dhchap', action='store_true')
 
     def init_storage_pool__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'Sets a storage pool\'s attributes.')
@@ -880,6 +864,16 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
         argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
         argument = subcommand.add_argument('--records', help='The number of records. Default: `20`.', type=int, default=20, dest='records')
+
+    def init_storage_pool__add_host(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add-host', 'Add an allowed host NQN to a storage pool.')
+        subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
+        subcommand.add_argument('host_nqn', help='The host NQN to allow access.', type=str)
+
+    def init_storage_pool__remove_host(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'remove-host', 'Remove an allowed host NQN from a storage pool.')
+        subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
+        subcommand.add_argument('host_nqn', help='The host NQN to remove.', type=str)
 
 
     def init_snapshot(self):
@@ -1307,12 +1301,6 @@ class CLIWrapper(CLIWrapperBase):
                         args.distr_vuid = None
                         args.uid = None
                     ret = self.volume__add(sub_command, args)
-                elif sub_command in ['add-host']:
-                    ret = self.volume__add_host(sub_command, args)
-                elif sub_command in ['remove-host']:
-                    ret = self.volume__remove_host(sub_command, args)
-                elif sub_command in ['get-secret']:
-                    ret = self.volume__get_secret(sub_command, args)
                 elif sub_command in ['qos-set']:
                     ret = self.volume__qos_set(sub_command, args)
                 elif sub_command in ['list']:
@@ -1415,6 +1403,10 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_pool__get_capacity(sub_command, args)
                 elif sub_command in ['get-io-stats']:
                     ret = self.storage_pool__get_io_stats(sub_command, args)
+                elif sub_command in ['add-host']:
+                    ret = self.storage_pool__add_host(sub_command, args)
+                elif sub_command in ['remove-host']:
+                    ret = self.storage_pool__remove_host(sub_command, args)
                 else:
                     self.parser.print_help()
 

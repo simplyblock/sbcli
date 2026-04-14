@@ -1,4 +1,4 @@
-from typing import Annotated, Dict, List, Optional
+from typing import Annotated, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -40,6 +40,7 @@ class StoragePoolParams(BaseModel):
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
     sec_options: Optional[Dict[str, bool]] = None
+    dhchap: bool = False
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
@@ -59,6 +60,7 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
         parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id(),
         parameters.cr_name, parameters.cr_namespace, parameters.cr_plural,
         sec_options=parameters.sec_options,
+        dhchap=parameters.dhchap,
     )
 
     if not id_or_false:
@@ -140,3 +142,25 @@ def update(cluster: Cluster, pool: StoragePool, parameters: UpdatableStoragePool
 def iostats(cluster: Cluster, pool: StoragePool, limit: int = 20):
     data = pool_controller.get_io_stats(pool.get_id(), history="")
     return core_utils.process_records(data, 20)
+
+
+class PoolHostParams(BaseModel):
+    host_nqn: str
+
+
+@instance_api.post('/host', name='clusters:storage-pools:add-host', status_code=204,
+                   responses={204: {"content": None}})
+def add_host(cluster: Cluster, pool: StoragePool, parameters: PoolHostParams) -> Response:
+    ok, err = pool_controller.add_host_to_pool(pool.get_id(), parameters.host_nqn)
+    if not ok:
+        raise HTTPException(400, err)
+    return Response(status_code=204)
+
+
+@instance_api.delete('/host', name='clusters:storage-pools:remove-host', status_code=204,
+                     responses={204: {"content": None}})
+def remove_host(cluster: Cluster, pool: StoragePool, parameters: PoolHostParams) -> Response:
+    ok, err = pool_controller.remove_host_from_pool(pool.get_id(), parameters.host_nqn)
+    if not ok:
+        raise HTTPException(400, err)
+    return Response(status_code=204)

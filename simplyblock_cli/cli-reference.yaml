@@ -1639,43 +1639,6 @@ commands:
             dest: replicate
             type: bool
             action: store_true
-          - name: "--allowed-hosts"
-            help: "Path to JSON file with host NQNs allowed to access this volume's subsystem."
-            dest: allowed_hosts
-            type: str
-      - name: add-host
-        help: "Add an allowed host NQN to a volume's subsystem."
-        arguments:
-          - name: "volume_id"
-            help: "The logical volume id."
-            dest: volume_id
-            type: str
-          - name: "host_nqn"
-            help: "The host NQN to allow access."
-            dest: host_nqn
-            type: str
-      - name: remove-host
-        help: "Remove an allowed host NQN from a volume's subsystem."
-        arguments:
-          - name: "volume_id"
-            help: "The logical volume id."
-            dest: volume_id
-            type: str
-          - name: "host_nqn"
-            help: "The host NQN to remove."
-            dest: host_nqn
-            type: str
-      - name: get-secret
-        help: "Get security credentials for a host on a volume."
-        arguments:
-          - name: "volume_id"
-            help: "The logical volume id."
-            dest: volume_id
-            type: str
-          - name: "host_nqn"
-            help: "The host NQN to get credentials for."
-            dest: host_nqn
-            type: str
       - name: qos-set
         help: "Changes QoS settings for an active logical volume."
         arguments:
@@ -2091,6 +2054,12 @@ commands:
             help: "Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated). Applied to all volumes in the pool."
             dest: sec_options
             type: str
+          - name: "--dhchap"
+            help: "Enable DH-HMAC-CHAP authentication for all volumes in the pool."
+            dest: dhchap
+            type: bool
+            default: false
+            action: store_true
       - name: set
         help: "Sets a storage pool's attributes."
         arguments:
@@ -2191,6 +2160,28 @@ commands:
             dest: records
             type: int
             default: 20
+      - name: add-host
+        help: "Add an allowed host NQN to a storage pool."
+        arguments:
+          - name: "pool_id"
+            help: "The storage pool id."
+            dest: pool_id
+            type: str
+          - name: "host_nqn"
+            help: "The host NQN to allow access."
+            dest: host_nqn
+            type: str
+      - name: remove-host
+        help: "Remove an allowed host NQN from a storage pool."
+        arguments:
+          - name: "pool_id"
+            help: "The storage pool id."
+            dest: pool_id
+            type: str
+          - name: "host_nqn"
+            help: "The host NQN to remove."
+            dest: host_nqn
+            type: str
   - name: "snapshot"
     help: "Snapshot commands."
     weight: 600
