@@ -483,6 +483,386 @@ class K8sUtils:
             f"[K8sUtils] Pod with prefix {pod_name_prefix!r} not Running within {timeout}s"
         )
 
+    # ── Generic YAML apply / delete ─────────────────────────────────────────
+
+    def apply_yaml(self, yaml_content: str, namespace: str = None):
+        """Apply a YAML manifest via ``kubectl apply -f -``."""
+        ns = namespace or self.namespace
+        escaped = yaml_content.replace("'", "'\\''")
+        return self._exec_kubectl(f"echo '{escaped}' | kubectl apply -n {ns} -f -")
+
+    def apply_yaml_cluster_scoped(self, yaml_content: str):
+        """Apply a cluster-scoped YAML manifest (no namespace flag)."""
+        escaped = yaml_content.replace("'", "'\\''")
+        return self._exec_kubectl(f"echo '{escaped}' | kubectl apply -f -")
+
+    def delete_resource(self, kind: str, name: str, namespace: str = None):
+        """Delete a K8s resource by kind and name."""
+        ns = namespace or self.namespace
+        return self._exec_kubectl(
+            f"kubectl delete {kind} {name} -n {ns} --ignore-not-found --wait=false"
+        )
+
+    def get_resource_json(self, kind: str, name: str, namespace: str = None) -> dict:
+        """Get a K8s resource as parsed JSON.  Returns ``{}`` if not found."""
+        ns = namespace or self.namespace
+        out, err = self._exec_kubectl(
+            f"kubectl get {kind} {name} -n {ns} -o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        text = out.strip()
+        if not text or "NotFound" in (err or ""):
+            return {}
+        try:
+            return json.loads(text)
+        except Exception:
+            return {}
+
+    # ── StorageClass & VolumeSnapshotClass (cluster-scoped) ──────────────────
+
+    def create_storage_class(self, name: str, cluster_id: str, pool_name: str,
+                             ndcs: int = 1, npcs: int = 1, fs_type: str = "ext4",
+                             compression: bool = False, encryption: bool = False,
+                             fabric: str = "tcp"):
+        """Create a simplyblock CSI StorageClass."""
+        yaml_content = (
+            f"apiVersion: storage.k8s.io/v1\n"
+            f"kind: StorageClass\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"provisioner: csi.simplyblock.io\n"
+            f"parameters:\n"
+            f"  csi.storage.k8s.io/fstype: {fs_type}\n"
+            f"  pool_name: {pool_name}\n"
+            f"  cluster_id: {cluster_id}\n"
+            f"  compression: \"{str(compression)}\"\n"
+            f"  encryption: \"{str(encryption)}\"\n"
+            f"  fabric: \"{fabric}\"\n"
+            f"  max_namespace_per_subsys: \"1\"\n"
+            f"  distr_ndcs: \"{ndcs}\"\n"
+            f"  distr_npcs: \"{npcs}\"\n"
+            f"  lvol_priority_class: \"0\"\n"
+            f"reclaimPolicy: Retain\n"
+            f"volumeBindingMode: Immediate\n"
+            f"allowVolumeExpansion: true\n"
+        )
+        self.logger.info(f"[K8sUtils] Creating StorageClass '{name}'")
+        self.apply_yaml_cluster_scoped(yaml_content)
+
+    def create_volume_snapshot_class(self, name: str = "simplyblock-csi-snapshotclass"):
+        """Create a VolumeSnapshotClass for the simplyblock CSI driver."""
+        yaml_content = (
+            f"apiVersion: snapshot.storage.k8s.io/v1\n"
+            f"kind: VolumeSnapshotClass\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"driver: csi.simplyblock.io\n"
+            f"deletionPolicy: Delete\n"
+        )
+        self.logger.info(f"[K8sUtils] Creating VolumeSnapshotClass '{name}'")
+        self.apply_yaml_cluster_scoped(yaml_content)
+
+    def delete_storage_class(self, name: str):
+        """Delete a StorageClass (cluster-scoped)."""
+        self._exec_kubectl(f"kubectl delete storageclass {name} --ignore-not-found")
+
+    def delete_volume_snapshot_class(self, name: str):
+        """Delete a VolumeSnapshotClass (cluster-scoped)."""
+        self._exec_kubectl(
+            f"kubectl delete volumesnapshotclass {name} --ignore-not-found"
+        )
+
+    # ── PVC operations ───────────────────────────────────────────────────────
+
+    def create_pvc(self, name: str, size: str, storage_class: str,
+                   namespace: str = None):
+        """Create a PersistentVolumeClaim (provisions an lvol via CSI)."""
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: PersistentVolumeClaim\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  accessModes:\n"
+            f"  - ReadWriteOnce\n"
+            f"  resources:\n"
+            f"    requests:\n"
+            f"      storage: {size}\n"
+            f"  storageClassName: {storage_class}\n"
+        )
+        self.logger.info(f"[K8sUtils] Creating PVC '{name}' size={size}")
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def create_clone_pvc(self, name: str, size: str, storage_class: str,
+                         snapshot_name: str, namespace: str = None):
+        """Create a PVC restored from a VolumeSnapshot (clone)."""
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: PersistentVolumeClaim\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  storageClassName: {storage_class}\n"
+            f"  dataSource:\n"
+            f"    name: {snapshot_name}\n"
+            f"    kind: VolumeSnapshot\n"
+            f"    apiGroup: snapshot.storage.k8s.io\n"
+            f"  accessModes:\n"
+            f"  - ReadWriteOnce\n"
+            f"  resources:\n"
+            f"    requests:\n"
+            f"      storage: {size}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating clone PVC '{name}' from snapshot '{snapshot_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def resize_pvc(self, name: str, new_size: str, namespace: str = None):
+        """Patch a PVC to request a larger size."""
+        ns = namespace or self.namespace
+        patch = f'{{"spec":{{"resources":{{"requests":{{"storage":"{new_size}"}}}}}}}}'
+        self.logger.info(f"[K8sUtils] Resizing PVC '{name}' to {new_size}")
+        self._exec_kubectl(
+            f"kubectl patch pvc {name} -n {ns} -p '{patch}' --type merge"
+        )
+
+    def wait_pvc_bound(self, name: str, timeout: int = 300,
+                       namespace: str = None) -> bool:
+        """Poll until PVC phase is ``Bound``.  Returns True on success."""
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get pvc {name} -n {ns} -o jsonpath='{{.status.phase}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out.strip() == "Bound":
+                self.logger.info(f"[K8sUtils] PVC '{name}' is Bound")
+                return True
+            self.logger.info(f"[K8sUtils] Waiting for PVC '{name}' to bind (current: {out.strip()!r})…")
+            time.sleep(5)
+        raise TimeoutError(f"[K8sUtils] PVC '{name}' not Bound within {timeout}s")
+
+    def delete_pvc(self, name: str, namespace: str = None):
+        """Delete a PVC."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting PVC '{name}'")
+        self.delete_resource("pvc", name, namespace=ns)
+
+    def get_pvc_status(self, name: str, namespace: str = None) -> dict:
+        """Return ``{phase, capacity}`` for a PVC."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pvc {name} -n {ns} -o jsonpath="
+            f"'{{.status.phase}} {{.status.capacity.storage}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        parts = out.strip().split()
+        return {
+            "phase": parts[0] if parts else "",
+            "capacity": parts[1] if len(parts) > 1 else "",
+        }
+
+    # ── VolumeSnapshot operations ────────────────────────────────────────────
+
+    def create_volume_snapshot(self, name: str, pvc_name: str,
+                               snapshot_class: str = "simplyblock-csi-snapshotclass",
+                               namespace: str = None):
+        """Create a VolumeSnapshot from a PVC."""
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: snapshot.storage.k8s.io/v1\n"
+            f"kind: VolumeSnapshot\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  volumeSnapshotClassName: {snapshot_class}\n"
+            f"  source:\n"
+            f"    persistentVolumeClaimName: {pvc_name}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating VolumeSnapshot '{name}' from PVC '{pvc_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_volume_snapshot_ready(self, name: str, timeout: int = 300,
+                                    namespace: str = None) -> bool:
+        """Poll until VolumeSnapshot ``readyToUse`` is true."""
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get volumesnapshot {name} -n {ns} "
+                f"-o jsonpath='{{.status.readyToUse}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out.strip() == "true":
+                self.logger.info(f"[K8sUtils] VolumeSnapshot '{name}' is ready")
+                return True
+            self.logger.info(
+                f"[K8sUtils] Waiting for VolumeSnapshot '{name}' readyToUse "
+                f"(current: {out.strip()!r})…"
+            )
+            time.sleep(5)
+        raise TimeoutError(
+            f"[K8sUtils] VolumeSnapshot '{name}' not ready within {timeout}s"
+        )
+
+    def delete_volume_snapshot(self, name: str, namespace: str = None):
+        """Delete a VolumeSnapshot."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting VolumeSnapshot '{name}'")
+        self.delete_resource("volumesnapshot", name, namespace=ns)
+
+    # ── FIO Job operations ───────────────────────────────────────────────────
+
+    def create_fio_job(self, job_name: str, pvc_name: str, configmap_name: str,
+                       fio_config: str, namespace: str = None,
+                       image: str = "dockerpinata/fio:2.1"):
+        """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC."""
+        ns = namespace or self.namespace
+        # Indent fio_config for YAML embedding (each line indented by 8 spaces)
+        indented_cfg = "\n".join(
+            f"      {line}" for line in fio_config.strip().splitlines()
+        )
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: ConfigMap\n"
+            f"metadata:\n"
+            f"  name: {configmap_name}\n"
+            f"  namespace: {ns}\n"
+            f"data:\n"
+            f"  fio.cfg: |\n"
+            f"{indented_cfg}\n"
+            f"---\n"
+            f"apiVersion: batch/v1\n"
+            f"kind: Job\n"
+            f"metadata:\n"
+            f"  name: {job_name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  backoffLimit: 4\n"
+            f"  template:\n"
+            f"    spec:\n"
+            f"      containers:\n"
+            f"      - name: fio-benchmark\n"
+            f"        image: {image}\n"
+            f"        imagePullPolicy: Always\n"
+            f"        command: [\"fio\", \"--eta=always\", \"--status-interval=5\", \"/fio/fio.cfg\"]\n"
+            f"        volumeMounts:\n"
+            f"        - mountPath: /spdkvol\n"
+            f"          name: benchmark-volume\n"
+            f"        - mountPath: /fio\n"
+            f"          name: fio-config\n"
+            f"      volumes:\n"
+            f"      - name: benchmark-volume\n"
+            f"        persistentVolumeClaim:\n"
+            f"          claimName: {pvc_name}\n"
+            f"      - name: fio-config\n"
+            f"        configMap:\n"
+            f"          name: {configmap_name}\n"
+            f"      restartPolicy: Never\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating FIO Job '{job_name}' on PVC '{pvc_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_job_complete(self, job_name: str, timeout: int = 600,
+                          namespace: str = None) -> str:
+        """Wait for a Job to reach Complete or Failed.
+
+        Returns ``'succeeded'``, ``'failed'``, or ``'timeout'``.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get job {job_name} -n {ns} "
+                f"-o jsonpath='{{.status.succeeded}} {{.status.failed}}' "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            parts = out.strip().split()
+            succeeded = parts[0] if parts else ""
+            failed = parts[1] if len(parts) > 1 else ""
+            if succeeded and int(succeeded) >= 1:
+                self.logger.info(f"[K8sUtils] Job '{job_name}' succeeded")
+                return "succeeded"
+            if failed and int(failed) >= 1:
+                self.logger.warning(f"[K8sUtils] Job '{job_name}' failed")
+                return "failed"
+            time.sleep(10)
+        self.logger.warning(f"[K8sUtils] Job '{job_name}' timed out after {timeout}s")
+        return "timeout"
+
+    def get_job_pod_name(self, job_name: str, namespace: str = None) -> str:
+        """Get the pod name created by a Job."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pods -n {ns} --selector=job-name={job_name} "
+            f"--no-headers -o custom-columns=:metadata.name | head -1",
+            supress_logs=True,
+        )
+        return out.strip()
+
+    def get_pod_logs(self, pod_name: str, namespace: str = None,
+                     tail: int = 200) -> str:
+        """Get pod logs (last *tail* lines)."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl logs {pod_name} -n {ns} --tail={tail} 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out
+
+    def delete_job(self, job_name: str, namespace: str = None):
+        """Delete a Job (cascading to its pods)."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting Job '{job_name}'")
+        self._exec_kubectl(
+            f"kubectl delete job {job_name} -n {ns} "
+            f"--ignore-not-found --cascade=foreground"
+        )
+
+    def delete_configmap(self, name: str, namespace: str = None):
+        """Delete a ConfigMap."""
+        ns = namespace or self.namespace
+        self.delete_resource("configmap", name, namespace=ns)
+
+    def validate_fio_job(self, job_name: str, namespace: str = None) -> bool:
+        """Check Job succeeded and pod logs have no FIO error keywords.
+
+        Returns True if valid.  Raises RuntimeError on failure.
+        """
+        ns = namespace or self.namespace
+        status = self.wait_job_complete(job_name, namespace=ns)
+        if status != "succeeded":
+            raise RuntimeError(
+                f"FIO Job '{job_name}' did not succeed (status={status})"
+            )
+        pod_name = self.get_job_pod_name(job_name, namespace=ns)
+        if not pod_name:
+            self.logger.warning(
+                f"[K8sUtils] Could not find pod for Job '{job_name}'; skipping log check"
+            )
+            return True
+        logs = self.get_pod_logs(pod_name, namespace=ns, tail=500)
+        fail_words = ["error", "fail", "interrupt", "terminate"]
+        logs_lower = logs.lower()
+        for word in fail_words:
+            if word in logs_lower:
+                raise RuntimeError(
+                    f"FIO Job '{job_name}' pod logs contain '{word}'"
+                )
+        return True
+
 
 # ── K8s-native sbcli_utils replacement ──────────────────────────────────────
 
