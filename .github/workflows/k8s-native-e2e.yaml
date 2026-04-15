@@ -170,15 +170,15 @@ jobs:
 
           echo "=== Cleanup complete ==="
 
-      # ── Label nodes ─────────────────────────────────────────────────────────
+      # # ── Label nodes ─────────────────────────────────────────────────────────
 
-      - name: Label worker nodes
-        run: |
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-          for NODE in "${NODES[@]}"; do
-            echo "Labeling node $NODE with simplyblock.io/role=mgmt-plane"
-            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
-          done
+      # - name: Label worker nodes
+      #   run: |
+      #     IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+      #     for NODE in "${NODES[@]}"; do
+      #       echo "Labeling node $NODE with simplyblock.io/role=mgmt-plane"
+      #       kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
+      #     done
 
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
@@ -199,13 +199,11 @@ jobs:
             --create-namespace \
             --set controlplane.enabled=true \
             --set operator.enabled=true \
-            --set autoClusterActivate=true \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
-            --set storagenode.create=true \
             --set operator.cluster.mgmtIfname="${{ github.event.inputs.mgmt_ifc }}" \
             --set operator.cluster.enableNodeAffinity=true \
-            --set operator.cluster.fabric=tcp \
+            --set operator.cluster.fabricType=tcp \
             --set operator.cluster.isSingleNode=false \
             --set operator.cluster.strictNodeAntiAffinity=false \
             --set operator.cluster.warningThreshold.capacity=95 \
@@ -220,10 +218,8 @@ jobs:
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
             --set-json "operator.storageNodes.workerNodes=${WORKER_JSON}" \
             --set-json "operator.storageNodes.dataIfname=${DATA_NICS_JSON}" \
-            --set ingress.enabled=true \
-            --set 'ingress.controller.nodeSelector.simplyblock\.io/role=mgmt-plane' \
-            --set logicalVolume.distr_ndcs="${NDCS}" \
-            --set logicalVolume.distr_npcs="${NPCS}" \
+            --set operator.stripe.dataChunks="${NDCS}" \
+            --set operator.stripe.parityChunks="${NPCS}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \
