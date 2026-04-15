@@ -27,11 +27,6 @@ on:
         required: true
         default: "192.168.10.211"
 
-      SBCLI_CMD:
-        description: "sbcli command name"
-        required: true
-        default: "sbctl"
-
       CLUSTER_ID:
         description: "Cluster id to run test on"
         required: true
@@ -100,7 +95,7 @@ jobs:
       BASTION_IP: ${{ inputs.BASTION_IP }}
       BASTION_SERVER: ${{ inputs.BASTION_IP }}
       MNODES: ${{ inputs.MNODES }}
-      SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
+      SBCLI_CMD: 'sbctl'
 
       # SSH/client env
       SSH_USER: ${{ inputs.SSH_USER }}

@@ -14,10 +14,6 @@ on:
         description: "Cluster to deploy on"
         required: true
         type: string
-      sbcli_cmd:
-        description: 'Command for sbcli execution'
-        required: true
-        default: 'sbcli-dev'
       ndcs:
         description: 'Value for NDCS'
         required: false
@@ -133,7 +129,7 @@ jobs:
           NPCS: ${{ github.event.inputs.npcs || 1 }}
           BS: ${{ github.event.inputs.bs || 4096 }}
           CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
-          SBCLI_CMD: ${{ github.event.inputs.sbcli_cmd || 'sbctl' }}
+          SBCLI_CMD: "sbctl"
 
       - name: Record Test End Time
         if: always()

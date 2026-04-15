@@ -31,13 +31,15 @@ import random
 import string
 import threading
 import time
+import traceback
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 from utils.k8s_utils import K8sUtils
+from utils.ssh_utils import RunnerK8sLog
 
 
 def _rand_seq(length: int) -> str:
@@ -110,19 +112,209 @@ class K8sNativeFailoverTest(TestClusterBase):
     # ── Setup / Teardown ─────────────────────────────────────────────────────
 
     def setup(self):
-        super().setup()
-        if self.k8s_test and self.mgmt_nodes:
+        """K8s-native setup: no SSH connections (Talos-compatible).
+
+        Replaces the parent setup() entirely — FIO runs as K8s Jobs so
+        no client machines, NFS mounts, or SSH connections are needed.
+        """
+        self.logger.info("Inside K8sNativeFailoverTest.setup()")
+
+        # 1. Retry sbcli API calls (routed through kubectl exec via K8sSbcliUtils)
+        retry = 30
+        while retry > 0:
+            try:
+                self.logger.info("Getting all storage nodes")
+                self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
+                self.sbcli_utils.list_lvols()
+                self.sbcli_utils.list_storage_pools()
+                break
+            except Exception as e:
+                self.logger.debug(f"API call failed with error: {e}")
+                retry -= 1
+                if retry == 0:
+                    self.logger.info(f"Retry attempt exhausted. API failed with: {e}. Exiting")
+                    raise e
+                self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
+                sleep_n_sec(10)
+
+        # 2. No client machines needed — FIO runs as K8s Jobs
+        self.client_machines = []
+        self.fio_node = []
+
+        # 3. Set up local log directories
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
+        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
+        os.makedirs(self.log_path, exist_ok=True)
+        os.makedirs(self.docker_logs_path, exist_ok=True)
+
+        run_file = os.getenv("RUN_DIR_FILE", None)
+        if run_file:
+            with open(run_file, "w") as f:
+                f.write(self.docker_logs_path)
+
+        # 4. Start K8s log monitor (local kubectl, no SSH)
+        self.runner_k8s_log = RunnerK8sLog(
+            log_dir=self.docker_logs_path,
+            test_name=self.test_name,
+        )
+        self.runner_k8s_log.start_logging()
+        self.runner_k8s_log.monitor_pod_logs()
+
+        # 5. Clean up old lvols/pools via sbcli (through kubectl exec)
+        try:
+            self.sbcli_utils.delete_all_snapshots()
+            sleep_n_sec(2)
+            self.sbcli_utils.delete_all_lvols()
+            sleep_n_sec(2)
+            self.sbcli_utils.delete_all_storage_pools()
+        except Exception as e:
+            self.logger.warning(f"Cleanup of old resources failed: {e}")
+
+        # 6. Initialize K8sUtils
+        if self.mgmt_nodes:
             self.k8s_utils = K8sUtils(
                 ssh_obj=self.ssh_obj,
                 mgmt_node=self.mgmt_nodes[0],
             )
             self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={self.mgmt_nodes[0]}")
 
+        self.logger.info("K8sNativeFailoverTest.setup() complete (no SSH)")
+
     def _ensure_k8s_utils(self):
         if not self.k8s_utils:
             raise RuntimeError(
                 "[K8s] k8s_utils not initialised — was setup() called with k8s_run=True?"
             )
+
+    def teardown(self, delete_lvols=True, close_ssh=True):
+        """K8s-native teardown: no SSH operations (Talos-compatible)."""
+        self.logger.info("Inside K8sNativeFailoverTest.teardown()")
+        self.stop_root_monitor()
+
+        if delete_lvols:
+            try:
+                self.sbcli_utils.delete_all_snapshots()
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_lvols()
+                sleep_n_sec(2)
+                self.sbcli_utils.delete_all_storage_pools()
+            except Exception as e:
+                self.logger.info(f"Teardown cleanup error: {e}")
+                self.logger.info(traceback.format_exc())
+
+    def cleanup_logs(self):
+        """No-op: K8s-native test has no SSH-based logs to clean."""
+        self.logger.info("cleanup_logs: skipped (K8s-native, no SSH)")
+
+    def configure_sysctl_settings(self):
+        """No-op: K8s-native test has no SSH access for sysctl."""
+        self.logger.info("configure_sysctl_settings: skipped (K8s-native, no SSH)")
+
+    def unmount_all(self, base_path=None):
+        """No-op: K8s-native test uses PVCs, not mount points."""
+        pass
+
+    def disconnect_lvols(self):
+        """No-op: K8s-native test uses PVCs, not NVMe connections."""
+        pass
+
+    def validate_migration_for_node(self, timestamp, timeout, node_id=None,
+                                    check_interval=60, no_task_ok=False):
+        """K8s-native migration validation — uses kubectl exec instead of SSH.
+
+        Replaces the parent method which does ssh_obj.exec_command() to
+        mgmt_nodes[0]. This version uses K8sSbcliUtils (kubectl exec).
+        """
+        start_time = datetime.now(timezone.utc)
+        end_time = start_time + timedelta(seconds=timeout)
+
+        # Initial task list via kubectl exec (replaces SSH call)
+        output = None
+        while output is None:
+            try:
+                k8s = self.sbcli_utils.k8s
+                output, _ = k8s.exec_sbcli(
+                    f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0"
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to get task list via kubectl exec: {e}")
+                output = ""
+            self.logger.info(f"Data migration output: {output}")
+            if no_task_ok:
+                return
+
+        migration_tasks_found = False
+
+        while datetime.now(timezone.utc) < end_time:
+            tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+            filtered_tasks = self.filter_migration_tasks(
+                tasks, node_id, timestamp, window_minutes=10
+            )
+
+            if filtered_tasks:
+                migration_tasks_found = True
+                self.logger.info(f"Checking migration tasks: {filtered_tasks}")
+
+                all_done = True
+                completed_count = 0
+
+                for task in filtered_tasks:
+                    try:
+                        updated_at = datetime.fromisoformat(
+                            task['updated_at']
+                        ).astimezone(timezone.utc)
+                    except ValueError as e:
+                        self.logger.error(
+                            f"Error parsing timestamp for task {task['id']}: {e}"
+                        )
+                        continue
+
+                    if (datetime.now(timezone.utc) - updated_at > timedelta(minutes=65)
+                            and task["status"] != "done"):
+                        raise RuntimeError(
+                            f"Migration task {task['id']} is stuck "
+                            f"(last updated at {updated_at.isoformat()})."
+                        )
+
+                    if task['status'] == 'done':
+                        completed_count += 1
+                    else:
+                        all_done = False
+
+                total_tasks = len(filtered_tasks)
+                remaining_tasks = total_tasks - completed_count
+                self.logger.info(
+                    f"Total migration tasks: {total_tasks}, "
+                    f"Completed: {completed_count}, Remaining: {remaining_tasks}"
+                )
+
+                if all_done:
+                    self.logger.info(
+                        f"All migration tasks for "
+                        f"{'node ' + node_id if node_id else 'the cluster'} "
+                        f"completed successfully without any stuck tasks."
+                    )
+                    return
+            else:
+                self.logger.info(
+                    f"No migration tasks found yet, retrying after {check_interval}s..."
+                )
+
+            sleep_n_sec(check_interval)
+
+        if not migration_tasks_found and not no_task_ok:
+            raise RuntimeError(
+                f"No migration tasks found for "
+                f"{'node ' + node_id if node_id else 'the cluster'} "
+                f"after the specified timestamp {timestamp} "
+                f"and function containing device migration!"
+            )
+
+        raise RuntimeError(
+            f"Timeout reached: Not all migration tasks completed within "
+            f"the specified timeout of {timeout} seconds."
+        )
 
     def _initialize_outage_log(self):
         os.makedirs(os.path.dirname(self.outage_log_file), exist_ok=True)
