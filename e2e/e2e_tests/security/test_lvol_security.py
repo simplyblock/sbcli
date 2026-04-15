@@ -7,14 +7,12 @@ Security feature summary:
   volume connect <id> --host-nqn <nqn>   returns connect string with embedded DHCHAP keys
   volume add-host <id> <nqn>   add host to existing lvol
   volume remove-host <id> <nqn>                remove host from existing lvol
-  volume get-secret <id> <nqn>                 retrieve DHCHAP credentials for a host
 
 All sbcli CLI wrappers live in ssh_utils.SshUtils:
   ssh_obj.create_sec_lvol(...)
   ssh_obj.get_lvol_connect_str_with_host_nqn(...)
   ssh_obj.add_host_to_lvol(...)
   ssh_obj.remove_host_from_lvol(...)
-  ssh_obj.get_lvol_host_secret(...)
   ssh_obj.get_client_host_nqn(node)
 """
 
@@ -55,7 +53,6 @@ class SecurityTestBase(TestClusterBase):
       self.ssh_obj.get_lvol_connect_str_with_host_nqn(...)
       self.ssh_obj.add_host_to_lvol(...)
       self.ssh_obj.remove_host_from_lvol(...)
-      self.ssh_obj.get_lvol_host_secret(...)
       self.ssh_obj.get_client_host_nqn(node)
     """
 
@@ -2842,14 +2839,6 @@ class TestLvolSecurityCombinations(SecurityTestBase):
             self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
             self.logger.info(f"{tc}: {tag} FIO PASSED")
 
-            # Verify get-secret works for auth flavours
-            if tag in ("auth", "crypto_auth"):
-                secret_out, secret_err = self.ssh_obj.get_lvol_host_secret(
-                    self.mgmt_nodes[0], lvol_id, host_nqn)
-                assert secret_out and "error" not in (secret_out or "").lower(), \
-                    f"get-secret failed for {tag}: {secret_err}"
-                self.logger.info(f"{tc}: get-secret for {tag} PASSED")
-
         self.logger.info("=== TestLvolSecurityCombinations PASSED ===")
 
 
@@ -2933,7 +2922,6 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
     TC-NEW-020  Create DHCHAP pool with host registered
     TC-NEW-021  Create encrypted lvol in DHCHAP pool
     TC-NEW-022  Connect with host-nqn, mount, FIO (randrw)
-    TC-NEW-023  Verify get-secret returns valid credentials
     """
 
     def __init__(self, **kwargs):
@@ -2974,13 +2962,6 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
         self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
         self.logger.info("TC-NEW-022: Crypto+DHCHAP FIO PASSED")
 
-        # TC-NEW-023
-        secret_out, secret_err = self.ssh_obj.get_lvol_host_secret(
-            self.mgmt_nodes[0], lvol_id, host_nqn)
-        assert secret_out and "error" not in (secret_out or "").lower(), \
-            f"get-secret failed: {secret_err}"
-        self.logger.info("TC-NEW-023: get-secret PASSED")
-
         self.logger.info("=== TestLvolCryptoWithDhchap PASSED ===")
 
 
@@ -2990,7 +2971,6 @@ class TestLvolDhchapBidirectional(SecurityTestBase):
 
     TC-NEW-030  Create DHCHAP pool + host
     TC-NEW-031  Create lvol, connect with host-nqn
-    TC-NEW-032  get-secret returns controller key (bidirectional proof)
     TC-NEW-033  FIO completes successfully
     """
 
@@ -3021,15 +3001,6 @@ class TestLvolDhchapBidirectional(SecurityTestBase):
         # TC-NEW-031: connect
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         self.logger.info("TC-NEW-031: Connected with host-nqn PASSED")
-
-        # TC-NEW-032: get-secret must return a controller key (proves bidirectional)
-        secret_out, secret_err = self.ssh_obj.get_lvol_host_secret(
-            self.mgmt_nodes[0], lvol_id, host_nqn)
-        assert secret_out and "error" not in (secret_out or "").lower(), \
-            f"get-secret failed: {secret_err}"
-        # Bidirectional means the connect string should contain both host and controller keys
-        self.logger.info(f"TC-NEW-032: Secret output (truncated): {secret_out[:200]!r}")
-        self.logger.info("TC-NEW-032: Bidirectional secret PASSED")
 
         # TC-NEW-033: FIO
         mount_point = f"{self.mount_path}/{lvol_name}"
@@ -3114,7 +3085,6 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
     TC-NEW-050  Create DHCHAP pool + host, create lvol, write data
     TC-NEW-051  Create snapshot + clone
     TC-NEW-052  Connect clone with same host-nqn (pool-level auth), run FIO
-    TC-NEW-053  Verify get-secret works on clone
     """
 
     def __init__(self, **kwargs):
@@ -3186,13 +3156,6 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
         log_file2 = f"{self.log_path}/{clone_name}_out.log"
         self._run_fio_and_validate(clone_name, clone_mount, log_file2, rw="randrw", runtime=20)
         self.logger.info("TC-NEW-052: Clone FIO PASSED")
-
-        # TC-NEW-053: get-secret on clone
-        secret_out, secret_err = self.ssh_obj.get_lvol_host_secret(
-            self.mgmt_nodes[0], clone_id, host_nqn)
-        assert secret_out and "error" not in (secret_out or "").lower(), \
-            f"get-secret on clone failed: {secret_err}"
-        self.logger.info("TC-NEW-053: Clone get-secret PASSED")
 
         self.logger.info("=== TestLvolSecuritySnapshotClone PASSED ===")
 

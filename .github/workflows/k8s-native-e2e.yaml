@@ -1,4 +1,4 @@
-name: K8s Native E2E Tests
+name: K8s Native Stress Tests
 
 on:
   workflow_dispatch:
@@ -123,6 +123,7 @@ jobs:
             "simplyblockstoragenodes.simplyblock.simplyblock.io"
             "simplyblockstorageclusters.simplyblock.simplyblock.io"
             "simplyblocksnapshotreplications.simplyblock.simplyblock.io"
+            "StorageNode"
           )
           patch_cr_finalizers() {
             for CR_TYPE in "${CR_TYPES[@]}"; do
@@ -365,9 +366,9 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
 
-          python3 e2e.py $TESTNAME \
+          python3 -u stress.py $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True
+            --run_k8s True 2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
