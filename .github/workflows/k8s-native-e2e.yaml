@@ -166,6 +166,12 @@ jobs:
             sleep 15
           done
 
+          echo "=== Phase 5: Cleanup leftover RBAC and secrets ==="
+          kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
+          kubectl -n $NAMESPACE delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
+
           echo "=== Cleanup complete ==="
 
       # ── Label nodes ─────────────────────────────────────────────────────────
@@ -221,7 +227,8 @@ jobs:
             --set ingress.enabled=true \
             --set 'ingress.controller.nodeSelector.simplyblock\.io/role=mgmt-plane' \
             --set logicalVolume.distr_ndcs="${NDCS}" \
-            --set logicalVolume.distr_npcs="${NPCS}"
+            --set logicalVolume.distr_npcs="${NPCS}" \
+            --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000"
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
