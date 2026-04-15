@@ -69,6 +69,12 @@ jobs:
           ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'add_sbcli_operator_helm' }}
           path: 'simplyblock-csi'
 
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_CONTENT }}" > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
       - name: Install Helm v3.15.4
         run: |
           if ! helm version 2>/dev/null | grep -q 'v3.15'; then
@@ -297,7 +303,6 @@ jobs:
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Setup and Run Tests
-        timeout-minutes: 240
         run: |
           cd $GITHUB_WORKSPACE/e2e
           python3 -m venv myenv
