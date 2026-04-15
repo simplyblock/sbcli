@@ -235,6 +235,7 @@ jobs:
             --set operator.storageNodes.spdkImage="${{ github.event.inputs.spdk_image }}" \
             --set operator.storageNodes.spdkDebug=false \
             --set operator.storageNodes.coreIsolation=false \
+            --set operator.storageNodes.numPartitions=0 \
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
             --set-json "operator.storageNodes.workerNodes=${WORKER_JSON}" \
             --set-json "operator.storageNodes.dataIfname=${DATA_NICS_JSON}" \
@@ -283,17 +284,21 @@ jobs:
             exit 1
           fi
 
-          echo "=== Waiting for snode-spdk pods to be ready (max 30 min) ==="
+          # Expected number of snode-spdk pods = number of worker nodes
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          EXPECTED_SNODES=${#NODES[@]}
+          echo "=== Waiting for $EXPECTED_SNODES snode-spdk pods to be ready (max 30 min) ==="
+
           for i in $(seq 1 180); do
             TOTAL=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | wc -l)
             READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
 
-            if [ "$TOTAL" -gt 0 ] && [ "$READY" -eq "$TOTAL" ]; then
-              echo "All $TOTAL snode-spdk pods are Running"
+            if [ "$READY" -ge "$EXPECTED_SNODES" ]; then
+              echo "All $READY/$EXPECTED_SNODES snode-spdk pods are Running"
               break
             fi
 
-            echo "snode-spdk pods: $READY/$TOTAL Running ($i/180)"
+            echo "snode-spdk pods: $READY/$EXPECTED_SNODES Running (total=$TOTAL) ($i/180)"
             if [ "$i" -eq 180 ]; then
               echo "ERROR: snode-spdk pods did not become ready within 30 minutes"
               kubectl -n $NAMESPACE get pods
