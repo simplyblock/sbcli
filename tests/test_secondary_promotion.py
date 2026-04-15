@@ -217,7 +217,9 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc = MagicMock()
         mock_rpc.bdev_examine.return_value = True
         mock_rpc.bdev_wait_for_examine.return_value = True
-        mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        # Leadership must show as restored so the leader-restore loop in
+        # recreate_lvstore exits cleanly instead of falling through to _kill_app.
+        mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
         mock_rpc.bdev_lvol_set_lvs_opts.return_value = True
         mock_rpc.get_bdevs.return_value = [{"name": "lvol-uuid-vol-1", "aliases": []}]
         mock_rpc.jc_suspend_compression.return_value = (True, None)
@@ -421,7 +423,9 @@ class TestPrimaryEscalation(unittest.TestCase):
         mock_rpc = MagicMock()
         mock_rpc.bdev_examine.return_value = True
         mock_rpc.bdev_wait_for_examine.return_value = True
-        mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        # Leadership must show as restored so the leader-restore loop in
+        # recreate_lvstore exits cleanly instead of falling through to _kill_app.
+        mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
         mock_rpc.bdev_lvol_set_lvs_opts.return_value = True
         mock_rpc.get_bdevs.return_value = [{"name": "lvol-uuid-vol-1", "aliases": []}]
         mock_rpc.jc_suspend_compression.return_value = (True, None)

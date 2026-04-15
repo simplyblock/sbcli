@@ -4266,7 +4266,12 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node):
     """Recreate a non-leader LVS on snode.
 
     Per design: runs for secondary when primary is online, or for tertiary always.
-    No leadership logic — just connect to the current leader's hublvol.
+    While snode examines its raid, the current leader must be quiesced:
+    block the leader's port, demote its lvs leadership (leader=False,
+    bs_nonleadership=True) + force distribs to non-leader, drain inflight
+    IO, then examine. Omitting this step allows JC replication writes from
+    the leader to corrupt the raid state snode is examining — the original
+    writer-conflict incident fixed in 09b4792b.
 
     Args:
         snode: the restarting node (RPCs are executed here)
@@ -4385,6 +4390,39 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node):
         except Exception as e:
             logger.warning("Skipping peer port block for sibling %s on %s: %s",
                            other_sec.get_id(), primary_node.lvstore, e)
+
+    ### 4- drop leadership on the current leader and drain inflight IO.
+    # Per design (restored from 09b4792b; dropped in the 9fa5a61c refactor
+    # and re-added here): once the leader's port is blocked, we must also
+    # demote the leader and wait for its inflight IO to drain so that the
+    # upcoming examine on snode sees a consistent raid state. Without this,
+    # JC replication writes from the leader continue to flow through the
+    # distribs while we examine them, producing a writer conflict
+    # (spdk_lvs_change_leader_state → block_port cascade that took down
+    # node 202 in production).
+    if not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids):
+        try:
+            leader_rpc_client = RPCClient(
+                leader_node.mgmt_ip, leader_node.rpc_port,
+                leader_node.rpc_username, leader_node.rpc_password)
+            leader_rpc_client.bdev_lvol_set_leader(
+                primary_node.lvstore, leader=False, bs_nonleadership=True)
+            leader_rpc_client.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+            logger.info("Checking for inflight IO on leader %s for %s",
+                        leader_node.get_id(), primary_node.lvstore)
+            for _ in range(100):
+                is_inflight = leader_rpc_client.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
+                if is_inflight:
+                    time.sleep(0.1)
+                else:
+                    break
+            else:
+                logger.error(
+                    "Timeout waiting for inflight IO to drain on leader %s (%s)",
+                    leader_node.get_id(), primary_node.lvstore)
+        except Exception as e:
+            logger.warning("Failed to demote leader %s for %s: %s",
+                           leader_node.get_id(), primary_node.lvstore, e)
 
     ### 5- examine
     ret = snode_rpc_client.bdev_examine(primary_node.raid)
