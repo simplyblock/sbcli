@@ -112,63 +112,39 @@ jobs:
           NAMESPACE=simplyblock
 
           echo "=== Phase 1: Helm uninstall ==="
-          helm uninstall spdk-csi -n $NAMESPACE --wait 2>/dev/null || true
-          sleep 10
+          helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
 
-          echo "=== Phase 2: Force delete namespace resources ==="
-          for RTYPE in pod pvc pv jobs service ds; do
-            kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
+          echo "=== Phase 2: Patch finalizers on CRs ==="
+          CR_TYPES=(
+            "simplyblockpool.simplyblock.simplyblock.io"
+            "simplyblocklvol.simplyblock.simplyblock.io"
+            "simplyblocktask.simplyblock.simplyblock.io"
+            "simplyblockdevices.simplyblock.simplyblock.io"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io"
+            "simplyblocksnapshotreplications.simplyblock.simplyblock.io"
+          )
+          for CR_TYPE in "${CR_TYPES[@]}"; do
+            for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+              kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
+                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            done
           done
 
-          echo "=== Phase 3: CR cleanup — remove finalizers and delete ==="
-          RESOURCES=(
-            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool"
-            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool2"
-            "simplyblocklvol.simplyblock.simplyblock.io simplyblock-lvol"
-            "simplyblocktask.simplyblock.simplyblock.io simplyblock-task"
-            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-devices"
-            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-device-action"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node2"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node-action"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster2"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster-activate"
-            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication"
-            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication-failback"
-          )
+          echo "=== Phase 3: Delete namespace ==="
+          kubectl delete namespace $NAMESPACE --wait=false 2>/dev/null || true
 
-          cr_cleanup() {
-            for item in "${RESOURCES[@]}"; do
-              KIND=$(echo "$item" | awk '{print $1}')
-              NAME=$(echo "$item" | awk '{print $2}')
-              kubectl -n $NAMESPACE patch "$KIND" "$NAME" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-              kubectl -n $NAMESPACE delete "$KIND" "$NAME" \
-                --ignore-not-found --wait=false 2>/dev/null || true
-            done
-          }
-
-          cr_cleanup
-
-          echo "=== Phase 4: Wait for namespace to be clean ==="
-          for i in $(seq 1 15); do
-            POD_COUNT=$(kubectl -n $NAMESPACE get pods --no-headers 2>/dev/null | wc -l)
-            if [ "$POD_COUNT" -eq 0 ] || [ -z "$POD_COUNT" ]; then
-              echo "Namespace $NAMESPACE is clean"
+          echo "=== Phase 4: Wait for namespace deletion (max 2 min) ==="
+          for i in $(seq 1 24); do
+            if ! kubectl get namespace $NAMESPACE 2>/dev/null; then
+              echo "Namespace $NAMESPACE deleted"
               break
             fi
-            echo "Still $POD_COUNT pods remaining, retrying cleanup ($i/15)..."
-            for RTYPE in pod pvc pv jobs service ds; do
-              kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
-            done
-            cr_cleanup
-            sleep 15
+            echo "Namespace still exists ($i/24)..."
+            sleep 5
           done
 
-          echo "=== Phase 5: Cleanup leftover RBAC and secrets ==="
-          kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
-          kubectl -n $NAMESPACE delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
+          echo "=== Phase 5: Cleanup cluster-scoped resources ==="
           kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
           kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
 
@@ -230,7 +206,8 @@ jobs:
             --set logicalVolume.distr_npcs="${NPCS}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
-            --set controlplane.observability.enabled=true
+            --set controlplane.observability.enabled=true \
+            --set opensearch.persistence.storageClass=local-hostpath
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
