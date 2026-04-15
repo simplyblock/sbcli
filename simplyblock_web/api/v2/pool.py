@@ -1,4 +1,4 @@
-from typing import Annotated, Dict, List, Optional
+from typing import Annotated, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -20,12 +20,15 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-pools:list')
 def list(cluster: Cluster) -> List[StoragePoolDTO]:
-    return [
-        StoragePoolDTO.from_model(pool)
-        for pool
-        in db.get_pools()
-        if pool.cluster_id == cluster.get_id()
-    ]
+    data = []
+    for pool in db.get_pools():
+        if pool.cluster_id == cluster.get_id():
+            stat_obj = None
+            ret = db.get_pool_stats(pool, 1)
+            if ret:
+                stat_obj = ret[0]
+            data.append(StoragePoolDTO.from_model(pool, stat_obj))
+    return data
 
 
 class StoragePoolParams(BaseModel):
@@ -36,7 +39,10 @@ class StoragePoolParams(BaseModel):
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
-    sec_options: Optional[Dict[str, bool]] = None
+    dhchap: bool = False
+    cr_name: str = ""
+    cr_namespace: str = ""
+    cr_plural: str = ""
 
 
 @api.post('/', name='clusters:storage-pools:create', status_code=201, responses={201: {"content": None}})
@@ -51,14 +57,15 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
     id_or_false =  pool_controller.add_pool(
         parameters.name, parameters.pool_max, parameters.volume_max_size, parameters.max_rw_iops, parameters.max_rw_mbytes,
         parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id(),
-        sec_options=parameters.sec_options,
+        parameters.cr_name, parameters.cr_namespace, parameters.cr_plural,
+        dhchap=parameters.dhchap,
     )
 
     if not id_or_false:
         raise ValueError('Failed to create pool')
 
-    entity_url = request.app.url_path_for('clusters:storage-pools:detail', cluster_id=cluster.get_id(), pool_id=id_or_false)
-    return Response(status_code=201, headers={'Location': entity_url})
+    pool = db.get_pool_by_id(id_or_false)
+    return pool.to_dict()
 
 
 instance_api = APIRouter(prefix='/{pool_id}')
@@ -76,7 +83,11 @@ StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
 
 @instance_api.get('/', name='clusters:storage-pools:detail')
 def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
-    return StoragePoolDTO.from_model(pool)
+    stat_obj = None
+    ret = db.get_pool_stats(pool, 1)
+    if ret:
+        stat_obj = ret[0]
+    return StoragePoolDTO.from_model(pool, stat_obj)
 
 
 @instance_api.delete('/', name='clusters:storage-pools:delete', status_code=204, responses={204: {"content": None}})
@@ -98,6 +109,9 @@ class UpdatableStoragePoolParams(BaseModel):
     max_rw_mbytes: Optional[util.Unsigned] = None
     max_r_mbytes: Optional[util.Unsigned] = None
     max_w_mbytes: Optional[util.Unsigned] = None
+    lvols_cr_name: Optional[str] = None
+    lvols_cr_namespace: Optional[str] = None
+    lvols_cr_plural: Optional[str] = None
 
 
 @instance_api.put('/', name='clusters:storage-pools:update', status_code=204, responses={204: {"content": None}})
@@ -126,3 +140,25 @@ def update(cluster: Cluster, pool: StoragePool, parameters: UpdatableStoragePool
 def iostats(cluster: Cluster, pool: StoragePool, limit: int = 20):
     data = pool_controller.get_io_stats(pool.get_id(), history="")
     return core_utils.process_records(data, 20)
+
+
+class PoolHostParams(BaseModel):
+    host_nqn: str
+
+
+@instance_api.post('/host', name='clusters:storage-pools:add-host', status_code=204,
+                   responses={204: {"content": None}})
+def add_host(cluster: Cluster, pool: StoragePool, parameters: PoolHostParams) -> Response:
+    ok, err = pool_controller.add_host_to_pool(pool.get_id(), parameters.host_nqn)
+    if not ok:
+        raise HTTPException(400, err)
+    return Response(status_code=204)
+
+
+@instance_api.delete('/host', name='clusters:storage-pools:remove-host', status_code=204,
+                     responses={204: {"content": None}})
+def remove_host(cluster: Cluster, pool: StoragePool, parameters: PoolHostParams) -> Response:
+    ok, err = pool_controller.remove_host_from_pool(pool.get_id(), parameters.host_nqn)
+    if not ok:
+        raise HTTPException(400, err)
+    return Response(status_code=204)

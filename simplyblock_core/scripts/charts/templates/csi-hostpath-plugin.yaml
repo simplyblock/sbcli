@@ -1,3 +1,4 @@
+{{- if .Values.csiHostpathDriver.enabled }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -229,3 +230,4 @@ spec:
             path: /dev
             type: Directory
           name: dev-dir
+{{- end }}

@@ -366,7 +366,7 @@ class RPCClient:
         }
         return self._request2("ultra21_alloc_ns_init", params)
 
-    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None):
+    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None):
         params = {
             "nqn": nqn,
             "namespace": {
@@ -382,6 +382,11 @@ class RPCClient:
 
         if nsid:
             params['namespace']['nsid'] = nsid
+
+        if eui64:
+            params['namespace']['eui64'] = eui64
+            params['namespace']['ptpl_file'] = "/mnt/ns_resv"+eui64+".json"
+
 
         return self._request("nvmf_subsystem_add_ns", params)
 
@@ -777,7 +782,7 @@ class RPCClient:
         }
         return self._request("bdev_passtest_delete", params)
 
-    def bdev_nvme_set_options(self, dhchap_digests=None, dhchap_dhgroups=None):
+    def bdev_nvme_set_options(self):
         params = {
             # "action_on_timeout": "abort",
             "bdev_retry_count": constants.BDEV_RETRY,
@@ -790,10 +795,6 @@ class RPCClient:
             "transport_ack_timeout": constants.ACK_TO,
             "action_on_timeout": "abort"
         }
-        if dhchap_digests:
-            params["dhchap_digests"] = dhchap_digests
-        if dhchap_dhgroups:
-            params["dhchap_dhgroups"] = dhchap_dhgroups
         return self._request("bdev_nvme_set_options", params)
 
     def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size, iobuf_small_cache_size, iobuf_large_cache_size):
@@ -969,8 +970,12 @@ class RPCClient:
         params = {"name": name, "vuid": vuid}
         return self._request("bdev_jm_unmap_vuid", params)
 
-    def nvmf_set_config(self, poll_groups_mask):
+    def nvmf_set_config(self, poll_groups_mask, dhchap_digests=None, dhchap_dhgroups=None):
         params = {"poll_groups_mask": poll_groups_mask}
+        if dhchap_digests:
+            params["dhchap_digests"] = dhchap_digests
+        if dhchap_dhgroups:
+            params["dhchap_dhgroups"] = dhchap_dhgroups
         return self._request("nvmf_set_config", params)
 
     def jc_set_hint_lcpu_mask(self, jc_singleton_mask):
@@ -1259,6 +1264,7 @@ class RPCClient:
             "jm_vuid": jm_vuid,
         }
         return self._request("bdev_distrib_check_inflight_io", params)
+
 
     def bdev_lvol_remove_from_group(self, group_id, lvol_name_list):
         params = {

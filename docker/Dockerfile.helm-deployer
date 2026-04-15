@@ -1,9 +1,27 @@
 FROM alpine/helm:latest
 
+ARG TARGETARCH
 ARG SBCLI_BRANCH=""
 ARG CSI_BRANCH=""
 
-RUN apk add --no-cache git
+RUN apk add --no-cache git curl tar gcompat bash bash-completion
+
+# kubectl
+RUN KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt) && \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
+      -o /usr/local/bin/kubectl && \
+    chmod +x /usr/local/bin/kubectl
+
+# oc (OpenShift CLI)
+RUN if [ "$TARGETARCH" = "arm64" ]; then OC_ARCH="aarch64"; else OC_ARCH="x86_64"; fi && \
+    curl -fsSL "https://mirror.openshift.com/pub/openshift-v4/${OC_ARCH}/clients/ocp/stable/openshift-client-linux.tar.gz" | \
+      tar -xz -C /usr/local/bin oc && \
+    chmod +x /usr/local/bin/oc
+
+# talosctl
+RUN curl -fsSL "https://github.com/siderolabs/talos/releases/latest/download/talosctl-linux-${TARGETARCH}" \
+      -o /usr/local/bin/talosctl && \
+    chmod +x /usr/local/bin/talosctl
 
 RUN if [ -n "$SBCLI_BRANCH" ]; then \
       git clone --branch "$SBCLI_BRANCH" --depth 1 \
@@ -14,3 +32,8 @@ RUN if [ -n "$CSI_BRANCH" ]; then \
       git clone --branch "$CSI_BRANCH" --depth 1 \
         https://github.com/simplyblock/simplyblock-csi /opt/simplyblock-csi; \
     fi
+
+# kubectl and oc autocomplete
+RUN echo 'source <(kubectl completion bash)' >> /etc/profile.d/completions.sh && \
+    echo 'source <(oc completion bash)' >> /etc/profile.d/completions.sh && \
+    echo 'source /etc/profile.d/completions.sh' >> /root/.bashrc

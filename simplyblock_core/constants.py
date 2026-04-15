@@ -162,6 +162,15 @@ SYSTEM_INFO_FILE = "/etc/simplyblock/system_info"
 
 LVO_MAX_NAMESPACES_PER_SUBSYS=32
 
+CR_GROUP = "storage.simplyblock.io"
+CR_VERSION  = "v1alpha1"
+
+GRAFANA_K8S_ENDPOINT = "http://simplyblock-grafana:3000"
+GRAYLOG_K8S_ENDPOINT = "http://simplyblock-graylog:9000"
+OS_K8S_ENDPOINT = "http://opensearch-cluster-master:9200"
+
+WEBAPI_K8S_ENDPOINT = "http://simplyblock-webappapi:5000/api/v2"
+
 K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
@@ -232,6 +241,10 @@ LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3  # max recursive "shrink" snapshot rounds
 # NVMe-oF TLS / DH-HMAC-CHAP security
 VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
 VALID_DHCHAP_DHGROUPS = ["null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"]
+
+# Fixed pool-level DHCHAP settings: all main digests and weakest DH group only
+DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
+DHCHAP_DHGROUP = "ffdhe2048"
 
 # Default port ranges (configurable per-cluster via Cluster model fields)
 NVMF_BASE_PORT = 4420         # Base port for ALL NVMe-oF listeners (lvol, hublvol, device)

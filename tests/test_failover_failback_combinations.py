@@ -615,8 +615,10 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.services.storage_node_monitor.is_node_data_plane_disconnected_quorum",
+           return_value=True)
     def test_primary_offline_first_sec_restarts_drops_leadership_on_second_sec(
-            self, mock_snode_client, mock_health, mock_db_cls, mock_create_bdev,
+            self, mock_quorum, mock_snode_client, mock_health, mock_db_cls, mock_create_bdev,
             mock_rpc_cls, mock_fw_cls, mock_tasks, mock_tcp_events, mock_storage_events):
         """Primary offline, first sec restarts → must drop leadership on second sec
         to prevent writer conflict when JC connects to remote JMs."""

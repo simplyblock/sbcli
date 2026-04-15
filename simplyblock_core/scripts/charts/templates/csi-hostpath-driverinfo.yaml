@@ -1,3 +1,4 @@
+{{- if .Values.csiHostpathDriver.enabled }}
 apiVersion: storage.k8s.io/v1
 kind: CSIDriver
 metadata:
@@ -21,4 +22,4 @@ spec:
   # Kubernetes may use fsGroup to change permissions and ownership 
   # of the volume to match user requested fsGroup in the pod's SecurityPolicy
   fsGroupPolicy: File
-  
+{{- end }}
