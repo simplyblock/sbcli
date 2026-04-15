@@ -18,9 +18,6 @@ on:
       worker_nodes:
         description: 'Comma-separated K8s worker node names'
         required: true
-      mnodes:
-        description: 'Management node IPs (space-separated)'
-        required: true
       mgmt_ifc:
         description: 'Management network interface'
         required: false
@@ -310,7 +307,6 @@ jobs:
           export CLUSTER_ID="${{ env.CLUSTER_ID }}"
           export CLUSTER_SECRET="${{ env.CLUSTER_SECRET }}"
           export K8S_LOCAL_KUBECTL=1
-          export MNODES="${{ github.event.inputs.mnodes }}"
           export SBCLI_CMD=sbctl
 
           TESTNAME=""
