@@ -114,26 +114,56 @@ jobs:
           echo "=== Phase 1: Helm uninstall ==="
           helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
 
-          echo "=== Phase 2: Patch finalizers on all CRs ==="
-          CR_TYPES=(
-            "simplyblockpool.simplyblock.simplyblock.io"
-            "simplyblocklvol.simplyblock.simplyblock.io"
-            "simplyblocktask.simplyblock.simplyblock.io"
-            "simplyblockdevices.simplyblock.simplyblock.io"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io"
-            "simplyblocksnapshotreplications.simplyblock.simplyblock.io"
-            "StorageNode"
+          echo "=== Phase 2: Patch finalizers and delete CRs ==="
+          RESOURCES=(
+            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool"
+            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool2"
+            "simplyblocklvol.simplyblock.simplyblock.io simplyblock-lvol"
+            "simplyblocktask.simplyblock.simplyblock.io simplyblock-task"
+            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-devices"
+            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-device-action"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node2"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node-action"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster2"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster-activate"
+            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication"
+            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication-failback"
+            "pool.storage.simplyblock.io simplyblock-pool"
+            "pool.storage.simplyblock.io simplyblock-pool2"
+            "lvol.storage.simplyblock.io simplyblock-lvol"
+            "task.storage.simplyblock.io simplyblock-task"
+            "devices.storage.simplyblock.io simplyblock-devices"
+            "devices.storage.simplyblock.io simplyblock-device-action"
+            "storagenodes.storage.simplyblock.io simplyblock-node"
+            "storagenodes.storage.simplyblock.io simplyblock-node2"
+            "storagenodes.storage.simplyblock.io simplyblock-node-action"
+            "storageclusters.storage.simplyblock.io simplyblock-cluster"
+            "storageclusters.storage.simplyblock.io simplyblock-cluster2"
+            "storageclusters.storage.simplyblock.io simplyblock-cluster-activate"
+            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
+            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
           )
-          patch_cr_finalizers() {
-            for CR_TYPE in "${CR_TYPES[@]}"; do
-              for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-                kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
-                  --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-              done
+
+          patch_and_delete_crs() {
+            echo "Removing finalizers..."
+            for item in "${RESOURCES[@]}"; do
+              KIND=$(echo "$item" | awk '{print $1}')
+              NAME=$(echo "$item" | awk '{print $2}')
+              kubectl -n $NAMESPACE patch "$KIND" "$NAME" \
+                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            done
+
+            echo "Deleting resources..."
+            for item in "${RESOURCES[@]}"; do
+              KIND=$(echo "$item" | awk '{print $1}')
+              NAME=$(echo "$item" | awk '{print $2}')
+              kubectl -n $NAMESPACE delete "$KIND" "$NAME" \
+                --ignore-not-found --wait=false 2>/dev/null || true
             done
           }
-          patch_cr_finalizers
+          patch_and_delete_crs
 
           echo "=== Phase 3: Force delete all namespaced resources ==="
           for RTYPE in pod pvc pv jobs service ds statefulset deployment replicaset secret sa configmap; do
@@ -149,7 +179,15 @@ jobs:
           kubectl -n $NAMESPACE get all 2>/dev/null || echo "No resources found"
           echo ""
           echo "CRDs:"
-          for CR_TYPE in "${CR_TYPES[@]}"; do
+          for CR_TYPE in \
+            "simplyblockpool.simplyblock.simplyblock.io" \
+            "simplyblocklvol.simplyblock.simplyblock.io" \
+            "simplyblockstoragenodes.simplyblock.simplyblock.io" \
+            "simplyblockstorageclusters.simplyblock.simplyblock.io" \
+            "pool.storage.simplyblock.io" \
+            "lvol.storage.simplyblock.io" \
+            "storagenodes.storage.simplyblock.io" \
+            "storageclusters.storage.simplyblock.io"; do
             kubectl -n $NAMESPACE get "$CR_TYPE" 2>/dev/null || true
           done
 
@@ -163,7 +201,7 @@ jobs:
             fi
 
             echo "Namespace still terminating, re-patching finalizers ($i/36)..."
-            patch_cr_finalizers
+            patch_and_delete_crs
 
             if [ "$i" -ge 6 ]; then
               echo "Force-removing namespace finalizers..."
