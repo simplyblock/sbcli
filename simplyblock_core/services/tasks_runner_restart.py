@@ -174,13 +174,6 @@ def task_runner_node(task):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db.kv_store)
 
-    cluster = db.get_cluster_by_id(task.cluster_id)
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-        task.function_result = f"Cluster is not active: {cluster.status}, retry"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return False
-
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
     logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")

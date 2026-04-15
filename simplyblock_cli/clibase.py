@@ -544,8 +544,9 @@ class CLIWrapperBase:
         npcs = args.npcs
 
         allowed_hosts = None
-        if args.allowed_hosts:
-            with open(args.allowed_hosts, 'r') as f:
+        allowed_hosts_arg = getattr(args, 'allowed_hosts', None)
+        if allowed_hosts_arg:
+            with open(allowed_hosts_arg, 'r') as f:
                 allowed_hosts = _json.load(f)
             if not isinstance(allowed_hosts, list):
                 print("Error: --allowed-hosts JSON must be a list of host NQN strings")

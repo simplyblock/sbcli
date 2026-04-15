@@ -2293,6 +2293,17 @@ def restart_storage_node(
         logger.info("Setting node status to Online")
         set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
         _refresh_cluster_maps_after_node_recovery(snode)
+
+        online_devices_list = []
+        for dev in snode.nvme_devices:
+            if dev.status in [NVMeDevice.STATUS_ONLINE,
+                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                online_devices_list.append(dev.get_id())
+        if online_devices_list:
+            logger.info(f"Starting migration task for node {snode.get_id()}")
+            tasks_controller.add_device_mig_task_for_node(snode.get_id())
+
         return True
 
     else:
