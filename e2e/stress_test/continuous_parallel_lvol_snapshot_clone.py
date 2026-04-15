@@ -237,18 +237,26 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                         break
         self.logger.warning(f"[max_lvols] Forced enqueue of {added} lvol tree deletes to recover from cluster max-lvol limit")
 
-    def _api(self, op: str, ctx: dict, fn):
-        try:
-            return fn()
-        except Exception as e:
-            api_err = self._extract_api_error(e)
-            self._inc("failures", op if op in self._metrics["failures"] else "unknown", 1)
-            if self._is_max_lvols_error(api_err):
-                self.logger.warning(f"[max_lvols] op={op} ctx={ctx}: cluster hit max-lvol limit; triggering forced deletes and continuing")
-                self._force_enqueue_deletes()
-                raise  # task fails but test keeps running
-            self._set_failure(op=op, exc=e, details="api call failed", ctx=ctx, api_err=api_err)
-            raise
+    def _api(self, op: str, ctx: dict, fn, retries: int = 10, interval: int = 5):
+        last_exc = None
+        for attempt in range(1, retries + 1):
+            try:
+                return fn()
+            except Exception as e:
+                last_exc = e
+                api_err = self._extract_api_error(e)
+                if self._is_max_lvols_error(api_err):
+                    self._inc("failures", op if op in self._metrics["failures"] else "unknown", 1)
+                    self.logger.warning(f"[max_lvols] op={op} ctx={ctx}: cluster hit max-lvol limit; triggering forced deletes and continuing")
+                    self._force_enqueue_deletes()
+                    raise  # task fails but test keeps running
+                if attempt < retries:
+                    self.logger.warning(f"[retry] op={op} attempt {attempt}/{retries} failed: {e}; retrying in {interval}s")
+                    sleep_n_sec(interval)
+                else:
+                    self._inc("failures", op if op in self._metrics["failures"] else "unknown", 1)
+                    self._set_failure(op=op, exc=e, details=f"api call failed after {retries} attempts", ctx=ctx, api_err=api_err)
+                    raise
 
     # ----------------------------
     # Helpers
@@ -346,10 +354,13 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
     def _task_create_lvol(self, idx: int, lvol_name: str):
         self._inc("attempts", "create_lvol", 1)
 
+        GENERAL_RETRY_MAX = 10
+        GENERAL_RETRY_INTERVAL = 5
         BDEV_RETRY_MAX = 7
         SYNC_DELETION_RETRY_MAX = 10  # 10 × 15s = 2.5 min
         bdev_retries = 0
         sync_retries = 0
+        general_retries = 0
         ctx = {"lvol_name": lvol_name, "idx": idx, "client": self._pick_client(idx)}
 
         while True:
@@ -391,10 +402,6 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                     continue
 
                 if self._is_lvol_sync_deletion_error(api_err):
-                    # Sync deletion blocks ALL operations on that node until
-                    # it completes.  Treat like max_lvols — non-fatal, trigger
-                    # forced deletes so the sync deletion clears faster, and
-                    # let the main loop retry later.
                     self._inc("failures", "create_lvol", 1)
                     self.logger.warning(
                         f"[sync_deletion] create_lvol sync_retry exhausted "
@@ -404,12 +411,18 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                     self._force_enqueue_deletes()
                     raise
 
-                # Retries exhausted or unrecognised error — fail the test
+                # General retry for unrecognised errors
+                if general_retries < GENERAL_RETRY_MAX - 1:
+                    general_retries += 1
+                    self.logger.warning(f"[retry] create_lvol attempt {general_retries}/{GENERAL_RETRY_MAX} failed: {e}; retrying in {GENERAL_RETRY_INTERVAL}s")
+                    sleep_n_sec(GENERAL_RETRY_INTERVAL)
+                    continue
+
                 self._inc("failures", "create_lvol", 1)
                 if self._is_bdev_error(api_err):
                     details = f"bdev creation failed after {bdev_retries + 1} attempts"
                 else:
-                    details = "api call failed"
+                    details = f"api call failed after {GENERAL_RETRY_MAX} attempts"
                 self._set_failure(op="create_lvol", exc=e, details=details, ctx=ctx, api_err=api_err)
                 raise
 
@@ -464,8 +477,11 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
         self._inc("attempts", "create_snapshot", 1)
 
+        GENERAL_RETRY_MAX = 10
+        GENERAL_RETRY_INTERVAL = 5
         SYNC_DELETION_RETRY_MAX = 10  # 10 × 15s = 2.5 min
         sync_retries = 0
+        general_retries = 0
         ctx = {"src_lvol_name": src_lvol_name, "src_lvol_id": src_lvol_id, "snap_name": snap_name}
 
         try:
@@ -495,11 +511,6 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                         continue
 
                     if self._is_lvol_sync_deletion_error(api_err):
-                        # Snapshot is tied to the parent lvol's node — if that
-                        # node has sync deletion we can't do anything here.
-                        # Non-fatal: trigger forced deletes and raise so the
-                        # outer except resets snap_state to "pending" and a
-                        # different lvol can be tried next loop iteration.
                         self._inc("failures", "create_snapshot", 1)
                         self.logger.warning(
                             f"[sync_deletion] create_snapshot sync_retry exhausted "
@@ -509,9 +520,15 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                         self._force_enqueue_deletes()
                         raise
 
-                    # Unrecognised error — fail the test
+                    # General retry for unrecognised errors
+                    if general_retries < GENERAL_RETRY_MAX - 1:
+                        general_retries += 1
+                        self.logger.warning(f"[retry] create_snapshot attempt {general_retries}/{GENERAL_RETRY_MAX} failed: {e}; retrying in {GENERAL_RETRY_INTERVAL}s")
+                        sleep_n_sec(GENERAL_RETRY_INTERVAL)
+                        continue
+
                     self._inc("failures", "create_snapshot", 1)
-                    self._set_failure(op="create_snapshot", exc=e, details="api call failed", ctx=ctx, api_err=api_err)
+                    self._set_failure(op="create_snapshot", exc=e, details=f"api call failed after {GENERAL_RETRY_MAX} attempts", ctx=ctx, api_err=api_err)
                     raise
 
             snap_id = self._wait_snapshot_id(snap_name)
@@ -561,10 +578,13 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
         self._inc("attempts", "create_clone", 1)
 
+        GENERAL_RETRY_MAX = 10
+        GENERAL_RETRY_INTERVAL = 5
         BDEV_RETRY_MAX = 7
         SYNC_DELETION_RETRY_MAX = 10  # 10 × 15s = 2.5 min
         bdev_retries = 0
         sync_retries = 0
+        general_retries = 0
         ctx = {"snap_name": snap_name, "snapshot_id": snap_id, "clone_name": clone_name, "client": self._pick_client(idx)}
 
         try:
@@ -602,11 +622,6 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                         continue
 
                     if self._is_lvol_sync_deletion_error(api_err):
-                        # Clone is tied to its snapshot's node — if that node
-                        # has sync deletion we can't do anything here.
-                        # Non-fatal: trigger forced deletes and raise so the
-                        # outer except resets clone_state to "pending" and a
-                        # different snapshot can be tried next loop iteration.
                         self._inc("failures", "create_clone", 1)
                         self.logger.warning(
                             f"[sync_deletion] create_clone sync_retry exhausted "
@@ -616,12 +631,18 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                         self._force_enqueue_deletes()
                         raise
 
-                    # Retries exhausted or unrecognised error — fail the test
+                    # General retry for unrecognised errors
+                    if general_retries < GENERAL_RETRY_MAX - 1:
+                        general_retries += 1
+                        self.logger.warning(f"[retry] create_clone attempt {general_retries}/{GENERAL_RETRY_MAX} failed: {e}; retrying in {GENERAL_RETRY_INTERVAL}s")
+                        sleep_n_sec(GENERAL_RETRY_INTERVAL)
+                        continue
+
                     self._inc("failures", "create_clone", 1)
                     if self._is_bdev_error(api_err):
                         details = f"bdev creation failed after {bdev_retries + 1} attempts"
                     else:
-                        details = "api call failed"
+                        details = f"api call failed after {GENERAL_RETRY_MAX} attempts"
                     self._set_failure(op="create_clone", exc=e, details=details, ctx=ctx, api_err=api_err)
                     raise
 
@@ -708,7 +729,9 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         ctx = {"snap_name": snap_name, "snap_id": snap_id}
         self._inc("attempts", "delete_snapshot", 1)
 
-        for attempt in range(2):
+        RETRY_MAX = 10
+        RETRY_INTERVAL = 5
+        for attempt in range(RETRY_MAX):
             try:
                 self.sbcli_utils.delete_snapshot(snap_id=snap_id, snap_name=snap_name, skip_error=False)
                 break  # success
@@ -733,10 +756,15 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                                     m["clones"].discard(cn)
                         continue  # retry snapshot delete
 
-                # Final attempt failed or no clones to clear — propagate as test failure
+                if attempt < RETRY_MAX - 1:
+                    self.logger.warning(f"[retry] delete_snapshot attempt {attempt + 1}/{RETRY_MAX} failed: {e}; retrying in {RETRY_INTERVAL}s")
+                    sleep_n_sec(RETRY_INTERVAL)
+                    continue
+
+                # Final attempt failed — propagate as test failure
                 api_err = self._extract_api_error(e)
                 self._inc("failures", "delete_snapshot", 1)
-                self._set_failure(op="delete_snapshot", exc=e, details="snapshot delete failed", ctx=ctx, api_err=api_err)
+                self._set_failure(op="delete_snapshot", exc=e, details=f"snapshot delete failed after {RETRY_MAX} attempts", ctx=ctx, api_err=api_err)
                 raise
 
         with self._lock:
@@ -760,7 +788,9 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         ctx = {"lvol_name": lvol_name, "lvol_id": lvol_id, "client": client}
         self._inc("attempts", "delete_lvol", 1)
 
-        for attempt in range(2):
+        RETRY_MAX = 10
+        RETRY_INTERVAL = 5
+        for attempt in range(RETRY_MAX):
             try:
                 self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=False)
                 break  # success
@@ -785,10 +815,15 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                                     m["snapshots"].discard(sn)
                         continue  # retry lvol delete
 
-                # Final attempt failed or no snapshots to clear — propagate as test failure
+                if attempt < RETRY_MAX - 1:
+                    self.logger.warning(f"[retry] delete_lvol attempt {attempt + 1}/{RETRY_MAX} failed: {e}; retrying in {RETRY_INTERVAL}s")
+                    sleep_n_sec(RETRY_INTERVAL)
+                    continue
+
+                # Final attempt failed — propagate as test failure
                 api_err = self._extract_api_error(e)
                 self._inc("failures", "delete_lvol", 1)
-                self._set_failure(op="delete_lvol", exc=e, details="lvol delete failed", ctx=ctx, api_err=api_err)
+                self._set_failure(op="delete_lvol", exc=e, details=f"lvol delete failed after {RETRY_MAX} attempts", ctx=ctx, api_err=api_err)
                 raise
 
         with self._lock:
