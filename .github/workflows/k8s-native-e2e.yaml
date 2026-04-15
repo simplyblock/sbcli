@@ -114,7 +114,7 @@ jobs:
           echo "=== Phase 1: Helm uninstall ==="
           helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
 
-          echo "=== Phase 2: Patch finalizers on CRs ==="
+          echo "=== Phase 2: Patch finalizers on all CRs ==="
           CR_TYPES=(
             "simplyblockpool.simplyblock.simplyblock.io"
             "simplyblocklvol.simplyblock.simplyblock.io"
@@ -124,27 +124,47 @@ jobs:
             "simplyblockstorageclusters.simplyblock.simplyblock.io"
             "simplyblocksnapshotreplications.simplyblock.simplyblock.io"
           )
-          for CR_TYPE in "${CR_TYPES[@]}"; do
-            for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-              kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+          patch_cr_finalizers() {
+            for CR_TYPE in "${CR_TYPES[@]}"; do
+              for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+                kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
+                  --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+              done
             done
+          }
+          patch_cr_finalizers
+
+          echo "=== Phase 3: Force delete all namespaced resources ==="
+          for RTYPE in pod pvc pv jobs service ds statefulset deployment replicaset secret sa configmap; do
+            kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
           done
 
-          echo "=== Phase 3: Delete namespace ==="
+          echo "=== Phase 4: Delete namespace ==="
           kubectl delete namespace $NAMESPACE --wait=false 2>/dev/null || true
 
-          echo "=== Phase 4: Wait for namespace deletion (max 2 min) ==="
-          for i in $(seq 1 24); do
+          echo "=== Phase 5: Wait for namespace deletion (max 3 min) ==="
+          for i in $(seq 1 36); do
             if ! kubectl get namespace $NAMESPACE 2>/dev/null; then
               echo "Namespace $NAMESPACE deleted"
               break
             fi
-            echo "Namespace still exists ($i/24)..."
+
+            # Re-patch finalizers on any CRs still blocking deletion
+            echo "Namespace still terminating, re-patching finalizers ($i/36)..."
+            patch_cr_finalizers
+
+            # Force-finalize the namespace itself if stuck
+            if [ "$i" -ge 6 ]; then
+              echo "Force-removing namespace finalizers..."
+              kubectl get namespace $NAMESPACE -o json 2>/dev/null | \
+                jq '.spec.finalizers = []' | \
+                kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - 2>/dev/null || true
+            fi
+
             sleep 5
           done
 
-          echo "=== Phase 5: Cleanup cluster-scoped resources ==="
+          echo "=== Phase 6: Cleanup cluster-scoped resources ==="
           kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
           kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
 
