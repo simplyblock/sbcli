@@ -304,7 +304,12 @@ class StorageNode(BaseNodeObject):
         return nqn
 
     def recreate_hublvol(self):
-        """reCreate a hublvol for this node's lvstore
+        """reCreate a hublvol for this node's lvstore.
+
+        Returns True on success, False on failure. Callers in the restart
+        flow (recreate_lvstore) gate the secondary port-unblock on this
+        return value, so silent-success-on-failure would defeat the
+        IO-isolation invariant.
         """
 
         if self.hublvol and self.hublvol.uuid:
@@ -315,7 +320,8 @@ class StorageNode(BaseNodeObject):
                 if not rpc_client.get_bdevs(self.hublvol.bdev_name):
                     ret = rpc_client.bdev_lvol_create_hublvol(self.lvstore)
                     if not ret:
-                        logger.warning(f'Failed to recreate hublvol on {self.get_id()}')
+                        logger.error(f'Failed to recreate hublvol on {self.get_id()}')
+                        return False
                 else:
                     logger.info(f'Hublvol already exists {self.hublvol.bdev_name}')
 
@@ -329,17 +335,17 @@ class StorageNode(BaseNodeObject):
                         ana_state="optimized",
                 )
                 return True
-            except RPCException:
-                pass
+            except RPCException as e:
+                logger.error("RPC error recreating hublvol on %s: %s",
+                             self.get_id(), getattr(e, "message", str(e)))
+                return False
         else:
             try:
                 self.create_hublvol()
                 return True
             except RPCException as e:
                 logger.error("Error establishing hublvol: %s", e.message)
-                # return False
-
-        return self.hublvol
+                return False
 
     def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary"):
         """Connect to a primary node's hublvol, optionally with multipath failover.
@@ -348,6 +354,15 @@ class StorageNode(BaseNodeObject):
         multipath so that IO automatically fails over from the primary path
         (optimized) to the failover path (non_optimized) when the primary
         becomes unreachable.
+
+        Returns True iff all three required steps succeed:
+          1. at least one NVMe controller attach established the remote bdev
+          2. bdev_lvol_set_lvs_opts committed
+          3. bdev_lvol_connect_hublvol committed
+        Returns False otherwise. Individual per-NIC attach failures are
+        tolerated as long as at least one primary path is present after the
+        attach loop. Callers in the restart flow rely on this boolean to
+        decide whether to unblock the secondary port.
         """
         logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}'
                      + (f' with failover to {failover_node.get_id()}' if failover_node else ''))
@@ -367,7 +382,12 @@ class StorageNode(BaseNodeObject):
                                  or (primary_node.active_tcp and n.trtype == "TCP")]) > 1
             use_multipath = "multipath" if (failover_node or multiple_nics) else False
 
-            # Attach primary path(s) — one per data NIC
+            # Attach primary path(s) — one per data NIC. Track whether at
+            # least one primary attach succeeded: without that, the remote
+            # bdev won't exist and the subsequent lvs_opts/connect_hublvol
+            # would fail anyway. Multipath tolerates per-NIC failures; a
+            # single working path is enough.
+            primary_attached = False
             for iface in primary_node.data_nics:
                 if primary_node.active_rdma and iface.trtype == "RDMA":
                     tr_type = "RDMA"
@@ -379,10 +399,22 @@ class StorageNode(BaseNodeObject):
                     primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
                     iface.ip4_address, primary_node.hublvol.nvmf_port,
                     tr_type, multipath=use_multipath)
-                if not ret:
+                if ret:
+                    primary_attached = True
+                else:
                     logger.warning(f'Failed to connect to hublvol on {iface.ip4_address}')
 
-            # Attach failover path(s) — same controller name, same NQN, different IP
+            if not primary_attached:
+                logger.error(
+                    "No primary-path NVMe attach succeeded for hublvol of %s; "
+                    "remote bdev %s will not be present",
+                    primary_node.get_id(), remote_bdev,
+                )
+                return False
+
+            # Attach failover path(s) — same controller name, same NQN, different IP.
+            # Failover-path failures are best-effort; the overall connect still
+            # succeeds as long as the primary path is present.
             if failover_node:
                 for iface in failover_node.data_nics:
                     if failover_node.active_rdma and iface.trtype == "RDMA":
@@ -404,12 +436,16 @@ class StorageNode(BaseNodeObject):
                 subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
                 role=role,
         ):
-            pass
-            # raise RPCException('Failed to set secondary lvstore options')
+            logger.error("bdev_lvol_set_lvs_opts failed for %s on %s",
+                         primary_node.lvstore, self.get_id())
+            return False
 
         if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
-            pass
-            # raise RPCException('Failed to connect secondary lvstore to primary')
+            logger.error("bdev_lvol_connect_hublvol failed for %s on %s",
+                         primary_node.lvstore, self.get_id())
+            return False
+
+        return True
 
     def create_alceml(self, name, nvme_bdev, uuid, **kwargs):
         logger.info(f"Adding {name}")

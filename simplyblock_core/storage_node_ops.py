@@ -4841,6 +4841,40 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
             _kill_app()
             raise Exception(f"Failed to restore leadership for {lvs_name}")
 
+    def _abort_restart_and_unblock(reason):
+        """Abort the primary restart when a hublvol step fails.
+
+        Ordering required by design (see recreate_lvstore / hublvol
+        IO-isolation invariant):
+          a) kill SPDK on the restarting primary (snode)
+          b) flip snode status back to OFFLINE
+          c) only then unblock the secondary port(s) that were blocked
+             during this restart, so client IO can resume on the
+             secondary once ANA re-promotes it.
+
+        (a) and (b) are handled by _kill_app() above. This helper then
+        performs (c) for every connected secondary/tertiary whose port
+        was blocked in the earlier ``### 3- block secondary port`` step,
+        and finally raises to bail out of recreate_lvstore before any
+        further forward progress (lvols, leadership) can happen on an
+        inconsistent state.
+        """
+        logger.error("Aborting recreate_lvstore on %s for %s: %s",
+                     snode.get_id(), lvs_name, reason)
+        _kill_app()
+        for _sn in sec_nodes:
+            if _sn.get_id() in disconnected_peers:
+                continue
+            try:
+                _fw = FirewallClient(_sn, timeout=5, retry=2)
+                _pt = "udp" if _sn.active_rdma else "tcp"
+                _fw.firewall_set_port(snode_lvs_port, _pt, "allow", _sn.rpc_port)
+                tcp_ports_events.port_allowed(_sn, snode_lvs_port)
+            except Exception as ue:
+                logger.error("Failed to unblock port %s on %s during abort: %s",
+                             snode_lvs_port, _sn.get_id(), ue)
+        raise Exception(f"Abort restart: {reason}")
+
     ### 8- create hublvol and expose via subsystem with listeners (per data NICs)
     if sec_nodes:
         if is_takeover:
@@ -4850,11 +4884,15 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
                 logger.info("Created and exposed hublvol on new leader %s for %s", snode.get_id(), lvs_name)
             except Exception as e:
                 logger.error("Error creating hublvol on new leader: %s", e)
+                _abort_restart_and_unblock(f"create_hublvol on new leader failed: {e}")
         else:
             try:
-                snode.recreate_hublvol()
+                if not snode.recreate_hublvol():
+                    _abort_restart_and_unblock(
+                        f"recreate_hublvol returned False on {snode.get_id()}")
             except RPCException as e:
                 logger.error("Error creating hublvol: %s", e.message)
+                _abort_restart_and_unblock(f"recreate_hublvol raised: {e.message}")
 
     ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=50)
@@ -4868,9 +4906,13 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
         sec1 = sec_nodes[0] if sec_nodes else None
         if sec1 and sec1.get_id() not in disconnected_peers:
             try:
-                sec1.create_secondary_hublvol(snode, cluster.nqn)
+                if sec1.create_secondary_hublvol(snode, cluster.nqn) is None:
+                    _abort_restart_and_unblock(
+                        f"create_secondary_hublvol on {sec1.get_id()} returned None")
             except Exception as e:
                 logger.error("Error creating secondary hublvol on sec_1: %s", e)
+                _abort_restart_and_unblock(
+                    f"create_secondary_hublvol on {sec1.get_id()} raised: {e}")
 
     for i, sec_node in enumerate(sec_nodes):
         if sec_node.get_id() in disconnected_peers:
@@ -4880,11 +4922,15 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
             failover_node = sec1 if i >= 1 and sec1 and sec1.get_id() not in disconnected_peers else None
             try:
                 sec_role = "tertiary" if i >= 1 else "secondary"
-                sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
+                if not sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role):
+                    _abort_restart_and_unblock(
+                        f"connect_to_hublvol failed for {sec_node.get_id()}")
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
+                _abort_restart_and_unblock(
+                    f"connect_to_hublvol raised for {sec_node.get_id()}: {e}")
 
-        ### 10- allow secondary port
+        ### 10- allow secondary port (only if all hublvol steps succeeded)
         fw_api = FirewallClient(sec_node, timeout=5, retry=2)
         port_type = "tcp"
         if sec_node.active_rdma:
