@@ -2333,6 +2333,9 @@ def patch_cr_node_status(
             new_status_nodes.append(node)
 
         if not found:
+            if remove:
+                # Node already absent from status — nothing to do.
+                return            
             raise RuntimeError(
                 f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
             )
