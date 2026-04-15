@@ -20,13 +20,12 @@ security_schemes = {
         description="Standard HTTP Basic Authentication"
     )
 }
-app = OpenAPI(__name__, security_schemes=security_schemes)
+app = OpenAPI(__name__, security_schemes=security_schemes)  # type: ignore[arg-type]
 app.url_map.strict_slashes = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
 app.register_error_handler(Exception, utils.error_handler)
 
 auth = HTTPBasicAuth()
-app.basic_auth = auth
 @auth.verify_password
 def verify_password(username, password):
     access_token = os.getenv("SNODE_ACCESS_TOKEN", "access_token")
