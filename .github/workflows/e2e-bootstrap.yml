@@ -19,9 +19,6 @@ on:
       GRAFANA_ENDPOINT:
         type: string
         default: "http://192.168.10.211/grafana"
-      SBCLI_CMD:
-        type: string
-        default: "sbctl"
       SBCLI_BRANCH:
         type: string
         default: "R25.10-Hotfix"
@@ -111,10 +108,6 @@ on:
         required: true
         default: "http://192.168.10.211/grafana"
 
-      SBCLI_CMD:
-        description: "sbcli command name"
-        required: true
-        default: "sbctl"
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
         required: true
@@ -243,7 +236,7 @@ jobs:
       EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
       EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
-      SBCLI_CMD: ${{ inputs.SBCLI_CMD || 'sbctl' }}
+      SBCLI_CMD: "sbctl"
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'R25.10-Hotfix' }}
 
       # SSH/client env
