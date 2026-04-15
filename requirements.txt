@@ -26,3 +26,4 @@ fastapi
 uvicorn
 prometheus_api_client
 paramiko
+flask_httpauth

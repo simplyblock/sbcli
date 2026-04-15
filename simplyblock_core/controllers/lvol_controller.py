@@ -52,7 +52,7 @@ def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
     Returns a dict with 'dhchap_key' and 'dhchap_ctrlr_key' keyring names,
     or an empty dict on failure.
     """
-    snode_api = SNodeClient(snode.api_endpoint)
+    snode_api = snode.snode_client()
     safe_pool = pool.get_id().replace("-", "_")
     key_names = {}
 
@@ -90,7 +90,7 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
     Returns a dict mapping key type ('dhchap_key', 'dhchap_ctrlr_key', 'psk')
     to the SPDK keyring name for use in subsystem_add_host.
     """
-    snode_api = SNodeClient(snode.api_endpoint)
+    snode_api = snode.snode_client()
     # Sanitize host NQN for use as filename
     safe_host = host_nqn.replace(":", "_").replace(".", "_")
     key_names = {}

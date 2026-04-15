@@ -79,8 +79,7 @@ class CLIWrapperBase:
         return parent_parser.add_parser(command, description=help, help=help, usage=usage)
 
     def storage_node__deploy(self, sub_command, args):
-        isolate_cores = args.isolate_cores
-        return storage_ops.deploy(args.ifname, isolate_cores)
+        return storage_ops.deploy(args.ifname, args.isolate_cores, args.access_token)
 
     def storage_node__configure_upgrade(self, sub_command, args):
         storage_ops.upgrade_automated_deployment_config()
@@ -195,6 +194,7 @@ class CLIWrapperBase:
                 ha_jm_count=ha_jm_count,
                 format_4k=format_4k,
                 spdk_proxy_image=getattr(args, 'spdk_proxy_image', None),
+                access_token=getattr(args, 'access_token', ""),
             )
         except Exception as e:
             print(e)

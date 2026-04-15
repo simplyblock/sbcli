@@ -464,7 +464,7 @@ def check_node(snode):
 
     # 2- check node API
     try:
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=10, retry=2)
+        snode_api = snode.snode_client(timeout=10, retry=2)
         ret, _ = snode_api.is_live()
         logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {ret}")
         if not ret:
@@ -478,7 +478,7 @@ def check_node(snode):
 
     # 3- check spdk process through node API
     try:
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=40, retry=2)
+        snode_api = snode.snode_client(timeout=40, retry=2)
         is_up, _ = snode_api.spdk_process_is_up( snode.rpc_port, snode.cluster_id)
         logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {bool(is_up)}")
         if not is_up:

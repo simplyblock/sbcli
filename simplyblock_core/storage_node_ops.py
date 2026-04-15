@@ -554,7 +554,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     if not nbd_device:
         logger.error("Failed to start nbd dev")
         return False
-    snode_api = SNodeClient(snode.api_endpoint)
+    snode_api = snode.snode_client()
     partition_percent = 0
     if partition_size:
         partition_percent = int(partition_size * 100 / nvme.size)
@@ -1058,8 +1058,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
-             id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False, spdk_proxy_image=None):
-    snode_api = SNodeClient(node_addr)
+             id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False, spdk_proxy_image=None,
+             access_token=None):
+    snode_api = SNodeClient(node_addr, access_token)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
         nodes = node_info["nodes_config"]["nodes"]
@@ -1210,7 +1211,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             log_config_type = utils.get_storage_node_api_log_type(mgmt_ip, '/SNodeAPI')
             if log_config_type and log_config_type != LogConfig.types.GELF:
                 logger.info("SNodeAPI container found but not configured with gelf logger")
-                start_storage_node_api_container(mgmt_ip, cluster_ip)
+                start_storage_node_api_container(mgmt_ip, cluster_ip, access_token)
         node_socket = node_config.get("socket")
 
         total_mem = minimum_hp_memory
@@ -1364,6 +1365,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.active_tcp = active_tcp
         snode.active_rdma = active_rdma
         snode.spdk_proxy_image = spdk_proxy_image
+        snode.access_token = access_token
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -1749,9 +1751,9 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             pass
 
     try:
-        if health_controller._check_node_api(snode.mgmt_ip):
+        if health_controller.check_node_api(snode):
             logger.info("Stopping SPDK container")
-            snode_api = SNodeClient(snode.api_endpoint, timeout=20)
+            snode_api = snode.snode_client(timeout=20)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             snode_api.leave_swarm()
             pci_address = []
@@ -1825,7 +1827,7 @@ def restart_storage_node(
     if node_ip:
         if node_ip != snode.api_endpoint:
             logger.info(f"Restarting on new node with ip: {node_ip}")
-            snode_api = SNodeClient(node_ip, timeout=5 * 60, retry=3)
+            snode_api = snode.snode_client(timeout=5 * 60, retry=3)
             node_info, _ = snode_api.info()
             if not node_info:
                 logger.error("Failed to get node info!")
@@ -1873,7 +1875,7 @@ def restart_storage_node(
     active_rdma = False
     fabric_tcp = cluster.fabric_tcp
     fabric_rdma = cluster.fabric_rdma
-    snode_api = SNodeClient(snode.api_endpoint, timeout=5 * 60, retry=3)
+    snode_api = snode.snode_client(timeout=5 * 60, retry=3)
     for nic in snode.data_nics:
         if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
             nic.trtype = "RDMA"
@@ -2314,7 +2316,7 @@ def restart_storage_node(
         except Exception as e:
             logger.error(e)
             storage_events.snode_restart_failed(snode)
-            snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+            snode_api = snode.snode_client(timeout=5, retry=5)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
             restart_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
@@ -2796,7 +2798,7 @@ def shutdown_storage_node(node_id, force=False):
     time.sleep(1)
     logger.info("Stopping SPDK")
     try:
-        SNodeClient(snode.api_endpoint, timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
+        snode.snode_client(timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
@@ -2804,7 +2806,7 @@ def shutdown_storage_node(node_id, force=False):
     for dev in snode.nvme_devices:
         if dev.pcie_address not in pci_address:
             try:
-                ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
+                ret = snode.snode_client(timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
                 logger.debug(ret)
                 pci_address.append(dev.pcie_address)
             except Exception as e:
@@ -3238,7 +3240,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     return True
 
 
-def deploy(ifname, isolate_cores=False):
+def deploy(ifname, isolate_cores=False, access_token="access_token"):
     if not ifname:
         ifname = "eth0"
 
@@ -3272,7 +3274,7 @@ def deploy(ifname, isolate_cores=False):
     logger.info(f"Node IP: {dev_ip}")
     scripts.configure_docker(dev_ip)
 
-    start_storage_node_api_container(dev_ip)
+    start_storage_node_api_container(dev_ip, access_token)
 
     if isolate_cores:
         utils.generate_realtime_variables_file(all_isolated_cores)
@@ -3283,7 +3285,7 @@ def deploy(ifname, isolate_cores=False):
     return f"{dev_ip}:5000"
 
 
-def start_storage_node_api_container(node_ip, cluster_ip=None):
+def start_storage_node_api_container(node_ip, cluster_ip=None, access_token="access_token"):
     node_docker = docker.DockerClient(base_url=f"tcp://{node_ip}:2375", version="auto", timeout=60 * 5)
     # node_docker = docker.DockerClient(base_url='unix://var/run/docker.sock', version="auto", timeout=60 * 5)
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
@@ -3297,7 +3299,8 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
     if cluster_ip is not None:
         log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{cluster_ip}:12202"})
     else:
-        log_config = LogConfig(type=LogConfig.types.JOURNALD)
+        pass
+    log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
     node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
@@ -3320,7 +3323,8 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             f"DOCKER_IP={node_ip}",
             "WITHOUT_CLOUD_INFO=True",
             "SIMPLYBLOCK_LOG_LEVEL=DEBUG",
-        ]
+            f"SNODE_ACCESS_TOKEN={access_token}",
+        ],
     )
     logger.info(f"Pulling image {constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}")
     pull_docker_image_with_retry(node_docker, constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
@@ -3436,7 +3440,7 @@ def health_check(node_id):
 
     try:
         logger.info("Connecting to node's API")
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
+        snode_api = snode.snode_client()
         node_info, _ = snode_api.info()
         logger.info(f"Node info: {node_info['hostname']}")
 
@@ -3453,7 +3457,7 @@ def get_info(node_id):
         logger.exception("Can not find storage node")
         return False
 
-    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
+    snode_api = snode.snode_client()
     node_info, _ = snode_api.info()
     return json.dumps(node_info, indent=2)
 
@@ -3752,7 +3756,7 @@ def recreate_lvstore_on_sec(secondary_node):
                 logger.error(f"Failed to recover lvstore: {primary_node.lvstore} "
                              f"on secondary: {secondary_node.get_id()}")
                 storage_events.snode_restart_failed(secondary_node)
-                snode_api = SNodeClient(secondary_node.api_endpoint, timeout=5, retry=5)
+                snode_api = secondary_node.snode_client( timeout=5, retry=5)
                 snode_api.spdk_process_kill(secondary_node.rpc_port, secondary_node.cluster_id)
                 set_node_status(secondary_node.get_id(), StorageNode.STATUS_OFFLINE)
                 return False
@@ -3771,7 +3775,7 @@ def recreate_lvstore_on_sec(secondary_node):
                     logger.error(f"Failed to recover BDev: {lv.lvol_uuid} "
                                  f"on secondary: {secondary_node.get_id()}")
                     storage_events.snode_restart_failed(secondary_node)
-                    snode_api = SNodeClient(secondary_node.api_endpoint, timeout=5, retry=5)
+                    snode_api = secondary_node.snode_client(timeout=5, retry=5)
                     snode_api.spdk_process_kill(secondary_node.rpc_port, secondary_node.cluster_id)
                     set_node_status(secondary_node.get_id(), StorageNode.STATUS_OFFLINE)
                     return False
@@ -3966,7 +3970,7 @@ def recreate_lvstore(snode, force=False):
 
     def _kill_app():
         storage_events.snode_restart_failed(snode)
-        snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+        snode_api = snode.snode_client(timeout=5, retry=5)
         snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
 

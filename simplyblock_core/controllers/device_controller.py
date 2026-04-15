@@ -260,7 +260,7 @@ def restart_device(device_id, force=False):
 
     if not snode.rpc_client().bdev_nvme_controller_list(device_obj.nvme_controller):
         try:
-            ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
+            ret = snode.snode_client(timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
             logger.debug(ret)
             snode.rpc_client().bdev_nvme_controller_attach(device_obj.nvme_controller, device_obj.pcie_address)
             snode.rpc_client().bdev_examine(f"{device_obj.nvme_controller}n1")
@@ -970,7 +970,7 @@ def new_device_from_failed(device_id):
 
     if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
         try:
-            ret = SNodeClient(device_node.api_endpoint, timeout=30, retry=1).bind_device_to_spdk(device.pcie_address)
+            ret = device_node.snode_client(timeout=30, retry=1).bind_device_to_spdk(device.pcie_address)
             logger.debug(ret)
             device_node.rpc_client().bdev_nvme_controller_attach(device.nvme_controller, device.pcie_address)
         except Exception as e:

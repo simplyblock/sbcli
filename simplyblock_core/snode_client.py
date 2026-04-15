@@ -16,19 +16,19 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, ip_address, timeout=300, retry=5):
+    def __init__(self, ip_address, access_token="access_token", timeout=300, retry=5):
         self.ip_address = ip_address
         self.url = 'http://%s/snode/' % self.ip_address
         self.timeout = timeout
         self.session = requests.session()
         self.session.verify = False
+        self.session.auth = ("token", access_token)
         self.session.headers['Content-Type'] = "application/json"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
 
     def _request(self, method, path, payload=None):
         try:
-            logger.debug("Requesting path: %s, params: %s", path, payload)
             data = None
             params = None
             if payload:
@@ -36,7 +36,7 @@ class SNodeClient:
                     params = payload
                 else:
                     data = json.dumps(payload)
-
+            logger.debug("Requesting: %s, params: %s", self.url+path, params)
             response = self.session.request(method, self.url+path, data=data,
                                             timeout=self.timeout, params=params)
         except Exception as e:

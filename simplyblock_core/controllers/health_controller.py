@@ -117,10 +117,9 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, ret
     return False, False
 
 
-def _check_node_api(ip):
+def check_node_api(node):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
-        logger.debug(f"Node API={ip}:5000")
+        snode_api = node.snode_client(timeout=90, retry=2)
         ret, _ = snode_api.is_live()
         logger.debug(f"snode is alive: {ret}")
         if ret:
@@ -128,14 +127,6 @@ def _check_node_api(ip):
     except Exception as e:
         logger.debug(e)
     return False
-
-
-def _check_spdk_process_up(ip, rpc_port, cluster_id):
-    snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
-    logger.debug(f"Node API={ip}:5000")
-    is_up, _ = snode_api.spdk_process_is_up(rpc_port, cluster_id)
-    logger.debug(f"SPDK is {is_up}")
-    return is_up
 
 
 def check_port_on_node(snode, port_id):
@@ -191,9 +182,9 @@ def _check_node_ping(ip):
 
 
 def _check_ping_from_node(ip, ifname, node):
-    snodeapi = SNodeClient(node.api_endpoint, timeout=3, retry=3)
+    snode_api = node.snode_client( timeout=3, retry=3)
     try:
-        ret, _ = snodeapi.ping_ip(ip, ifname)
+        ret, _ = snode_api.ping_ip(ip, ifname)
         return bool(ret)
     except Exception as e:
         logger.error(e)
@@ -581,7 +572,7 @@ def check_node(node_id, with_devices=True):
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
     # 2- check node API
-    node_api_check = _check_node_api(snode.mgmt_ip)
+    node_api_check = check_node_api(snode)
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC

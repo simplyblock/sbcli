@@ -90,6 +90,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'deploy', 'Prepares a host to be used as a storage node.')
         argument = subcommand.add_argument('--ifname', help='Management interface name, e.g. eth0.', type=str, dest='ifname')
         argument = subcommand.add_argument('--isolate-cores', help='Isolates cores in kernel args for the provided CPU mask. Default: `false`.', default=False, dest='isolate_cores', action='store_true')
+        argument = subcommand.add_argument('--access-token', help='Storage node API access token.', type=str, dest='access_token')
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')
@@ -151,6 +152,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--max-snap', help='The max snapshot per storage node. Default: `5000`.', type=int, default=5000, dest='max_snap')
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-proxy-image', help='The SPDK proxy image URI.', type=str, dest='spdk_proxy_image')
+        argument = subcommand.add_argument('--access-token', help='Storage node API access token.', type=str, dest='access_token')
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')

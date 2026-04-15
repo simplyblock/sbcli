@@ -176,7 +176,7 @@ def task_runner_node(task):
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
     logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
-    node_api_check = health_controller._check_node_api(node.mgmt_ip)
+    node_api_check = health_controller.check_node_api(node)
     logger.info(f"Check: node API {node.mgmt_ip}:5000 ... {node_api_check}")
     node_data_nic_ping_check = False
     for data_nic in node.data_nics:

@@ -10,6 +10,7 @@ from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
 
@@ -112,6 +113,8 @@ class StorageNode(BaseNodeObject):
     firewall_port: int = 5001
     lvol_poller_mask: str = ""
     spdk_proxy_image: str = ""
+    access_token = ""
+
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.
@@ -481,6 +484,11 @@ class StorageNode(BaseNodeObject):
                 logger.info(f"remove lvol_del_sync_lock from node: {self.get_id()}")
         time.sleep(0.250)
         return True
+
+    def snode_client(self, **kwargs):
+        """Return storage node api client to this node
+        """
+        return SNodeClient(self.api_endpoint, self.access_token, **kwargs)
 
 
 class NodeLVolDelLock(BaseModel):
