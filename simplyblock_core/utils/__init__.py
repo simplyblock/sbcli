@@ -2312,9 +2312,6 @@ def patch_cr_node_status(
         )
 
         status_nodes = cr.get("status", {}).get("nodes", [])
-        if not status_nodes:
-            raise RuntimeError("CR has no status.nodes")
-
         found = False
         new_status_nodes = []
 
