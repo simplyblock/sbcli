@@ -657,19 +657,27 @@ class TestHublvolConnectErrors:
             'nvmf_port': self.n0.hublvol.nvmf_port,
         })
 
-    def test_attach_failure_does_not_prevent_connect_hublvol(self):
-        """When attach_controller fails, set_lvs_opts and connect_hublvol are still called.
+    def test_attach_failure_skips_connect_hublvol_and_returns_false(self):
+        """When every primary-path attach_controller fails, connect_to_hublvol
+        must return False and must NOT proceed to set_lvs_opts or
+        bdev_lvol_connect_hublvol.
 
-        The code doesn't bail on attach failure — it logs a warning and proceeds.
-        This matches the current best-effort behavior.
+        Rationale: the remote hublvol bdev does not exist without a working
+        attach, so any downstream lvs_opts / connect_hublvol call would
+        reference a missing bdev. The restart flow uses the boolean return
+        to decide whether to abort the primary's restart before unblocking
+        the secondary port — silently calling connect_hublvol anyway would
+        mask the real failure.
         """
         self.env['servers'][1].fail_method(
             'bdev_nvme_attach_controller', 'Target unreachable')
-        self.n1.connect_to_hublvol(self.n0, failover_node=None, role="secondary")
+        ok = self.n1.connect_to_hublvol(self.n0, failover_node=None, role="secondary")
         self.env['servers'][1].clear_fail_method('bdev_nvme_attach_controller')
 
-        assert self.env['servers'][1].was_called('bdev_lvol_connect_hublvol'), \
-            "connect_hublvol must be called even when attach_controller fails"
+        assert ok is False, \
+            "connect_to_hublvol must return False when all primary attaches fail"
+        assert not self.env['servers'][1].was_called('bdev_lvol_connect_hublvol'), \
+            "connect_hublvol must NOT be called when all primary attaches fail"
 
     def test_attach_failure_no_path_in_server_state(self):
         """When attach_controller fails, no path must be stored in nvme_controller_paths."""
@@ -702,15 +710,20 @@ class TestHublvolConnectErrors:
         assert self.env['servers'][1].was_called('bdev_nvme_attach_controller'), \
             "attach_controller must be attempted even when connect_hublvol later fails"
 
-    def test_set_lvs_opts_failure_does_not_prevent_connect_hublvol(self):
-        """When set_lvs_opts fails, connect_hublvol is still called (best-effort)."""
+    def test_set_lvs_opts_failure_skips_connect_hublvol_and_returns_false(self):
+        """When bdev_lvol_set_lvs_opts fails, connect_to_hublvol must return
+        False and must NOT proceed to bdev_lvol_connect_hublvol. The restart
+        flow depends on this to abort before unblocking the secondary port.
+        """
         self.env['servers'][1].fail_method(
             'bdev_lvol_set_lvs_opts', 'LVS not found')
-        self.n1.connect_to_hublvol(self.n0, failover_node=None, role="secondary")
+        ok = self.n1.connect_to_hublvol(self.n0, failover_node=None, role="secondary")
         self.env['servers'][1].clear_fail_method('bdev_lvol_set_lvs_opts')
 
-        assert self.env['servers'][1].was_called('bdev_lvol_connect_hublvol'), \
-            "connect_hublvol must be called even when set_lvs_opts fails"
+        assert ok is False, \
+            "connect_to_hublvol must return False when set_lvs_opts fails"
+        assert not self.env['servers'][1].was_called('bdev_lvol_connect_hublvol'), \
+            "connect_hublvol must NOT be called when set_lvs_opts failed"
 
     def test_tertiary_one_attach_fails_still_connects(self):
         """If the failover path attach fails, connect_hublvol is still called on tertiary."""
@@ -752,15 +765,19 @@ class TestHublvolConnectErrors:
         assert len(paths) == 1, \
             f"Only 1 path must be stored when failover attach fails; got {len(paths)}"
 
-    def test_all_attach_calls_fail_connect_hublvol_still_attempted(self):
-        """Even with all attach calls failing, connect_hublvol is attempted (best-effort)."""
+    def test_all_attach_calls_fail_skips_connect_hublvol(self):
+        """Even when the attach loop runs through every NIC, if none succeed
+        connect_to_hublvol must return False and must NOT attempt
+        bdev_lvol_connect_hublvol.
+        """
         self.env['servers'][1].fail_method(
             'bdev_nvme_attach_controller', 'All paths unreachable')
-        self.n1.connect_to_hublvol(self.n0, failover_node=None, role="secondary")
+        ok = self.n1.connect_to_hublvol(self.n0, failover_node=None, role="secondary")
         self.env['servers'][1].clear_fail_method('bdev_nvme_attach_controller')
 
-        # Verify connect was attempted despite all attaches failing
+        assert ok is False, \
+            "connect_to_hublvol must return False when all attach calls fail"
         assert self.env['servers'][1].was_called('bdev_nvme_attach_controller'), \
-            "attach_controller must be attempted"
-        assert self.env['servers'][1].was_called('bdev_lvol_connect_hublvol'), \
-            "connect_hublvol must be attempted even when all attach calls fail"
+            "attach_controller must have been attempted"
+        assert not self.env['servers'][1].was_called('bdev_lvol_connect_hublvol'), \
+            "connect_hublvol must NOT be attempted when no attach succeeded"
