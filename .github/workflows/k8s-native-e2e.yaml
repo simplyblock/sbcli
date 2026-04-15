@@ -1,4 +1,4 @@
-name: K8s Native E2E Tests
+name: K8s Native Stress Tests
 
 on:
   workflow_dispatch:
@@ -17,9 +17,6 @@ on:
         default: 'simplyblock/spdk:main-latest'
       worker_nodes:
         description: 'Comma-separated K8s worker node names'
-        required: true
-      mnodes:
-        description: 'Management node IPs (space-separated)'
         required: true
       mgmt_ifc:
         description: 'Management network interface'
@@ -72,6 +69,12 @@ jobs:
           ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'add_sbcli_operator_helm' }}
           path: 'simplyblock-csi'
 
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_CONTENT }}" > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
       - name: Install Helm v3.15.4
         run: |
           if ! helm version 2>/dev/null | grep -q 'v3.15'; then
@@ -109,15 +112,9 @@ jobs:
           NAMESPACE=simplyblock
 
           echo "=== Phase 1: Helm uninstall ==="
-          helm uninstall spdk-csi -n $NAMESPACE --wait 2>/dev/null || true
-          sleep 10
+          helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
 
-          echo "=== Phase 2: Force delete namespace resources ==="
-          for RTYPE in pod pvc pv jobs service ds; do
-            kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
-          done
-
-          echo "=== Phase 3: CR cleanup — remove finalizers and delete ==="
+          echo "=== Phase 2: Patch finalizers and delete CRs ==="
           RESOURCES=(
             "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool"
             "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool2"
@@ -133,47 +130,114 @@ jobs:
             "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster-activate"
             "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication"
             "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication-failback"
+            "pool.storage.simplyblock.io simplyblock-pool"
+            "pool.storage.simplyblock.io simplyblock-pool2"
+            "lvol.storage.simplyblock.io simplyblock-lvol"
+            "task.storage.simplyblock.io simplyblock-task"
+            "devices.storage.simplyblock.io simplyblock-devices"
+            "devices.storage.simplyblock.io simplyblock-device-action"
+            "storagenodes.storage.simplyblock.io simplyblock-node"
+            "storagenodes.storage.simplyblock.io simplyblock-node2"
+            "storagenodes.storage.simplyblock.io simplyblock-node-action"
+            "storageclusters.storage.simplyblock.io simplyblock-cluster"
+            "storageclusters.storage.simplyblock.io simplyblock-cluster2"
+            "storageclusters.storage.simplyblock.io simplyblock-cluster-activate"
+            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
+            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
           )
 
-          cr_cleanup() {
+          patch_and_delete_crs() {
+            echo "Removing finalizers..."
             for item in "${RESOURCES[@]}"; do
               KIND=$(echo "$item" | awk '{print $1}')
               NAME=$(echo "$item" | awk '{print $2}')
               kubectl -n $NAMESPACE patch "$KIND" "$NAME" \
                 --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            done
+
+            echo "Deleting resources..."
+            for item in "${RESOURCES[@]}"; do
+              KIND=$(echo "$item" | awk '{print $1}')
+              NAME=$(echo "$item" | awk '{print $2}')
               kubectl -n $NAMESPACE delete "$KIND" "$NAME" \
                 --ignore-not-found --wait=false 2>/dev/null || true
             done
           }
+          patch_and_delete_crs
 
-          cr_cleanup
+          echo "=== Phase 3: Force delete all namespaced resources ==="
+          for RTYPE in pod pvc pv jobs service ds statefulset deployment replicaset secret sa configmap; do
+            kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
+          done
 
-          echo "=== Phase 4: Wait for namespace to be clean ==="
-          for i in $(seq 1 15); do
-            POD_COUNT=$(kubectl -n $NAMESPACE get pods --no-headers 2>/dev/null | wc -l)
-            if [ "$POD_COUNT" -eq 0 ] || [ -z "$POD_COUNT" ]; then
-              echo "Namespace $NAMESPACE is clean"
+          echo "=== Phase 4: Cleanup cluster-scoped resources ==="
+          kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
+
+          echo "=== Phase 5: Verify nothing remains ==="
+          echo "Namespaced resources:"
+          kubectl -n $NAMESPACE get all 2>/dev/null || echo "No resources found"
+          echo ""
+          echo "CRDs:"
+          for CR_TYPE in \
+            "simplyblockpool.simplyblock.simplyblock.io" \
+            "simplyblocklvol.simplyblock.simplyblock.io" \
+            "simplyblockstoragenodes.simplyblock.simplyblock.io" \
+            "simplyblockstorageclusters.simplyblock.simplyblock.io" \
+            "pool.storage.simplyblock.io" \
+            "lvol.storage.simplyblock.io" \
+            "storagenodes.storage.simplyblock.io" \
+            "storageclusters.storage.simplyblock.io"; do
+            kubectl -n $NAMESPACE get "$CR_TYPE" 2>/dev/null || true
+          done
+
+          echo "=== Phase 6: Delete namespace ==="
+          kubectl delete namespace $NAMESPACE --wait=false 2>/dev/null || true
+
+          for i in $(seq 1 36); do
+            if ! kubectl get namespace $NAMESPACE 2>/dev/null; then
+              echo "Namespace $NAMESPACE deleted"
               break
             fi
-            echo "Still $POD_COUNT pods remaining, retrying cleanup ($i/15)..."
-            for RTYPE in pod pvc pv jobs service ds; do
-              kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
-            done
-            cr_cleanup
-            sleep 15
+
+            echo "Namespace still terminating, re-patching finalizers ($i/36)..."
+            patch_and_delete_crs
+
+            if [ "$i" -ge 6 ]; then
+              echo "Force-removing namespace finalizers..."
+              kubectl get namespace $NAMESPACE -o json 2>/dev/null | \
+                jq '.spec.finalizers = []' | \
+                kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - 2>/dev/null || true
+            fi
+
+            sleep 5
           done
 
           echo "=== Cleanup complete ==="
 
-      # ── Label nodes ─────────────────────────────────────────────────────────
+      # # ── Label nodes ─────────────────────────────────────────────────────────
 
-      - name: Label worker nodes
+      # - name: Label worker nodes
+      #   run: |
+      #     IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+      #     for NODE in "${NODES[@]}"; do
+      #       echo "Labeling node $NODE with simplyblock.io/role=mgmt-plane"
+      #       kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
+      #     done
+
+      # ── Prepare namespace ─────────────────────────────────────────────────
+
+      - name: Create namespace and set pod-security labels
         run: |
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-          for NODE in "${NODES[@]}"; do
-            echo "Labeling node $NODE with simplyblock.io/role=mgmt-plane"
-            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
-          done
+          kubectl create namespace simplyblock --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace simplyblock \
+            pod-security.kubernetes.io/enforce=privileged \
+            pod-security.kubernetes.io/warn=privileged \
+            pod-security.kubernetes.io/audit=privileged \
+            --overwrite
+
+      - name: Wait before helm install
+        run: sleep 30
 
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
@@ -194,13 +258,11 @@ jobs:
             --create-namespace \
             --set controlplane.enabled=true \
             --set operator.enabled=true \
-            --set autoClusterActivate=true \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
-            --set storagenode.create=true \
             --set operator.cluster.mgmtIfname="${{ github.event.inputs.mgmt_ifc }}" \
             --set operator.cluster.enableNodeAffinity=true \
-            --set operator.cluster.fabric=tcp \
+            --set operator.cluster.fabricType=tcp \
             --set operator.cluster.isSingleNode=false \
             --set operator.cluster.strictNodeAntiAffinity=false \
             --set operator.cluster.warningThreshold.capacity=95 \
@@ -212,13 +274,16 @@ jobs:
             --set operator.storageNodes.spdkImage="${{ github.event.inputs.spdk_image }}" \
             --set operator.storageNodes.spdkDebug=false \
             --set operator.storageNodes.coreIsolation=false \
+            --set operator.storageNodes.numPartitions=0 \
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
             --set-json "operator.storageNodes.workerNodes=${WORKER_JSON}" \
             --set-json "operator.storageNodes.dataIfname=${DATA_NICS_JSON}" \
-            --set ingress.enabled=true \
-            --set 'ingress.controller.nodeSelector.simplyblock\.io/role=mgmt-plane' \
-            --set logicalVolume.distr_ndcs="${NDCS}" \
-            --set logicalVolume.distr_npcs="${NPCS}"
+            --set operator.stripe.dataChunks="${NDCS}" \
+            --set operator.stripe.parityChunks="${NPCS}" \
+            --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
+            --set prometheus.server.persistentVolume.storageClass=local-hostpath \
+            --set controlplane.observability.enabled=true \
+            --set opensearch.persistence.storageClass=local-hostpath
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -257,6 +322,29 @@ jobs:
             kubectl -n $NAMESPACE get pods
             exit 1
           fi
+
+          # Expected number of snode-spdk pods = number of worker nodes
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          EXPECTED_SNODES=${#NODES[@]}
+          echo "=== Waiting for $EXPECTED_SNODES snode-spdk pods to be ready (max 30 min) ==="
+
+          for i in $(seq 1 180); do
+            TOTAL=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | wc -l)
+            READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
+
+            if [ "$READY" -ge "$EXPECTED_SNODES" ]; then
+              echo "All $READY/$EXPECTED_SNODES snode-spdk pods are Running"
+              break
+            fi
+
+            echo "snode-spdk pods: $READY/$EXPECTED_SNODES Running (total=$TOTAL) ($i/180)"
+            if [ "$i" -eq 180 ]; then
+              echo "ERROR: snode-spdk pods did not become ready within 30 minutes"
+              kubectl -n $NAMESPACE get pods
+              exit 1
+            fi
+            sleep 10
+          done
 
           echo "=== Polling cluster status ==="
           for i in $(seq 1 90); do
@@ -300,7 +388,6 @@ jobs:
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
 
       - name: Setup and Run Tests
-        timeout-minutes: 240
         run: |
           cd $GITHUB_WORKSPACE/e2e
           python3 -m venv myenv
@@ -310,7 +397,6 @@ jobs:
           export CLUSTER_ID="${{ env.CLUSTER_ID }}"
           export CLUSTER_SECRET="${{ env.CLUSTER_SECRET }}"
           export K8S_LOCAL_KUBECTL=1
-          export MNODES="${{ github.event.inputs.mnodes }}"
           export SBCLI_CMD=sbctl
 
           TESTNAME=""
@@ -318,9 +404,9 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
 
-          python3 e2e.py $TESTNAME \
+          python3 -u stress.py $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True
+            --run_k8s True 2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}

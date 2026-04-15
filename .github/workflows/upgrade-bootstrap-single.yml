@@ -37,9 +37,6 @@ on:
       GRAFANA_ENDPOINT:
         type: string
         default: "http://192.168.10.211/grafana"
-      SBCLI_CMD:
-        type: string
-        default: "sbctl"
       SSH_USER:
         type: string
         default: "root"
@@ -120,10 +117,6 @@ on:
         description: "Grafana endpoint"
         required: true
         default: "http://192.168.10.211/grafana"
-      SBCLI_CMD:
-        description: "sbcli command name"
-        required: true
-        default: "sbctl"
       SSH_USER:
         description: "SSH user"
         required: true
@@ -205,7 +198,7 @@ jobs:
       MNODES:           ${{ inputs.MNODES || '192.168.10.211' }}
       NR_HUGEPAGES:     ${{ inputs.NR_HUGEPAGES || '2048' }}
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
-      SBCLI_CMD:        ${{ inputs.SBCLI_CMD || 'sbctl' }}
+      SBCLI_CMD:        sbctl
 
       # SSH/client env
       SSH_USER:    ${{ inputs.SSH_USER || 'root' }}
